@@ -1,0 +1,2 @@
+config IA64
+    bool
