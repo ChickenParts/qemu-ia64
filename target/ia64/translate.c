@@ -462,8 +462,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             uint8_t x6 = (insn >> 27) & 0x3f;
             if (x3 == 0 && x6 == 0x2c) {
                 /* mov cr[r3] = r2 (M32 format) */
-                uint8_t r2 = extract64(insn, 20, 7);
-                uint8_t cr = extract64(insn, 13, 7);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t cr = extract64(insn, 20, 7);
                 gen_store_cr_reg(cr, cpu_r[r2]);
                 break;
             } else if (x3 == 0 && x6 == 0x24) {
