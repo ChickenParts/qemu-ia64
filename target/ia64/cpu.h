@@ -19,6 +19,9 @@ typedef struct CPUArchState {
     uint64_t ip;         /* Instruction Pointer */
     uint64_t psr;        /* Processor Status Register */
     uint64_t cfm;        /* Current Frame Marker */
+    uint64_t cr_ipsr;    /* Processor status saved by interrupt */
+    uint64_t cr_iip;     /* Saved instruction pointer */
+    uint64_t cr_ifs;     /* Function state */
 } CPUIA64State;
 
 struct ArchCPU {
