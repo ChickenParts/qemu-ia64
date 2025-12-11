@@ -98,6 +98,24 @@ struct IA64CPUClass {
 #define IA64_EXCP_INST_ACCESS (IA64_EXCP_BASE + 0x52) /* access rights */
 #define IA64_EXCP_DATA_ACCESS (IA64_EXCP_BASE + 0x53) /* access rights */
 
+#define IA64_VEC_VHPT_INST            0x0000
+#define IA64_VEC_INST_TLB             0x0400
+#define IA64_VEC_DATA_TLB             0x0800
+#define IA64_VEC_ALT_DATA_TLB         0x1000
+#define IA64_VEC_DATA_NESTED_TLB      0x1400
+#define IA64_VEC_INST_KEY_MISS        0x1800
+#define IA64_VEC_DATA_KEY_MISS        0x1C00
+#define IA64_VEC_DATA_DIRTY           0x2000
+#define IA64_VEC_INST_ACCESS_BIT      0x2400
+#define IA64_VEC_DATA_ACCESS_BIT      0x2800
+#define IA64_VEC_BREAK                0x2C00
+#define IA64_VEC_EXTERNAL_INTERRUPT   0x3000
+#define IA64_VEC_ALT_INST_TLB         0x0C00
+#define IA64_VEC_INST_PAGE_NOT_P      0x5000
+#define IA64_VEC_DATA_PAGE_NOT_P      0x5000
+#define IA64_VEC_INST_ACCESS_RIGHTS   0x5200
+#define IA64_VEC_DATA_ACCESS_RIGHTS   0x5300
+
 void ia64_cpu_list(void);
 void ia64_tcg_init(void);
 void ia64_translate_code(CPUState *cs, TranslationBlock *tb,

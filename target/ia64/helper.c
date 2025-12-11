@@ -163,20 +163,26 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                 bool write = (access_type == MMU_DATA_STORE);
                 if (!PTE_P(pte) || !TAR_P(tar)) {
                     return ia64_fault(cs, env, is_data, write,
-                                      IA64_EXCP_PAGE_NOT_P, 0);
+                                      is_data ? IA64_VEC_DATA_PAGE_NOT_P
+                                              : IA64_VEC_INST_PAGE_NOT_P,
+                                      0);
                 }
                 if (!PTE_A(pte)) {
                     return ia64_fault(cs, env, is_data, write,
-                                      IA64_EXCP_PAGE_ACC, 0);
+                                      is_data ? IA64_VEC_DATA_ACCESS_RIGHTS
+                                              : IA64_VEC_INST_ACCESS_RIGHTS,
+                                      0);
                 }
                 if (write && !PTE_D(pte)) {
                     return ia64_fault(cs, env, is_data, write,
-                                      IA64_EXCP_PAGE_DIRTY, 0);
+                                      IA64_VEC_DATA_DIRTY, 0);
                 }
                 if (!ia64_check_perms(env, is_data, write,
                                       PTE_AR(pte), PTE_PL(pte))) {
                     return ia64_fault(cs, env, is_data, write,
-                                      IA64_EXCP_PAGE_ACC, 0);
+                                      is_data ? IA64_VEC_DATA_ACCESS_RIGHTS
+                                              : IA64_VEC_INST_ACCESS_RIGHTS,
+                                      0);
                 }
                 ia64_insert_tlb(env, is_data, address, pbase,
                                 rid, trans_ps, PTE_AR(pte), PTE_PL(pte),
@@ -192,8 +198,8 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             bool is_data = access_type != MMU_INST_FETCH;
             bool write = (access_type == MMU_DATA_STORE);
             return ia64_fault(cs, env, is_data, write,
-                              access_type == MMU_INST_FETCH ? IA64_EXCP_ITLB_MISS
-                                                            : IA64_EXCP_DTLB_MISS,
+                              access_type == MMU_INST_FETCH ? IA64_VEC_INST_TLB
+                                                            : IA64_VEC_DATA_TLB,
                               0);
         }
     }

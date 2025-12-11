@@ -106,7 +106,8 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     if (env->cr_iha) {
         env->ip = env->cr_iha;
     } else {
-        env->ip = (uint64_t)vec << 8;
+        uint64_t iva = env->cr[2]; /* cr.iva */
+        env->ip = iva + vec;
     }
     env->psr &= ~PSR_RI_MASK; /* clear RI */
 }
