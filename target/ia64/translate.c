@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "tcg/tcg-op.h"
+#include "tcg/tcg.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "exec/translator.h"
@@ -885,6 +886,21 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         /* I-unit instructions */
         switch (major) {
         case 0x0:
+            /* break / nop.i */
+            if (((insn >> 33) & 0x7) == 0 && ((insn >> 27) & 0x3f) == 0) {
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint64_t imm = ((insn >> 36) & 1ULL) << 20 | ((insn >> 6) & 0xfffff);
+                TCGv_i64 timm = tcg_temp_new_i64();
+                tcg_gen_movi_i64(timm, imm);
+                TCGv_i64 ret = tcg_temp_new_i64();
+                gen_helper_ssc(ret, tcg_env, timm);
+                tcg_gen_mov_i64(cpu_r[8], ret);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
             /* nop.i class */
             break;
         case 0x4: {

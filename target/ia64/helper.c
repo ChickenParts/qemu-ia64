@@ -13,6 +13,9 @@
 #include "exec/page-protection.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "qemu/log.h"
+#include "exec/cpu-common.h"
+#include "system/memory.h"
+#include "system/address-spaces.h"
 
 #define RR_RID(x)   extract64((x), 32, 24)
 #define RR_PS(x)    extract64((x), 56, 6)
@@ -43,7 +46,8 @@
 #define IA64_PSR_IC       (1ULL << 13)
 
 static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
-                       bool write, uint32_t vec, uint64_t iim)
+                       bool write, uint32_t vec, uint64_t iim,
+                       uintptr_t retaddr)
 {
     /* Save interruption state */
     if (env->psr & IA64_PSR_IC) {
@@ -62,7 +66,8 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64 fault vec=0x%x is_data=%d IIM=0x%lx IFA=0x%lx\n",
                   vec, is_data, iim, env->cr_ifa);
-    return true;
+    cpu_loop_exit(cs);
+    return false;
 }
 
 static bool ia64_check_perms(CPUIA64State *env, bool is_data, bool write,
@@ -165,24 +170,24 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                     return ia64_fault(cs, env, is_data, write,
                                       is_data ? IA64_VEC_DATA_PAGE_NOT_P
                                               : IA64_VEC_INST_PAGE_NOT_P,
-                                      0);
+                                      0, retaddr);
                 }
                 if (!PTE_A(pte)) {
                     return ia64_fault(cs, env, is_data, write,
                                       is_data ? IA64_VEC_DATA_ACCESS_RIGHTS
                                               : IA64_VEC_INST_ACCESS_RIGHTS,
-                                      0);
+                                      0, retaddr);
                 }
                 if (write && !PTE_D(pte)) {
                     return ia64_fault(cs, env, is_data, write,
-                                      IA64_VEC_DATA_DIRTY, 0);
+                                      IA64_VEC_DATA_DIRTY, 0, retaddr);
                 }
                 if (!ia64_check_perms(env, is_data, write,
                                       PTE_AR(pte), PTE_PL(pte))) {
                     return ia64_fault(cs, env, is_data, write,
                                       is_data ? IA64_VEC_DATA_ACCESS_RIGHTS
                                               : IA64_VEC_INST_ACCESS_RIGHTS,
-                                      0);
+                                      0, retaddr);
                 }
                 ia64_insert_tlb(env, is_data, address, pbase,
                                 rid, trans_ps, PTE_AR(pte), PTE_PL(pte),
@@ -200,7 +205,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             return ia64_fault(cs, env, is_data, write,
                               access_type == MMU_INST_FETCH ? IA64_VEC_INST_TLB
                                                             : IA64_VEC_DATA_TLB,
-                              0);
+                              0, retaddr);
         }
     }
 
@@ -208,8 +213,116 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     tlb_set_page(cs, address & TARGET_PAGE_MASK,
                  phys_addr & TARGET_PAGE_MASK, prot,
                  mmu_idx, TARGET_PAGE_SIZE);
-                 
+
     return true;
+}
+
+typedef struct {
+    FILE *fp;
+    uint64_t last_count;
+} SscFile;
+
+static SscFile ssc_files[16];
+
+static void ia64_ssc_write(CPUIA64State *env, uint64_t addr, const void *buf,
+                           size_t len)
+{
+    address_space_write(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
+                        buf, len);
+}
+
+static void ia64_ssc_read(CPUIA64State *env, uint64_t addr, void *buf,
+                          size_t len)
+{
+    address_space_read(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
+                       buf, len);
+}
+
+uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
+{
+    uint64_t nr = env->r[15];
+    uint64_t arg0 = env->r[32];
+    uint64_t arg2 = env->r[34];
+    uint64_t arg3 = env->r[35];
+
+    switch (nr) {
+    case 20: /* SSC_CONSOLE_INIT */
+        return 0;
+    case 31: /* SSC_PUTCHAR */
+        fputc((int)arg0 & 0xff, stderr);
+        fflush(stderr);
+        return 0;
+    case 75: { /* SSC_GET_ARGS */
+        /* Return kernel path and args as single string. */
+        static const char args[] = "stuff/vmlinux-ia64-main";
+        ia64_ssc_write(env, arg0, args, sizeof(args));
+        return sizeof(args);
+    }
+    case 50: { /* SSC_OPEN */
+        char path[512];
+        ia64_ssc_read(env, arg0, path, sizeof(path) - 1);
+        path[sizeof(path) - 1] = 0;
+        for (int i = 0; i < 16; i++) {
+            if (!ssc_files[i].fp) {
+                ssc_files[i].fp = fopen(path, "rb");
+                if (!ssc_files[i].fp) {
+                    return -1;
+                }
+                return i + 3;
+            }
+        }
+        return -1;
+    }
+    case 51: { /* SSC_CLOSE */
+        int fd = arg0 - 3;
+        if (fd >= 0 && fd < 16 && ssc_files[fd].fp) {
+            fclose(ssc_files[fd].fp);
+            ssc_files[fd].fp = NULL;
+            ssc_files[fd].last_count = 0;
+            return 0;
+        }
+        return -1;
+    }
+    case 52: { /* SSC_READ */
+        int fd = arg0 - 3;
+        if (fd < 0 || fd >= 16 || !ssc_files[fd].fp) {
+            return -1;
+        }
+        struct {
+            uint64_t addr;
+            uint32_t len;
+        } req;
+        ia64_ssc_read(env, arg2, &req, sizeof(req));
+        fseeko(ssc_files[fd].fp, arg3, SEEK_SET);
+        uint8_t *tmp = g_malloc(req.len);
+        size_t n = fread(tmp, 1, req.len, ssc_files[fd].fp);
+        ia64_ssc_write(env, req.addr, tmp, n);
+        g_free(tmp);
+        ssc_files[fd].last_count = n;
+        return 0;
+    }
+    case 55: { /* SSC_WAIT_COMPLETION */
+        struct {
+            int32_t fd;
+            uint32_t count;
+        } stat = { .fd = arg0, .count = 0 };
+        int fd = arg0 - 3;
+        if (fd >= 0 && fd < 16) {
+            stat.count = ssc_files[fd].last_count;
+        }
+        ia64_ssc_write(env, arg0, &stat, sizeof(stat));
+        return 0;
+    }
+    case 77: { /* SSC_GET_INITRAMFS */
+        return 0;
+    }
+    case 66: { /* SSC_EXIT */
+        exit(arg0);
+    }
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "SSC unhandled nr=%" PRIu64 " imm=%" PRIu64 "\n", nr, imm);
+        return -1;
+    }
 }
 
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
