@@ -231,6 +231,14 @@ static void gen_store_cr_reg(uint8_t idx, TCGv_i64 v)
     tcg_gen_st_i64(v, tcg_env, offsetof(CPUIA64State, cr) + idx * 8);
 }
 
+static TCGv_i64 gen_load_fp(uint8_t idx, uint8_t part)
+{
+    TCGv_i64 t = tcg_temp_new_i64();
+    tcg_gen_ld_i64(t, tcg_env,
+                   offsetof(CPUIA64State, f) + (idx * 2 + part) * 8);
+    return t;
+}
+
 static void ia64_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
@@ -425,7 +433,7 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
     } else if (((insn >> 37) & 0xf) == 0x4) {
         /* Simple br.cond immediate (B1-style target25 << 4). */
         uint64_t imm = extract64(insn, 13, 20) | (extract64(insn, 36, 1) << 20);
-        int64_t disp = (int64_t)(imm << 4);
+        int64_t disp = sextract64(imm, 0, 21) << 4;
         tcg_gen_movi_i64(cpu_pc, ctx->base.pc_next + disp);
         ctx->base.is_jmp = DISAS_NORETURN;
         tcg_gen_exit_tb(NULL, 0);
@@ -563,6 +571,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
                                         MO_TE | MO_64);
                 }
+            } else if (x == 0 && x6 == 0x24) {
+                /* ld1.c.nc variants: treat as zero-extended byte load */
+                if (r1 != 0) {
+                    tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                                        MO_TE | MO_UB);
+                }
             } else if (x == 0 && (x6 == 0x33 || x6 == 0x37 || x6 == 0x3b)) {
                 /* st8 / st8.rel / st8.spill variants */
                 TCGv_i64 src = tcg_temp_new_i64();
@@ -597,6 +611,57 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         case 0xE: /* A-unit */
             decode_a_unit(ctx, insn);
             break;
+        case 0x6:
+        case 0x7: {
+            /* FP memory (M9/M10): handle stfe* using lower 64 bits. */
+            uint8_t qp = insn & 0x3f;
+            TCGLabel *skip_label = gen_qp_skip(qp);
+            uint8_t x6 = extract64(insn, 30, 6);
+            uint8_t r3 = extract64(insn, 20, 7);
+            uint8_t f2 = extract64(insn, 13, 7);
+            uint8_t r2 = f2;
+            bool is_imm = (major == 0x7);
+            int64_t imm9 = 0;
+            if (is_imm) {
+                uint64_t imm = extract64(insn, 6, 7) |
+                               (extract64(insn, 27, 1) << 7) |
+                               (extract64(insn, 36, 1) << 8);
+                imm9 = sextract64(imm, 0, 9);
+            }
+            TCGv_i64 addr = tcg_temp_new_i64();
+            if (r3 == 0) {
+                tcg_gen_movi_i64(addr, 0);
+            } else {
+                tcg_gen_mov_i64(addr, cpu_r[r3]);
+            }
+            if (is_imm && imm9) {
+                tcg_gen_addi_i64(addr, addr, imm9);
+            }
+            if (x6 == 0x30) {
+                /* stfe/stfe.imm: store low 64 bits of f2 */
+                TCGv_i64 src = gen_load_fp(f2, 0);
+                tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, MO_TE | MO_64);
+            } else if (x6 == 0x33 || x6 == 0x37 || x6 == 0x3b) {
+                /* Some firmwares use st8.spill via M10 encoding; emulate. */
+                TCGv_i64 src = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(src, 0);
+                } else {
+                    tcg_gen_mov_i64(src, cpu_r[r2]);
+                }
+                tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, MO_TE | MO_64);
+            } else {
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                gen_unimpl(ctx, insn, "M-slot fp");
+                break;
+            }
+            if (skip_label) {
+                gen_set_label(skip_label);
+            }
+            break;
+        }
         default:
             gen_unimpl(ctx, insn, "M-slot");
             break;

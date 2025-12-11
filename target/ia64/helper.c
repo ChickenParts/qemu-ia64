@@ -25,8 +25,8 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
      *    around 0x04000000; map that region by subtracting the bias.
      */
     hwaddr phys_addr = address;
-    /* ELF vmlinux links text at 0xa000000100000000, LMA ~0x051ca280. */
-    const uint64_t kernel_bias = 0xa0000000fae35d80ULL;
+    /* ELF vmlinux links text at 0xa000000100000000, LMA around 0x04000000. */
+    const uint64_t kernel_bias = 0xa0000000fc000000ULL;
     if (address >= 0xa000000000000000ULL) {
         phys_addr = address - kernel_bias;
     }
