@@ -1,6 +1,4 @@
-/*
- * IA-64 helper header
- *
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
-DEF_HELPER_2(exception, noreturn, env, int)
+DEF_HELPER_2(itc_d, void, env, i64)
+DEF_HELPER_2(itc_i, void, env, i64)
+DEF_HELPER_FLAGS_1(thash, TCG_CALL_NO_RWG, i64, env)
+DEF_HELPER_FLAGS_1(ttag, TCG_CALL_NO_RWG, i64, env)

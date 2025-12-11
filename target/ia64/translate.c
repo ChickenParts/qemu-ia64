@@ -7,14 +7,17 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "tcg/tcg-op.h"
-#include "exec/translator.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
+#include "exec/translator.h"
 #include "disas/disas.h"
 #include "exec/translation-block.h"
 #include "exec/memop.h"
 #include "qemu/log.h"
 #include <inttypes.h>
+#define HELPER_H "helper.h"
+#include "exec/helper-info.c.inc"
+#undef HELPER_H
 
 static TCGv_i64 cpu_pc;
 static TCGv_i64 cpu_psr;
@@ -22,6 +25,7 @@ static TCGv_i64 cpu_cfm;
 static TCGv_i64 cpu_pr;
 static TCGv_i64 cpu_b[8];
 static TCGv_i64 cpu_r[128];
+static TCGv_i64 cpu_rr[8];
 static TCGv_i64 cpu_cr_iip;
 static TCGv_i64 cpu_cr_ipsr;
 static TCGv_i64 cpu_cr_ifs;
@@ -76,6 +80,14 @@ void ia64_tcg_init(void)
         cpu_r[i] = tcg_global_mem_new_i64(tcg_env,
                                           offsetof(CPUIA64State, r[i]),
                                           g_strdup(buf));
+    }
+
+    for (int i = 0; i < 8; i++) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "rr%d", i);
+        cpu_rr[i] = tcg_global_mem_new_i64(tcg_env,
+                                           offsetof(CPUIA64State, rr[i]),
+                                           g_strdup(buf));
     }
 }
 
@@ -229,6 +241,30 @@ static void gen_store_cr_reg(uint8_t idx, TCGv_i64 v)
         break;
     }
     tcg_gen_st_i64(v, tcg_env, offsetof(CPUIA64State, cr) + idx * 8);
+}
+
+static void gen_store_rr_reg(TCGv_i64 idx_reg, TCGv_i64 val)
+{
+    TCGv_i64 tmp = tcg_temp_new_i64();
+    tcg_gen_shri_i64(tmp, idx_reg, 61);
+    for (int i = 0; i < 8; i++) {
+        TCGLabel *skip = gen_new_label();
+        tcg_gen_brcondi_i64(TCG_COND_NE, tmp, i, skip);
+        tcg_gen_mov_i64(cpu_rr[i], val);
+        gen_set_label(skip);
+    }
+}
+
+static void gen_load_rr_reg(TCGv_i64 dest, TCGv_i64 idx_reg)
+{
+    TCGv_i64 tmp = tcg_temp_new_i64();
+    tcg_gen_shri_i64(tmp, idx_reg, 61);
+    for (int i = 0; i < 8; i++) {
+        TCGLabel *skip = gen_new_label();
+        tcg_gen_brcondi_i64(TCG_COND_NE, tmp, i, skip);
+        tcg_gen_mov_i64(dest, cpu_rr[i]);
+        gen_set_label(skip);
+    }
 }
 
 static TCGv_i64 gen_load_fp(uint8_t idx, uint8_t part)
@@ -468,7 +504,53 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             /* mov to/from control regs and region regs */
             uint8_t x3 = (insn >> 33) & 0x7;
             uint8_t x6 = (insn >> 27) & 0x3f;
-            if (x3 == 0 && x6 == 0x2c) {
+            if (x3 == 0 && x6 == 0x0) {
+                /* mov rr[r3] = r2 */
+                uint8_t r3 = extract64(insn, 20, 7);
+                uint8_t r2 = extract64(insn, 13, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                TCGv_i64 val = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(val, 0);
+                } else {
+                    tcg_gen_mov_i64(val, cpu_r[r2]);
+                }
+                gen_store_rr_reg(idx, val);
+                break;
+            } else if (x3 == 0 && x6 == 0xa) {
+                /* mov r1 = rr[r3] */
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                if (r1 != 0) {
+                    TCGv_i64 idx = tcg_temp_new_i64();
+                    if (r3 == 0) {
+                        tcg_gen_movi_i64(idx, 0);
+                    } else {
+                        tcg_gen_mov_i64(idx, cpu_r[r3]);
+                    }
+                    gen_load_rr_reg(cpu_r[r1], idx);
+                }
+                break;
+            } else if (x3 == 0 && (x6 == 0x2e || x6 == 0x2f)) {
+                /* itc.d / itc.i */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r2 = extract64(insn, 13, 7);
+                if (x6 == 0x2e) {
+                    gen_helper_itc_d(tcg_env, cpu_r[r2]);
+                } else {
+                    gen_helper_itc_i(tcg_env, cpu_r[r2]);
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            } else if (x3 == 0 && x6 == 0x2c) {
                 /* mov cr[r3] = r2 (M32 format) */
                 uint8_t r2 = extract64(insn, 13, 7);
                 uint8_t cr = extract64(insn, 20, 7);

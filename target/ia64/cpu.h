@@ -28,6 +28,22 @@ typedef struct CPUArchState {
     uint64_t cr_iha;     /* Interruption handler address */
     uint64_t cr[128];
     uint64_t ar[128];
+    uint64_t rr[8];
+
+    struct {
+        uint64_t tag;   /* virtual base aligned to page */
+        uint64_t pa;    /* physical base aligned to page */
+        uint32_t rid;   /* region id selector */
+        uint8_t ps;     /* page-size log2 */
+        uint8_t ar;     /* access rights */
+        uint8_t pl;     /* privilege level */
+        uint8_t d;      /* dirty */
+        uint8_t a;      /* accessed */
+        uint8_t p;      /* present */
+        uint8_t valid;  /* entry contains translation */
+    } itlb[128], dtlb[128];
+    uint8_t itlb_next;
+    uint8_t dtlb_next;
 } CPUIA64State;
 
 struct ArchCPU {
