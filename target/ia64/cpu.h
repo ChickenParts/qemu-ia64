@@ -40,10 +40,21 @@ typedef struct CPUArchState {
         uint8_t d;      /* dirty */
         uint8_t a;      /* accessed */
         uint8_t p;      /* present */
+        uint8_t ed;     /* exception deferral */
         uint8_t valid;  /* entry contains translation */
     } itlb[128], dtlb[128];
     uint8_t itlb_next;
     uint8_t dtlb_next;
+
+    struct {
+        uint64_t pte;   /* raw PTE for attributes */
+        uint64_t itr;   /* raw ITR/DTR TAR value */
+        uint64_t tag;
+        uint64_t pa;
+        uint32_t rid;
+        uint8_t ps;
+        uint8_t valid;
+    } itrs[16], dtrs[16], itcs[128], dtcs[128];
 } CPUIA64State;
 
 struct ArchCPU {

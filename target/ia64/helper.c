@@ -15,6 +15,7 @@
 #define RR_RID(x)   extract64((x), 32, 24)
 #define RR_PS(x)    extract64((x), 56, 6)
 #define RR_VE(x)    extract64((x), 63, 1)
+#define RR(idx)     env->rr[(idx) & 0x7]
 
 /* PTA helpers */
 #define PTA_VE(x)   extract64((x), 63, 1)
@@ -22,6 +23,18 @@
 #define PTA_VF(x)   extract64((x), 55, 1)
 #define PTA_BASE(x) extract64((x), 3, 46)
 #define PTA_VRN(x)  extract64((x), 0, 3)
+
+#define PTE_ED(x)   extract64((x), 11, 1)
+#define PTE_AR(x)   extract64((x), 52, 3)
+#define PTE_PL(x)   extract64((x), 55, 2)
+#define PTE_D(x)    extract64((x), 57, 1)
+#define PTE_A(x)    extract64((x), 58, 1)
+#define PTE_MA(x)   extract64((x), 59, 3)
+#define PTE_P(x)    extract64((x), 63, 1)
+#define PTE_PPN(x)  extract64((x), 12, 38)
+
+#define TAR_KEY(x)  extract64((x), 32, 24)
+#define TAR_PS(x)   extract64((x), 56, 6)
 
 bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        MMUAccessType access_type, int mmu_idx,
@@ -98,7 +111,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,
-                            uint8_t p)
+                            uint8_t p, uint8_t ed)
 {
     uint64_t mask = (1ULL << ps) - 1;
     uint64_t tag = va & ~mask;
@@ -114,8 +127,9 @@ static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
         env->dtlb[idx].d = d;
         env->dtlb[idx].a = a;
         env->dtlb[idx].p = p;
+        env->dtlb[idx].ed = ed;
         env->dtlb[idx].valid = 1;
-        env->dtlb_next = (idx + 1) & 63;
+        env->dtlb_next = (idx + 1) & 127;
     } else {
         env->itlb[idx].tag = tag;
         env->itlb[idx].pa = pbase;
@@ -126,8 +140,9 @@ static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
         env->itlb[idx].d = d;
         env->itlb[idx].a = a;
         env->itlb[idx].p = p;
+        env->itlb[idx].ed = ed;
         env->itlb[idx].valid = 1;
-        env->itlb_next = (idx + 1) & 63;
+        env->itlb_next = (idx + 1) & 127;
     }
 }
 
@@ -142,8 +157,9 @@ void HELPER(itc_d)(CPUIA64State *env, uint64_t src)
     uint8_t d  = extract64(src, 57, 1);
     uint8_t a  = extract64(src, 58, 1);
     uint8_t p  = extract64(src, 63, 1);
+    uint8_t ed = extract64(src, 11, 1);
     uint32_t rid = RR_RID(env->rr[extract64(env->cr_ifa, 61, 3)]);
-    ia64_insert_tlb(env, true, env->cr_ifa, src, rid, ps, ar, pl, d, a, p);
+    ia64_insert_tlb(env, true, env->cr_ifa, src, rid, ps, ar, pl, d, a, p, ed);
 }
 
 void HELPER(itc_i)(CPUIA64State *env, uint64_t src)
@@ -157,8 +173,9 @@ void HELPER(itc_i)(CPUIA64State *env, uint64_t src)
     uint8_t d  = extract64(src, 57, 1);
     uint8_t a  = extract64(src, 58, 1);
     uint8_t p  = extract64(src, 63, 1);
+    uint8_t ed = extract64(src, 11, 1);
     uint32_t rid = RR_RID(env->rr[extract64(env->cr_ifa, 61, 3)]);
-    ia64_insert_tlb(env, false, env->cr_ifa, src, rid, ps, ar, pl, d, a, p);
+    ia64_insert_tlb(env, false, env->cr_ifa, src, rid, ps, ar, pl, d, a, p, ed);
 }
 
 uint64_t HELPER(thash)(CPUIA64State *env)
@@ -190,4 +207,129 @@ uint64_t HELPER(ttag)(CPUIA64State *env)
     uint8_t rr = extract64(va, 61, 3);
     return (extract64(va, 3 + (61 - 1 - 3), 61 - RR_PS(env->rr[rr])) ^
             (uint64_t)RR_RID(env->rr[rr]) << 39);
+}
+
+static void ia64_purge_tc_range(CPUIA64State *env, bool is_data,
+                                uint64_t va, uint8_t ps)
+{
+    uint64_t mask = ~((1ULL << ps) - 1);
+    uint64_t tag = va & mask;
+    uint32_t rid = RR_RID(RR(extract64(va, 61, 3)));
+
+    if (is_data) {
+        for (int i = 0; i < 128; i++) {
+            if (!env->dtlb[i].valid) {
+                continue;
+            }
+            if (env->dtlb[i].rid == rid &&
+                env->dtlb[i].tag == tag &&
+                env->dtlb[i].ps == ps) {
+                env->dtlb[i].valid = 0;
+            }
+        }
+        for (int i = 0; i < 128; i++) {
+            if (!env->dtcs[i].valid) {
+                continue;
+            }
+            if (env->dtcs[i].rid == rid &&
+                env->dtcs[i].tag == tag &&
+                env->dtcs[i].ps == ps) {
+                env->dtcs[i].valid = 0;
+            }
+        }
+    } else {
+        for (int i = 0; i < 128; i++) {
+            if (!env->itlb[i].valid) {
+                continue;
+            }
+            if (env->itlb[i].rid == rid &&
+                env->itlb[i].tag == tag &&
+                env->itlb[i].ps == ps) {
+                env->itlb[i].valid = 0;
+            }
+        }
+        for (int i = 0; i < 128; i++) {
+            if (!env->itcs[i].valid) {
+                continue;
+            }
+            if (env->itcs[i].rid == rid &&
+                env->itcs[i].tag == tag &&
+                env->itcs[i].ps == ps) {
+                env->itcs[i].valid = 0;
+            }
+        }
+    }
+}
+
+/* Purge TC entry for va/range using ps from tar. */
+static void ia64_ptc(CPUIA64State *env, bool is_global, bool is_dirty,
+                     bool is_rid, uint64_t va, uint64_t tar)
+{
+    uint8_t ps = TAR_PS(tar);
+    ia64_purge_tc_range(env, is_dirty, va, ps);
+}
+
+void HELPER(ptc_l)(CPUIA64State *env, uint64_t va, uint64_t tar)
+{
+    ia64_ptc(env, false, true, false, va, tar);
+}
+
+void HELPER(ptc_e)(CPUIA64State *env, uint64_t va, uint64_t tar)
+{
+    ia64_ptc(env, false, false, false, va, tar);
+}
+
+void HELPER(ptc_g)(CPUIA64State *env, uint64_t va, uint64_t tar)
+{
+    ia64_ptc(env, true, true, true, va, tar);
+}
+
+void HELPER(ptc_ga)(CPUIA64State *env, uint64_t va, uint64_t tar)
+{
+    ia64_ptc(env, true, true, true, va, tar);
+}
+
+void HELPER(itr_d)(CPUIA64State *env, uint64_t pte, uint64_t tar)
+{
+    /* DTR insert */
+    uint8_t slot = extract64(tar, 0, 4);
+    uint8_t ps = TAR_PS(tar);
+    env->dtrs[slot].pte = pte;
+    env->dtrs[slot].itr = tar;
+    env->dtrs[slot].tag = env->cr_ifa & ~((1ULL << ps) - 1);
+    env->dtrs[slot].pa = (PTE_PPN(pte) << 12) & ~((1ULL << ps) - 1);
+    env->dtrs[slot].rid = RR_RID(RR(extract64(env->cr_ifa, 61, 3)));
+    env->dtrs[slot].ps = ps;
+    env->dtrs[slot].valid = 1;
+    ia64_insert_tlb(env, true, env->cr_ifa, env->dtrs[slot].pa,
+                    env->dtrs[slot].rid, ps, PTE_AR(pte), PTE_PL(pte),
+                    PTE_D(pte), PTE_A(pte), PTE_P(pte), PTE_ED(pte));
+}
+
+void HELPER(itr_i)(CPUIA64State *env, uint64_t pte, uint64_t tar)
+{
+    uint8_t slot = extract64(tar, 0, 4);
+    uint8_t ps = TAR_PS(tar);
+    env->itrs[slot].pte = pte;
+    env->itrs[slot].itr = tar;
+    env->itrs[slot].tag = env->cr_ifa & ~((1ULL << ps) - 1);
+    env->itrs[slot].pa = (PTE_PPN(pte) << 12) & ~((1ULL << ps) - 1);
+    env->itrs[slot].rid = RR_RID(RR(extract64(env->cr_ifa, 61, 3)));
+    env->itrs[slot].ps = ps;
+    env->itrs[slot].valid = 1;
+    ia64_insert_tlb(env, false, env->cr_ifa, env->itrs[slot].pa,
+                    env->itrs[slot].rid, ps, PTE_AR(pte), PTE_PL(pte),
+                    PTE_D(pte), PTE_A(pte), PTE_P(pte), PTE_ED(pte));
+}
+
+void HELPER(ptr_d)(CPUIA64State *env, uint64_t va, uint64_t range)
+{
+    uint8_t ps = extract64(range, 24, 6);
+    ia64_purge_tc_range(env, true, va, ps);
+}
+
+void HELPER(ptr_i)(CPUIA64State *env, uint64_t va, uint64_t range)
+{
+    uint8_t ps = extract64(range, 24, 6);
+    ia64_purge_tc_range(env, false, va, ps);
 }
