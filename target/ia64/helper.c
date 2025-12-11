@@ -111,7 +111,18 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             if (!PTA_VF(pta) || tag == expected) {
                 uint8_t trans_ps = TAR_PS(tar);
                 hwaddr pbase = (PTE_PPN(pte) << 12);
-                ia64_insert_tlb(env, access_type != MMU_INST_FETCH, address, pbase,
+                bool is_data = access_type != MMU_INST_FETCH;
+                bool write = (access_type == MMU_DATA_STORE);
+                if (!PTE_P(pte)) {
+                    return false;
+                }
+                if (!PTE_A(pte)) {
+                    return false;
+                }
+                if (write && !PTE_D(pte)) {
+                    return false;
+                }
+                ia64_insert_tlb(env, is_data, address, pbase,
                                 rid, trans_ps, PTE_AR(pte), PTE_PL(pte),
                                 PTE_D(pte), PTE_A(pte), PTE_P(pte), PTE_ED(pte));
                 phys_addr = pbase | (address & ((1ULL << trans_ps) - 1));
@@ -119,13 +130,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             }
         }
         if (!hit) {
-            /* Fallback: identity map low addresses or bias map kernel. */
-            const uint64_t kernel_bias = 0xa0000000fc000000ULL;
-            if (address >= 0xa000000000000000ULL) {
-                phys_addr = address - kernel_bias;
-            } else {
-                return false;
-            }
+            return false;
         }
     }
 
