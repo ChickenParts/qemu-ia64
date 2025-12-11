@@ -94,6 +94,10 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool probe, uintptr_t retaddr)
 {
+    if (probe) {
+        return false;
+    }
+
     /* IA64CPU *cpu = IA64_CPU(cs); */
     CPUIA64State *env = cpu_env(cs);
 
@@ -130,7 +134,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             }
             uint64_t mask = ~((1ULL << env->itlb[i].ps) - 1);
             if ((address & mask) == env->itlb[i].tag) {
-                phys_addr = env->itlb[i].pa | (address & ~mask);
+                phys_addr = env->itlb[i].pa + (address & ~mask);
                 hit = true;
                 break;
             }
@@ -145,7 +149,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             }
             uint64_t mask = ~((1ULL << env->dtlb[i].ps) - 1);
             if ((address & mask) == env->dtlb[i].tag) {
-                phys_addr = env->dtlb[i].pa | (address & ~mask);
+                phys_addr = env->dtlb[i].pa + (address & ~mask);
                 hit = true;
                 break;
             }
@@ -210,6 +214,23 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "TLB fill %s VA=0x%" PRIx64 " -> PA=0x%" PRIx64
+                  " idx=%d ps=%d\n",
+                  access_type == MMU_INST_FETCH ? "I" :
+                  (access_type == MMU_DATA_LOAD ? "L" : "S"),
+                  address, phys_addr, mmu_idx, ps);
+    if (access_type == MMU_INST_FETCH &&
+        address == 0xa0000001011b1e50ULL) {
+        uint64_t buf[2] = {0, 0};
+        address_space_read(&address_space_memory, phys_addr,
+                           MEMTXATTRS_UNSPECIFIED, (uint8_t *)buf,
+                           sizeof(buf));
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "Snapshot @PA=0x%" PRIx64 " data=%016" PRIx64
+                      " %016" PRIx64 "\n",
+                      phys_addr, buf[0], buf[1]);
+    }
     tlb_set_page(cs, address & TARGET_PAGE_MASK,
                  phys_addr & TARGET_PAGE_MASK, prot,
                  mmu_idx, TARGET_PAGE_SIZE);
@@ -262,12 +283,16 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
         char path[512];
         ia64_ssc_read(env, arg0, path, sizeof(path) - 1);
         path[sizeof(path) - 1] = 0;
+        qemu_log_mask(LOG_GUEST_ERROR, "SSC_OPEN '%s'\n", path);
         for (int i = 0; i < 16; i++) {
             if (!ssc_files[i].fp) {
                 ssc_files[i].fp = fopen(path, "rb");
                 if (!ssc_files[i].fp) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "SSC_OPEN failed errno=%d\n", errno);
                     return -1;
                 }
+                qemu_log_mask(LOG_GUEST_ERROR, "SSC_OPEN fd=%d\n", i + 3);
                 return i + 3;
             }
         }
@@ -296,6 +321,10 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
         fseeko(ssc_files[fd].fp, arg3, SEEK_SET);
         uint8_t *tmp = g_malloc(req.len);
         size_t n = fread(tmp, 1, req.len, ssc_files[fd].fp);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "SSC_READ fd=%d addr=0x%lx len=%u off=0x%lx -> %zu\n",
+                      fd + 3, (unsigned long)req.addr, req.len,
+                      (unsigned long)arg3, n);
         ia64_ssc_write(env, req.addr, tmp, n);
         g_free(tmp);
         ssc_files[fd].last_count = n;
@@ -310,6 +339,8 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
         if (fd >= 0 && fd < 16) {
             stat.count = ssc_files[fd].last_count;
         }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "SSC_WAIT fd=%d last=%u\n", fd + 3, stat.count);
         ia64_ssc_write(env, arg0, &stat, sizeof(stat));
         return 0;
     }
@@ -511,6 +542,10 @@ void HELPER(itr_d)(CPUIA64State *env, uint64_t pte, uint64_t tar)
     /* DTR insert */
     uint8_t slot = extract64(tar, 0, 4);
     uint8_t ps = TAR_PS(tar);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "itr.d slot=%u ps=%u pte=0x%" PRIx64 " tar=0x%" PRIx64
+                  " cr_ifa=0x%" PRIx64 "\n",
+                  slot, ps, pte, tar, env->cr_ifa);
     env->dtrs[slot].pte = pte;
     env->dtrs[slot].itr = tar;
     env->dtrs[slot].tag = env->cr_ifa & ~((1ULL << ps) - 1);
@@ -527,6 +562,10 @@ void HELPER(itr_i)(CPUIA64State *env, uint64_t pte, uint64_t tar)
 {
     uint8_t slot = extract64(tar, 0, 4);
     uint8_t ps = TAR_PS(tar);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "itr.i slot=%u ps=%u pte=0x%" PRIx64 " tar=0x%" PRIx64
+                  " cr_ifa=0x%" PRIx64 "\n",
+                  slot, ps, pte, tar, env->cr_ifa);
     env->itrs[slot].pte = pte;
     env->itrs[slot].itr = tar;
     env->itrs[slot].tag = env->cr_ifa & ~((1ULL << ps) - 1);

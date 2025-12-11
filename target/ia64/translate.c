@@ -310,7 +310,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 static void decode_a_unit(DisasContext *ctx, uint64_t insn)
 {
     uint8_t major = (insn >> 37) & 0xf;
-    uint8_t x2a = (insn >> 34) & 0x7;
+    uint8_t x2a = (insn >> 34) & 0x3;
     uint8_t x4 = (insn >> 29) & 0xf;
     uint8_t x2b = (insn >> 27) & 0x3;
     uint8_t r3 = (insn >> 20) & 0x7f;
@@ -421,6 +421,54 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             tcg_gen_setcondi_i64(TCG_COND_NE, cond, t2, simm);
         } else {
             tcg_gen_setcondi_i64(TCG_COND_EQ, cond, t2, simm);
+        }
+        gen_set_predicates(p1, p2, cond);
+        handled = true;
+    } else if ((major == 0xC || major == 0xD) &&
+               (x2a == 1 || x2a == 3)) {
+        /* cmp4.lt / cmp4.ltu reg-reg (A6) or imm8 (A8) */
+        uint8_t p2 = extract64(insn, 27, 6);
+        uint8_t p1 = extract64(insn, 6, 6);
+        bool is_unsigned = (major == 0xD);
+
+        TCGv_i64 cond = tcg_temp_new_i64();
+        if (x2a == 1) {
+            TCGv_i64 t1 = tcg_temp_new_i64();
+            TCGv_i64 t2 = tcg_temp_new_i64();
+            if (r2 == 0) {
+                tcg_gen_movi_i64(t1, 0);
+            } else {
+                tcg_gen_mov_i64(t1, cpu_r[r2]);
+            }
+            if (r3 == 0) {
+                tcg_gen_movi_i64(t2, 0);
+            } else {
+                tcg_gen_mov_i64(t2, cpu_r[r3]);
+            }
+            if (is_unsigned) {
+                tcg_gen_ext32u_i64(t1, t1);
+                tcg_gen_ext32u_i64(t2, t2);
+                tcg_gen_setcond_i64(TCG_COND_LTU, cond, t1, t2);
+            } else {
+                tcg_gen_ext32s_i64(t1, t1);
+                tcg_gen_ext32s_i64(t2, t2);
+                tcg_gen_setcond_i64(TCG_COND_LT, cond, t1, t2);
+            }
+        } else {
+            int64_t imm = sextract64(insn, 13, 8);
+            TCGv_i64 t2 = tcg_temp_new_i64();
+            if (r3 == 0) {
+                tcg_gen_movi_i64(t2, 0);
+            } else {
+                tcg_gen_mov_i64(t2, cpu_r[r3]);
+            }
+            if (is_unsigned) {
+                tcg_gen_ext32u_i64(t2, t2);
+                tcg_gen_setcondi_i64(TCG_COND_LTU, cond, t2, (uint32_t)imm);
+            } else {
+                tcg_gen_ext32s_i64(t2, t2);
+                tcg_gen_setcondi_i64(TCG_COND_LT, cond, t2, (int32_t)imm);
+            }
         }
         gen_set_predicates(p1, p2, cond);
         handled = true;
@@ -886,7 +934,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         /* I-unit instructions */
         switch (major) {
         case 0x0:
-            /* break / nop.i */
+            /* break / nop.i / loadrs */
             if (((insn >> 33) & 0x7) == 0 && ((insn >> 27) & 0x3f) == 0) {
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -899,6 +947,17 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
+                break;
+            } else if (((insn >> 27) & 0x3f) == 0x2) {
+                /* loadrs: we do not model RSE yet; treat as nop but emit a temp op */
+                TCGv_i64 tmp = tcg_temp_new_i64();
+                tcg_gen_movi_i64(tmp, 0);
+                break;
+            } else if (((insn >> 27) & 0x3f) == 0x1) {
+                /* srlz.i placeholder */
+                break;
+            } else if (((insn >> 27) & 0x3f) == 0x8) {
+                /* srlz.d placeholder */
                 break;
             }
             /* nop.i class */
@@ -1068,6 +1127,13 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     case 2: insn = slot2; break;
     }
 
+    if (type == SLOT_RES) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64 reserved template tmpl=%02x pc=%016" PRIx64
+                      " ri=%d low=%016" PRIx64 " high=%016" PRIx64 "\n",
+                      template, ctx->base.pc_next, ctx->ri, low, high);
+    }
+
     if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
         qemu_log_mask(CPU_LOG_EXEC,
                       "IA64: pc=%016" PRIx64 " ri=%d tmpl=%02x slot=%d insn=%011" PRIx64 "\n",
@@ -1091,6 +1157,15 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 static void ia64_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
+
+    /*
+     * If we bailed out before completing a bundle, pc_next may still point
+     * at the current bundle base. Ensure the TB accounts for the bytes
+     * we actually consumed so translate-all does not see a zero-sized TB.
+     */
+    if (ctx->base.pc_next == ctx->base.pc_first) {
+        ctx->base.pc_next += 16;
+    }
     
     switch (ctx->base.is_jmp) {
     case DISAS_TOO_MANY:

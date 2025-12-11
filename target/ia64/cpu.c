@@ -50,7 +50,54 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
         icc->parent_phases.hold(obj, type);
     }
 
+    /* Basic bootstrap defaults */
     env->ip = 0xFFFF0000ULL;
+    env->psr = 0;
+    env->cfm = 0;
+
+    /* Disable VHPT until firmware/guest enables it. */
+    env->cr[8] = 0; /* PTA.ve = 0 */
+    /* Default region registers: VE=1, PS defaults to 28 (256MB) for region 0. */
+    for (int i = 0; i < 8; i++) {
+        env->rr[i] = (uint64_t)(28ULL << 56) | (1ULL << 63);
+    }
+    /* Prefill a large identity mapping so early faults don't spin. */
+    memset(env->itlb, 0, sizeof(env->itlb));
+    memset(env->dtlb, 0, sizeof(env->dtlb));
+    env->itlb[0].tag = 0;
+    env->itlb[0].pa = 0;
+    env->itlb[0].rid = 0;
+    env->itlb[0].ps = 28; /* 256MB */
+    env->itlb[0].ar = 7;
+    env->itlb[0].pl = 0;
+    env->itlb[0].d = 1;
+    env->itlb[0].a = 1;
+    env->itlb[0].p = 1;
+    env->itlb[0].ed = 0;
+    env->itlb[0].valid = 1;
+    env->dtlb[0] = env->itlb[0];
+    /* Map kernel virtual region with static bias (VA-PA offset). */
+    uint8_t k_ps = 28; /* 256MB page, enough for the kernel text window. */
+    uint64_t bias = 0xa0000000fc000000ULL;
+    uint64_t kva_base = 0xa000000100000000ULL;
+    uint64_t mask = ~((1ULL << k_ps) - 1);
+    uint64_t tag = kva_base & mask;
+    uint64_t pa = tag - bias;
+    env->rr[5] = ((uint64_t)k_ps << 56) | (1ULL << 63);
+    env->itlb[1].tag = tag;
+    env->itlb[1].pa = pa;
+    env->itlb[1].rid = 0;
+    env->itlb[1].ps = k_ps;
+    env->itlb[1].ar = 7;
+    env->itlb[1].pl = 0;
+    env->itlb[1].d = 1;
+    env->itlb[1].a = 1;
+    env->itlb[1].p = 1;
+    env->itlb[1].ed = 0;
+    env->itlb[1].valid = 1;
+    env->dtlb[1] = env->itlb[1];
+    env->itlb_next = 2;
+    env->dtlb_next = 2;
 }
 
 static void ia64_cpu_initfn(Object *obj)
@@ -116,6 +163,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .initialize = ia64_tcg_init,
     .translate_code = ia64_translate_code,
     .tlb_fill = ia64_cpu_tlb_fill,
+    .tlb_fill_align = NULL,
     .get_tb_cpu_state = ia64_get_tb_cpu_state,
     .mmu_index = ia64_cpu_mmu_index,
 #ifndef CONFIG_USER_ONLY
