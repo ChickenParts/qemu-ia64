@@ -93,7 +93,12 @@ static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 
 static void ia64_cpu_do_interrupt(CPUState *cs)
 {
-    // TODO: Implement interrupt handling
+    IA64CPU *cpu = IA64_CPU(cs);
+    CPUIA64State *env = &cpu->env;
+
+    /* Fail fast until a real interrupt model is wired. */
+    cpu_abort(cs, "IA64 exception 0x%x ISR=0x%lx IIM=0x%lx IFA=0x%lx",
+              cs->exception_index, env->cr_isr, env->cr_iim, env->cr_ifa);
 }
 
 static const TCGCPUOps ia64_tcg_ops = {
