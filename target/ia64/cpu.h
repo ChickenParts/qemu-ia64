@@ -95,10 +95,14 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        bool probe, uintptr_t retaddr);
 
 #define cpu_signal_handler cpu_ia64_signal_handler
+#ifdef CONFIG_USER_ONLY
 #define cpu_mmu_index cpu_ia64_mmu_index
+#endif
 
-static inline int cpu_ia64_mmu_index(CPUIA64State *env, bool ifetch)
+static inline int cpu_ia64_mmu_index(CPUState *cs, bool ifetch)
 {
+    CPUIA64State *env = cpu_env(cs);
+    (void)env;
     return MMU_KERNEL_IDX; // Placeholder
 }
 

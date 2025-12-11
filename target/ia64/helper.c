@@ -11,6 +11,7 @@
 #include "exec/cputlb.h"
 #include "exec/target_page.h"
 #include "exec/page-protection.h"
+#include "accel/tcg/cpu-ldst.h"
 
 #define RR_RID(x)   extract64((x), 32, 24)
 #define RR_PS(x)    extract64((x), 56, 6)
@@ -36,6 +37,11 @@
 #define TAR_KEY(x)  extract64((x), 32, 24)
 #define TAR_PS(x)   extract64((x), 56, 6)
 
+static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
+                            uint64_t pa, uint32_t rid, uint8_t ps,
+                            uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,
+                            uint8_t p, uint8_t ed);
+
 bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool probe, uintptr_t retaddr)
@@ -51,6 +57,9 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     if (ps == 0) {
         ps = 12;
     }
+
+    env->cr_ifa = address;
+    env->cr[21] = ((uint64_t)ps << 2) | ((uint64_t)rid << 8);
 
     hwaddr phys_addr = address;
     bool hit = false;
@@ -91,12 +100,32 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     if (!hit) {
-        /* Temporary fallback: identity map and kernel bias region. */
-        const uint64_t kernel_bias = 0xa0000000fc000000ULL;
-        if (address >= 0xa000000000000000ULL) {
-            phys_addr = address - kernel_bias;
-        } else {
-            return false;
+        uint64_t pta = env->cr[8]; /* cr.pta */
+        if (PTA_VE(pta) && RR_VE(rr)) {
+            uint64_t vhpt_addr = helper_thash(env);
+            uint64_t pte = cpu_ldq_data(env, vhpt_addr);
+            uint64_t tar = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 8)
+                                       : ((uint64_t)rid << 8) | ((uint64_t)ps << 2);
+            uint64_t tag = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 16) : 0;
+            uint64_t expected = helper_ttag(env);
+            if (!PTA_VF(pta) || tag == expected) {
+                uint8_t trans_ps = TAR_PS(tar);
+                hwaddr pbase = (PTE_PPN(pte) << 12);
+                ia64_insert_tlb(env, access_type != MMU_INST_FETCH, address, pbase,
+                                rid, trans_ps, PTE_AR(pte), PTE_PL(pte),
+                                PTE_D(pte), PTE_A(pte), PTE_P(pte), PTE_ED(pte));
+                phys_addr = pbase | (address & ((1ULL << trans_ps) - 1));
+                hit = true;
+            }
+        }
+        if (!hit) {
+            /* Fallback: identity map low addresses or bias map kernel. */
+            const uint64_t kernel_bias = 0xa0000000fc000000ULL;
+            if (address >= 0xa000000000000000ULL) {
+                phys_addr = address - kernel_bias;
+            } else {
+                return false;
+            }
         }
     }
 
