@@ -47,13 +47,33 @@
 #define IA64_EXCP_PAGE_ACC   0x5
 #define IA64_EXCP_PAGE_DIRTY 0x6
 
+#define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
+
 static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
                        uint8_t vec, uint64_t iim)
 {
     env->cr_isr = vec;
     env->cr_iim = iim;
     cs->exception_index = 0x100 + vec; /* placeholder vector */
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64 fault vec=0x%x is_data=%d IIM=0x%lx IFA=0x%lx\n",
+                  vec, is_data, iim, env->cr_ifa);
     return false;
+}
+
+static bool ia64_check_perms(CPUIA64State *env, bool is_data, bool write,
+                             uint8_t ar, uint8_t pl)
+{
+    uint8_t cpl = IA64_PSR_CPL(env->psr);
+    if (cpl > pl) {
+        return false;
+    }
+    /* Simplified: AR==0 => no access, otherwise allow. */
+    if (ar == 0) {
+        return false;
+    }
+    /* No PKR/key enforcement yet. */
+    return true;
 }
 
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
@@ -143,6 +163,11 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                 if (write && !PTE_D(pte)) {
                     return ia64_fault(cs, env, is_data,
                                       IA64_EXCP_PAGE_DIRTY, 0);
+                }
+                if (!ia64_check_perms(env, is_data, write,
+                                      PTE_AR(pte), PTE_PL(pte))) {
+                    return ia64_fault(cs, env, is_data,
+                                      IA64_EXCP_PAGE_ACC, 0);
                 }
                 ia64_insert_tlb(env, is_data, address, pbase,
                                 rid, trans_ps, PTE_AR(pte), PTE_PL(pte),
