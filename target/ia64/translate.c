@@ -12,6 +12,7 @@
 #include "exec/helper-gen.h"
 #include "disas/disas.h"
 #include "exec/translation-block.h"
+#include "exec/memop.h"
 #include "qemu/log.h"
 #include <inttypes.h>
 
@@ -24,6 +25,10 @@ static TCGv_i64 cpu_r[128];
 static TCGv_i64 cpu_cr_iip;
 static TCGv_i64 cpu_cr_ipsr;
 static TCGv_i64 cpu_cr_ifs;
+static TCGv_i64 cpu_cr_isr;
+static TCGv_i64 cpu_cr_ifa;
+static TCGv_i64 cpu_cr_iim;
+static TCGv_i64 cpu_cr_iha;
 
 void ia64_tcg_init(void)
 {
@@ -44,6 +49,18 @@ void ia64_tcg_init(void)
     cpu_cr_ifs = tcg_global_mem_new_i64(tcg_env,
                                         offsetof(CPUIA64State, cr_ifs),
                                         "cr_ifs");
+    cpu_cr_isr = tcg_global_mem_new_i64(tcg_env,
+                                        offsetof(CPUIA64State, cr_isr),
+                                        "cr_isr");
+    cpu_cr_ifa = tcg_global_mem_new_i64(tcg_env,
+                                        offsetof(CPUIA64State, cr_ifa),
+                                        "cr_ifa");
+    cpu_cr_iim = tcg_global_mem_new_i64(tcg_env,
+                                        offsetof(CPUIA64State, cr_iim),
+                                        "cr_iim");
+    cpu_cr_iha = tcg_global_mem_new_i64(tcg_env,
+                                        offsetof(CPUIA64State, cr_iha),
+                                        "cr_iha");
     
     for (int i = 0; i < 8; i++) {
         char buf[8];
@@ -67,6 +84,7 @@ typedef struct DisasContext {
     CPUIA64State *env;
     int ri;
     uint64_t extra_bits;
+    int mem_idx;
 } DisasContext;
 
 enum SlotType {
@@ -115,12 +133,111 @@ static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)
               ctx->base.pc_next, ctx->ri, insn, msg ?: "");
 }
 
+static TCGLabel *gen_qp_skip(uint8_t qp)
+{
+    if (qp == 0) {
+        return NULL;
+    }
+    TCGLabel *skip = gen_new_label();
+    TCGv_i64 t_qp = tcg_temp_new_i64();
+    tcg_gen_shri_i64(t_qp, cpu_pr, qp);
+    tcg_gen_andi_i64(t_qp, t_qp, 1);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, t_qp, 0, skip);
+    return skip;
+}
+
+static void gen_set_predicates(uint8_t p_true, uint8_t p_false, TCGv_i64 cond)
+{
+    /* Update predicate registers while keeping p0 untouched. */
+    uint64_t mask = 0;
+    if (p_true != 0) {
+        mask |= 1ULL << p_true;
+    }
+    if (p_false != 0) {
+        mask |= 1ULL << p_false;
+    }
+    if (mask == 0) {
+        return;
+    }
+
+    TCGv_i64 t_pr = tcg_temp_new_i64();
+    tcg_gen_mov_i64(t_pr, cpu_pr);
+
+    /* Clear destination predicate bits first. */
+    tcg_gen_andi_i64(t_pr, t_pr, ~mask);
+
+    if (p_true != 0) {
+        TCGv_i64 t = tcg_temp_new_i64();
+        tcg_gen_andi_i64(t, cond, 1);
+        tcg_gen_shli_i64(t, t, p_true);
+        tcg_gen_or_i64(t_pr, t_pr, t);
+    }
+    if (p_false != 0) {
+        TCGv_i64 t = tcg_temp_new_i64();
+        tcg_gen_xori_i64(t, cond, 1);
+        tcg_gen_andi_i64(t, t, 1);
+        tcg_gen_shli_i64(t, t, p_false);
+        tcg_gen_or_i64(t_pr, t_pr, t);
+    }
+
+    tcg_gen_mov_i64(cpu_pr, t_pr);
+}
+
+static TCGv_i64 gen_load_ar(uint8_t idx)
+{
+    TCGv_i64 t = tcg_temp_new_i64();
+    tcg_gen_ld_i64(t, tcg_env, offsetof(CPUIA64State, ar) + idx * 8);
+    return t;
+}
+
+static void gen_store_ar(uint8_t idx, TCGv_i64 v)
+{
+    tcg_gen_st_i64(v, tcg_env, offsetof(CPUIA64State, ar) + idx * 8);
+}
+
+static TCGv_i64 gen_load_cr_reg(uint8_t idx)
+{
+    switch (idx) {
+    case 16: return cpu_cr_ipsr;
+    case 17: return cpu_cr_isr;
+    case 19: return cpu_cr_iip;
+    case 20: return cpu_cr_ifa;
+    case 23: return cpu_cr_ifs;
+    case 24: return cpu_cr_iim;
+    case 25: return cpu_cr_iha;
+    default:
+        break;
+    }
+    TCGv_i64 t = tcg_temp_new_i64();
+    tcg_gen_ld_i64(t, tcg_env, offsetof(CPUIA64State, cr) + idx * 8);
+    return t;
+}
+
+static void gen_store_cr_reg(uint8_t idx, TCGv_i64 v)
+{
+    switch (idx) {
+    case 16: tcg_gen_mov_i64(cpu_cr_ipsr, v); break;
+    case 17: tcg_gen_mov_i64(cpu_cr_isr, v); break;
+    case 19: tcg_gen_mov_i64(cpu_cr_iip, v); break;
+    case 20: tcg_gen_mov_i64(cpu_cr_ifa, v); break;
+    case 23: tcg_gen_mov_i64(cpu_cr_ifs, v); break;
+    case 24: tcg_gen_mov_i64(cpu_cr_iim, v); break;
+    case 25: tcg_gen_mov_i64(cpu_cr_iha, v); break;
+    case 21: /* cr.itir */ break;
+    case 22: /* cr.iipa */ break;
+    default:
+        break;
+    }
+    tcg_gen_st_i64(v, tcg_env, offsetof(CPUIA64State, cr) + idx * 8);
+}
+
 static void ia64_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     ctx->env = cpu_env(cs);
     ctx->ri = ctx->base.tb->flags & 3;
     ctx->extra_bits = 0;
+    ctx->mem_idx = MMU_KERNEL_IDX;
 }
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
@@ -150,17 +267,9 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
     uint8_t r1 = (insn >> 6) & 0x7f;
     uint8_t qp = insn & 0x3f;
     
-    TCGLabel *skip_label = NULL;
+    TCGLabel *skip_label = gen_qp_skip(qp);
     bool handled = false;
     
-    if (qp != 0) {
-        skip_label = gen_new_label();
-        TCGv_i64 t_qp = tcg_temp_new_i64();
-        tcg_gen_shri_i64(t_qp, cpu_pr, qp);
-        tcg_gen_andi_i64(t_qp, t_qp, 1);
-        tcg_gen_brcondi_i64(TCG_COND_EQ, t_qp, 0, skip_label);
-    }
-
     if (major == 0x8 && x2a == 0 && x4 == 0 && x2b == 0) {
         TCGv_i64 t1 = tcg_temp_new_i64();
         TCGv_i64 t2 = tcg_temp_new_i64();
@@ -192,6 +301,77 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
         if (r1 != 0) {
             tcg_gen_mov_i64(cpu_r[r1], t1);
         }
+        handled = true;
+    } else if (major == 0x8 && x2a == 2) {
+        /* adds r1 = imm14, r3 (A4) */
+        uint64_t imm =
+            extract64(insn, 13, 7) |               /* imm7b */
+            (extract64(insn, 27, 6) << 7) |         /* imm6d */
+            (extract64(insn, 36, 1) << 13);         /* sign */
+        int64_t simm = sextract64(imm, 0, 14);
+        TCGv_i64 t = tcg_temp_new_i64();
+        if (r3 == 0) {
+            tcg_gen_movi_i64(t, simm);
+        } else {
+            tcg_gen_addi_i64(t, cpu_r[r3], simm);
+        }
+        if (r1 != 0) {
+            tcg_gen_mov_i64(cpu_r[r1], t);
+        }
+        handled = true;
+    } else if ((major == 0xC || major == 0xD || major == 0xE) &&
+               x2a == 0) {
+        /* cmp.eq / cmp.ne variants (A6 reg-reg) */
+        uint8_t p2 = extract64(insn, 27, 6);
+        uint8_t p1 = extract64(insn, 6, 6);
+        uint8_t c = (insn >> 12) & 1;
+        bool is_ne = c;
+
+        TCGv_i64 t1 = tcg_temp_new_i64();
+        TCGv_i64 t2 = tcg_temp_new_i64();
+        if (r2 == 0) {
+            tcg_gen_movi_i64(t1, 0);
+        } else {
+            tcg_gen_mov_i64(t1, cpu_r[r2]);
+        }
+        if (r3 == 0) {
+            tcg_gen_movi_i64(t2, 0);
+        } else {
+            tcg_gen_mov_i64(t2, cpu_r[r3]);
+        }
+
+        TCGv_i64 cond = tcg_temp_new_i64();
+        if (is_ne) {
+            tcg_gen_setcond_i64(TCG_COND_NE, cond, t1, t2);
+        } else {
+            tcg_gen_setcond_i64(TCG_COND_EQ, cond, t1, t2);
+        }
+        gen_set_predicates(p1, p2, cond);
+        handled = true;
+    } else if ((major == 0xC || major == 0xD || major == 0xE) &&
+               x2a == 2) {
+        /* cmp.eq / cmp.ne imm8, r3 (A8) */
+        uint8_t p2 = extract64(insn, 27, 6);
+        uint8_t p1 = extract64(insn, 6, 6);
+        uint8_t c = (insn >> 12) & 1;
+        uint64_t imm = extract64(insn, 13, 7) |
+                       (extract64(insn, 36, 1) << 7);
+        int64_t simm = sextract64(imm, 0, 8);
+        bool is_ne = c;
+
+        TCGv_i64 t2 = tcg_temp_new_i64();
+        if (r3 == 0) {
+            tcg_gen_movi_i64(t2, 0);
+        } else {
+            tcg_gen_mov_i64(t2, cpu_r[r3]);
+        }
+        TCGv_i64 cond = tcg_temp_new_i64();
+        if (is_ne) {
+            tcg_gen_setcondi_i64(TCG_COND_NE, cond, t2, simm);
+        } else {
+            tcg_gen_setcondi_i64(TCG_COND_EQ, cond, t2, simm);
+        }
+        gen_set_predicates(p1, p2, cond);
         handled = true;
     }
 
@@ -284,30 +464,46 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 /* mov cr[r3] = r2 (M32 format) */
                 uint8_t r2 = extract64(insn, 20, 7);
                 uint8_t cr = extract64(insn, 13, 7);
-                if (cr == 4) {
-                    tcg_gen_mov_i64(cpu_cr_ipsr, cpu_r[r2]);
-                } else if (cr == 6) {
-                    tcg_gen_mov_i64(cpu_cr_iip, cpu_r[r2]);
-                } else if (cr == 10) {
-                    tcg_gen_mov_i64(cpu_cr_ifs, cpu_r[r2]);
-                }
+                gen_store_cr_reg(cr, cpu_r[r2]);
                 break;
             } else if (x3 == 0 && x6 == 0x24) {
                 /* mov r1 = cr[r3] (M33 format) */
                 uint8_t r1 = extract64(insn, 6, 7);
                 uint8_t cr = extract64(insn, 20, 7);
-                TCGv_i64 t = tcg_temp_new_i64();
-                if (cr == 4) {
-                    tcg_gen_mov_i64(t, cpu_cr_ipsr);
-                } else if (cr == 6) {
-                    tcg_gen_mov_i64(t, cpu_cr_iip);
-                } else if (cr == 10) {
-                    tcg_gen_mov_i64(t, cpu_cr_ifs);
-                } else {
-                    tcg_gen_movi_i64(t, 0);
-                }
+                TCGv_i64 t = gen_load_cr_reg(cr);
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t);
+                }
+                break;
+            } else if (x3 == 0 && x6 == 0x22) {
+                /* mov r1 = ar[r3] (M31 format) */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t ar = extract64(insn, 20, 7);
+                TCGv_i64 t = gen_load_ar(ar);
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], t);
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            } else if (x3 == 0 && x6 == 0x2a) {
+                /* mov ar[r3] = r2 (M29 format) */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t ar = extract64(insn, 20, 7);
+                TCGv_i64 t = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(t, 0);
+                } else {
+                    tcg_gen_mov_i64(t, cpu_r[r2]);
+                }
+                gen_store_ar(ar, t);
+                if (skip_label) {
+                    gen_set_label(skip_label);
                 }
                 break;
             }
@@ -324,6 +520,68 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             uint8_t r1 = (insn >> 6) & 0x7f;
             if (r1 != 0) {
                 tcg_gen_movi_i64(cpu_r[r1], 0);
+            }
+            if (skip_label) {
+                gen_set_label(skip_label);
+            }
+            break;
+        }
+        case 0x4:
+        case 0x5: {
+            /* Integer loads/stores (M4/M5) */
+            uint8_t qp = insn & 0x3f;
+            TCGLabel *skip_label = gen_qp_skip(qp);
+            uint8_t x6 = extract64(insn, 30, 6);
+            uint8_t x = extract64(insn, 27, 1);
+            uint8_t r3 = extract64(insn, 20, 7);
+            uint8_t r2 = extract64(insn, 13, 7);
+            uint8_t r1 = extract64(insn, 6, 7);
+            bool is_imm = (major == 0x5);
+            int64_t imm9 = 0;
+
+            if (is_imm) {
+                uint64_t imm = extract64(insn, 6, 7) |
+                               (extract64(insn, 27, 1) << 7) |
+                               (extract64(insn, 36, 1) << 8);
+                imm9 = sextract64(imm, 0, 9);
+            }
+
+            /* Base address */
+            TCGv_i64 addr = tcg_temp_new_i64();
+            if (r3 == 0) {
+                tcg_gen_movi_i64(addr, 0);
+            } else {
+                tcg_gen_mov_i64(addr, cpu_r[r3]);
+            }
+            if (is_imm && imm9) {
+                tcg_gen_addi_i64(addr, addr, imm9);
+            }
+
+            if (x == 0 && (x6 == 0x3 || x6 == 0x7 || x6 == 0xb || x6 == 0xf)) {
+                /* ld8 variants */
+                if (r1 != 0) {
+                    tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                                        MO_TE | MO_64);
+                }
+            } else if (x == 0 && (x6 == 0x33 || x6 == 0x37 || x6 == 0x3b)) {
+                /* st8 / st8.rel / st8.spill variants */
+                TCGv_i64 src = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(src, 0);
+                } else {
+                    tcg_gen_mov_i64(src, cpu_r[r2]);
+                }
+                tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, MO_TE | MO_64);
+                if (is_imm && r3 != 0 && imm9) {
+                    /* Post-increment writeback */
+                    tcg_gen_mov_i64(cpu_r[r3], addr);
+                }
+            } else {
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                gen_unimpl(ctx, insn, "M-slot");
+                break;
             }
             if (skip_label) {
                 gen_set_label(skip_label);

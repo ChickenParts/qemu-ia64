@@ -22,6 +22,12 @@ typedef struct CPUArchState {
     uint64_t cr_ipsr;    /* Processor status saved by interrupt */
     uint64_t cr_iip;     /* Saved instruction pointer */
     uint64_t cr_ifs;     /* Function state */
+    uint64_t cr_isr;     /* Interrupt status */
+    uint64_t cr_ifa;     /* Interruption faulting address */
+    uint64_t cr_iim;     /* Interruption immediate */
+    uint64_t cr_iha;     /* Interruption handler address */
+    uint64_t cr[128];
+    uint64_t ar[128];
 } CPUIA64State;
 
 struct ArchCPU {
