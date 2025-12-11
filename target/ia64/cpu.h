@@ -86,6 +86,15 @@ struct IA64CPUClass {
 #define MMU_KERNEL_IDX 1
 #define MMU_PHYS_IDX 2
 
+#define IA64_EXCP_BASE    0x200
+#define IA64_EXCP_VHPT_TRANS  (IA64_EXCP_BASE + 0x0)
+#define IA64_EXCP_ITLB_MISS   (IA64_EXCP_BASE + 0x1)
+#define IA64_EXCP_DTLB_MISS   (IA64_EXCP_BASE + 0x2)
+#define IA64_EXCP_PAGE_NOT_P  (IA64_EXCP_BASE + 0x3)
+#define IA64_EXCP_MA          (IA64_EXCP_BASE + 0x4)
+#define IA64_EXCP_PAGE_ACC    (IA64_EXCP_BASE + 0x5)
+#define IA64_EXCP_PAGE_DIRTY  (IA64_EXCP_BASE + 0x6)
+
 void ia64_cpu_list(void);
 void ia64_tcg_init(void);
 void ia64_translate_code(CPUState *cs, TranslationBlock *tb,

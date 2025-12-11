@@ -39,22 +39,14 @@
 #define TAR_PS(x)   extract64((x), 56, 6)
 #define TAR_P(x)    extract64((x), 63, 1)
 
-#define IA64_EXCP_VHPT_TRANS 0x0
-#define IA64_EXCP_ITLB_MISS  0x1
-#define IA64_EXCP_DTLB_MISS  0x2
-#define IA64_EXCP_PAGE_NOT_P 0x3
-#define IA64_EXCP_MA         0x4
-#define IA64_EXCP_PAGE_ACC   0x5
-#define IA64_EXCP_PAGE_DIRTY 0x6
-
 #define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
 
 static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
-                       uint8_t vec, uint64_t iim)
+                       uint32_t vec, uint64_t iim)
 {
     env->cr_isr = vec;
     env->cr_iim = iim;
-    cs->exception_index = 0x100 + vec; /* placeholder vector */
+    cs->exception_index = IA64_EXCP_BASE + vec;
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64 fault vec=0x%x is_data=%d IIM=0x%lx IFA=0x%lx\n",
                   vec, is_data, iim, env->cr_ifa);

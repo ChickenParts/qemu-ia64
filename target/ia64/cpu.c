@@ -95,10 +95,20 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
 {
     IA64CPU *cpu = IA64_CPU(cs);
     CPUIA64State *env = &cpu->env;
+    uint32_t vec = cs->exception_index - IA64_EXCP_BASE;
 
-    /* Fail fast until a real interrupt model is wired. */
-    cpu_abort(cs, "IA64 exception 0x%x ISR=0x%lx IIM=0x%lx IFA=0x%lx",
-              cs->exception_index, env->cr_isr, env->cr_iim, env->cr_ifa);
+    /* Save interrupted state */
+    env->cr_iip = env->ip;
+    env->cr_ipsr = env->psr;
+    env->cr_ifs = env->cfm;
+
+    /* Basic handler target */
+    if (env->cr_iha) {
+        env->ip = env->cr_iha;
+    } else {
+        env->ip = (uint64_t)vec << 8;
+    }
+    env->psr &= ~PSR_RI_MASK; /* clear RI */
 }
 
 static const TCGCPUOps ia64_tcg_ops = {
