@@ -151,6 +151,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
     uint8_t qp = insn & 0x3f;
     
     TCGLabel *skip_label = NULL;
+    bool handled = false;
     
     if (qp != 0) {
         skip_label = gen_new_label();
@@ -161,7 +162,6 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
     }
 
     if (major == 0x8 && x2a == 0 && x4 == 0 && x2b == 0) {
-        /* add r1 = r2, r3 */
         TCGv_i64 t1 = tcg_temp_new_i64();
         TCGv_i64 t2 = tcg_temp_new_i64();
         
@@ -179,13 +179,48 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
         if (r1 != 0) {
             tcg_gen_mov_i64(cpu_r[r1], t1);
         }
+        handled = true;
+    } else if (major == 0x8 && x2a == 0 && x4 == 3 && x2b == 2) {
+        /* or r1 = r2, r3 */
+        TCGv_i64 t1 = tcg_temp_new_i64();
+        TCGv_i64 t2 = tcg_temp_new_i64();
+        if (r2 == 0) tcg_gen_movi_i64(t1, 0);
+        else tcg_gen_mov_i64(t1, cpu_r[r2]);
+        if (r3 == 0) tcg_gen_movi_i64(t2, 0);
+        else tcg_gen_mov_i64(t2, cpu_r[r3]);
+        tcg_gen_or_i64(t1, t1, t2);
+        if (r1 != 0) {
+            tcg_gen_mov_i64(cpu_r[r1], t1);
+        }
+        handled = true;
+    }
+
+    /* addl r1 = imm22, r3 (A5 format, op=9) */
+    if (!handled && major == 0x9) {
+        uint64_t imm =
+            extract64(insn, 13, 7) |               /* bits 13..19 */
+            (extract64(insn, 27, 9) << 7) |         /* bits 27..35 */
+            (extract64(insn, 22, 5) << (7 + 9)) |   /* bits 22..26 */
+            (extract64(insn, 36, 1) << (7 + 9 + 5));/* bit 36 (sign) */
+        int64_t simm = sextract64(imm, 0, 22);
+        TCGv_i64 t1 = tcg_temp_new_i64();
+        if (r3 == 0) {
+            tcg_gen_movi_i64(t1, simm);
+        } else {
+            tcg_gen_addi_i64(t1, cpu_r[r3], simm);
+        }
+        if (r1 != 0) {
+            tcg_gen_mov_i64(cpu_r[r1], t1);
+        }
+        handled = true;
     }
     
     if (skip_label) {
         gen_set_label(skip_label);
     }
-
-    /* Anything else in A-unit currently treated as a no-op placeholder. */
+    if (!handled) {
+        gen_unimpl(ctx, insn, "A-slot");
+    }
 }
 
 static void decode_b_unit(DisasContext *ctx, uint64_t insn)
@@ -207,13 +242,18 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         tcg_gen_mov_i64(cpu_pc, cpu_cr_iip);
         ctx->base.is_jmp = DISAS_NORETURN;
         tcg_gen_exit_tb(NULL, 0);
-    } else {
+    } else if (((insn >> 37) & 0xf) == 0x4) {
         /* Simple br.cond immediate (B1-style target25 << 4). */
         uint64_t imm = extract64(insn, 13, 20) | (extract64(insn, 36, 1) << 20);
         int64_t disp = (int64_t)(imm << 4);
         tcg_gen_movi_i64(cpu_pc, ctx->base.pc_next + disp);
         ctx->base.is_jmp = DISAS_NORETURN;
         tcg_gen_exit_tb(NULL, 0);
+    } else if (((insn >> 37) & 0xf) == 0x2 && ((insn >> 27) & 0x3f) == 0x0) {
+        /* nop.b */
+        /* nothing */
+    } else {
+        gen_unimpl(ctx, insn, "B-slot");
     }
     if (skip_label) {
         gen_set_label(skip_label);
