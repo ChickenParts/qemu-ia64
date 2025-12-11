@@ -214,23 +214,6 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "TLB fill %s VA=0x%" PRIx64 " -> PA=0x%" PRIx64
-                  " idx=%d ps=%d\n",
-                  access_type == MMU_INST_FETCH ? "I" :
-                  (access_type == MMU_DATA_LOAD ? "L" : "S"),
-                  address, phys_addr, mmu_idx, ps);
-    if (access_type == MMU_INST_FETCH &&
-        address == 0xa0000001011b1e50ULL) {
-        uint64_t buf[2] = {0, 0};
-        address_space_read(&address_space_memory, phys_addr,
-                           MEMTXATTRS_UNSPECIFIED, (uint8_t *)buf,
-                           sizeof(buf));
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "Snapshot @PA=0x%" PRIx64 " data=%016" PRIx64
-                      " %016" PRIx64 "\n",
-                      phys_addr, buf[0], buf[1]);
-    }
     tlb_set_page(cs, address & TARGET_PAGE_MASK,
                  phys_addr & TARGET_PAGE_MASK, prot,
                  mmu_idx, TARGET_PAGE_SIZE);
@@ -267,6 +250,9 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
     uint64_t arg3 = env->r[35];
 
     switch (nr) {
+    case 0:
+        /* Unknown/no-op SSC; ignore quietly. */
+        return 0;
     case 20: /* SSC_CONSOLE_INIT */
         return 0;
     case 31: /* SSC_PUTCHAR */

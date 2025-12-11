@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
+#include "qemu/qemu-print.h"
 #include "qemu/module.h"
 #ifndef CONFIG_USER_ONLY
 #include "hw/core/sysemu-cpu-ops.h"
@@ -133,6 +134,35 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     };
 }
 
+static void ia64_restore_state_to_opc(CPUState *cs,
+                                      const TranslationBlock *tb,
+                                      const uint64_t *data)
+{
+    CPUIA64State *env = cpu_env(cs);
+    /* data[0] = pc, data[1] = ri (from tcg_gen_insn_start) */
+    env->ip = data[0];
+    env->psr &= ~PSR_RI_MASK;
+    env->psr |= (data[1] << PSR_RI_SHIFT) & PSR_RI_MASK;
+}
+
+static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
+{
+    CPUIA64State *env = cpu_env(cs);
+    qemu_fprintf(f, "IP=%016" PRIx64 " PSR=%016" PRIx64 " CFM=%016" PRIx64 "\n",
+                 env->ip, env->psr, env->cfm);
+    qemu_fprintf(f, "PR=%016" PRIx64 "\n", env->pr);
+    for (int i = 0; i < 8; i++) {
+        qemu_fprintf(f, "r%-2d=%016" PRIx64 "%s", i, env->r[i],
+                     (i % 4 == 3) ? "\n" : " ");
+    }
+    for (int i = 12; i < 20; i++) {
+        qemu_fprintf(f, "r%-2d=%016" PRIx64 "%s", i, env->r[i],
+                     ((i - 12) % 4 == 3) ? "\n" : " ");
+    }
+    qemu_fprintf(f, "b0=%016" PRIx64 " b1=%016" PRIx64 " b2=%016" PRIx64 " b3=%016" PRIx64 "\n",
+                 env->b[0], env->b[1], env->b[2], env->b[3]);
+}
+
 static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
     return MMU_KERNEL_IDX;
@@ -165,6 +195,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .tlb_fill = ia64_cpu_tlb_fill,
     .tlb_fill_align = NULL,
     .get_tb_cpu_state = ia64_get_tb_cpu_state,
+    .restore_state_to_opc = ia64_restore_state_to_opc,
     .mmu_index = ia64_cpu_mmu_index,
 #ifndef CONFIG_USER_ONLY
     .cpu_exec_halt = ia64_cpu_has_work,
@@ -188,7 +219,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
                                        &icc->parent_phases);
 
     cc->class_by_name = object_class_by_name;
-    cc->dump_state = NULL; // TODO
+    cc->dump_state = ia64_cpu_dump_state;
     cc->set_pc = ia64_cpu_set_pc;
     cc->gdb_read_register = NULL; // TODO
     cc->gdb_write_register = NULL; // TODO

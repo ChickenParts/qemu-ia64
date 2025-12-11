@@ -174,6 +174,11 @@ static int cpu_unwind_data_from_tb(TranslationBlock *tb, uintptr_t host_pc,
 void cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
                                uintptr_t host_pc)
 {
+    tb = tcg_tb_lookup(host_pc);
+    if (unlikely(tb == NULL)) {
+        cpu_abort(cpu, "cpu_restore_state_from_tb: missing TB for host_pc=%p",
+                  (void *)host_pc);
+    }
     uint64_t data[INSN_START_WORDS];
     int insns_left = cpu_unwind_data_from_tb(tb, host_pc, data);
 
