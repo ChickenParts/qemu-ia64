@@ -23,6 +23,7 @@ typedef struct CPUArchState {
     uint64_t cr_iip;     /* Saved instruction pointer */
     uint64_t cr_ifs;     /* Function state */
     uint64_t cr_isr;     /* Interrupt status */
+    uint64_t cr_iipa;    /* Interruption instruction pointer address */
     uint64_t cr_ifa;     /* Interruption faulting address */
     uint64_t cr_iim;     /* Interruption immediate */
     uint64_t cr_iha;     /* Interruption handler address */
@@ -94,6 +95,8 @@ struct IA64CPUClass {
 #define IA64_EXCP_MA          (IA64_EXCP_BASE + 0x4)
 #define IA64_EXCP_PAGE_ACC    (IA64_EXCP_BASE + 0x5)
 #define IA64_EXCP_PAGE_DIRTY  (IA64_EXCP_BASE + 0x6)
+#define IA64_EXCP_INST_ACCESS (IA64_EXCP_BASE + 0x52) /* access rights */
+#define IA64_EXCP_DATA_ACCESS (IA64_EXCP_BASE + 0x53) /* access rights */
 
 void ia64_cpu_list(void);
 void ia64_tcg_init(void);

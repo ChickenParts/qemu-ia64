@@ -40,17 +40,29 @@
 #define TAR_P(x)    extract64((x), 63, 1)
 
 #define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
+#define IA64_PSR_IC       (1ULL << 13)
 
 static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
-                       uint32_t vec, uint64_t iim)
+                       bool write, uint32_t vec, uint64_t iim)
 {
-    env->cr_isr = vec;
+    /* Save interruption state */
+    if (env->psr & IA64_PSR_IC) {
+        env->cr_ipsr = env->psr;
+        env->cr_iip = env->ip & ~0xFULL;
+        env->cr_ifs = env->cfm;
+    }
+    /* Build ISR flags: X/W/R bits and code in low bits */
+    uint64_t isr = vec;
+    isr |= (!is_data ? 1ULL : 0ULL) << 31; /* X */
+    isr |= (write ? 1ULL : 0ULL) << 30;    /* W */
+    isr |= ((!write && is_data) || (!is_data) ? 1ULL : 0ULL) << 29; /* R */
+    env->cr_isr = isr;
     env->cr_iim = iim;
     cs->exception_index = IA64_EXCP_BASE + vec;
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64 fault vec=0x%x is_data=%d IIM=0x%lx IFA=0x%lx\n",
                   vec, is_data, iim, env->cr_ifa);
-    return false;
+    return true;
 }
 
 static bool ia64_check_perms(CPUIA64State *env, bool is_data, bool write,
@@ -79,6 +91,11 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 {
     /* IA64CPU *cpu = IA64_CPU(cs); */
     CPUIA64State *env = cpu_env(cs);
+
+    /* Alignment/probe calls should not raise faults or log. */
+    if (probe) {
+        return false;
+    }
 
     /* Region / page size info */
     uint8_t rr_idx = extract64(address, 61, 3);
@@ -145,20 +162,20 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                 bool is_data = access_type != MMU_INST_FETCH;
                 bool write = (access_type == MMU_DATA_STORE);
                 if (!PTE_P(pte) || !TAR_P(tar)) {
-                    return ia64_fault(cs, env, is_data,
+                    return ia64_fault(cs, env, is_data, write,
                                       IA64_EXCP_PAGE_NOT_P, 0);
                 }
                 if (!PTE_A(pte)) {
-                    return ia64_fault(cs, env, is_data,
+                    return ia64_fault(cs, env, is_data, write,
                                       IA64_EXCP_PAGE_ACC, 0);
                 }
                 if (write && !PTE_D(pte)) {
-                    return ia64_fault(cs, env, is_data,
+                    return ia64_fault(cs, env, is_data, write,
                                       IA64_EXCP_PAGE_DIRTY, 0);
                 }
                 if (!ia64_check_perms(env, is_data, write,
                                       PTE_AR(pte), PTE_PL(pte))) {
-                    return ia64_fault(cs, env, is_data,
+                    return ia64_fault(cs, env, is_data, write,
                                       IA64_EXCP_PAGE_ACC, 0);
                 }
                 ia64_insert_tlb(env, is_data, address, pbase,
@@ -169,7 +186,12 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             }
         }
         if (!hit) {
-            return ia64_fault(cs, env, access_type != MMU_INST_FETCH,
+            if (probe) {
+                return false;
+            }
+            bool is_data = access_type != MMU_INST_FETCH;
+            bool write = (access_type == MMU_DATA_STORE);
+            return ia64_fault(cs, env, is_data, write,
                               access_type == MMU_INST_FETCH ? IA64_EXCP_ITLB_MISS
                                                             : IA64_EXCP_DTLB_MISS,
                               0);

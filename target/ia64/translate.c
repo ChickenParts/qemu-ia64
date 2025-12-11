@@ -26,6 +26,7 @@ static TCGv_i64 cpu_pr;
 static TCGv_i64 cpu_b[8];
 static TCGv_i64 cpu_r[128];
 static TCGv_i64 cpu_rr[8];
+static TCGv_i64 cpu_cr_iva;
 static TCGv_i64 cpu_cr_iip;
 static TCGv_i64 cpu_cr_ipsr;
 static TCGv_i64 cpu_cr_ifs;
@@ -50,6 +51,9 @@ void ia64_tcg_init(void)
     cpu_cr_ipsr = tcg_global_mem_new_i64(tcg_env,
                                          offsetof(CPUIA64State, cr_ipsr),
                                          "cr_ipsr");
+    cpu_cr_iva = tcg_global_mem_new_i64(tcg_env,
+                                        offsetof(CPUIA64State, cr[2]),
+                                        "cr_iva");
     cpu_cr_ifs = tcg_global_mem_new_i64(tcg_env,
                                         offsetof(CPUIA64State, cr_ifs),
                                         "cr_ifs");
@@ -212,6 +216,7 @@ static TCGv_i64 gen_load_cr_reg(uint8_t idx)
     switch (idx) {
     case 16: return cpu_cr_ipsr;
     case 17: return cpu_cr_isr;
+    case 2:  return cpu_cr_iva;
     case 19: return cpu_cr_iip;
     case 20: return cpu_cr_ifa;
     case 23: return cpu_cr_ifs;
@@ -230,6 +235,7 @@ static void gen_store_cr_reg(uint8_t idx, TCGv_i64 v)
     switch (idx) {
     case 16: tcg_gen_mov_i64(cpu_cr_ipsr, v); break;
     case 17: tcg_gen_mov_i64(cpu_cr_isr, v); break;
+    case 2:  tcg_gen_mov_i64(cpu_cr_iva, v); break;
     case 19: tcg_gen_mov_i64(cpu_cr_iip, v); break;
     case 20: tcg_gen_mov_i64(cpu_cr_ifa, v); break;
     case 23: tcg_gen_mov_i64(cpu_cr_ifs, v); break;
