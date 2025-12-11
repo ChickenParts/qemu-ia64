@@ -12,6 +12,7 @@
 #include "exec/target_page.h"
 #include "exec/page-protection.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "qemu/log.h"
 
 #define RR_RID(x)   extract64((x), 32, 24)
 #define RR_PS(x)    extract64((x), 56, 6)
@@ -36,6 +37,24 @@
 
 #define TAR_KEY(x)  extract64((x), 32, 24)
 #define TAR_PS(x)   extract64((x), 56, 6)
+#define TAR_P(x)    extract64((x), 63, 1)
+
+#define IA64_EXCP_VHPT_TRANS 0x0
+#define IA64_EXCP_ITLB_MISS  0x1
+#define IA64_EXCP_DTLB_MISS  0x2
+#define IA64_EXCP_PAGE_NOT_P 0x3
+#define IA64_EXCP_MA         0x4
+#define IA64_EXCP_PAGE_ACC   0x5
+#define IA64_EXCP_PAGE_DIRTY 0x6
+
+static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
+                       uint8_t vec, uint64_t iim)
+{
+    env->cr_isr = vec;
+    env->cr_iim = iim;
+    cs->exception_index = 0x100 + vec; /* placeholder vector */
+    return false;
+}
 
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
@@ -113,14 +132,17 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                 hwaddr pbase = (PTE_PPN(pte) << 12);
                 bool is_data = access_type != MMU_INST_FETCH;
                 bool write = (access_type == MMU_DATA_STORE);
-                if (!PTE_P(pte)) {
-                    return false;
+                if (!PTE_P(pte) || !TAR_P(tar)) {
+                    return ia64_fault(cs, env, is_data,
+                                      IA64_EXCP_PAGE_NOT_P, 0);
                 }
                 if (!PTE_A(pte)) {
-                    return false;
+                    return ia64_fault(cs, env, is_data,
+                                      IA64_EXCP_PAGE_ACC, 0);
                 }
                 if (write && !PTE_D(pte)) {
-                    return false;
+                    return ia64_fault(cs, env, is_data,
+                                      IA64_EXCP_PAGE_DIRTY, 0);
                 }
                 ia64_insert_tlb(env, is_data, address, pbase,
                                 rid, trans_ps, PTE_AR(pte), PTE_PL(pte),
@@ -130,7 +152,10 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             }
         }
         if (!hit) {
-            return false;
+            return ia64_fault(cs, env, access_type != MMU_INST_FETCH,
+                              access_type == MMU_INST_FETCH ? IA64_EXCP_ITLB_MISS
+                                                            : IA64_EXCP_DTLB_MISS,
+                              0);
         }
     }
 
