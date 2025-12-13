@@ -146,6 +146,15 @@ static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
     return (cpl == 3) ? MMU_USER_IDX : MMU_KERNEL_IDX;
 }
 
+static void ia64_switch_banks_local(CPUIA64State *env)
+{
+    for (int i = 0; i < 16; i++) {
+        uint64_t tmp = env->banked_r[i];
+        env->banked_r[i] = env->r[16 + i];
+        env->r[16 + i] = tmp;
+    }
+}
+
 static void ia64_cpu_do_interrupt(CPUState *cs)
 {
     IA64CPU *cpu = IA64_CPU(cs);
@@ -156,6 +165,17 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     uint64_t iva = env->cr[2]; /* cr.iva */
     env->ip = iva + vec;
     env->psr &= ~PSR_RI_MASK; /* clear RI */
+
+    /*
+     * On interruption, IA-64 uses banked registers (r16..r31) for privileged
+     * handlers. Linux's IVT code assumes it's running with BN=1 and will
+     * explicitly bsw.0/bsw.1 when needed. Switch to BN=1 here so handlers see
+     * the expected banked register set.
+     */
+    if (!(env->psr & IA64_PSR_BN)) {
+        ia64_switch_banks_local(env);
+        env->psr |= IA64_PSR_BN;
+    }
 }
 
 static vaddr ia64_pointer_wrap(CPUState *cs, int idx, vaddr res, vaddr base);

@@ -339,37 +339,109 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
 
     if (major == 0x8 && x2a == 0) {
         /* A1 bitwise/add/sub/etc. */
-        TCGv_i64 t1 = tcg_temp_new_i64();
-        TCGv_i64 t2 = tcg_temp_new_i64();
-        if (r2 == 0) tcg_gen_movi_i64(t1, 0);
-        else tcg_gen_mov_i64(t1, cpu_r[r2]);
-        if (r3 == 0) tcg_gen_movi_i64(t2, 0);
-        else tcg_gen_mov_i64(t2, cpu_r[r3]);
-
-        switch (x4) {
-        case 0: /* add */
-            tcg_gen_add_i64(t1, t1, t2);
-            break;
-        case 2: /* addp4: r1 = r2 + (r3 << 2) */
-            tcg_gen_shli_i64(t2, t2, 2);
-            tcg_gen_add_i64(t1, t1, t2);
-            break;
-        case 3:
-            switch (x2b) {
-            case 0: tcg_gen_and_i64(t1, t1, t2); break;
-            case 1: tcg_gen_andc_i64(t1, t1, t2); break;
-            case 2: tcg_gen_or_i64(t1, t1, t2); break;
-            case 3: tcg_gen_xor_i64(t1, t1, t2); break;
-            default: break;
+        /* Immediate sub: sub r1 = imm7, r3  (imm7 is bits 13..19) */
+        if (x4 == 0x9 && x2b == 1 && ve == 0) {
+            uint64_t imm7 = r2;
+            TCGv_i64 src = tcg_temp_new_i64();
+            if (r3 == 0) {
+                tcg_gen_movi_i64(src, 0);
+            } else {
+                tcg_gen_mov_i64(src, cpu_r[r3]);
             }
-            break;
-        default:
-            break;
+            TCGv_i64 t = tcg_temp_new_i64();
+            tcg_gen_movi_i64(t, imm7);
+            tcg_gen_sub_i64(t, t, src);
+            if (r1 != 0) {
+                tcg_gen_mov_i64(cpu_r[r1], t);
+            }
+            handled = true;
+        } else
+        /* Immediate logical ops: and/andcm/or/xor r1 = imm7, r3 */
+        if (x4 == 0xB && ve == 0) {
+            int64_t simm7 = sextract64((uint64_t)r2, 0, 7);
+            uint64_t imm = (uint64_t)simm7;
+            TCGv_i64 src = tcg_temp_new_i64();
+            if (r3 == 0) {
+                tcg_gen_movi_i64(src, 0);
+            } else {
+                tcg_gen_mov_i64(src, cpu_r[r3]);
+            }
+            TCGv_i64 t = tcg_temp_new_i64();
+            switch (x2b) {
+            case 0: /* and */
+                tcg_gen_andi_i64(t, src, imm);
+                break;
+            case 1: /* andcm */
+                tcg_gen_andi_i64(t, src, ~imm);
+                break;
+            case 2: /* or */
+                tcg_gen_ori_i64(t, src, imm);
+                break;
+            case 3: /* xor */
+                tcg_gen_xori_i64(t, src, imm);
+                break;
+            default:
+                g_assert_not_reached();
+            }
+            if (r1 != 0) {
+                tcg_gen_mov_i64(cpu_r[r1], t);
+            }
+            handled = true;
+            /* handled */
+        } else {
+            TCGv_i64 t1 = tcg_temp_new_i64();
+            TCGv_i64 t2 = tcg_temp_new_i64();
+            if (r2 == 0) {
+                tcg_gen_movi_i64(t1, 0);
+            } else {
+                tcg_gen_mov_i64(t1, cpu_r[r2]);
+            }
+            if (r3 == 0) {
+                tcg_gen_movi_i64(t2, 0);
+            } else {
+                tcg_gen_mov_i64(t2, cpu_r[r3]);
+            }
+
+            bool a1_handled = true;
+            switch (x4) {
+            case 0: /* add */
+                tcg_gen_add_i64(t1, t1, t2);
+                break;
+            case 1: /* sub */
+                tcg_gen_sub_i64(t1, t1, t2);
+                break;
+            case 2: /* addp4: r1 = r2 + (r3 << 2) */
+                tcg_gen_shli_i64(t2, t2, 2);
+                tcg_gen_add_i64(t1, t1, t2);
+                break;
+            case 3:
+                switch (x2b) {
+                case 0: tcg_gen_and_i64(t1, t1, t2); break;
+                case 1: tcg_gen_andc_i64(t1, t1, t2); break;
+                case 2: tcg_gen_or_i64(t1, t1, t2); break;
+                case 3: tcg_gen_xor_i64(t1, t1, t2); break;
+                default: break;
+                }
+                break;
+            case 4: { /* shladd: r1 = (r2 << (x2b+1)) + r3 */
+                uint8_t sh = x2b + 1;
+                tcg_gen_shli_i64(t1, t1, sh);
+                tcg_gen_add_i64(t1, t1, t2);
+                break;
+            }
+            default:
+                a1_handled = false;
+                break;
+            }
+            if (!a1_handled) {
+                handled = false;
+            } else {
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], t1);
+                }
+                handled = true;
+            }
         }
-        if (r1 != 0) {
-            tcg_gen_mov_i64(cpu_r[r1], t1);
-        }
-        handled = true;
     } else if (major == 0x8 && x2a == 2 && ve == 0) {
         /* adds r1 = imm14, r3 (A4) */
         uint64_t imm =
@@ -1303,13 +1375,166 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             break;
         case 0x6:
         case 0x7: {
-            /* M18: setf.sig f1 = r2 (op=6 m=0 x=1 x6=0x1c) */
+            /* Assorted M-slot ops in the op=6/7 space. */
             uint8_t qp = insn & 0x3f;
             TCGLabel *skip_label = gen_qp_skip(qp);
             uint8_t m = extract64(insn, 36, 1);
             uint8_t x = extract64(insn, 27, 1);
             uint8_t x6 = extract64(insn, 30, 6);
-            if (major == 0x6 && m == 0 && x == 1 && x6 == 0x1c) {
+            uint8_t x3 = extract64(insn, 33, 3);
+            bool handled = false;
+
+            /*
+             * lfetch* [r3] (M18-style encoding)
+             * major=6, x3=5, m=0, x=0, x6={0x2c..0x2f}.
+             * Treat as a hint; for .fault variants, perform a byte probe load
+             * (discarded) so translation faults are raised in the right place.
+             */
+            if ((major == 0x6 || major == 0x7) && x3 == 5 &&
+                (x6 == 0x2c || x6 == 0x2d || x6 == 0x2e || x6 == 0x2f)) {
+                uint8_t r3 = extract64(insn, 20, 7);
+                uint8_t r2 = extract64(insn, 13, 7);
+                int32_t simm8 = 0;
+                if (major == 0x7) {
+                    uint64_t raw = (uint64_t)r2 | ((uint64_t)x << 7);
+                    simm8 = sextract64(raw, 0, 8);
+                }
+
+                if (x6 == 0x2e || x6 == 0x2f) {
+                    /* .fault variants: raise translation faults at the hint site */
+                    TCGv_i64 addr = tcg_temp_new_i64();
+                    if (r3 == 0) {
+                        tcg_gen_movi_i64(addr, 0);
+                    } else {
+                        tcg_gen_mov_i64(addr, cpu_r[r3]);
+                    }
+                    TCGv_i64 tmp = tcg_temp_new_i64();
+                    tcg_gen_qemu_ld_i64(tmp, addr, ctx->mem_idx, MO_TE | MO_UB);
+                }
+                if (r3 != 0 && simm8 != 0) {
+                    tcg_gen_addi_i64(cpu_r[r3], cpu_r[r3], simm8);
+                }
+                handled = true;
+            }
+
+            /*
+             * stf8 [r3]=f2{,imm8} (seen in memset/entry save areas)
+             * - major=6/7, x3=6, x6=0x31
+             * - r3 is base address
+             * - r2 is FP register index
+             * - imm8 is encoded as (r1 | (x << 7)); 0 => no update
+             */
+            if (!handled && (major == 0x6 || major == 0x7) && x3 == 6 &&
+                m == 0 && x6 == 0x31) {
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t f2 = extract64(insn, 13, 7) & 0x7f;
+                uint8_t r3 = extract64(insn, 20, 7);
+                uint32_t imm8 = (uint32_t)r1 | ((uint32_t)x << 7);
+
+                TCGv_i64 addr = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(addr, 0);
+                } else {
+                    tcg_gen_mov_i64(addr, cpu_r[r3]);
+                }
+
+                TCGv_i64 lo = tcg_temp_new_i64();
+                tcg_gen_ld_i64(lo, tcg_env,
+                               offsetof(CPUIA64State, f) + (f2 * 16) + 0);
+                tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
+
+                if (r3 != 0 && imm8 != 0) {
+                    tcg_gen_addi_i64(cpu_r[r3], cpu_r[r3], imm8);
+                }
+                handled = true;
+            }
+
+            /*
+             * ldf.fill f1=[r3]{,imm8}
+             * - major=6/7, x3=3, x6=0x1b
+             * - r3 is base address
+             * - r2 is the post-increment byte count low 7 bits
+             * - imm8 is encoded as (r2 | (x << 7)); 0 => no update
+             * Load 16 bytes (2x64) into the emulated FP register.
+             */
+            if (!handled && (major == 0x6 || major == 0x7) && x3 == 3 &&
+                x6 == 0x1b) {
+                uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                int32_t simm8 = 0;
+                if (major == 0x7) {
+                    uint64_t raw = (uint64_t)r2 | ((uint64_t)x << 7);
+                    simm8 = sextract64(raw, 0, 8);
+                }
+
+                TCGv_i64 addr = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(addr, 0);
+                } else {
+                    tcg_gen_mov_i64(addr, cpu_r[r3]);
+                }
+
+                TCGv_i64 lo = tcg_temp_new_i64();
+                TCGv_i64 hi = tcg_temp_new_i64();
+                tcg_gen_qemu_ld_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
+                TCGv_i64 addr2 = tcg_temp_new_i64();
+                tcg_gen_addi_i64(addr2, addr, 8);
+                tcg_gen_qemu_ld_i64(hi, addr2, ctx->mem_idx, MO_TE | MO_64);
+
+                if (f1 != 0) {
+                    tcg_gen_st_i64(lo, tcg_env,
+                                   offsetof(CPUIA64State, f) + (f1 * 16) + 0);
+                    tcg_gen_st_i64(hi, tcg_env,
+                                   offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                }
+
+                if (r3 != 0 && simm8 != 0) {
+                    tcg_gen_addi_i64(cpu_r[r3], cpu_r[r3], simm8);
+                }
+                handled = true;
+            }
+
+            /*
+             * stf.spill{,.nta} [r3]=f2{,imm7} (used in Linux entry save area)
+             * - major=6/7, x3=7, x6=0x3b
+             * - r3 is the base address register
+             * - r2 is the FP register index
+             * - r1 is the post-increment byte count (0 => no update)
+             */
+            if (!handled && (major == 0x6 || major == 0x7) && x3 == 7 &&
+                m == 0 && x == 0 && x6 == 0x3b) {
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t f2 = extract64(insn, 13, 7) & 0x7f;
+                uint8_t r3 = extract64(insn, 20, 7);
+
+                TCGv_i64 addr = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(addr, 0);
+                } else {
+                    tcg_gen_mov_i64(addr, cpu_r[r3]);
+                }
+
+                TCGv_i64 lo = tcg_temp_new_i64();
+                TCGv_i64 hi = tcg_temp_new_i64();
+                tcg_gen_ld_i64(lo, tcg_env,
+                               offsetof(CPUIA64State, f) + (f2 * 16) + 0);
+                tcg_gen_ld_i64(hi, tcg_env,
+                               offsetof(CPUIA64State, f) + (f2 * 16) + 8);
+
+                tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
+                TCGv_i64 addr2 = tcg_temp_new_i64();
+                tcg_gen_addi_i64(addr2, addr, 8);
+                tcg_gen_qemu_st_i64(hi, addr2, ctx->mem_idx, MO_TE | MO_64);
+
+                if (r3 != 0 && r1 != 0) {
+                    tcg_gen_addi_i64(cpu_r[r3], cpu_r[r3], r1);
+                }
+                handled = true;
+            }
+
+            /* M18: setf.sig f1 = r2 (op=6 m=0 x=1 x6=0x1c) */
+            if (!handled && major == 0x6 && m == 0 && x == 1 && x6 == 0x1c) {
                 uint8_t r2 = extract64(insn, 13, 7);
                 uint8_t f1 = extract64(insn, 6, 7);
                 TCGv_i64 val = tcg_temp_new_i64();
@@ -1319,6 +1544,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_mov_i64(val, cpu_r[r2]);
                 }
                 gen_helper_setf_sig(tcg_env, tcg_constant_i32(f1), val);
+                handled = true;
+            }
+
+            if (!handled) {
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                gen_unimpl(ctx, insn, "M-slot op6/7");
+                break;
             }
             if (skip_label) {
                 gen_set_label(skip_label);
@@ -1722,8 +1956,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             uint8_t ve = extract64(insn, 33, 1);
             bool handled = false;
 
-            if (x2a == 0 && ve == 0) {
-                /* tbit.* p1,p2 = r3, pos6 */
+            if (x2a == 0) {
+                /* Test instructions: tbit.* / tnat.* */
                 uint8_t p2 = extract64(insn, 27, 6);
                 uint8_t p1 = extract64(insn, 6, 6);
                 uint8_t r3 = extract64(insn, 20, 7);
@@ -1731,30 +1965,108 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint8_t tb = extract64(insn, 36, 1);
                 uint8_t ta = extract64(insn, 33, 1);
                 uint8_t c = extract64(insn, 12, 1);
+                uint8_t bit13 = extract64(insn, 13, 1);
 
-                TCGv_i64 src = tcg_temp_new_i64();
-                if (r3 == 0) {
-                    tcg_gen_movi_i64(src, 0);
+                if (bit13) {
+                    /*
+                     * tnat.* p1,p2 = r3
+                     *
+                     * We currently do not model NaT bits, so assume NaT(r3)=0.
+                     * Linux uses tnat to augment predicates in exception paths.
+                     *
+                     * Encodings observed in Linux:
+                     * - c selects z vs nz (0 => z, 1 => nz)
+                     * - ta/tb select predicate combining:
+                     *     ta=0 tb=0: .unc (default)
+                     *     ta=0 tb=1: .and
+                     *     ta=1 tb=0: .or
+                     *     ta=1 tb=1: .or.andcm
+                     */
+                    bool is_nz = (c != 0);
+                    TCGv_i64 cond = tcg_temp_new_i64();
+                    tcg_gen_movi_i64(cond, is_nz ? 0 : 1);
+
+                    if (ta == 0 && tb == 0) {
+                        /* .unc: p1 = cond; p2 = ~cond */
+                        gen_set_predicates(p1, p2, cond);
+                        handled = true;
+                    } else {
+                        /* .and / .or / .or.andcm */
+                        uint64_t mask = 0;
+                        if (p1 != 0) {
+                            mask |= 1ULL << p1;
+                        }
+                        if (p2 != 0) {
+                            mask |= 1ULL << p2;
+                        }
+                        if (mask) {
+                            TCGv_i64 pr = tcg_temp_new_i64();
+                            tcg_gen_mov_i64(pr, cpu_pr);
+                            tcg_gen_andi_i64(pr, pr, ~mask);
+
+                            TCGv_i64 ncond = tcg_temp_new_i64();
+                            tcg_gen_xori_i64(ncond, cond, 1);
+                            tcg_gen_andi_i64(cond, cond, 1);
+                            tcg_gen_andi_i64(ncond, ncond, 1);
+
+                            if (p1 != 0) {
+                                TCGv_i64 old1 = tcg_temp_new_i64();
+                                TCGv_i64 new1 = tcg_temp_new_i64();
+                                tcg_gen_shri_i64(old1, cpu_pr, p1);
+                                tcg_gen_andi_i64(old1, old1, 1);
+                                if (ta == 0) {
+                                    tcg_gen_and_i64(new1, old1, cond);
+                                } else {
+                                    tcg_gen_or_i64(new1, old1, cond);
+                                }
+                                tcg_gen_shli_i64(new1, new1, p1);
+                                tcg_gen_or_i64(pr, pr, new1);
+                            }
+                            if (p2 != 0) {
+                                TCGv_i64 old2 = tcg_temp_new_i64();
+                                TCGv_i64 new2 = tcg_temp_new_i64();
+                                tcg_gen_shri_i64(old2, cpu_pr, p2);
+                                tcg_gen_andi_i64(old2, old2, 1);
+                                if (ta == 0 || tb) {
+                                    /* .and or .or.andcm: p2 = p2 & ~cond */
+                                    tcg_gen_and_i64(new2, old2, ncond);
+                                } else {
+                                    /* .or: p2 = p2 | ~cond */
+                                    tcg_gen_or_i64(new2, old2, ncond);
+                                }
+                                tcg_gen_shli_i64(new2, new2, p2);
+                                tcg_gen_or_i64(pr, pr, new2);
+                            }
+                            tcg_gen_mov_i64(cpu_pr, pr);
+                        }
+                        handled = true;
+                    }
                 } else {
-                    tcg_gen_mov_i64(src, cpu_r[r3]);
+                    /* tbit.* p1,p2 = r3, pos6 */
+                    TCGv_i64 src = tcg_temp_new_i64();
+                    if (r3 == 0) {
+                        tcg_gen_movi_i64(src, 0);
+                    } else {
+                        tcg_gen_mov_i64(src, cpu_r[r3]);
+                    }
+
+                    TCGv_i64 bit = tcg_temp_new_i64();
+                    tcg_gen_shri_i64(bit, src, pos);
+                    tcg_gen_andi_i64(bit, bit, 1);
+
+                    /*
+                     * Decode the encodings observed in early Linux boot:
+                     * - For .or forms (ta=1), c selects z vs nz (0 => z, 1 => nz)
+                     * - Otherwise treat as tbit.z for now.
+                     */
+                    bool is_z = (ta == 1) ? (c == 0) : true;
+                    if (is_z) {
+                        tcg_gen_xori_i64(bit, bit, 1);
+                    }
+
+                    gen_set_predicates(p1, p2, bit);
+                    handled = true;
                 }
-
-                TCGv_i64 bit = tcg_temp_new_i64();
-                tcg_gen_shri_i64(bit, src, pos);
-                tcg_gen_andi_i64(bit, bit, 1);
-
-                /*
-                 * Decode the common Linux encodings:
-                 * - tb=0,ta=0: tbit.z / tbit.z.unc (c selects .unc)
-                 * - otherwise : c selects z vs nz (good enough for early boot)
-                 */
-                bool is_z = (tb == 0 && ta == 0) ? true : (c == 0);
-                if (is_z) {
-                    tcg_gen_xori_i64(bit, bit, 1);
-                }
-
-                gen_set_predicates(p1, p2, bit);
-                handled = true;
             } else if (x2a == 1 && ve == 1) {
                 /* shl r1 = r2, count6 (count encoded as 63 - imm6) */
                 uint8_t r1 = extract64(insn, 6, 7);
