@@ -94,11 +94,14 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
                       " is_data=%d IIM=0x%lx IFA=0x%lx"
                       " ar.k3=0x%" PRIx64 " ar.k4=0x%" PRIx64
                       " ar.k6=0x%" PRIx64 " ar.k7=0x%" PRIx64
-                      " r12=0x%" PRIx64 " r13=0x%" PRIx64
+                      " r1=0x%" PRIx64 " r12=0x%" PRIx64 " r13=0x%" PRIx64
+                      " r16=0x%" PRIx64 " r17=0x%" PRIx64
                       " r20=0x%" PRIx64 " r32=0x%" PRIx64 " r45=0x%" PRIx64 "\n",
                       vec, env->ip, env->psr, is_data, iim, env->cr_ifa,
                       env->ar[3], env->ar[4], env->ar[6], env->ar[7],
-                      env->r[12], env->r[13], env->r[20], env->r[32], env->r[45]);
+                      env->r[1], env->r[12], env->r[13],
+                      env->r[16], env->r[17],
+                      env->r[20], env->r[32], env->r[45]);
         log_count++;
         last_ip = env->ip;
         last_vec = vec;
@@ -449,10 +452,12 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     bool is_fetch = (access_type == MMU_INST_FETCH);
 
     /*
-     * Linux uses region 7 addresses (__va()) as a direct map of physical memory
-     * and expects them to be accessible before page tables/VHPT are set up.
+     * Linux uses region 7 addresses (__va()) as a direct map of physical memory.
+     * However, region 7 also contains other (non-identity) kernel addresses
+     * such as the negative percpu range. Only treat region 7 with bit60==0
+     * (i.e. VA in [RGN_BASE(7), RGN_BASE(7)+2^60)) as identity-mapped.
      */
-    if (extract64(address, 61, 3) == 7) {
+    if (extract64(address, 61, 3) == 7 && extract64(address, 60, 1) == 0) {
         hwaddr phys_addr = address & ((1ULL << 61) - 1);
         int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
@@ -492,16 +497,11 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     /*
      * Hardware computes cr.iha for VHPT lookups on (I|D)TLB misses.
-     * Linux's IVT handlers dereference cr.iha unconditionally.
+     * Linux's IVT handlers dereference cr.iha unconditionally, even when
+     * VHPT is disabled (PTA.ve=0), to decide whether to fall back to the
+     * slow page_fault path. Always provide a deterministic hash address.
      */
-    {
-        uint64_t pta = env->cr[8]; /* cr.pta */
-        if (PTA_VE(pta) && RR_VE(rr)) {
-            env->cr_iha = helper_thash(env);
-        } else {
-            env->cr_iha = 0;
-        }
-    }
+    env->cr_iha = helper_thash(env);
 
     hwaddr phys_addr = address;
     bool hit = false;
