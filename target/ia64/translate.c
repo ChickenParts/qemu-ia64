@@ -303,7 +303,16 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->env = cpu_env(cs);
     ctx->ri = ctx->base.tb->flags & 3;
     ctx->extra_bits = 0;
-    ctx->mem_idx = MMU_KERNEL_IDX;
+    /*
+     * Use the current PSR to select the data translation mode.
+     * If DT is clear, data accesses use physical addressing.
+     */
+    if (!(ctx->env->psr & IA64_PSR_DT)) {
+        ctx->mem_idx = MMU_PHYS_IDX;
+    } else {
+        ctx->mem_idx = (IA64_PSR_CPL(ctx->env->psr) == 3) ? MMU_USER_IDX
+                                                          : MMU_KERNEL_IDX;
+    }
 }
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
@@ -871,25 +880,27 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 break;
             }
 
-            if (x3 == 0 && (x4 == 0x6 || x4 == 0x7)) {
-                /* M44: ssm/rsm imm24 (per ski encoding.format + encoding.imm) */
-                TCGLabel *skip_label = gen_qp_skip(insn & 0x3f);
-                uint64_t imm21a = extract64(insn, 6, 21);
-                uint64_t i = extract64(insn, 36, 1);
-                uint64_t i2d = extract64(insn, 31, 2);
-                uint64_t imm24 = (i << 23) | (i2d << 21) | imm21a;
-                if (x4 == 0x6) {
-                    tcg_gen_ori_i64(cpu_psr, cpu_psr, imm24);
-                } else {
-                    TCGv_i64 mask = tcg_temp_new_i64();
-                    tcg_gen_movi_i64(mask, ~imm24);
-                    tcg_gen_and_i64(cpu_psr, cpu_psr, mask);
-                }
-                if (skip_label) {
-                    gen_set_label(skip_label);
-                }
-                break;
-            }
+	            if (x3 == 0 && (x4 == 0x6 || x4 == 0x7)) {
+	                /* M44: ssm/rsm imm24 (per ski encoding.format + encoding.imm) */
+	                TCGLabel *skip_label = gen_qp_skip(insn & 0x3f);
+	                uint64_t imm21a = extract64(insn, 6, 21);
+	                uint64_t i = extract64(insn, 36, 1);
+	                uint64_t i2d = extract64(insn, 31, 2);
+	                uint64_t imm24 = (i << 23) | (i2d << 21) | imm21a;
+	                if (x4 == 0x6) {
+	                    tcg_gen_ori_i64(cpu_psr, cpu_psr, imm24);
+	                } else {
+	                    TCGv_i64 mask = tcg_temp_new_i64();
+	                    tcg_gen_movi_i64(mask, ~imm24);
+	                    tcg_gen_and_i64(cpu_psr, cpu_psr, mask);
+	                }
+	                /* PSR update affects translation mode; end TB here. */
+	                ctx->base.is_jmp = DISAS_TOO_MANY;
+	                if (skip_label) {
+	                    gen_set_label(skip_label);
+	                }
+	                break;
+	            }
             if (m0_x == 1) {
                 /* nop.m / hint.m with imm21 */
                 break;

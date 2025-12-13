@@ -142,7 +142,15 @@ static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
     CPUIA64State *env = cpu_env(cs);
     uint8_t cpl = IA64_PSR_CPL(env->psr);
-    (void)ifetch;
+    if (ifetch) {
+        if (!(env->psr & IA64_PSR_IT)) {
+            return MMU_PHYS_IDX;
+        }
+    } else {
+        if (!(env->psr & IA64_PSR_DT)) {
+            return MMU_PHYS_IDX;
+        }
+    }
     return (cpl == 3) ? MMU_USER_IDX : MMU_KERNEL_IDX;
 }
 
