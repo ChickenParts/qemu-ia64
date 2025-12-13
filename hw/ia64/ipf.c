@@ -708,16 +708,19 @@ static void ipf_init(MachineState *machine)
 
     memory_region_add_subregion(sysmem, 0, machine->ram);
 
+    /*
+     * Map the GFW window at the top of 32-bit physical space.
+     *
+     * This region is used by IA-64 guest firmware (GFW) as well as by the
+     * Linux kernel for some early/legacy absolute addresses in the top 4GB.
+     */
+    memory_region_init_ram(&m->rom, NULL, "ipf.gfw", GFW_SIZE, &error_fatal);
+    memory_region_add_subregion(sysmem, GFW_START, &m->rom);
+
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
     if (image_size > 0) {
         int64_t fw_offset = GFW_START + GFW_SIZE - image_size;
-        /*
-         * Map the full GFW window as RAM so the VMM can populate the HOB list
-         * and NVRAM areas (as Xen/KVM do) before transferring control.
-         */
-        memory_region_init_ram(&m->rom, NULL, "ipf.gfw", GFW_SIZE, &error_fatal);
-        memory_region_add_subregion(sysmem, GFW_START, &m->rom);
         if (load_image_targphys(bios_name, fw_offset, image_size) != image_size) {
             error_report("Unable to load firmware file '%s'", bios_name);
             exit(1);

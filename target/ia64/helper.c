@@ -320,6 +320,32 @@ void HELPER(xma_l)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     env->f[f1][1] = 0;
 }
 
+void HELPER(xma_h)(CPUIA64State *env, uint32_t f1, uint32_t f3,
+                   uint32_t f4, uint32_t f2)
+{
+    f1 &= 0x7f;
+    f2 &= 0x7f;
+    f3 &= 0x7f;
+    f4 &= 0x7f;
+    __int128 prod = (__int128)(int64_t)env->f[f3][0] * (__int128)(int64_t)env->f[f4][0];
+    __int128 sum = prod + (__int128)(int64_t)env->f[f2][0];
+    env->f[f1][0] = (uint64_t)(sum >> 64);
+    env->f[f1][1] = 0;
+}
+
+void HELPER(xma_hu)(CPUIA64State *env, uint32_t f1, uint32_t f3,
+                    uint32_t f4, uint32_t f2)
+{
+    f1 &= 0x7f;
+    f2 &= 0x7f;
+    f3 &= 0x7f;
+    f4 &= 0x7f;
+    __uint128_t prod = (__uint128_t)env->f[f3][0] * (__uint128_t)env->f[f4][0];
+    __uint128_t sum = prod + (__uint128_t)env->f[f2][0];
+    env->f[f1][0] = (uint64_t)(sum >> 64);
+    env->f[f1][1] = 0;
+}
+
 void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
 {
     CPUState *cs = env_cpu(env);
@@ -331,10 +357,16 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     static int log_count;
     if (log_count++ < 64) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "dbg_probe pc=%016" PRIx64 " ri=%u psr=%016" PRIx64
-                      " cfm=%016" PRIx64 " depth=%u r32=%016" PRIx64
-                      " r45=%016" PRIx64 "\n",
-                      pc, ri, env->psr, env->cfm, env->rse_depth,
+                      "dbg_probe pc=%016" PRIx64 " ri=%u"
+                      " psr=%016" PRIx64 " cfm=%016" PRIx64 " depth=%u"
+                      " cr_ifa=%016" PRIx64 " ar.k6=%016" PRIx64
+                      " r1=%016" PRIx64 " r12=%016" PRIx64
+                      " r16=%016" PRIx64 " r17=%016" PRIx64
+                      " r32=%016" PRIx64 " r45=%016" PRIx64 "\n",
+                      pc, ri,
+                      env->psr, env->cfm, env->rse_depth,
+                      env->cr_ifa, env->ar[6],
+                      env->r[1], env->r[12], env->r[16], env->r[17],
                       env->r[32], env->r[45]);
     }
 }
@@ -460,6 +492,24 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     if (extract64(address, 61, 3) == 7 && extract64(address, 60, 1) == 0) {
         hwaddr phys_addr = address & ((1ULL << 61) - 1);
         int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                     phys_addr & TARGET_PAGE_MASK, prot,
+                     mmu_idx, TARGET_PAGE_SIZE);
+        return true;
+    }
+
+    /*
+     * Some IA-64 Linux code (notably WARN/bug infrastructure and early per-cpu
+     * setup) uses absolute addresses in the top 4GB, represented as sign-extended
+     * 32-bit negative values (region 7 with bit60==1).
+     *
+     * Provide a bootstrap alias to the 32-bit physical address space so these
+     * can be accessed before the guest establishes a proper mapping.
+     */
+    if (extract64(address, 61, 3) == 7 && extract64(address, 60, 1) == 1 &&
+        extract64(address, 32, 32) == 0xffffffffU) {
+        hwaddr phys_addr = (uint32_t)address;
+        int prot = PAGE_READ | PAGE_WRITE;
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
                      phys_addr & TARGET_PAGE_MASK, prot,
                      mmu_idx, TARGET_PAGE_SIZE);
