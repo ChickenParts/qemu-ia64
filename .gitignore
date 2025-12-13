@@ -13,6 +13,9 @@ run.*
 console*.log
 console.*
 err.log
+boot*.serial
+boot*.console
+mon*.out
 
 # Local kernel / reference trees (kept out of git)
 stuff/linux-ia64/

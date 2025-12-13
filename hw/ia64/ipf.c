@@ -41,7 +41,11 @@
 #include "hw/boards.h"
 //#include "ia64intrin.h"
 #include "hw/virtio/virtio-blk.h"
+#include "hw/char/serial-mm.h"
+#include "hw/irq.h"
 #include "qemu/error-report.h"
+#include "qemu/bswap.h"
+#include "system/system.h"
 #include "system/address-spaces.h"
 #include "elf.h"
 #include "hw/ia64/gfw.h"
@@ -85,10 +89,11 @@ struct IPFMachineState {
     I2CBus *smbus;
 
     MemoryRegion rom;
-    MemoryRegion rom2;
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
     MemoryRegion bmapm2;
+
+    struct IpfTextWatch *text_watch[2];
 };
 
 #define TYPE_IPF_PC "ipf-pc"
@@ -105,11 +110,254 @@ static uint64_t ipf_boot_r28;
 static uint64_t ipf_kernel_low;
 static uint64_t ipf_kernel_high;
 static uint64_t ipf_kernel_bias;
+static uint64_t ipf_sym_io_space;
+static uint64_t ipf_sym_ia64_bad_break;
+static uint64_t ipf_sym_search_extable;
+static uint64_t ipf_sym_stext;
+static uint64_t ipf_sym_etext;
+
+static void ipf_kernel_sym_cb(const char *st_name, int st_info,
+                              uint64_t st_value, uint64_t st_size)
+{
+    (void)st_info;
+    (void)st_size;
+
+    if (!ipf_sym_io_space && st_name && strcmp(st_name, "io_space") == 0) {
+        ipf_sym_io_space = st_value;
+    }
+    if (!ipf_sym_ia64_bad_break && st_name &&
+        strcmp(st_name, "ia64_bad_break") == 0) {
+        ipf_sym_ia64_bad_break = st_value;
+    }
+    if (!ipf_sym_search_extable && st_name &&
+        strcmp(st_name, "search_extable") == 0) {
+        ipf_sym_search_extable = st_value;
+    }
+    if (!ipf_sym_stext && st_name && strcmp(st_name, "_stext") == 0) {
+        ipf_sym_stext = st_value;
+    }
+    if (!ipf_sym_etext && st_name && strcmp(st_name, "_etext") == 0) {
+        ipf_sym_etext = st_value;
+    }
+}
+
+static void ipf_patch_io_space(uint64_t io_space_va, uint64_t kernel_bias,
+                               uint64_t ram_size)
+{
+    /*
+     * Linux/ia64 early serial console uses io_space[] to translate the
+     * simulator-style 32-bit I/O encoding (segment:offset) into a region-6
+     * uncached physical mapping. On real platforms this is initialized by
+     * firmware/platform code; for bringup, seed segment 0xff to the GFW window
+     * so 0xff5e0000 becomes 0xc0000000ff5e0000 and hits our serial-mm UART.
+     */
+    if ((io_space_va >> 61) != 5) {
+        DPRINTF("io_space: unexpected VA 0x%016" PRIx64 ", skipping\n",
+                io_space_va);
+        return;
+    }
+
+    uint64_t io_space_pa = io_space_va - kernel_bias;
+    if (io_space_pa + 0x1000 > ram_size) {
+        DPRINTF("io_space: PA 0x%016" PRIx64 " out of RAM, skipping\n",
+                io_space_pa);
+        return;
+    }
+
+    struct QEMU_PACKED {
+        uint64_t base;
+        uint32_t flags;
+        uint32_t pad;
+    } entry = {
+        .base = (6ULL << 61) | 0x00000000ff000000ULL,
+        .flags = 0,
+        .pad = 0,
+    };
+
+    hwaddr slot = io_space_pa + 0xff * sizeof(entry);
+    address_space_write(&address_space_memory, slot, MEMTXATTRS_UNSPECIFIED,
+                        (const uint8_t *)&entry, sizeof(entry));
+    DPRINTF("io_space: seeded seg 0xff at PA 0x%016" HWADDR_PRIx "\n", slot);
+}
+
+static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
+{
+    CPUIA64State *env = &cpu->env;
+    int fd = open(kernel_filename, O_RDONLY | O_BINARY);
+    if (fd < 0) {
+        return;
+    }
+
+    Elf64_Ehdr ehdr;
+    if (read(fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
+        close(fd);
+        return;
+    }
+    if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
+        ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
+        ehdr.e_phoff == 0 || ehdr.e_phnum == 0 ||
+        ehdr.e_phentsize < sizeof(Elf64_Phdr)) {
+        close(fd);
+        return;
+    }
+
+    bool found = false;
+    uint64_t best_vaddr = 0;
+    uint64_t best_paddr = 0;
+    uint64_t best_memsz = 0;
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+        Elf64_Phdr phdr;
+        off_t off = ehdr.e_phoff + (off_t)i * ehdr.e_phentsize;
+        if (pread(fd, &phdr, sizeof(phdr), off) != sizeof(phdr)) {
+            break;
+        }
+        if (phdr.p_type != PT_LOAD) {
+            continue;
+        }
+        if (!(phdr.p_flags & PF_W)) {
+            continue;
+        }
+        if ((phdr.p_vaddr >> 61) != 7 || ((phdr.p_vaddr >> 60) & 1) == 0) {
+            continue;
+        }
+        if (phdr.p_memsz == 0) {
+            continue;
+        }
+        if (!found || phdr.p_vaddr > best_vaddr) {
+            best_vaddr = phdr.p_vaddr;
+            best_paddr = phdr.p_paddr;
+            best_memsz = phdr.p_memsz;
+            found = true;
+        }
+    }
+    close(fd);
+
+    if (!found) {
+        return;
+    }
+
+    env->percpu_va_base = best_vaddr;
+    env->percpu_pa_base = best_paddr;
+    env->percpu_size = QEMU_ALIGN_UP(best_memsz, (1ULL << TARGET_PAGE_BITS));
+    DPRINTF("percpu: VA=0x%016" PRIx64 " PA=0x%016" PRIx64 " size=0x%" PRIx64 "\n",
+            env->percpu_va_base, env->percpu_pa_base, env->percpu_size);
+}
 
 #define FW_FILENAME "Flash.fd"
 
 /* Leave a chunk of memory at the top of RAM for the BIOS ACPI tables.  */
 #define ACPI_DATA_SIZE       0x10000
+
+/* IA-64 simulator-style UART base (see Linux drivers/tty/serial/8250/8250_early.c). */
+#define IPF_UART_BASE 0x00000000ff5e0000ULL
+
+typedef struct IpfTextWatch {
+    MemoryRegion mr;
+    uint8_t *ram_ptr;
+    hwaddr pa_base;
+    IA64CPU *cpu;
+    uint32_t write_count;
+} IpfTextWatch;
+
+static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IpfTextWatch *w = opaque;
+    uint8_t *p = w->ram_ptr + w->pa_base + addr;
+
+    switch (size) {
+    case 1:
+        return ldub_p(p);
+    case 2:
+        return lduw_le_p(p);
+    case 4:
+        return ldl_le_p(p);
+    case 8:
+        return ldq_le_p(p);
+    default:
+        return 0;
+    }
+}
+
+static void ipf_text_watch_write(void *opaque, hwaddr addr, uint64_t data,
+                                 unsigned size)
+{
+    IpfTextWatch *w = opaque;
+    CPUIA64State *env = w->cpu ? &w->cpu->env : NULL;
+    hwaddr pa = w->pa_base + addr;
+    uint8_t *p = w->ram_ptr + w->pa_base + addr;
+
+    if (w->write_count < 64) {
+        fprintf(stderr,
+                "IPF_TEXT_WATCH: write size=%u pa=%016" HWADDR_PRIx " data=%016" PRIx64
+                " ip=%016" PRIx64 " psr=%016" PRIx64
+                " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
+                " r12=%016" PRIx64 " r13=%016" PRIx64
+                " r24=%016" PRIx64 " r27=%016" PRIx64 " r28=%016" PRIx64 " r31=%016" PRIx64
+                " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                size, pa, data,
+                env ? env->ip : 0, env ? env->psr : 0,
+                env ? env->r[1] : 0, env ? env->r[2] : 0, env ? env->r[3] : 0,
+                env ? env->r[12] : 0, env ? env->r[13] : 0,
+                env ? env->r[24] : 0, env ? env->r[27] : 0, env ? env->r[28] : 0,
+                env ? env->r[31] : 0,
+                env ? env->r[32] : 0, env ? env->r[33] : 0, env ? env->r[34] : 0,
+                env ? env->b[0] : 0, env ? env->b[6] : 0);
+        fflush(stderr);
+    }
+    w->write_count++;
+
+    /* Forward the write into underlying RAM. */
+    switch (size) {
+    case 1:
+        stb_p(p, data);
+        break;
+    case 2:
+        stw_le_p(p, data);
+        break;
+    case 4:
+        stl_le_p(p, data);
+        break;
+    case 8:
+        stq_le_p(p, data);
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ipf_text_watch_ops = {
+    .read = ipf_text_watch_read,
+    .write = ipf_text_watch_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+    },
+};
+
+static void ipf_add_text_watch(IPFMachineState *m, MemoryRegion *sysmem,
+                               IA64CPU *cpu, MemoryRegion *ram, hwaddr pa,
+                               const char *label)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(m->text_watch); i++) {
+        if (!m->text_watch[i]) {
+            IpfTextWatch *w = g_new0(IpfTextWatch, 1);
+            w->ram_ptr = memory_region_get_ram_ptr(ram);
+            w->pa_base = pa;
+            w->cpu = cpu;
+            memory_region_init_io(&w->mr, OBJECT(m), &ipf_text_watch_ops, w,
+                                  label, 0x20);
+            memory_region_add_subregion_overlap(sysmem, pa, &w->mr, 1000);
+            m->text_watch[i] = w;
+            fprintf(stderr,
+                    "IPF_TEXT_WATCH: watching %s PA=%016" HWADDR_PRIx "\n",
+                    label, pa);
+            return;
+        }
+    }
+    fprintf(stderr, "IPF_TEXT_WATCH: no free watch slots for %s\n", label);
+}
 
 #define MAX_IDE_BUS 2
 #define MAX_IDE_DEVS 2
@@ -153,6 +401,9 @@ struct ia64_boot_param {
 #define IPF_EFI_SYSTAB_ADDR  0x0000000000011000ULL
 #define IPF_EFI_RUNTIME_ADDR 0x0000000000012000ULL
 #define IPF_EFI_STUBS_ADDR   0x0000000000013000ULL
+#define IPF_EFI_CONFTAB_ADDR 0x0000000000014000ULL
+#define IPF_EFI_PCDP_ADDR    0x0000000000015000ULL
+#define IPF_EFI_VENDOR_ADDR  0x0000000000016000ULL
 
 /* EFI table signatures (see Linux include/linux/efi.h). */
 #define EFI_SYSTEM_TABLE_SIGNATURE      0x5453595320494249ULL /* "IBI SYST" */
@@ -203,6 +454,97 @@ typedef struct QEMU_PACKED {
     uint64_t tables;
 } IPFEfiSystemTable;
 
+typedef struct QEMU_PACKED {
+    uint32_t data1;
+    uint16_t data2;
+    uint16_t data3;
+    uint8_t data4[8];
+} IPFEfiGuid;
+
+typedef struct QEMU_PACKED {
+    IPFEfiGuid guid;
+    uint64_t table;
+} IPFEfiConfigTable;
+
+/*
+ * Minimal HCDP/PCDP table describing a single MMIO 8250 UART.
+ *
+ * Linux uses the EFI config table entry HCDP_TABLE_GUID to locate this table
+ * and will call setup_earlycon() based on its contents.
+ */
+typedef struct QEMU_PACKED {
+    uint8_t space_id;
+    uint8_t bit_width;
+    uint8_t bit_offset;
+    uint8_t access_width;
+    uint64_t address;
+} IPFAcpiGenericAddress;
+
+typedef struct QEMU_PACKED {
+    uint8_t type;
+    uint8_t bits;
+    uint8_t parity;
+    uint8_t stop_bits;
+    uint8_t pci_seg;
+    uint8_t pci_bus;
+    uint8_t pci_dev;
+    uint8_t pci_func;
+    uint64_t baud;
+    IPFAcpiGenericAddress addr;
+    uint16_t pci_dev_id;
+    uint16_t pci_vendor_id;
+    uint32_t gsi;
+    uint32_t clock_rate;
+    uint8_t pci_prog_intfc;
+    uint8_t flags;
+    uint16_t conout_index;
+    uint32_t reserved;
+} IPFPcdpUart;
+
+typedef struct QEMU_PACKED {
+    uint8_t signature[4];
+    uint32_t length;
+    uint8_t rev;
+    uint8_t chksum;
+    uint8_t oemid[6];
+    uint8_t oem_tabid[8];
+    uint32_t oem_rev;
+    uint8_t creator_id[4];
+    uint32_t creator_rev;
+    uint32_t num_uarts;
+} IPFPcdpHdr;
+
+typedef struct QEMU_PACKED {
+    IPFPcdpHdr hdr;
+    IPFPcdpUart uart0;
+} IPFPcdpTable;
+
+/* GUIDs (match Linux include/linux/efi.h). */
+static const IPFEfiGuid ipf_guid_sal_systab = {
+    .data1 = 0xeb9d2d32,
+    .data2 = 0x2d88,
+    .data3 = 0x11d3,
+    .data4 = { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d },
+};
+
+static const IPFEfiGuid ipf_guid_hcdp = {
+    .data1 = 0xf951938d,
+    .data2 = 0x620b,
+    .data3 = 0x42ef,
+    .data4 = { 0x82, 0x79, 0xa8, 0x4b, 0x79, 0x61, 0x78, 0x98 },
+};
+
+static uint8_t ipf_byte_checksum(const void *buf, size_t len)
+{
+    const uint8_t *p = buf;
+    uint8_t sum = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        sum += p[i];
+    }
+    return (uint8_t)(0 - sum);
+}
+
 /*
  * Minimal EFI memory descriptor (per UEFI spec) as expected by Linux/ia64.
  * Size must match ia64_boot_param->efi_memdesc_size.
@@ -218,6 +560,8 @@ struct efi_memory_desc {
 
 /* EFI memory types (subset). */
 #define EFI_RESERVED_TYPE            0
+#define EFI_LOADER_CODE              1
+#define EFI_LOADER_DATA              2
 #define EFI_CONVENTIONAL_MEMORY      7
 
 /*
@@ -653,24 +997,78 @@ static void main_cpu_reset(void *opaque)
     if (ipf_boot_r28) {
         s->r[28] = ipf_boot_r28;
     }
+    if (ipf_boot_ip) {
+        /*
+         * Provide a deterministic initial stack pointer in physical mode.
+         * Linux/ia64 expects firmware/bootloader to provide a valid r12.
+         *
+         * Place it below the loaded kernel image to avoid clobbering it.
+         */
+        uint64_t stack_top = ipf_kernel_low;
+        if (stack_top > (1ULL << 20)) {
+            stack_top -= (1ULL << 20); /* 1MiB below kernel base */
+        } else {
+            stack_top = (1ULL << 20);
+        }
+        stack_top &= ~0xFULL;
+        s->r[12] = stack_top;
+    }
 
     /*
-     * Provide a small VHPT area in region 7 so Linux's early DTLB handler
-     * doesn't try to probe address 0 when rr[0..5] enable VHPT.
+     * Seed cr.pta so Linux/ia64's early IVT itlb/dtlb miss handlers can locate
+     * PTEs via cr.iha before ia64_mmu_init() programs the final VMLPT layout.
      *
-     * This is a pragmatic "firmware default": VF=1, VRN=7, SIZE=0 (32KB),
-     * BASE=1MB, VE=1.
+     * Model a CPU with a 61-bit implemented VA space and Linux/ia64 64K pages:
+     *   vmlpt_bits = impl_va_bits - PAGE_SHIFT + pte_bits = 61 - 16 + 3 = 48
+     *   pta_base   = 2^61 - 2^vmlpt_bits
+     * Use short-format VHPT entries (VF=0) and enable the VHPT walker (VE=1).
      */
     if (ipf_boot_ip) {
-        uint64_t vhpt_base = 0x0000000000100000ULL;
+        const uint64_t impl_va_bits = 61;
+        const uint64_t page_shift = 16;
+        const uint64_t pte_bits = 3;
+        const uint64_t vmlpt_bits = impl_va_bits - page_shift + pte_bits; /* 48 */
+        uint64_t pta_base = (1ULL << 61) - (1ULL << vmlpt_bits);
+
         uint64_t pta = 0;
-        pta |= (7ULL << 61);                /* VRN=7 */
-        pta |= ((vhpt_base >> 15) & ((1ULL << 46) - 1)) << 15; /* BASE */
-        pta |= (1ULL << 8);                 /* VF=1 */
-        pta |= (0ULL << 2);                 /* SIZE=0 */
-        pta |= 1ULL;                        /* VE=1 */
-        s->cr[8] = pta;                     /* cr.pta */
+        pta |= pta_base;
+        pta |= (vmlpt_bits << 2); /* SIZE */
+        /*
+         * Keep PTA.VE=0 so early Linux uses the software TLB miss handlers
+         * (itc.d/itc.i) instead of taking the VHPT translation vector (0)
+         * when the VMLPT itself isn't mapped yet.
+         */
+        s->cr[8] = pta;           /* cr.pta */
     }
+}
+
+static void ipf_uart_dummy_irq(void *opaque, int n, int level)
+{
+    /* Polled UART use (earlycon) does not require an interrupt controller. */
+}
+
+static void ipf_init_uart(MemoryRegion *sysmem)
+{
+    Chardev *chr = serial_hd(0);
+    if (!chr) {
+        DPRINTF("UART: no serial backend (-serial), skipping\n");
+        return;
+    }
+
+    qemu_irq irq = qemu_allocate_irq(ipf_uart_dummy_irq, NULL, 0);
+
+    SerialMM *uart = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
+    qdev_prop_set_uint8(DEVICE(uart), "regshift", 0);
+    qdev_prop_set_uint32(DEVICE(uart), "baudbase", 115200);
+    qdev_prop_set_chr(DEVICE(uart), "chardev", chr);
+    qdev_prop_set_uint8(DEVICE(uart), "endianness", DEVICE_LITTLE_ENDIAN);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(uart), &error_fatal);
+    sysbus_connect_irq(SYS_BUS_DEVICE(uart), 0, irq);
+
+    /* Overlay the UART on top of the GFW RAM window. */
+    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
+    memory_region_add_subregion_overlap(sysmem, IPF_UART_BASE, mr, 1);
+    DPRINTF("UART: mapped serial-mm at 0x%016" PRIx64 "\n", (uint64_t)IPF_UART_BASE);
 }
 
 /* Itanium hardware initialisation */
@@ -716,6 +1114,7 @@ static void ipf_init(MachineState *machine)
      */
     memory_region_init_ram(&m->rom, NULL, "ipf.gfw", GFW_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, GFW_START, &m->rom);
+    ipf_init_uart(sysmem);
 
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
@@ -750,10 +1149,15 @@ static void ipf_init(MachineState *machine)
      * Load the ELF kernel. The IA-64 ELF uses physical p_paddr; entry
      * point phys_start is a low PA (see System.map).
      */
+    ipf_sym_io_space = 0;
+    ipf_sym_ia64_bad_break = 0;
+    ipf_sym_search_extable = 0;
+    ipf_sym_stext = 0;
+    ipf_sym_etext = 0;
     if (load_elf_ram_sym(kernel_filename, NULL, NULL, NULL,
                          &kernel_entry, &kernel_low, &kernel_high, NULL,
                          ELFDATA2LSB, EM_IA_64, 0, 0,
-                         NULL, false, NULL) < 0) {
+                         NULL, false, ipf_kernel_sym_cb) < 0) {
         error_report("Unable to load kernel '%s'", kernel_filename);
         exit(1);
     }
@@ -762,6 +1166,73 @@ static void ipf_init(MachineState *machine)
     ipf_kernel_low = kernel_low;
     ipf_kernel_high = kernel_high;
     ipf_kernel_bias = 0xa000000100000000ULL - kernel_low;
+    env->kernel_stext = ipf_sym_stext;
+    env->kernel_etext = ipf_sym_etext;
+    ipf_probe_percpu_segment(kernel_filename, cpu);
+    {
+        /*
+         * Bringup sanity: console_srcu.percpu_ref (used in __srcu_read_unlock)
+         * should come from the kernel .data image and must not be zero.
+         */
+        const uint64_t console_srcu_va = 0xa000000101f57678ULL;
+        const uint64_t field_va = console_srcu_va + 8;
+        const hwaddr field_pa = field_va - ipf_kernel_bias;
+        uint64_t val = 0;
+        address_space_read(&address_space_memory, field_pa,
+                           MEMTXATTRS_UNSPECIFIED, &val, sizeof(val));
+        DPRINTF("console_srcu+8: PA=0x%016" HWADDR_PRIx " val=%016" PRIx64 "\n",
+                field_pa, (uint64_t)le64_to_cpu(val));
+    }
+    if (ipf_sym_io_space) {
+        ipf_patch_io_space(ipf_sym_io_space, ipf_kernel_bias,
+                           machine->ram_size);
+    }
+    const char *watch = getenv("QEMU_IA64_WATCH_TEXT");
+    if (watch && *watch) {
+        if ((strcmp(watch, "1") == 0) ||
+            (strcmp(watch, "ia64_bad_break") == 0) ||
+            (strcmp(watch, "all") == 0)) {
+            if (ipf_sym_ia64_bad_break) {
+                ipf_add_text_watch(m, sysmem, cpu, machine->ram,
+                                   ipf_sym_ia64_bad_break - ipf_kernel_bias,
+                                   "ia64_bad_break");
+            } else {
+                fprintf(stderr,
+                        "IPF_TEXT_WATCH: symbol ia64_bad_break not found\n");
+            }
+        }
+        if ((strcmp(watch, "search_extable") == 0) ||
+            (strcmp(watch, "all") == 0)) {
+            if (ipf_sym_search_extable) {
+                ipf_add_text_watch(m, sysmem, cpu, machine->ram,
+                                   ipf_sym_search_extable - ipf_kernel_bias,
+                                   "search_extable");
+            } else {
+                fprintf(stderr,
+                        "IPF_TEXT_WATCH: symbol search_extable not found\n");
+            }
+        }
+    }
+
+    /* Optional RAM watchpoints for bringup debugging. */
+    const char *watch_data = getenv("QEMU_IA64_WATCH_DATA");
+    if (watch_data && *watch_data) {
+        hwaddr pa = 0;
+        if (strcmp(watch_data, "console_srcu") == 0 ||
+            strcmp(watch_data, "console_srcu+8") == 0) {
+            const uint64_t console_srcu_va = 0xa000000101f57678ULL;
+            pa = (console_srcu_va + 8) - ipf_kernel_bias;
+            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa,
+                               "console_srcu+8");
+        } else {
+            char *endp = NULL;
+            pa = (hwaddr)strtoull(watch_data, &endp, 0);
+            if (endp && endp != watch_data) {
+                ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa,
+                                   "data_watch");
+            }
+        }
+    }
 
     /* Initrd placement (optional). */
     if (initrd_filename) {
@@ -813,25 +1284,128 @@ static void ipf_init(MachineState *machine)
         uint64_t reserve_end = 0x0000000000020000ULL; /* 128KB */
         reserve_end = MIN(reserve_end, machine->ram_size);
         reserve_end = QEMU_ALIGN_UP(reserve_end, 4096);
+        const uint64_t page_size = 4096;
+        const uint64_t wb = (1ULL << 3); /* EFI_MEMORY_WB */
 
-        struct efi_memory_desc md[2] = { 0 };
-        md[0].type = EFI_RESERVED_TYPE;
-        md[0].phys_addr = 0;
-        md[0].virt_addr = 0;
-        md[0].num_pages = reserve_end / 4096;
-        md[0].attribute = 0;
+        /* Reserve the loaded kernel image so bootmem/memblock don't clobber it. */
+        uint64_t kern_start = QEMU_ALIGN_DOWN(kernel_low, page_size);
+        uint64_t kern_end = QEMU_ALIGN_UP(kernel_high, page_size);
+        kern_end = MIN(kern_end, machine->ram_size);
 
-        md[1].type = EFI_CONVENTIONAL_MEMORY;
-        md[1].phys_addr = reserve_end;
-        md[1].virt_addr = 0;
-        md[1].num_pages = (machine->ram_size - reserve_end) / 4096;
-        md[1].attribute = 0;
+        /* Reserve initrd as well (if present). */
+        uint64_t initrd_start = 0;
+        uint64_t initrd_end = 0;
+        if (initrd_size > 0) {
+            initrd_start = QEMU_ALIGN_DOWN(initrd_base, page_size);
+            initrd_end = QEMU_ALIGN_UP(initrd_base + initrd_size, page_size);
+            initrd_end = MIN(initrd_end, machine->ram_size);
+        }
+
+        struct Range {
+            uint64_t start;
+            uint64_t end;
+            uint32_t type;
+        } ranges[5];
+        size_t nr = 0;
+
+        ranges[nr++] = (struct Range){
+            .start = 0,
+            .end = reserve_end,
+            .type = EFI_RESERVED_TYPE,
+        };
+        if (kern_end > kern_start) {
+            ranges[nr++] = (struct Range){
+                .start = kern_start,
+                .end = kern_end,
+                .type = EFI_RESERVED_TYPE,
+            };
+        }
+        if (initrd_end > initrd_start) {
+            ranges[nr++] = (struct Range){
+                .start = initrd_start,
+                .end = initrd_end,
+                .type = EFI_RESERVED_TYPE,
+            };
+        }
+
+        /* Sort small range list by start. */
+        for (size_t i = 0; i + 1 < nr; i++) {
+            for (size_t j = i + 1; j < nr; j++) {
+                if (ranges[j].start < ranges[i].start) {
+                    struct Range tmp = ranges[i];
+                    ranges[i] = ranges[j];
+                    ranges[j] = tmp;
+                }
+            }
+        }
+
+        /* Merge overlapping reserved/loader ranges. */
+        struct Range merged[5];
+        size_t nm = 0;
+        for (size_t i = 0; i < nr; i++) {
+            struct Range r = ranges[i];
+            if (r.end <= r.start) {
+                continue;
+            }
+            if (r.start >= machine->ram_size) {
+                continue;
+            }
+            r.end = MIN(r.end, machine->ram_size);
+            if (nm == 0) {
+                merged[nm++] = r;
+                continue;
+            }
+            struct Range *last = &merged[nm - 1];
+            if (r.start <= last->end) {
+                last->end = MAX(last->end, r.end);
+                last->type = EFI_RESERVED_TYPE;
+            } else {
+                merged[nm++] = r;
+            }
+        }
+
+        /* Emit EFI descriptors alternating conventional and reserved segments. */
+        struct efi_memory_desc md[8] = { 0 };
+        size_t nd = 0;
+        uint64_t cur = 0;
+        for (size_t i = 0; i < nm; i++) {
+            uint64_t start = merged[i].start;
+            uint64_t end = merged[i].end;
+            if (cur < start) {
+                md[nd++] = (struct efi_memory_desc){
+                    .type = EFI_CONVENTIONAL_MEMORY,
+                    .phys_addr = cur,
+                    .virt_addr = 0,
+                    .num_pages = (start - cur) / page_size,
+                    .attribute = wb,
+                };
+            }
+            if (end > start) {
+                md[nd++] = (struct efi_memory_desc){
+                    .type = merged[i].type,
+                    .phys_addr = start,
+                    .virt_addr = 0,
+                    .num_pages = (end - start) / page_size,
+                    .attribute = wb,
+                };
+            }
+            cur = end;
+        }
+        if (cur < machine->ram_size) {
+            md[nd++] = (struct efi_memory_desc){
+                .type = EFI_CONVENTIONAL_MEMORY,
+                .phys_addr = cur,
+                .virt_addr = 0,
+                .num_pages = (machine->ram_size - cur) / page_size,
+                .attribute = wb,
+            };
+        }
 
         address_space_write(&address_space_memory, IPF_EFI_MEMMAP_ADDR,
                             MEMTXATTRS_UNSPECIFIED,
-                            (const uint8_t *)md, sizeof(md));
+                            (const uint8_t *)md, sizeof(md[0]) * nd);
         bp.efi_memmap = IPF_EFI_MEMMAP_ADDR;
-        bp.efi_memmap_size = sizeof(md);
+        bp.efi_memmap_size = sizeof(md[0]) * nd;
         bp.efi_memdesc_size = sizeof(md[0]);
         bp.efi_memdesc_version = 1;
     }
@@ -843,46 +1417,118 @@ static void ipf_init(MachineState *machine)
      * runtime->set_virtual_address_map() during early boot.
      */
     {
-        uint64_t stub_ok = IPF_EFI_STUBS_ADDR;
-        uint64_t stub_unsupported = IPF_EFI_STUBS_ADDR +
-                                    sizeof(ipf_efi_stub_set_virtual_address_map);
+        /*
+         * IA-64 uses function descriptors: a function pointer is a pointer to
+         * a 16-byte descriptor { entry, gp }. Linux's efi_call_phys() will
+         * load both qwords and branch to entry with r1=gp.
+         *
+         * Therefore, runtime service fields must point at descriptors, not
+         * directly at the code.
+         */
+        struct QEMU_PACKED IPFEfiFuncDesc {
+            uint64_t entry;
+            uint64_t gp;
+        };
 
-        address_space_write(&address_space_memory, stub_ok, MEMTXATTRS_UNSPECIFIED,
+        /* Linux __va() uses region 7 as the direct physical map. */
+        const uint64_t rgn7_base = 7ULL << 61;
+
+        uint64_t stub_ok_code = IPF_EFI_STUBS_ADDR;
+        uint64_t stub_unsupported_code = stub_ok_code +
+                                         sizeof(ipf_efi_stub_set_virtual_address_map);
+        uint64_t fdesc_base = stub_unsupported_code +
+                              sizeof(ipf_efi_stub_unsupported);
+        fdesc_base = QEMU_ALIGN_UP(fdesc_base, 16);
+        uint64_t stub_ok_desc = fdesc_base;
+        uint64_t stub_unsupported_desc = fdesc_base + sizeof(struct IPFEfiFuncDesc);
+        uint64_t stub_ok_code_va = rgn7_base | stub_ok_code;
+        uint64_t stub_unsupported_code_va = rgn7_base | stub_unsupported_code;
+        uint64_t stub_ok_desc_va = rgn7_base | stub_ok_desc;
+        uint64_t stub_unsupported_desc_va = rgn7_base | stub_unsupported_desc;
+
+        address_space_write(&address_space_memory, stub_ok_code, MEMTXATTRS_UNSPECIFIED,
                             ipf_efi_stub_set_virtual_address_map,
                             sizeof(ipf_efi_stub_set_virtual_address_map));
-        address_space_write(&address_space_memory, stub_unsupported, MEMTXATTRS_UNSPECIFIED,
+        address_space_write(&address_space_memory, stub_unsupported_code, MEMTXATTRS_UNSPECIFIED,
                             ipf_efi_stub_unsupported,
                             sizeof(ipf_efi_stub_unsupported));
+
+        struct IPFEfiFuncDesc ok_desc = { .entry = stub_ok_code_va, .gp = 0 };
+        struct IPFEfiFuncDesc unsup_desc = { .entry = stub_unsupported_code_va, .gp = 0 };
+        address_space_write(&address_space_memory, stub_ok_desc, MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)&ok_desc, sizeof(ok_desc));
+        address_space_write(&address_space_memory, stub_unsupported_desc, MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)&unsup_desc, sizeof(unsup_desc));
 
         IPFEfiRuntimeServices rt = { 0 };
         rt.hdr.signature = EFI_RUNTIME_SERVICES_SIGNATURE;
         rt.hdr.revision = EFI_RUNTIME_SERVICES_REVISION;
         rt.hdr.headersize = sizeof(rt);
-        rt.set_virtual_address_map = stub_ok;
-        rt.get_time = stub_unsupported;
-        rt.set_time = stub_unsupported;
-        rt.get_wakeup_time = stub_unsupported;
-        rt.set_wakeup_time = stub_unsupported;
-        rt.get_variable = stub_unsupported;
-        rt.get_next_variable = stub_unsupported;
-        rt.set_variable = stub_unsupported;
-        rt.get_next_high_mono_count = stub_unsupported;
-        rt.reset_system = stub_unsupported;
-        rt.update_capsule = stub_unsupported;
-        rt.query_capsule_caps = stub_unsupported;
-        rt.query_variable_info = stub_unsupported;
+        rt.set_virtual_address_map = stub_ok_desc_va;
+        rt.get_time = stub_unsupported_desc_va;
+        rt.set_time = stub_unsupported_desc_va;
+        rt.get_wakeup_time = stub_unsupported_desc_va;
+        rt.set_wakeup_time = stub_unsupported_desc_va;
+        rt.get_variable = stub_unsupported_desc_va;
+        rt.get_next_variable = stub_unsupported_desc_va;
+        rt.set_variable = stub_unsupported_desc_va;
+        rt.get_next_high_mono_count = stub_unsupported_desc_va;
+        rt.reset_system = stub_unsupported_desc_va;
+        rt.update_capsule = stub_unsupported_desc_va;
+        rt.query_capsule_caps = stub_unsupported_desc_va;
+        rt.query_variable_info = stub_unsupported_desc_va;
 
         address_space_write(&address_space_memory, IPF_EFI_RUNTIME_ADDR,
                             MEMTXATTRS_UNSPECIFIED,
                             (const uint8_t *)&rt, sizeof(rt));
 
+        /* Vendor string (UCS-2/UTF-16) for efi_systab_report_header(). */
+        static const uint16_t vendor[] = { 'Q', 'E', 'M', 'U', 0 };
+        address_space_write(&address_space_memory, IPF_EFI_VENDOR_ADDR,
+                            MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)vendor, sizeof(vendor));
+
+        /* HCDP/PCDP table with one primary MMIO UART at 0xff5e0000. */
+        IPFPcdpTable pcdp = { 0 };
+        memcpy(pcdp.hdr.signature, "PCDP", 4);
+        pcdp.hdr.rev = 3; /* PCDP v2.0 */
+        pcdp.hdr.num_uarts = 1;
+        pcdp.uart0.type = 0; /* PCDP_CONSOLE_UART */
+        pcdp.uart0.bits = 8;
+        pcdp.uart0.parity = 0;
+        pcdp.uart0.stop_bits = 1;
+        pcdp.uart0.baud = 115200;
+        pcdp.uart0.addr.space_id = 0; /* ACPI_ADR_SPACE_SYSTEM_MEMORY */
+        pcdp.uart0.addr.bit_width = 8;
+        pcdp.uart0.addr.bit_offset = 0;
+        pcdp.uart0.addr.access_width = 1;
+        pcdp.uart0.addr.address = IPF_UART_BASE;
+        pcdp.uart0.flags = (1U << 2); /* PCDP_UART_PRIMARY_CONSOLE */
+        pcdp.hdr.length = sizeof(pcdp);
+        pcdp.hdr.chksum = ipf_byte_checksum(&pcdp, sizeof(pcdp));
+        address_space_write(&address_space_memory, IPF_EFI_PCDP_ADDR,
+                            MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)&pcdp, sizeof(pcdp));
+
+        /* EFI configuration tables (SAL + HCDP). */
+        IPFEfiConfigTable conf[2] = { 0 };
+        conf[0].guid = ipf_guid_hcdp;
+        conf[0].table = IPF_EFI_PCDP_ADDR;
+        conf[1].guid = ipf_guid_sal_systab;
+        conf[1].table = 0; /* avoid Linux using EFI_INVALID_TABLE_ADDR */
+        address_space_write(&address_space_memory, IPF_EFI_CONFTAB_ADDR,
+                            MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)conf, sizeof(conf));
+
         IPFEfiSystemTable st = { 0 };
         st.hdr.signature = EFI_SYSTEM_TABLE_SIGNATURE;
         st.hdr.revision = 0x00010000;
         st.hdr.headersize = sizeof(st);
+        st.fw_vendor = IPF_EFI_VENDOR_ADDR;
+        st.fw_revision = 1;
         st.runtime = IPF_EFI_RUNTIME_ADDR;
-        st.nr_tables = 0;
-        st.tables = 0;
+        st.nr_tables = ARRAY_SIZE(conf);
+        st.tables = IPF_EFI_CONFTAB_ADDR;
 
         address_space_write(&address_space_memory, IPF_EFI_SYSTAB_ADDR,
                             MEMTXATTRS_UNSPECIFIED,
