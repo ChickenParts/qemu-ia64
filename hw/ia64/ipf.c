@@ -154,7 +154,7 @@ struct ia64_boot_param {
 
 /* EFI table signatures (see Linux include/linux/efi.h). */
 #define EFI_SYSTEM_TABLE_SIGNATURE      0x5453595320494249ULL /* "IBI SYST" */
-#define EFI_RUNTIME_SERVICES_SIGNATURE  0x0565245354e5552ULL   /* "RUNTSERV" */
+#define EFI_RUNTIME_SERVICES_SIGNATURE  0x5652453544e5552ULL   /* "RUNTSERV" */
 #define EFI_RUNTIME_SERVICES_REVISION   0x00010000U
 
 /* Minimal EFI table header and runtime/system table layouts (64-bit). */

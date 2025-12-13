@@ -94,10 +94,11 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
                       " is_data=%d IIM=0x%lx IFA=0x%lx"
                       " ar.k3=0x%" PRIx64 " ar.k4=0x%" PRIx64
                       " ar.k6=0x%" PRIx64 " ar.k7=0x%" PRIx64
-                      " r12=0x%" PRIx64 " r13=0x%" PRIx64 " r32=0x%" PRIx64 "\n",
+                      " r12=0x%" PRIx64 " r13=0x%" PRIx64
+                      " r20=0x%" PRIx64 " r32=0x%" PRIx64 " r45=0x%" PRIx64 "\n",
                       vec, env->ip, env->psr, is_data, iim, env->cr_ifa,
                       env->ar[3], env->ar[4], env->ar[6], env->ar[7],
-                      env->r[12], env->r[13], env->r[32]);
+                      env->r[12], env->r[13], env->r[20], env->r[32], env->r[45]);
         log_count++;
         last_ip = env->ip;
         last_vec = vec;
@@ -320,6 +321,19 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
 {
     CPUState *cs = env_cpu(env);
     ia64_fault(cs, env, false, false, IA64_VEC_BREAK, iim, GETPC());
+}
+
+void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
+{
+    static int log_count;
+    if (log_count++ < 64) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_probe pc=%016" PRIx64 " ri=%u psr=%016" PRIx64
+                      " cfm=%016" PRIx64 " depth=%u r32=%016" PRIx64
+                      " r45=%016" PRIx64 "\n",
+                      pc, ri, env->psr, env->cfm, env->rse_depth,
+                      env->r[32], env->r[45]);
+    }
 }
 
 uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t sor)
