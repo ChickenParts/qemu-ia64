@@ -29,11 +29,47 @@
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "hw/qdev-properties.h"
+#include "qemu/log.h"
+#include <inttypes.h>
+
+static bool serial_mm_trace_inited;
+static int serial_mm_trace_left;
+
+static inline bool serial_mm_trace_enabled(void)
+{
+    if (!serial_mm_trace_inited) {
+        serial_mm_trace_inited = true;
+        const char *s = getenv("QEMU_SERIAL_MM_TRACE");
+        if (s && *s) {
+            serial_mm_trace_left = atoi(s);
+            if (serial_mm_trace_left <= 0) {
+                serial_mm_trace_left = 256;
+            }
+        }
+    }
+    return serial_mm_trace_left > 0;
+}
+
+static inline void serial_mm_trace_op(const char *op, SerialMM *s,
+                                      hwaddr addr, unsigned size, uint64_t val)
+{
+    if (!serial_mm_trace_enabled()) {
+        return;
+    }
+    hwaddr reg = addr >> s->regshift;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "serial-mm %s addr=0x%" HWADDR_PRIx " reg=0x%" HWADDR_PRIx
+                  " size=%u val=0x%02" PRIx64 "\n",
+                  op, addr, reg, size, val & 0xff);
+    serial_mm_trace_left--;
+}
 
 static uint64_t serial_mm_read(void *opaque, hwaddr addr, unsigned size)
 {
     SerialMM *s = SERIAL_MM(opaque);
-    return serial_io_ops.read(&s->serial, addr >> s->regshift, 1);
+    uint64_t v = serial_io_ops.read(&s->serial, addr >> s->regshift, 1);
+    serial_mm_trace_op("rd", s, addr, size, v);
+    return v;
 }
 
 static void serial_mm_write(void *opaque, hwaddr addr,
@@ -41,6 +77,7 @@ static void serial_mm_write(void *opaque, hwaddr addr,
 {
     SerialMM *s = SERIAL_MM(opaque);
     value &= 255;
+    serial_mm_trace_op("wr", s, addr, size, value);
     serial_io_ops.write(&s->serial, addr >> s->regshift, value, 1);
 }
 
