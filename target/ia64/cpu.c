@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
+#include "qemu/bswap.h"
 #include "qemu/qemu-print.h"
 #include "qemu/module.h"
 #ifndef CONFIG_USER_ONLY
@@ -46,22 +47,74 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     IA64CPU *cpu = IA64_CPU(obj);
     IA64CPUClass *icc = IA64_CPU_GET_CLASS(cpu);
     CPUIA64State *env = &cpu->env;
+    uint64_t kernel_stext = env->kernel_stext;
+    uint64_t kernel_etext = env->kernel_etext;
+    uint64_t percpu_va_base = env->percpu_va_base;
+    uint64_t percpu_pa_base = env->percpu_pa_base;
+    uint64_t percpu_size = env->percpu_size;
 
     if (icc->parent_phases.hold) {
         icc->parent_phases.hold(obj, type);
     }
 
+    /*
+     * Reset guest-visible architectural state to a deterministic baseline.
+     *
+     * Note: preserve machine-provided diagnostic ranges across reset.
+     */
+    g_free(env->rse_frames);
+    g_free(env->intr_frames);
+    memset(env, 0, sizeof(*env));
+    env->kernel_stext = kernel_stext;
+    env->kernel_etext = kernel_etext;
+    env->percpu_va_base = percpu_va_base;
+    env->percpu_pa_base = percpu_pa_base;
+    env->percpu_size = percpu_size;
+
     /* Basic bootstrap defaults */
     env->ip = 0xFFFF0000ULL;
-    env->psr = 0;
+    /*
+     * Linux IA-64 expects to run with PSR.BN=1 in normal (non-interrupt)
+     * context; the alternate bank (BN=0) is used on interruption entry.
+     * Keeping BN=1 from reset also preserves the bootloader-provided r28
+     * across the early head.S rfi used to switch into virtual mode.
+     */
+    env->psr = IA64_PSR_BN;
     env->cfm = 0;
     env->pr = 1; /* p0 is always true */
-    memset(env->banked_r, 0, sizeof(env->banked_r));
 
-    g_free(env->rse_frames);
-    env->rse_frames = NULL;
-    env->rse_depth = 0;
-    env->rse_capacity = 0;
+    /* CPUID registers (Linux reads indices 0..4 in cpu_init/identify_cpu). */
+    {
+        static const uint8_t vendor[16] = "GenuineIntel";
+        env->cpuid[0] = ldq_le_p(&vendor[0]);
+        env->cpuid[1] = ldq_le_p(&vendor[8]);
+        env->cpuid[2] = 0; /* processor serial number */
+        env->cpuid[3] = (0ULL) |              /* number */
+                        (0ULL << 8) |         /* revision */
+                        (0ULL << 16) |        /* model */
+                        (0x7ULL << 24) |      /* family: Merced */
+                        (0x8ULL << 32);       /* archrev */
+        env->cpuid[4] = 0; /* features */
+    }
+
+    env->last_b0_write_pc = 0;
+    env->last_b0_write_insn = 0;
+    env->last_b0_write_val = 0;
+    env->last_b0_write_kind = 0;
+    env->prev_b0_write_pc = 0;
+    env->prev_b0_write_insn = 0;
+    env->prev_b0_write_val = 0;
+    env->prev_b0_write_kind = 0;
+    memset(env->b0_trace_pc, 0, sizeof(env->b0_trace_pc));
+    memset(env->b0_trace_insn, 0, sizeof(env->b0_trace_insn));
+    memset(env->b0_trace_val, 0, sizeof(env->b0_trace_val));
+    memset(env->b0_trace_kind, 0, sizeof(env->b0_trace_kind));
+    env->b0_trace_idx = 0;
+
+    env->last_branch_from = 0;
+    env->last_branch_to = 0;
+    env->last_branch_insn = 0;
+    env->last_branch_kind = 0;
 
     /* Disable VHPT until firmware/guest enables it. */
     env->cr[8] = 0; /* PTA.ve = 0 */
@@ -102,9 +155,21 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     IA64CPU *cpu = IA64_CPU(cs);
     CPUIA64State *env = &cpu->env;
 
+    /*
+     * TB translation depends on more than the bundle slot (RI):
+     * - IT/DT select instruction/data translation vs physical mode
+     * - CPL selects the MMU index for data accesses
+     *
+     * Include these bits so TBs are invalidated when the guest toggles them.
+     */
+    uint64_t flags = (env->psr & PSR_RI_MASK) >> PSR_RI_SHIFT;
+    flags |= (env->psr & IA64_PSR_DT) ? (1ULL << 2) : 0;
+    flags |= (env->psr & IA64_PSR_IT) ? (1ULL << 3) : 0;
+    flags |= ((uint64_t)IA64_PSR_CPL(env->psr) & 3ULL) << 4;
+
     return (TCGTBCPUState){
         .pc = env->ip,
-        .flags = (env->psr & PSR_RI_MASK) >> PSR_RI_SHIFT,
+        .flags = flags,
         .cs_base = 0,
     };
 }
@@ -125,6 +190,25 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
     CPUIA64State *env = cpu_env(cs);
     qemu_fprintf(f, "IP=%016" PRIx64 " PSR=%016" PRIx64 " CFM=%016" PRIx64 "\n",
                  env->ip, env->psr, env->cfm);
+    qemu_fprintf(f, "LAST_BR from=%016" PRIx64 " to=%016" PRIx64
+                 " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                 env->last_branch_from, env->last_branch_to,
+                 env->last_branch_kind, env->last_branch_insn);
+    qemu_fprintf(f, "LAST_B0_WRITE pc=%016" PRIx64 " val=%016" PRIx64
+                 " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                 env->last_b0_write_pc, env->last_b0_write_val,
+                 env->last_b0_write_kind, env->last_b0_write_insn);
+    qemu_fprintf(f, "PREV_B0_WRITE pc=%016" PRIx64 " val=%016" PRIx64
+                 " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                 env->prev_b0_write_pc, env->prev_b0_write_val,
+                 env->prev_b0_write_kind, env->prev_b0_write_insn);
+    qemu_fprintf(f, "B0_TRACE idx=%u\n", env->b0_trace_idx);
+    for (int i = 0; i < 16; i++) {
+        qemu_fprintf(f, "b0_trace[%02d] pc=%016" PRIx64 " val=%016" PRIx64
+                     " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                     i, env->b0_trace_pc[i], env->b0_trace_val[i],
+                     env->b0_trace_kind[i], env->b0_trace_insn[i]);
+    }
     qemu_fprintf(f, "PR=%016" PRIx64 "\n", env->pr);
     for (int i = 0; i < 8; i++) {
         qemu_fprintf(f, "r%-2d=%016" PRIx64 "%s", i, env->r[i],
@@ -136,6 +220,8 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
     }
     qemu_fprintf(f, "b0=%016" PRIx64 " b1=%016" PRIx64 " b2=%016" PRIx64 " b3=%016" PRIx64 "\n",
                  env->b[0], env->b[1], env->b[2], env->b[3]);
+    qemu_fprintf(f, "r32=%016" PRIx64 " r36=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                 env->r[32], env->r[36], env->b[6]);
 }
 
 static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
@@ -175,14 +261,13 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     env->psr &= ~PSR_RI_MASK; /* clear RI */
 
     /*
-     * On interruption, IA-64 uses banked registers (r16..r31) for privileged
-     * handlers. Linux's IVT code assumes it's running with BN=1 and will
-     * explicitly bsw.0/bsw.1 when needed. Switch to BN=1 here so handlers see
-     * the expected banked register set.
+     * On interruption, Linux enters the IVT with BN=0 (alternate bank) and
+     * later uses bsw.1 to switch back to the normal bank (BN=1) when it wants
+     * to save/restore the interrupted context's r16..r31.
      */
-    if (!(env->psr & IA64_PSR_BN)) {
+    if (env->psr & IA64_PSR_BN) {
         ia64_switch_banks_local(env);
-        env->psr |= IA64_PSR_BN;
+        env->psr &= ~IA64_PSR_BN;
     }
 }
 

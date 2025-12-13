@@ -11,8 +11,10 @@
 #include "exec/cputlb.h"
 #include "exec/target_page.h"
 #include "exec/page-protection.h"
+#include "exec/translation-block.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "exec/cpu-common.h"
 #include "system/memory.h"
 #include "system/address-spaces.h"
@@ -51,8 +53,56 @@
 #define TAR_PS(x)   extract64((x), 2, 6)
 #define TAR_P(x)    extract64((x), 0, 1)
 
+/* Interrupt Status Register (see Linux arch/ia64/include/asm/kregs.h). */
+#define IA64_ISR_X_BIT 32 /* execute access */
+#define IA64_ISR_W_BIT 33 /* write access */
+#define IA64_ISR_R_BIT 34 /* read access */
+#define IA64_ISR_CODE_MASK 0xf
+
+/* RSE-related AR indices */
+#define IA64_AR_RSC       16
+#define IA64_AR_BSP       17
+#define IA64_AR_BSPSTORE  18
+#define IA64_AR_RNAT      19
+
+/* ar.rsc loadrs field: bits 16..29, in bytes (see SKI ssDSym.c). */
+#define IA64_RSC_LOADRS_SHIFT 16
+#define IA64_RSC_LOADRS_MASK  0x3fffULL
+
+static inline uint64_t ia64_rsc_get_loadrs(uint64_t rsc)
+{
+    return (rsc >> IA64_RSC_LOADRS_SHIFT) & IA64_RSC_LOADRS_MASK;
+}
+
+static inline uint64_t ia64_rsc_set_loadrs(uint64_t rsc, uint64_t loadrs_bytes)
+{
+    rsc &= ~(IA64_RSC_LOADRS_MASK << IA64_RSC_LOADRS_SHIFT);
+    rsc |= (loadrs_bytes & IA64_RSC_LOADRS_MASK) << IA64_RSC_LOADRS_SHIFT;
+    return rsc;
+}
+
+static inline uint64_t ia64_rse_slot_num(uint64_t addr)
+{
+    return (addr >> 3) & 0x3f;
+}
+
+static inline uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
+{
+    /*
+     * The backing store inserts an RNAT slot every 63 registers (slot#63).
+     * This helper mirrors SKI's ia64_rse_skip_regs().
+     */
+    int64_t delta = (int64_t)ia64_rse_slot_num(addr) + num_regs;
+    if (num_regs < 0) {
+        delta -= 0x3e;
+    }
+    return addr + ((uint64_t)(num_regs + delta / 0x3f) << 3);
+}
+
 static void ia64_rse_push_window(CPUIA64State *env);
 static bool ia64_rse_pop_window(CPUIA64State *env);
+static void ia64_intr_push_window(CPUIA64State *env);
+static bool ia64_intr_pop_window(CPUIA64State *env);
 
 static void ia64_switch_banks(CPUIA64State *env)
 {
@@ -75,16 +125,43 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
         cpu_restore_state(cs, retaddr);
     }
 
+    /* Optional fail-fast: stack pointer should never point into kernel .text. */
+    const char *sp_text = getenv("QEMU_IA64_SP_IN_TEXT");
+    if (sp_text && *sp_text && env->kernel_stext && env->kernel_etext) {
+        uint64_t sp = env->r[12];
+        if (sp >= env->kernel_stext && sp < env->kernel_etext) {
+            fprintf(stderr,
+                    "IA64: SP in .text on fault vec=0x%x ip=%016" PRIx64
+                    " sp=%016" PRIx64 " stext=%016" PRIx64 " etext=%016" PRIx64
+                    " is_data=%d write=%d\n",
+                    vec, env->ip, sp, env->kernel_stext, env->kernel_etext,
+                    is_data ? 1 : 0, write ? 1 : 0);
+            fflush(stderr);
+            if (strcmp(sp_text, "1") == 0 || strcmp(sp_text, "abort") == 0) {
+                cpu_abort(cs, "IA64: SP in .text (QEMU_IA64_SP_IN_TEXT=%s)", sp_text);
+            }
+        }
+    }
+
     /* Save interruption state */
-    ia64_rse_push_window(env);
+    ia64_intr_push_window(env);
     env->cr_ipsr = env->psr;
     env->cr_iip = env->ip & ~0xFULL;
     env->cr_ifs = env->cfm;
-    /* Build ISR flags: X/W/R bits and code in low bits */
-    uint64_t isr = vec;
-    isr |= (!is_data ? 1ULL : 0ULL) << 31; /* X */
-    isr |= (write ? 1ULL : 0ULL) << 30;    /* W */
-    isr |= ((!write && is_data) || (!is_data) ? 1ULL : 0ULL) << 29; /* R */
+    /*
+     * Build ISR flags (X/W/R) and leave isr.code at 0 for normal accesses.
+     * Linux uses bit 32 (IA64_ISR_X_BIT) to distinguish instruction misses.
+     */
+    uint64_t isr = 0;
+    if (!is_data) {
+        isr |= 1ULL << IA64_ISR_X_BIT;
+        isr |= 1ULL << IA64_ISR_R_BIT; /* treat instruction fetch as read */
+    } else if (write) {
+        isr |= 1ULL << IA64_ISR_W_BIT;
+    } else {
+        isr |= 1ULL << IA64_ISR_R_BIT;
+    }
+    isr |= 0 & IA64_ISR_CODE_MASK;
     env->cr_isr = isr;
     env->cr_iim = iim;
     cs->exception_index = IA64_EXCP_BASE + vec;
@@ -92,12 +169,18 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64 fault vec=0x%x ip=0x%" PRIx64 " psr=0x%" PRIx64
                       " is_data=%d IIM=0x%lx IFA=0x%lx"
+                      " IHA=0x%lx PTA=0x%lx ITIR=0x%lx"
+                      " LAST_BR from=%016" PRIx64 " to=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64
                       " ar.k3=0x%" PRIx64 " ar.k4=0x%" PRIx64
                       " ar.k6=0x%" PRIx64 " ar.k7=0x%" PRIx64
                       " r1=0x%" PRIx64 " r12=0x%" PRIx64 " r13=0x%" PRIx64
                       " r16=0x%" PRIx64 " r17=0x%" PRIx64
                       " r20=0x%" PRIx64 " r32=0x%" PRIx64 " r45=0x%" PRIx64 "\n",
                       vec, env->ip, env->psr, is_data, iim, env->cr_ifa,
+                      env->cr_iha, env->cr[8], env->cr[21],
+                      env->last_branch_from, env->last_branch_to,
+                      env->last_branch_kind, env->last_branch_insn,
                       env->ar[3], env->ar[4], env->ar[6], env->ar[7],
                       env->r[1], env->r[12], env->r[13],
                       env->r[16], env->r[17],
@@ -110,18 +193,86 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     return false;
 }
 
-static bool G_GNUC_UNUSED ia64_check_perms(CPUIA64State *env, bool is_data,
-                                           bool write, uint8_t ar, uint8_t pl)
+/*
+ * Access rights enforcement.
+ *
+ * Mirror SKI's accessRights() behavior: AR encodes a combined read/write/exec
+ * policy with additional privilege-level constraints.
+ */
+enum {
+    IA64_EXECUTE_ACCESS = 0,
+    IA64_READ_ACCESS = 1,
+    IA64_WRITE_ACCESS = 2,
+};
+
+static bool ia64_access_rights(uint8_t ar, uint8_t pl, uint8_t cpl,
+                               MMUAccessType access_type)
 {
-    uint8_t cpl = IA64_PSR_CPL(env->psr);
-    if (cpl > pl) {
+    unsigned atype = IA64_EXECUTE_ACCESS;
+    if (access_type == MMU_DATA_LOAD) {
+        atype = IA64_READ_ACCESS;
+    } else if (access_type == MMU_DATA_STORE) {
+        atype = IA64_READ_ACCESS | IA64_WRITE_ACCESS;
+    }
+    atype &= IA64_READ_ACCESS | IA64_WRITE_ACCESS;
+
+    switch (ar & 7) {
+    case 0:
+        if (atype != IA64_READ_ACCESS || cpl > pl) {
+            return false;
+        }
+        break;
+    case 1:
+        if ((atype & IA64_WRITE_ACCESS) || cpl > pl) {
+            return false;
+        }
+        break;
+    case 2:
+        if (atype == IA64_EXECUTE_ACCESS || cpl > pl) {
+            return false;
+        }
+        break;
+    case 3:
+        if (cpl > pl) {
+            return false;
+        }
+        break;
+    case 4:
+        if (atype == IA64_EXECUTE_ACCESS || cpl > pl) {
+            return false;
+        }
+        if ((atype & IA64_WRITE_ACCESS) && cpl && cpl == pl) {
+            return false;
+        }
+        break;
+    case 5:
+        if (cpl > pl) {
+            return false;
+        }
+        if ((atype & IA64_WRITE_ACCESS) && cpl) {
+            return false;
+        }
+        break;
+    case 6:
+        if (cpl > pl) {
+            return false;
+        }
+        if (atype == IA64_EXECUTE_ACCESS && (!cpl || cpl < pl)) {
+            return false;
+        }
+        break;
+    case 7:
+        if (atype & IA64_WRITE_ACCESS) {
+            return false;
+        }
+        if (atype == IA64_READ_ACCESS && cpl) {
+            return false;
+        }
+        break;
+    default:
         return false;
     }
-    /* Simplified: AR==0 => no access, otherwise allow. */
-    if (ar == 0) {
-        return false;
-    }
-    /* No PKR/key enforcement yet. */
+
     return true;
 }
 
@@ -175,12 +326,43 @@ uint64_t HELPER(tpa)(CPUIA64State *env, uint64_t va)
         }
     }
 
-    /* No translation. Raise a data TLB fault like SKI dtlbLookup(). */
     CPUState *cs = env_cpu(env);
+    uintptr_t retaddr = GETPC();
     env->cr_ifa = va;
-    cs->exception_index = IA64_EXCP_BASE + IA64_VEC_DATA_TLB;
-    cpu_loop_exit_noexc(cs);
+    uint8_t ps = RR_PS(rr);
+    if (ps == 0) {
+        ps = 12; /* default to 4K */
+    }
+    env->cr[21] = ((uint64_t)ps << 2) | ((uint64_t)rid << 8);
+    env->cr_iha = helper_thash(env);
+
+    /*
+     * No translation: raise the architected (alt) DTLB fault and ensure the
+     * OS miss handler sees the same CR state as for a normal data access.
+     */
+    uint32_t vec = (env->psr & IA64_PSR_DT) ? IA64_VEC_DATA_TLB
+                                           : IA64_VEC_ALT_DATA_TLB;
+    ia64_fault(cs, env, true, false, vec, 0, retaddr);
     return 0;
+}
+
+void HELPER(fc)(CPUIA64State *env, uint64_t va)
+{
+    /*
+     * Flush cache line for address in va (fc/fc.i).
+     *
+     * QEMU doesn't model caches, but Linux relies on fc+sync.i+srlz.i around
+     * patching to ensure updated instructions are visible to fetch. Mirror
+     * SKI's clearPdecode() by invalidating translated code covering this
+     * address.
+     */
+    uint64_t pa = va;
+    if (env->psr & IA64_PSR_DT) {
+        pa = helper_tpa(env, va);
+    }
+
+    pa &= ~0x1fULL;
+    tb_invalidate_phys_range(env_cpu(env), pa, pa + 31);
 }
 
 static void ia64_rse_ensure(CPUIA64State *env, uint32_t need)
@@ -195,6 +377,39 @@ static void ia64_rse_ensure(CPUIA64State *env, uint32_t need)
     env->rse_frames = g_realloc_n(env->rse_frames, new_cap,
                                   sizeof(*env->rse_frames));
     env->rse_capacity = new_cap;
+}
+
+static void ia64_intr_ensure(CPUIA64State *env, uint32_t need)
+{
+    if (env->intr_capacity >= need) {
+        return;
+    }
+    uint32_t new_cap = env->intr_capacity ? env->intr_capacity : 8;
+    while (new_cap < need) {
+        new_cap *= 2;
+    }
+    env->intr_frames = g_realloc_n(env->intr_frames, new_cap,
+                                   sizeof(*env->intr_frames));
+    env->intr_capacity = new_cap;
+}
+
+static void ia64_intr_push_window(CPUIA64State *env)
+{
+    ia64_intr_ensure(env, env->intr_depth + 1);
+    struct IA64IntrFrame *frame = &env->intr_frames[env->intr_depth++];
+    memcpy(frame->r, &env->r[32], sizeof(frame->r));
+    frame->ar_pfs = env->ar[64]; /* ar.pfs */
+}
+
+static bool ia64_intr_pop_window(CPUIA64State *env)
+{
+    if (env->intr_depth == 0) {
+        return false;
+    }
+    struct IA64IntrFrame *frame = &env->intr_frames[--env->intr_depth];
+    memcpy(&env->r[32], frame->r, sizeof(frame->r));
+    env->ar[64] = frame->ar_pfs;
+    return true;
 }
 
 static void ia64_rse_push_window(CPUIA64State *env)
@@ -238,19 +453,36 @@ void HELPER(rfi)(CPUIA64State *env)
     if (cur_bn != new_bn) {
         ia64_switch_banks(env);
     }
-    bool popped = ia64_rse_pop_window(env);
-    if (!popped) {
-        env->cfm = env->cr_ifs;
+    /*
+     * rfi returns from an interruption and restores the interrupted context
+     * from cr.ipsr/cr.iip/cr.ifs.  It must not unwind normal call frames.
+     *
+     * cr.ifs has a validity bit at 63 (set by cover when PSR.ic=0).
+     */
+    env->cfm = env->cr_ifs & ~(1ULL << 63);
+
+    /*
+     * Linux also uses rfi as a control transfer during early boot (to switch
+     * into the final virtual mapping) without taking an actual interruption.
+     * In that case we have no saved interrupt window to restore.
+     */
+    if (env->intr_depth > 0) {
+        (void)ia64_intr_pop_window(env);
     }
+
+    env->last_branch_from = env->ip;
+    env->last_branch_to = env->cr_iip & ~0xFULL;
+    env->last_branch_insn = 0;
+    env->last_branch_kind = 7 | (((env->psr >> PSR_RI_SHIFT) & 3) << 8);
     if (rfi_log_count < 32 || env->cr_iip == 0) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "rfi ip=%016" PRIx64 " psr=%016" PRIx64
                       " -> cr_iip=%016" PRIx64 " cr_ipsr=%016" PRIx64
                       " cr_ifs=%016" PRIx64 " cr_iim=%016" PRIx64
-                      " popped=%d r12=%016" PRIx64 " r13=%016" PRIx64 " r28=%016" PRIx64 "\n",
+                      " r12=%016" PRIx64 " r13=%016" PRIx64 " r28=%016" PRIx64 "\n",
                       env->ip, env->psr,
                       env->cr_iip, env->cr_ipsr, env->cr_ifs, env->cr_iim,
-                      (int)popped, env->r[12], env->r[13], env->r[28]);
+                      env->r[12], env->r[13], env->r[28]);
         rfi_log_count++;
     }
     env->psr = new_psr;
@@ -262,10 +494,10 @@ static uint64_t ia64_dbg_next_call_pc;
 void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
 {
     static int log_count;
+    ia64_dbg_next_call_pc = pc;
     if (log_count >= 32) {
         return;
     }
-    ia64_dbg_next_call_pc = pc;
     if (pc == 0xa0000001000665c0ULL) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "dbg_call pc=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
@@ -346,6 +578,100 @@ void HELPER(xma_hu)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     env->f[f1][1] = 0;
 }
 
+/*
+ * libgcc integer division helpers.
+ *
+ * IA-64 toolchains often lower 32/64-bit division/modulus to calls into these
+ * helper functions. The out-of-line implementations use floating-point
+ * instructions (fnorm/frcpa/fma/...) which we don't model yet.
+ *
+ * Emulate the architectural effect directly so that the kernel and runtime
+ * can make forward progress while the full FP unit is brought up.
+ */
+uint64_t HELPER(divdi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    int64_t sa = (int64_t)a;
+    int64_t sb = (int64_t)b;
+    if (sb == 0) {
+        return 0;
+    }
+    return (uint64_t)(sa / sb);
+}
+
+uint64_t HELPER(udivdi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    if (b == 0) {
+        return 0;
+    }
+    return a / b;
+}
+
+uint64_t HELPER(moddi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    int64_t sa = (int64_t)a;
+    int64_t sb = (int64_t)b;
+    if (sb == 0) {
+        return 0;
+    }
+    return (uint64_t)(sa % sb);
+}
+
+uint64_t HELPER(umoddi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    if (b == 0) {
+        return 0;
+    }
+    return a % b;
+}
+
+uint64_t HELPER(divsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    int32_t sa = (int32_t)a;
+    int32_t sb = (int32_t)b;
+    if (sb == 0) {
+        return 0;
+    }
+    return (uint64_t)(int64_t)(sa / sb);
+}
+
+uint64_t HELPER(udivsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint32_t ua = (uint32_t)a;
+    uint32_t ub = (uint32_t)b;
+    if (ub == 0) {
+        return 0;
+    }
+    return (uint64_t)(ua / ub);
+}
+
+uint64_t HELPER(modsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    int32_t sa = (int32_t)a;
+    int32_t sb = (int32_t)b;
+    if (sb == 0) {
+        return 0;
+    }
+    return (uint64_t)(int64_t)(sa % sb);
+}
+
+uint64_t HELPER(umodsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint32_t ua = (uint32_t)a;
+    uint32_t ub = (uint32_t)b;
+    if (ub == 0) {
+        return 0;
+    }
+    return (uint64_t)(ua % ub);
+}
+
 void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
 {
     CPUState *cs = env_cpu(env);
@@ -354,21 +680,107 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
 
 void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 {
-    static int log_count;
-    if (log_count++ < 64) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "dbg_probe pc=%016" PRIx64 " ri=%u"
-                      " psr=%016" PRIx64 " cfm=%016" PRIx64 " depth=%u"
-                      " cr_ifa=%016" PRIx64 " ar.k6=%016" PRIx64
-                      " r1=%016" PRIx64 " r12=%016" PRIx64
-                      " r16=%016" PRIx64 " r17=%016" PRIx64
-                      " r32=%016" PRIx64 " r45=%016" PRIx64 "\n",
-                      pc, ri,
-                      env->psr, env->cfm, env->rse_depth,
-                      env->cr_ifa, env->ar[6],
-                      env->r[1], env->r[12], env->r[16], env->r[17],
-                      env->r[32], env->r[45]);
+    typedef struct {
+        uint64_t pc;
+        uint32_t count;
+    } DbgProbeCount;
+
+    static DbgProbeCount probes[64];
+    static uint32_t nprobes;
+
+    uint32_t idx;
+    for (idx = 0; idx < nprobes; idx++) {
+        if (probes[idx].pc == pc) {
+            break;
+        }
     }
+    if (idx == nprobes) {
+        if (nprobes >= ARRAY_SIZE(probes)) {
+            return;
+        }
+        probes[idx].pc = pc;
+        probes[idx].count = 0;
+        nprobes++;
+    }
+
+    if (probes[idx].count++ >= 8) {
+        return;
+    }
+
+    /*
+     * Some probes are placed on bundles that contain predicated call sites.
+     * Filter those down to the interesting (predicate-true) cases to avoid
+     * drowning in noise.
+     */
+    if (pc == 0xa000000101197f30ULL) { /* format_decode WARN_ONCE bundle */
+        if (((env->pr >> 7) & 1) == 0) {
+            return;
+        }
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_probe pc=%016" PRIx64 " ri=%u"
+                  " psr=%016" PRIx64 " cfm=%016" PRIx64 " depth=%u"
+                  " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
+                  " pta=%016" PRIx64 " itir=%016" PRIx64
+                  " ar.k6=%016" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64 " r14=%016" PRIx64
+                  " r16=%016" PRIx64 " r17=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
+                  " b6=%016" PRIx64 " r45=%016" PRIx64 "\n",
+                  pc, ri,
+                  env->psr, env->cfm, env->rse_depth,
+                  env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
+                  env->ar[6],
+                  env->r[1], env->r[12], env->r[14], env->r[16], env->r[17],
+                  env->r[32], env->r[33], env->r[34], env->r[35],
+                  env->r[36], env->r[37], env->b[6], env->r[45]);
+
+    if (pc == 0xa000000101197f30ULL) {
+        uint64_t ptr = env->r[32];
+        uint8_t b[8];
+        for (int i = 0; i < 8; i++) {
+            b[i] = cpu_ldub_data(env, ptr - 4 + i);
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "format_decode_warn fmt.str=%016" PRIx64 " r15=%016" PRIx64
+                      " bytes[-4..+3]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                      ptr, env->r[15],
+                      b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+    }
+
+    if (pc == 0xa000000100073da0ULL || pc == 0xa000000100073620ULL) {
+        uint64_t fmt = env->r[32];
+        char msg[160];
+        size_t n = 0;
+        for (; n + 1 < sizeof(msg); n++) {
+            uint8_t c = cpu_ldub_data(env, fmt + n);
+            if (c == 0) {
+                break;
+            }
+            if (c < 0x20 || c > 0x7e) {
+                msg[n] = '.';
+            } else {
+                msg[n] = (char)c;
+            }
+        }
+        msg[n] = '\0';
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "panic_fmt pc=%016" PRIx64 " fmt=%016" PRIx64 " \"%s\"\n",
+                      pc, fmt, msg);
+    }
+}
+
+void HELPER(record_b0_trace)(CPUIA64State *env, uint64_t pc, uint64_t insn,
+                             uint64_t kind, uint64_t val)
+{
+    uint32_t idx = env->b0_trace_idx & 15U;
+    env->b0_trace_pc[idx] = pc;
+    env->b0_trace_insn[idx] = insn;
+    env->b0_trace_kind[idx] = kind;
+    env->b0_trace_val[idx] = val;
+    env->b0_trace_idx = (idx + 1) & 15U;
 }
 
 uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t sor)
@@ -387,12 +799,6 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
     uint8_t old_sof = old_cfm & 0x7f;
 
     env->cfm = (sof & 0x7f) | ((sol & 0x7f) << 7) | ((sor & 0xf) << 14);
-
-    /*
-     * Approximate ar.pfs content: many code sequences only treat it as an
-     * opaque token saved/restored around calls.
-     */
-    env->ar[64] = old_cfm;
 
     /* Clear newly allocated stacked regs (beyond previous SOF). */
     if (sof > old_sof) {
@@ -416,8 +822,9 @@ void HELPER(call)(CPUIA64State *env)
      * with IN regs copied from the caller's OUT regs.  The callee will run its
      * own alloc to set up locals/outs.
      */
-    uint8_t sof = env->cfm & 0x7f;
-    uint8_t sol = (env->cfm >> 7) & 0x7f;
+    uint64_t caller_cfm = env->cfm;
+    uint8_t sof = caller_cfm & 0x7f;
+    uint8_t sol = (caller_cfm >> 7) & 0x7f;
     uint8_t outs = (sof > sol) ? (sof - sol) : 0;
     uint64_t tmp[96] = { 0 };
     uint64_t dbg_pc = ia64_dbg_next_call_pc;
@@ -450,7 +857,13 @@ void HELPER(call)(CPUIA64State *env)
 
     /* Pre-alloc CFM for callee: treat all IN regs as locals. */
     env->cfm = (outs & 0x7f) | ((outs & 0x7f) << 7);
-    env->ar[64] = 0;
+
+    /*
+     * br.call seeds ar.pfs for the callee. Model this as the caller's CFM,
+     * which alloc will return in r1 and then replace with the callee's
+     * pre-alloc CFM.
+     */
+    env->ar[64] = caller_cfm;
 }
 
 void HELPER(ret_restore)(CPUIA64State *env)
@@ -499,17 +912,12 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     /*
-     * Some IA-64 Linux code (notably WARN/bug infrastructure and early per-cpu
-     * setup) uses absolute addresses in the top 4GB, represented as sign-extended
-     * 32-bit negative values (region 7 with bit60==1).
-     *
-     * Provide a bootstrap alias to the 32-bit physical address space so these
-     * can be accessed before the guest establishes a proper mapping.
+     * Linux uses region 6 as an identity-mapped uncached I/O region
+     * (RGN_UNCACHED). Treat it as a direct physical mapping.
      */
-    if (extract64(address, 61, 3) == 7 && extract64(address, 60, 1) == 1 &&
-        extract64(address, 32, 32) == 0xffffffffU) {
-        hwaddr phys_addr = (uint32_t)address;
-        int prot = PAGE_READ | PAGE_WRITE;
+    if (extract64(address, 61, 3) == 6) {
+        hwaddr phys_addr = address & ((1ULL << 61) - 1);
+        int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
                      phys_addr & TARGET_PAGE_MASK, prot,
                      mmu_idx, TARGET_PAGE_SIZE);
@@ -533,6 +941,28 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         return true;
     }
 
+    /*
+     * Linux IA-64 kernels may place the percpu PT_LOAD segment in region 7
+     * high addresses (e.g. 0xfffffffffffc0000). If present, map it directly
+     * to the segment's physical address to avoid early-boot fault recursion
+     * before the kernel installs its final translation structures.
+     */
+    if (env->percpu_size) {
+        uint64_t va = env->percpu_va_base;
+        uint64_t sz = env->percpu_size;
+        if (address >= va && address < va + sz) {
+            hwaddr phys_addr = env->percpu_pa_base + (address - va);
+            int prot = PAGE_READ | PAGE_WRITE;
+            if (is_fetch) {
+                prot |= PAGE_EXEC;
+            }
+            tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                         phys_addr & TARGET_PAGE_MASK, prot,
+                         mmu_idx, TARGET_PAGE_SIZE);
+            return true;
+        }
+    }
+
     /* Region / page size info */
     uint8_t rr_idx = extract64(address, 61, 3);
     uint64_t rr = env->rr[rr_idx];
@@ -542,19 +972,9 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         ps = 12;
     }
 
-    env->cr_ifa = address;
-    env->cr[21] = ((uint64_t)ps << 2) | ((uint64_t)rid << 8);
-
-    /*
-     * Hardware computes cr.iha for VHPT lookups on (I|D)TLB misses.
-     * Linux's IVT handlers dereference cr.iha unconditionally, even when
-     * VHPT is disabled (PTA.ve=0), to decide whether to fall back to the
-     * slow page_fault path. Always provide a deterministic hash address.
-     */
-    env->cr_iha = helper_thash(env);
-
     hwaddr phys_addr = address;
     bool hit = false;
+    const typeof(env->dtlb[0]) *match = NULL;
 
     /*
      * Check instruction vs data TLBs. Rid must match; page mask uses ps.
@@ -570,6 +990,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             uint64_t mask = ~((1ULL << env->itlb[i].ps) - 1);
             if ((address & mask) == env->itlb[i].tag) {
                 phys_addr = env->itlb[i].pa + (address & ~mask);
+                match = &env->itlb[i];
                 hit = true;
                 break;
             }
@@ -585,6 +1006,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             uint64_t mask = ~((1ULL << env->dtlb[i].ps) - 1);
             if ((address & mask) == env->dtlb[i].tag) {
                 phys_addr = env->dtlb[i].pa + (address & ~mask);
+                match = &env->dtlb[i];
                 hit = true;
                 break;
             }
@@ -592,27 +1014,173 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     if (!hit) {
-        if (!hit) {
-            bool is_data = access_type != MMU_INST_FETCH;
-            bool write = (access_type == MMU_DATA_STORE);
-            uint32_t vec;
-            if (is_data) {
-                vec = (env->psr & IA64_PSR_DT) ? IA64_VEC_DATA_TLB
-                                               : IA64_VEC_ALT_DATA_TLB;
-            } else {
-                vec = (env->psr & IA64_PSR_IT) ? IA64_VEC_INST_TLB
-                                               : IA64_VEC_ALT_INST_TLB;
-            }
-            return ia64_fault(cs, env, is_data, write, vec, 0, retaddr);
+        bool is_data = access_type != MMU_INST_FETCH;
+        bool write = (access_type == MMU_DATA_STORE);
+        uint32_t vec;
+
+        /*
+         * Determine the precise faulting PC for nested-miss heuristics.
+         * (ia64_fault() will restore state again; this is fine for now.)
+         */
+        if (retaddr) {
+            cpu_restore_state(cs, retaddr);
         }
+
+        if (is_data) {
+            vec = (env->psr & IA64_PSR_DT) ? IA64_VEC_DATA_TLB
+                                           : IA64_VEC_ALT_DATA_TLB;
+        } else {
+            vec = (env->psr & IA64_PSR_IT) ? IA64_VEC_INST_TLB
+                                           : IA64_VEC_ALT_INST_TLB;
+        }
+
+        /*
+         * Nested DTLB misses: Linux's IVT miss/ABit/DBit handlers expect a
+         * nested-DTLB vector when the VMLPT access faults.
+         *
+         * Heuristic: any data TLB miss while executing inside the first
+         * (0x2c00) bytes of the IVT is treated as nested.
+         */
+        bool nested = false;
+        if (is_data && vec == IA64_VEC_DATA_TLB && env->cr[2]) {
+            uint64_t iva = env->cr[2];
+            uint64_t ip = env->ip & ~0xFULL;
+            if (ip >= iva + IA64_VEC_INST_TLB && ip < iva + IA64_VEC_BREAK) {
+                nested = true;
+                vec = IA64_VEC_DATA_NESTED_TLB;
+            }
+        }
+
+        if (!nested) {
+            /*
+             * These control registers are architecturally updated only on
+             * translation faults (not on QEMU softmmu host TLB refills).
+             */
+            env->cr_ifa = address;
+            env->cr[21] = ((uint64_t)ps << 2) | ((uint64_t)rid << 8);
+            env->cr_iha = helper_thash(env);
+
+            /*
+             * VHPT translation vector: if the VHPT walker is enabled for this
+             * region and the virtual page table page is not mapped yet, Linux
+             * expects to take the VHPT vector (entry 0) rather than recurse.
+             */
+            uint64_t pta = env->cr[8]; /* cr.pta */
+            if (PTA_VE(pta) && RR_VE(rr)) {
+                uint64_t iha = env->cr_iha;
+                uint8_t iha_rr_idx = extract64(iha, 61, 3);
+                uint32_t iha_rid = RR_RID(env->rr[iha_rr_idx]);
+                bool iha_hit = false;
+                (void)ia64_translate_tlb(env, true, iha, iha_rid, &iha_hit);
+                if (!iha_hit) {
+                    vec = IA64_VEC_VHPT_INST;
+                }
+            }
+        }
+
+        return ia64_fault(cs, env, is_data, write, vec, 0, retaddr);
     }
 
-    int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+    /*
+     * Enforce access/dirty rights from the inserted TLB entry.
+     *
+     * Linux relies on access-bit/dirty-bit faults to set A/D in software and
+     * expects kernel text to be non-writable. Without enforcement, deep fault
+     * recursion can silently corrupt .opd/.text and derail control flow.
+     */
+    uint8_t cpl = IA64_PSR_CPL(env->psr);
+    bool is_data = access_type != MMU_INST_FETCH;
+    bool write = access_type == MMU_DATA_STORE;
+    uint32_t vec = 0;
+
+    if (match && !match->p) {
+        vec = IA64_VEC_DATA_PAGE_NOT_P;
+    } else if (match && !match->a) {
+        vec = is_data ? IA64_VEC_DATA_ACCESS_BIT : IA64_VEC_INST_ACCESS_BIT;
+    } else if (write && match && !match->d) {
+        vec = IA64_VEC_DATA_DIRTY;
+    } else if (match &&
+               !ia64_access_rights(match->ar, match->pl, cpl, access_type)) {
+        vec = is_data ? IA64_VEC_DATA_ACCESS_RIGHTS : IA64_VEC_INST_ACCESS_RIGHTS;
+    }
+
+    if (vec) {
+        if (retaddr) {
+            cpu_restore_state(cs, retaddr);
+        }
+        env->cr_ifa = address;
+        env->cr[21] = ((uint64_t)ps << 2) | ((uint64_t)rid << 8);
+        env->cr_iha = helper_thash(env);
+        return ia64_fault(cs, env, is_data, write, vec, 0, retaddr);
+    }
+
+    int prot = 0;
+    if (match && match->a &&
+        ia64_access_rights(match->ar, match->pl, cpl, MMU_DATA_LOAD)) {
+        prot |= PAGE_READ;
+    }
+    if (match && match->a && match->d &&
+        ia64_access_rights(match->ar, match->pl, cpl, MMU_DATA_STORE)) {
+        prot |= PAGE_WRITE;
+    }
+    if (match && match->a &&
+        ia64_access_rights(match->ar, match->pl, cpl, MMU_INST_FETCH)) {
+        prot |= PAGE_EXEC;
+    }
+    if (!prot) {
+        prot = PAGE_READ;
+    }
+
+    /* Bringup: confirm kernel .data mapping for console_srcu page. */
+    if ((address & TARGET_PAGE_MASK) == 0xa000000101f54000ULL) {
+        static int log_count;
+        if (log_count < 16) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "tlb_map console_srcu_page va=%016" PRIx64
+                          " -> pa=%016" HWADDR_PRIx " ps=%u rid=0x%x prot=%x\n",
+                          (uint64_t)address, phys_addr, match ? match->ps : 0,
+                          rid, prot);
+            log_count++;
+        }
+    }
     tlb_set_page(cs, address & TARGET_PAGE_MASK,
                  phys_addr & TARGET_PAGE_MASK, prot,
                  mmu_idx, TARGET_PAGE_SIZE);
 
     return true;
+}
+
+void HELPER(check_null_branch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                               uint64_t insn, uint64_t to)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_ABORT_NULL_BRANCH");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    if (!enabled) {
+        return;
+    }
+    if (to == 0) {
+        CPUState *cs = env_cpu(env);
+        cpu_restore_state(cs, GETPC());
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: null branch pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                      " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                      " b0=%016" PRIx64 " b6=%016" PRIx64
+                      " r12=%016" PRIx64 " r14=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                      " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64 "\n",
+                      pc, ri, insn,
+                      env->ip, env->psr, env->cfm,
+                      env->b[0], env->b[6],
+                      env->r[12], env->r[14],
+                      env->r[32], env->r[33], env->r[34], env->r[35],
+                      env->r[36], env->r[37]);
+        cpu_abort(cs,
+                  "IA64: null branch target pc=%016" PRIx64 " ri=%u insn=%011" PRIx64,
+                  pc, ri, insn);
+    }
 }
 
 typedef struct {
@@ -647,8 +1215,9 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
 
     switch (nr) {
     case 0:
-        /* Unknown/no-op SSC; ignore quietly. */
-        return 0;
+        /* SSC_STOP */
+        cpu_restore_state(env_cpu(env), GETPC());
+        cpu_abort(env_cpu(env), "IA64: SSC_STOP imm=%" PRIu64, imm);
     case 20: /* SSC_CONSOLE_INIT */
         return 0;
     case 31: /* SSC_PUTCHAR */
@@ -701,34 +1270,48 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
         if (fd < 0 || fd >= 16 || !ssc_files[fd].fp) {
             return -1;
         }
-        struct {
+        struct QEMU_PACKED {
             uint64_t addr;
             uint32_t len;
+            uint32_t pad;
         } req;
-        ia64_ssc_read(env, arg2, &req, sizeof(req));
-        fseeko(ssc_files[fd].fp, arg3, SEEK_SET);
-        uint8_t *tmp = g_malloc(req.len);
-        size_t n = fread(tmp, 1, req.len, ssc_files[fd].fp);
+        uint64_t req_ptr = arg2;
+        uint64_t off = arg3;
+        uint64_t total = 0;
+        fseeko(ssc_files[fd].fp, off, SEEK_SET);
+        for (uint64_t i = 0; i < arg1; i++, req_ptr += sizeof(req)) {
+            ia64_ssc_read(env, req_ptr, &req, sizeof(req));
+            if (req.len == 0) {
+                continue;
+            }
+            uint8_t *tmp = g_malloc(req.len);
+            size_t n = fread(tmp, 1, req.len, ssc_files[fd].fp);
+            ia64_ssc_write(env, req.addr, tmp, n);
+            g_free(tmp);
+            total += n;
+            if (n < req.len) {
+                break;
+            }
+        }
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "SSC_READ fd=%d addr=0x%lx len=%u off=0x%lx -> %zu\n",
-                      fd + 3, (unsigned long)req.addr, req.len,
-                      (unsigned long)arg3, n);
-        ia64_ssc_write(env, req.addr, tmp, n);
-        g_free(tmp);
-        ssc_files[fd].last_count = n;
+                      "SSC_READ fd=%d nreq=%" PRIu64 " req=0x%lx off=0x%lx -> %" PRIu64 "\n",
+                      fd + 3, arg1, (unsigned long)arg2, (unsigned long)arg3,
+                      total);
+        ssc_files[fd].last_count = total;
         return 0;
     }
     case 55: { /* SSC_WAIT_COMPLETION */
-        struct {
+        struct QEMU_PACKED {
             int32_t fd;
             uint32_t count;
-        } stat = { .fd = arg0, .count = 0 };
-        int fd = arg0 - 3;
-        if (fd >= 0 && fd < 16) {
-            stat.count = ssc_files[fd].last_count;
+        } stat = { .fd = -1, .count = 0 };
+        ia64_ssc_read(env, arg0, &stat, sizeof(stat));
+        int fd = stat.fd - 3;
+        if (fd >= 0 && fd < 16 && ssc_files[fd].fp) {
+            stat.count = (uint32_t)ssc_files[fd].last_count;
         }
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "SSC_WAIT fd=%d last=%u\n", fd + 3, stat.count);
+                      "SSC_WAIT fd=%d last=%u\n", stat.fd, stat.count);
         ia64_ssc_write(env, arg0, &stat, sizeof(stat));
         return 0;
     }
@@ -741,31 +1324,46 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
     case 448: { /* platform-specific; ignore */
         return 0;
     }
-    case 96: { /* SSC_WRITE (ski convention) */
+    case 96: /* legacy/unknown: treat as SSC_WRITE */
+    case 53: { /* SSC_WRITE */
         int fd = arg0 - 3;
         if (fd < 0 || fd >= 16 || !ssc_files[fd].fp) {
             return (uint64_t)-1;
         }
-        struct {
+        struct QEMU_PACKED {
             uint64_t addr;
             uint32_t len;
+            uint32_t pad;
         } req;
-        ia64_ssc_read(env, arg2, &req, sizeof(req));
-        fseeko(ssc_files[fd].fp, arg3, SEEK_SET);
-        uint8_t *tmp = g_malloc(req.len);
-        ia64_ssc_read(env, req.addr, tmp, req.len);
-        size_t n = fwrite(tmp, 1, req.len, ssc_files[fd].fp);
-        g_free(tmp);
+        uint64_t req_ptr = arg2;
+        uint64_t off = arg3;
+        uint64_t total = 0;
+        fseeko(ssc_files[fd].fp, off, SEEK_SET);
+        for (uint64_t i = 0; i < arg1; i++, req_ptr += sizeof(req)) {
+            ia64_ssc_read(env, req_ptr, &req, sizeof(req));
+            if (req.len == 0) {
+                continue;
+            }
+            uint8_t *tmp = g_malloc(req.len);
+            ia64_ssc_read(env, req.addr, tmp, req.len);
+            size_t n = fwrite(tmp, 1, req.len, ssc_files[fd].fp);
+            g_free(tmp);
+            total += n;
+            if (n < req.len) {
+                break;
+            }
+        }
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "SSC_WRITE fd=%d addr=0x%lx len=%u off=0x%lx -> %zu\n",
-                      fd + 3, (unsigned long)req.addr, req.len,
-                      (unsigned long)arg3, n);
-        ssc_files[fd].last_count = n;
+                      "SSC_WRITE fd=%d nreq=%" PRIu64 " req=0x%lx off=0x%lx -> %" PRIu64 "\n",
+                      fd + 3, arg1, (unsigned long)arg2, (unsigned long)arg3,
+                      total);
+        ssc_files[fd].last_count = total;
         return 0;
     }
     default:
-        qemu_log_mask(LOG_GUEST_ERROR, "SSC unhandled nr=%" PRIu64 " imm=%" PRIu64 "\n", nr, imm);
-        return -1;
+        cpu_restore_state(env_cpu(env), GETPC());
+        cpu_abort(env_cpu(env), "IA64: SSC unhandled nr=%" PRIu64 " imm=%" PRIu64,
+                  nr, imm);
     }
 }
 
@@ -817,6 +1415,7 @@ void HELPER(itc_d)(CPUIA64State *env, uint64_t src)
     if (ps == 0) {
         ps = 12; /* default to 4K */
     }
+    uint64_t pa = (PTE_PPN(src) << 12);
     uint8_t ar = PTE_AR(src);
     uint8_t pl = PTE_PL(src);
     uint8_t d  = PTE_D(src);
@@ -827,11 +1426,11 @@ void HELPER(itc_d)(CPUIA64State *env, uint64_t src)
     if (log_count < 16) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "itc.d ip=0x%" PRIx64 " cr_ifa=0x%" PRIx64
-                      " ps=%u rid=0x%x src=0x%" PRIx64 "\n",
-                      env->ip, env->cr_ifa, ps, rid, src);
+                      " ps=%u rid=0x%x src=0x%" PRIx64 " pa=0x%" PRIx64 "\n",
+                      env->ip, env->cr_ifa, ps, rid, src, pa);
         log_count++;
     }
-    ia64_insert_tlb(env, true, env->cr_ifa, src, rid, ps, ar, pl, d, a, p, ed);
+    ia64_insert_tlb(env, true, env->cr_ifa, pa, rid, ps, ar, pl, d, a, p, ed);
 }
 
 void HELPER(itc_i)(CPUIA64State *env, uint64_t src)
@@ -841,6 +1440,7 @@ void HELPER(itc_i)(CPUIA64State *env, uint64_t src)
     if (ps == 0) {
         ps = 12; /* default to 4K */
     }
+    uint64_t pa = (PTE_PPN(src) << 12);
     uint8_t ar = PTE_AR(src);
     uint8_t pl = PTE_PL(src);
     uint8_t d  = PTE_D(src);
@@ -851,11 +1451,11 @@ void HELPER(itc_i)(CPUIA64State *env, uint64_t src)
     if (log_count < 16) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "itc.i ip=0x%" PRIx64 " cr_ifa=0x%" PRIx64
-                      " ps=%u rid=0x%x src=0x%" PRIx64 "\n",
-                      env->ip, env->cr_ifa, ps, rid, src);
+                      " ps=%u rid=0x%x src=0x%" PRIx64 " pa=0x%" PRIx64 "\n",
+                      env->ip, env->cr_ifa, ps, rid, src, pa);
         log_count++;
     }
-    ia64_insert_tlb(env, false, env->cr_ifa, src, rid, ps, ar, pl, d, a, p, ed);
+    ia64_insert_tlb(env, false, env->cr_ifa, pa, rid, ps, ar, pl, d, a, p, ed);
 }
 
 uint64_t HELPER(thash)(CPUIA64State *env)
@@ -864,10 +1464,14 @@ uint64_t HELPER(thash)(CPUIA64State *env)
     uint64_t va = env->cr_ifa;
     uint64_t pta = env->cr[8]; /* cr.pta stored in cr[8] */
     uint8_t rr = extract64(va, 61, 3);
+    uint8_t ps = RR_PS(env->rr[rr]);
+    if (ps == 0) {
+        ps = 12; /* default to 4K */
+    }
     uint64_t mask = (1ULL << PTA_SIZE(pta)) - 1;
     mask = extract64(mask, 15, 46);
     uint64_t va_61 = va & ((1ULL << 61) - 1);
-    uint64_t hpn = va_61 >> RR_PS(env->rr[rr]);
+    uint64_t hpn = va_61 >> ps;
     uint64_t offset;
     uint64_t addr;
 
@@ -894,8 +1498,12 @@ uint64_t HELPER(ttag)(CPUIA64State *env)
 {
     uint64_t va = env->cr_ifa;
     uint8_t rr = extract64(va, 61, 3);
+    uint8_t ps = RR_PS(env->rr[rr]);
+    if (ps == 0) {
+        ps = 12; /* default to 4K */
+    }
     uint64_t va_61 = va & ((1ULL << 61) - 1);
-    return ((va_61 >> RR_PS(env->rr[rr])) ^ ((uint64_t)RR_RID(env->rr[rr]) << 39));
+    return ((va_61 >> ps) ^ ((uint64_t)RR_RID(env->rr[rr]) << 39));
 }
 
 static void ia64_purge_tc_range(CPUIA64State *env, bool is_data,
@@ -1069,7 +1677,124 @@ void HELPER(ptr_i)(CPUIA64State *env, uint64_t va, uint64_t range)
 
 void HELPER(flushrs)(CPUIA64State *env)
 {
-    /* RSE not modeled yet. */
+    /*
+     * For now, model an eager RSE with an empty dirty partition: flushrs
+     * synchronizes ar.bspstore with ar.bsp and clears ar.rsc.loadrs.
+     *
+     * Linux uses enforced-lazy + flushrs when switching stacks/modes and
+     * expects the loadrs field to report the dirty-partition size.
+     */
+    env->ar[IA64_AR_BSPSTORE] = env->ar[IA64_AR_BSP] & ~0x7ULL;
+    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);
+}
+
+void HELPER(loadrs)(CPUIA64State *env)
+{
+    /*
+     * Minimal loadrs implementation sufficient for Linux head.S early boot
+     * usage (loadrs with ar.rsc=0 to clear any residual dirty partition).
+     *
+     * If a non-zero loadrs field is requested, fail fast so we can fill in
+     * the full RSE load behavior when needed.
+     */
+    uint64_t rsc = env->ar[IA64_AR_RSC];
+    uint64_t loadrs_bytes = ia64_rsc_get_loadrs(rsc);
+    if (loadrs_bytes != 0) {
+        cpu_abort(env_cpu(env),
+                  "IA64 UNIMPL: loadrs with ar.rsc.loadrs=%" PRIu64 " (pc=%016" PRIx64 ")",
+                  loadrs_bytes, env->ip);
+    }
+    env->ar[IA64_AR_BSPSTORE] = env->ar[IA64_AR_BSP] & ~0x7ULL;
+    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, 0);
+}
+
+void HELPER(cover)(CPUIA64State *env)
+{
+    static int log_count;
+    uint64_t old_cfm = env->cfm;
+    uint8_t sof = old_cfm & 0x7f;
+    uint64_t bsp = env->ar[IA64_AR_BSP];
+
+    if (bsp == 0) {
+        bsp = env->ar[IA64_AR_BSPSTORE];
+    }
+    bsp &= ~0x7ULL;
+
+    uint64_t new_bsp = ia64_rse_skip_regs(bsp, sof);
+    uint64_t cover_bytes = new_bsp - bsp;
+
+    if (log_count < 64) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "cover ip=%016" PRIx64 " psr=%016" PRIx64
+                      " cfm=%016" PRIx64 " sof=%u bsp=%016" PRIx64
+                      " -> new_bsp=%016" PRIx64 " bytes=%" PRIu64 "\n",
+                      env->ip, env->psr, old_cfm, sof, bsp,
+                      new_bsp, cover_bytes);
+        log_count++;
+    }
+
+    /*
+     * When interruption collection is off, cover also updates cr.ifs (V=1).
+     * Set V unconditionally since Linux relies on it for rfi paths.
+     */
+    env->cr_ifs = old_cfm | (1ULL << 63);
+
+    /* Extend the dirty-partition size reported by ar.rsc.loadrs. */
+    uint64_t rsc = env->ar[IA64_AR_RSC];
+    uint64_t loadrs_bytes = ia64_rsc_get_loadrs(rsc);
+    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, loadrs_bytes + cover_bytes);
+
+    env->ar[IA64_AR_BSP] = new_bsp;
+
+    /* Create the covering frame: no stacked regs/rotations. */
+    env->cfm = 0;
+}
+
+void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
+{
+    /*
+     * Writing ar.bspstore is used by Linux to establish a new RSE backing
+     * store (e.g. during head.S and mode switches). In enforced-lazy mode,
+     * the kernel ensures the dirty partition is empty before doing this.
+     *
+     * Model this as resetting both ar.bspstore and ar.bsp and clearing
+     * ar.rsc.loadrs.
+     */
+    bspstore &= ~0x7ULL;
+    env->ar[IA64_AR_BSPSTORE] = bspstore;
+    env->ar[IA64_AR_BSP] = bspstore;
+    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);
+    env->ar[IA64_AR_RNAT] = 0;
+}
+
+uint64_t HELPER(get_itc)(CPUIA64State *env)
+{
+    /*
+     * ar.itc: interval time counter.
+     *
+     * Linux uses ar.itc for udelay() and various timekeeping paths very early.
+     * Model it as the QEMU virtual clock (ns) plus a guest-programmable offset.
+     *
+     * Store the offset in env->ar[IA64_AR_ITC] (signed) so that mov.m ar.itc = X
+     * can be implemented without adding a separate state field.
+     */
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t off = (int64_t)env->ar[IA64_AR_ITC];
+    return now + off;
+}
+
+void HELPER(set_itc)(CPUIA64State *env, uint64_t val)
+{
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    env->ar[IA64_AR_ITC] = (uint64_t)((int64_t)val - (int64_t)now);
+}
+
+uint64_t HELPER(get_cpuid)(CPUIA64State *env, uint64_t idx)
+{
+    if (idx < ARRAY_SIZE(env->cpuid)) {
+        return env->cpuid[idx];
+    }
+    return 0;
 }
 
 void HELPER(srlz_d)(CPUIA64State *env)

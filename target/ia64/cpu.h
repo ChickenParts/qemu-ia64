@@ -31,6 +31,7 @@ typedef struct CPUArchState {
     uint64_t cr[128];
     uint64_t ar[128];
     uint64_t rr[8];
+    uint64_t cpuid[5];
 
     struct {
         uint64_t tag;   /* virtual base aligned to page */
@@ -65,6 +66,52 @@ typedef struct CPUArchState {
     } *rse_frames;
     uint32_t rse_depth;
     uint32_t rse_capacity;
+
+    /*
+     * Interrupt snapshots for the stacked register window.
+     *
+     * Keep this separate from rse_frames (used for br.call/br.ret windowing)
+     * so that rfi restores the interrupted context without interfering with
+     * normal call/return bookkeeping performed inside IVT handlers.
+     */
+    struct IA64IntrFrame {
+        uint64_t r[96];     /* r32..r127 */
+        uint64_t ar_pfs;
+    } *intr_frames;
+    uint32_t intr_depth;
+    uint32_t intr_capacity;
+
+    /* Debug: last write to b0 (rp). */
+    uint64_t last_b0_write_pc;
+    uint64_t last_b0_write_insn;
+    uint64_t last_b0_write_val;
+    uint64_t last_b0_write_kind; /* 1=br.call/brl.call, 2=mov.b, 3=other */
+    uint64_t prev_b0_write_pc;
+    uint64_t prev_b0_write_insn;
+    uint64_t prev_b0_write_val;
+    uint64_t prev_b0_write_kind;
+
+    /* Debug: small ring buffer of recent b0 writes. */
+    uint64_t b0_trace_pc[16];
+    uint64_t b0_trace_insn[16];
+    uint64_t b0_trace_val[16];
+    uint64_t b0_trace_kind[16];
+    uint32_t b0_trace_idx;
+
+    /* Debug: last control-flow change (branch/call/ret/rfi). */
+    uint64_t last_branch_from;
+    uint64_t last_branch_to;
+    uint64_t last_branch_insn;
+    uint64_t last_branch_kind; /* kind | (ri << 8) */
+
+    /* Optional kernel text range for fail-fast diagnostics. */
+    uint64_t kernel_stext;
+    uint64_t kernel_etext;
+
+    /* Optional kernel percpu PT_LOAD mapping (virtual -> physical). */
+    uint64_t percpu_va_base;
+    uint64_t percpu_pa_base;
+    uint64_t percpu_size;
 } CPUIA64State;
 
 struct ArchCPU {
@@ -109,6 +156,9 @@ struct IA64CPUClass {
 #define IA64_PSR_DT       (1ULL << 17)
 #define IA64_PSR_BN       (1ULL << 44)
 #define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
+
+/* Application Register indices. */
+#define IA64_AR_ITC 44
 
 #define IA64_EXCP_BASE    0x200
 #define IA64_EXCP_VHPT_TRANS  (IA64_EXCP_BASE + 0x0)
