@@ -17,44 +17,69 @@
 #include "system/memory.h"
 #include "system/address-spaces.h"
 
-#define RR_RID(x)   extract64((x), 32, 24)
-#define RR_PS(x)    extract64((x), 56, 6)
-#define RR_VE(x)    extract64((x), 63, 1)
+/*
+ * SKI BitfR/BitfX index from the MSB; QEMU extract64() indexes from the LSB.
+ * Convert the architectural field layout accordingly.
+ *
+ * RR layout (see Linux head.S SET_ONE_RR):
+ * - rid: bits 8..31
+ * - ps : bits 2..7  (log2 page size)
+ * - ve : bit 0      (VHPT enable for the region)
+ */
+#define RR_RID(x)   extract64((x), 8, 24)
+#define RR_PS(x)    extract64((x), 2, 6)
+#define RR_VE(x)    extract64((x), 0, 1)
 #define RR(idx)     env->rr[(idx) & 0x7]
 
 /* PTA helpers */
-#define PTA_VE(x)   extract64((x), 63, 1)
-#define PTA_SIZE(x) extract64((x), 56, 6)
-#define PTA_VF(x)   extract64((x), 55, 1)
-#define PTA_BASE(x) extract64((x), 3, 46)
-#define PTA_VRN(x)  extract64((x), 0, 3)
+#define PTA_VE(x)   extract64((x), 0, 1)
+#define PTA_SIZE(x) extract64((x), 2, 6)
+#define PTA_VF(x)   extract64((x), 8, 1)
+#define PTA_BASE(x) extract64((x), 15, 46)
+#define PTA_VRN(x)  extract64((x), 61, 3)
 
-#define PTE_ED(x)   extract64((x), 11, 1)
-#define PTE_AR(x)   extract64((x), 52, 3)
-#define PTE_PL(x)   extract64((x), 55, 2)
-#define PTE_D(x)    extract64((x), 57, 1)
-#define PTE_A(x)    extract64((x), 58, 1)
-#define PTE_MA(x)   extract64((x), 59, 3)
-#define PTE_P(x)    extract64((x), 63, 1)
+#define PTE_ED(x)   extract64((x), 52, 1)
+#define PTE_AR(x)   extract64((x), 9, 3)
+#define PTE_PL(x)   extract64((x), 7, 2)
+#define PTE_D(x)    extract64((x), 6, 1)
+#define PTE_A(x)    extract64((x), 5, 1)
+#define PTE_MA(x)   extract64((x), 2, 3)
+#define PTE_P(x)    extract64((x), 0, 1)
 #define PTE_PPN(x)  extract64((x), 12, 38)
 
-#define TAR_KEY(x)  extract64((x), 32, 24)
-#define TAR_PS(x)   extract64((x), 56, 6)
-#define TAR_P(x)    extract64((x), 63, 1)
+#define TAR_KEY(x)  extract64((x), 8, 24)
+#define TAR_PS(x)   extract64((x), 2, 6)
+#define TAR_P(x)    extract64((x), 0, 1)
 
-#define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
-#define IA64_PSR_IC       (1ULL << 13)
+static void ia64_rse_push_window(CPUIA64State *env);
+static bool ia64_rse_pop_window(CPUIA64State *env);
+
+static void ia64_switch_banks(CPUIA64State *env)
+{
+    for (int i = 0; i < 16; i++) {
+        uint64_t tmp = env->banked_r[i];
+        env->banked_r[i] = env->r[16 + i];
+        env->r[16 + i] = tmp;
+    }
+}
 
 static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
                        bool write, uint32_t vec, uint64_t iim,
                        uintptr_t retaddr)
 {
-    /* Save interruption state */
-    if (env->psr & IA64_PSR_IC) {
-        env->cr_ipsr = env->psr;
-        env->cr_iip = env->ip & ~0xFULL;
-        env->cr_ifs = env->cfm;
+    static uint64_t last_ip;
+    static uint32_t last_vec;
+    static int log_count;
+
+    if (retaddr) {
+        cpu_restore_state(cs, retaddr);
     }
+
+    /* Save interruption state */
+    ia64_rse_push_window(env);
+    env->cr_ipsr = env->psr;
+    env->cr_iip = env->ip & ~0xFULL;
+    env->cr_ifs = env->cfm;
     /* Build ISR flags: X/W/R bits and code in low bits */
     uint64_t isr = vec;
     isr |= (!is_data ? 1ULL : 0ULL) << 31; /* X */
@@ -63,15 +88,26 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     env->cr_isr = isr;
     env->cr_iim = iim;
     cs->exception_index = IA64_EXCP_BASE + vec;
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "IA64 fault vec=0x%x is_data=%d IIM=0x%lx IFA=0x%lx\n",
-                  vec, is_data, iim, env->cr_ifa);
-    cpu_loop_exit(cs);
+    if (log_count < 64 || vec != last_vec || env->ip != last_ip) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64 fault vec=0x%x ip=0x%" PRIx64 " psr=0x%" PRIx64
+                      " is_data=%d IIM=0x%lx IFA=0x%lx"
+                      " ar.k3=0x%" PRIx64 " ar.k4=0x%" PRIx64
+                      " ar.k6=0x%" PRIx64 " ar.k7=0x%" PRIx64
+                      " r12=0x%" PRIx64 " r13=0x%" PRIx64 " r32=0x%" PRIx64 "\n",
+                      vec, env->ip, env->psr, is_data, iim, env->cr_ifa,
+                      env->ar[3], env->ar[4], env->ar[6], env->ar[7],
+                      env->r[12], env->r[13], env->r[32]);
+        log_count++;
+        last_ip = env->ip;
+        last_vec = vec;
+    }
+    cpu_loop_exit_restore(cs, retaddr);
     return false;
 }
 
-static bool ia64_check_perms(CPUIA64State *env, bool is_data, bool write,
-                             uint8_t ar, uint8_t pl)
+static bool G_GNUC_UNUSED ia64_check_perms(CPUIA64State *env, bool is_data,
+                                           bool write, uint8_t ar, uint8_t pl)
 {
     uint8_t cpl = IA64_PSR_CPL(env->psr);
     if (cpl > pl) {
@@ -83,6 +119,302 @@ static bool ia64_check_perms(CPUIA64State *env, bool is_data, bool write,
     }
     /* No PKR/key enforcement yet. */
     return true;
+}
+
+static uint64_t ia64_translate_tlb(CPUIA64State *env, bool is_data, uint64_t va,
+                                   uint32_t rid, bool *hit)
+{
+    const int n = ARRAY_SIZE(env->dtlb);
+    for (int i = 0; i < n; i++) {
+        const typeof(env->dtlb[0]) *e = is_data ? &env->dtlb[i] : &env->itlb[i];
+        if (!e->valid || e->rid != rid) {
+            continue;
+        }
+        uint64_t mask = ~((1ULL << e->ps) - 1);
+        if ((va & mask) == e->tag) {
+            *hit = true;
+            return e->pa + (va & ~mask);
+        }
+    }
+    *hit = false;
+    return 0;
+}
+
+uint64_t HELPER(tpa)(CPUIA64State *env, uint64_t va)
+{
+    uint8_t rr_idx = extract64(va, 61, 3);
+    uint64_t rr = env->rr[rr_idx];
+    uint32_t rid = RR_RID(rr);
+    bool hit = false;
+
+    uint64_t pa = ia64_translate_tlb(env, true, va, rid, &hit);
+    if (hit) {
+        return pa;
+    }
+
+    /* Fall back to VHPT if enabled. */
+    uint64_t pta = env->cr[8]; /* cr.pta */
+    if (PTA_VE(pta) && RR_VE(rr) && (env->psr & IA64_PSR_DT)) {
+        env->cr_ifa = va;
+        uint64_t vhpt_addr = helper_thash(env);
+        uint64_t pte = cpu_ldq_data(env, vhpt_addr);
+        uint64_t tar = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 8)
+                                   : ((uint64_t)rid << 8) | ((uint64_t)RR_PS(rr) << 2);
+        uint64_t tag = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 16) : 0;
+        uint64_t expected = helper_ttag(env);
+        if (!PTA_VF(pta) || tag == expected) {
+            uint8_t trans_ps = TAR_PS(tar);
+            hwaddr pbase = (PTE_PPN(pte) << 12);
+            if (PTE_P(pte) && TAR_P(tar)) {
+                return pbase | (va & ((1ULL << trans_ps) - 1));
+            }
+        }
+    }
+
+    /* No translation. Raise a data TLB fault like SKI dtlbLookup(). */
+    CPUState *cs = env_cpu(env);
+    env->cr_ifa = va;
+    cs->exception_index = IA64_EXCP_BASE + IA64_VEC_DATA_TLB;
+    cpu_loop_exit_noexc(cs);
+    return 0;
+}
+
+static void ia64_rse_ensure(CPUIA64State *env, uint32_t need)
+{
+    if (env->rse_capacity >= need) {
+        return;
+    }
+    uint32_t new_cap = env->rse_capacity ? env->rse_capacity : 16;
+    while (new_cap < need) {
+        new_cap *= 2;
+    }
+    env->rse_frames = g_realloc_n(env->rse_frames, new_cap,
+                                  sizeof(*env->rse_frames));
+    env->rse_capacity = new_cap;
+}
+
+static void ia64_rse_push_window(CPUIA64State *env)
+{
+    ia64_rse_ensure(env, env->rse_depth + 1);
+    struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth++];
+    memcpy(frame->r, &env->r[32], sizeof(frame->r));
+    frame->ar_pfs = env->ar[64]; /* ar.pfs */
+    frame->cfm = env->cfm;
+}
+
+static bool ia64_rse_pop_window(CPUIA64State *env)
+{
+    if (env->rse_depth == 0) {
+        return false;
+    }
+    struct IA64RSEFrame *frame = &env->rse_frames[--env->rse_depth];
+    memcpy(&env->r[32], frame->r, sizeof(frame->r));
+    env->ar[64] = frame->ar_pfs;
+    env->cfm = frame->cfm;
+    return true;
+}
+
+void HELPER(bsw)(CPUIA64State *env, uint32_t bn)
+{
+    bn &= 1;
+    uint32_t cur_bn = (env->psr & IA64_PSR_BN) ? 1 : 0;
+    if (cur_bn != bn) {
+        ia64_switch_banks(env);
+    }
+    env->psr &= ~IA64_PSR_BN;
+    env->psr |= bn ? IA64_PSR_BN : 0;
+}
+
+void HELPER(rfi)(CPUIA64State *env)
+{
+    static int rfi_log_count;
+    uint64_t new_psr = env->cr_ipsr;
+    uint32_t cur_bn = (env->psr & IA64_PSR_BN) ? 1 : 0;
+    uint32_t new_bn = (new_psr & IA64_PSR_BN) ? 1 : 0;
+    if (cur_bn != new_bn) {
+        ia64_switch_banks(env);
+    }
+    bool popped = ia64_rse_pop_window(env);
+    if (!popped) {
+        env->cfm = env->cr_ifs;
+    }
+    if (rfi_log_count < 32 || env->cr_iip == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "rfi ip=%016" PRIx64 " psr=%016" PRIx64
+                      " -> cr_iip=%016" PRIx64 " cr_ipsr=%016" PRIx64
+                      " cr_ifs=%016" PRIx64 " cr_iim=%016" PRIx64
+                      " popped=%d r12=%016" PRIx64 " r13=%016" PRIx64 " r28=%016" PRIx64 "\n",
+                      env->ip, env->psr,
+                      env->cr_iip, env->cr_ipsr, env->cr_ifs, env->cr_iim,
+                      (int)popped, env->r[12], env->r[13], env->r[28]);
+        rfi_log_count++;
+    }
+    env->psr = new_psr;
+    env->ip = env->cr_iip & ~0xFULL;
+}
+
+static uint64_t ia64_dbg_next_call_pc;
+
+void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
+{
+    static int log_count;
+    if (log_count >= 32) {
+        return;
+    }
+    ia64_dbg_next_call_pc = pc;
+    if (pc == 0xa0000001000665c0ULL) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_call pc=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                      " pr=%016" PRIx64 " p2=%d"
+                      " r13=%016" PRIx64 " r36=%016" PRIx64 " r38=%016" PRIx64
+                      " r46(out0)=%016" PRIx64 "\n",
+                      pc, env->psr, env->cfm, env->pr, (int)((env->pr >> 2) & 1),
+                      env->r[13], env->r[36], env->r[38], env->r[46]);
+    } else {
+        uint8_t sof = env->cfm & 0x7f;
+        uint8_t sol = (env->cfm >> 7) & 0x7f;
+        uint8_t outs = (sof > sol) ? (sof - sol) : 0;
+        uint8_t out0 = 32 + sol;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_call pc=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                      " sof=%u sol=%u outs=%u out0=r%u"
+                      " out0..4=%016" PRIx64 " %016" PRIx64 " %016" PRIx64
+                      " %016" PRIx64 " %016" PRIx64 "\n",
+                      pc, env->psr, env->cfm, sof, sol, outs, out0,
+                      env->r[out0 + 0], env->r[out0 + 1], env->r[out0 + 2],
+                      env->r[out0 + 3], env->r[out0 + 4]);
+    }
+    log_count++;
+}
+
+void HELPER(setf_sig)(CPUIA64State *env, uint32_t f1, uint64_t val)
+{
+    f1 &= 0x7f;
+    if (f1 == 0) {
+        return;
+    }
+    env->f[f1][0] = val;
+    env->f[f1][1] = 0;
+}
+
+uint64_t HELPER(getf_sig)(CPUIA64State *env, uint32_t f2)
+{
+    f2 &= 0x7f;
+    return env->f[f2][0];
+}
+
+void HELPER(xma_l)(CPUIA64State *env, uint32_t f1, uint32_t f3,
+                   uint32_t f4, uint32_t f2)
+{
+    f1 &= 0x7f;
+    f2 &= 0x7f;
+    f3 &= 0x7f;
+    f4 &= 0x7f;
+    __uint128_t prod = (__uint128_t)env->f[f3][0] * (__uint128_t)env->f[f4][0];
+    __uint128_t sum = prod + (__uint128_t)env->f[f2][0];
+    env->f[f1][0] = (uint64_t)sum;
+    env->f[f1][1] = 0;
+}
+
+void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
+{
+    CPUState *cs = env_cpu(env);
+    ia64_fault(cs, env, false, false, IA64_VEC_BREAK, iim, GETPC());
+}
+
+uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t sor)
+{
+    /*
+     * The register stack engine (RSE) creates a new register frame of size SOF
+     * with SOL locals and SOR rotating registers.  We model the architectural
+     * register numbers as a window (r32..r127) and rely on helper_call() to
+     * move caller OUT registers into callee IN registers.
+     *
+     * alloc itself only changes CFM/ar.pfs and (optionally) clears newly
+     * allocated stacked registers.
+     */
+    uint64_t old_pfs = env->ar[64]; /* ar.pfs */
+    uint64_t old_cfm = env->cfm;
+    uint8_t old_sof = old_cfm & 0x7f;
+
+    env->cfm = (sof & 0x7f) | ((sol & 0x7f) << 7) | ((sor & 0xf) << 14);
+
+    /*
+     * Approximate ar.pfs content: many code sequences only treat it as an
+     * opaque token saved/restored around calls.
+     */
+    env->ar[64] = old_cfm;
+
+    /* Clear newly allocated stacked regs (beyond previous SOF). */
+    if (sof > old_sof) {
+        uint8_t n = MIN((uint8_t)sof, (uint8_t)96);
+        for (uint8_t i = old_sof; i < n; i++) {
+            env->r[32 + i] = 0;
+        }
+    }
+
+    return old_pfs;
+}
+
+void HELPER(call)(CPUIA64State *env)
+{
+    /*
+     * On a call, the caller's OUT registers become the callee's IN registers.
+     * OUT0 starts at r32+SOL and there are (SOF-SOL) outputs in the current
+     * frame.
+     *
+     * We snapshot the full stacked window for return, then build a new window
+     * with IN regs copied from the caller's OUT regs.  The callee will run its
+     * own alloc to set up locals/outs.
+     */
+    uint8_t sof = env->cfm & 0x7f;
+    uint8_t sol = (env->cfm >> 7) & 0x7f;
+    uint8_t outs = (sof > sol) ? (sof - sol) : 0;
+    uint64_t tmp[96] = { 0 };
+    uint64_t dbg_pc = ia64_dbg_next_call_pc;
+    if (dbg_pc) {
+        uint8_t out0 = 32 + sol;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "call_map pc=%016" PRIx64 " cfm=%016" PRIx64 " sof=%u sol=%u outs=%u out0=r%u"
+                      " out0..4=%016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 "\n",
+                      dbg_pc, env->cfm, sof, sol, outs, out0,
+                      env->r[out0 + 0], env->r[out0 + 1], env->r[out0 + 2],
+                      env->r[out0 + 3], env->r[out0 + 4]);
+    }
+
+    ia64_rse_push_window(env);
+
+    outs = MIN(outs, (uint8_t)96);
+    if (sol < 96) {
+        uint8_t max_copy = MIN(outs, (uint8_t)(96 - sol));
+        for (uint8_t i = 0; i < max_copy; i++) {
+            tmp[i] = env->r[32 + sol + i];
+        }
+    }
+    memcpy(&env->r[32], tmp, sizeof(tmp));
+    if (dbg_pc) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "call_map pc=%016" PRIx64 " mapped in0..4=%016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 "\n",
+                      dbg_pc, env->r[32], env->r[33], env->r[34], env->r[35], env->r[36]);
+        ia64_dbg_next_call_pc = 0;
+    }
+
+    /* Pre-alloc CFM for callee: treat all IN regs as locals. */
+    env->cfm = (outs & 0x7f) | ((outs & 0x7f) << 7);
+    env->ar[64] = 0;
+}
+
+void HELPER(ret_restore)(CPUIA64State *env)
+{
+    static int log_count;
+    if (log_count < 64) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ret_restore ip=0x%" PRIx64 " b0=0x%" PRIx64
+                      " cfm=0x%" PRIx64 " depth=%u\n",
+                      env->ip, env->b[0], env->cfm, env->rse_depth);
+        log_count++;
+    }
+    (void)ia64_rse_pop_window(env);
 }
 
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
@@ -100,10 +432,36 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     /* IA64CPU *cpu = IA64_CPU(cs); */
     CPUIA64State *env = cpu_env(cs);
+    bool is_fetch = (access_type == MMU_INST_FETCH);
 
-    /* Alignment/probe calls should not raise faults or log. */
-    if (probe) {
-        return false;
+    /*
+     * Linux uses region 7 addresses (__va()) as a direct map of physical memory
+     * and expects them to be accessible before page tables/VHPT are set up.
+     */
+    if (extract64(address, 61, 3) == 7) {
+        hwaddr phys_addr = address & ((1ULL << 61) - 1);
+        int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                     phys_addr & TARGET_PAGE_MASK, prot,
+                     mmu_idx, TARGET_PAGE_SIZE);
+        return true;
+    }
+
+    /*
+     * Physical mode: if translation is disabled for this access, treat the
+     * address as a physical address and never raise translation faults.
+     *
+     * IA-64 Linux head.S expects to start with IT/DT off and will install TRs
+     * before switching into virtual mode.
+     */
+    if ((is_fetch && !(env->psr & IA64_PSR_IT)) ||
+        (!is_fetch && !(env->psr & IA64_PSR_DT))) {
+        hwaddr phys_addr = address;
+        int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                     phys_addr & TARGET_PAGE_MASK, prot,
+                     mmu_idx, TARGET_PAGE_SIZE);
+        return true;
     }
 
     /* Region / page size info */
@@ -117,6 +475,19 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     env->cr_ifa = address;
     env->cr[21] = ((uint64_t)ps << 2) | ((uint64_t)rid << 8);
+
+    /*
+     * Hardware computes cr.iha for VHPT lookups on (I|D)TLB misses.
+     * Linux's IVT handlers dereference cr.iha unconditionally.
+     */
+    {
+        uint64_t pta = env->cr[8]; /* cr.pta */
+        if (PTA_VE(pta) && RR_VE(rr)) {
+            env->cr_iha = helper_thash(env);
+        } else {
+            env->cr_iha = 0;
+        }
+    }
 
     hwaddr phys_addr = address;
     bool hit = false;
@@ -157,59 +528,18 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     if (!hit) {
-        uint64_t pta = env->cr[8]; /* cr.pta */
-        if (PTA_VE(pta) && RR_VE(rr)) {
-            uint64_t vhpt_addr = helper_thash(env);
-            uint64_t pte = cpu_ldq_data(env, vhpt_addr);
-            uint64_t tar = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 8)
-                                       : ((uint64_t)rid << 8) | ((uint64_t)ps << 2);
-            uint64_t tag = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 16) : 0;
-            uint64_t expected = helper_ttag(env);
-            if (!PTA_VF(pta) || tag == expected) {
-                uint8_t trans_ps = TAR_PS(tar);
-                hwaddr pbase = (PTE_PPN(pte) << 12);
-                bool is_data = access_type != MMU_INST_FETCH;
-                bool write = (access_type == MMU_DATA_STORE);
-                if (!PTE_P(pte) || !TAR_P(tar)) {
-                    return ia64_fault(cs, env, is_data, write,
-                                      is_data ? IA64_VEC_DATA_PAGE_NOT_P
-                                              : IA64_VEC_INST_PAGE_NOT_P,
-                                      0, retaddr);
-                }
-                if (!PTE_A(pte)) {
-                    return ia64_fault(cs, env, is_data, write,
-                                      is_data ? IA64_VEC_DATA_ACCESS_RIGHTS
-                                              : IA64_VEC_INST_ACCESS_RIGHTS,
-                                      0, retaddr);
-                }
-                if (write && !PTE_D(pte)) {
-                    return ia64_fault(cs, env, is_data, write,
-                                      IA64_VEC_DATA_DIRTY, 0, retaddr);
-                }
-                if (!ia64_check_perms(env, is_data, write,
-                                      PTE_AR(pte), PTE_PL(pte))) {
-                    return ia64_fault(cs, env, is_data, write,
-                                      is_data ? IA64_VEC_DATA_ACCESS_RIGHTS
-                                              : IA64_VEC_INST_ACCESS_RIGHTS,
-                                      0, retaddr);
-                }
-                ia64_insert_tlb(env, is_data, address, pbase,
-                                rid, trans_ps, PTE_AR(pte), PTE_PL(pte),
-                                PTE_D(pte), PTE_A(pte), PTE_P(pte), PTE_ED(pte));
-                phys_addr = pbase | (address & ((1ULL << trans_ps) - 1));
-                hit = true;
-            }
-        }
         if (!hit) {
-            if (probe) {
-                return false;
-            }
             bool is_data = access_type != MMU_INST_FETCH;
             bool write = (access_type == MMU_DATA_STORE);
-            return ia64_fault(cs, env, is_data, write,
-                              access_type == MMU_INST_FETCH ? IA64_VEC_INST_TLB
-                                                            : IA64_VEC_DATA_TLB,
-                              0, retaddr);
+            uint32_t vec;
+            if (is_data) {
+                vec = (env->psr & IA64_PSR_DT) ? IA64_VEC_DATA_TLB
+                                               : IA64_VEC_ALT_DATA_TLB;
+            } else {
+                vec = (env->psr & IA64_PSR_IT) ? IA64_VEC_INST_TLB
+                                               : IA64_VEC_ALT_INST_TLB;
+            }
+            return ia64_fault(cs, env, is_data, write, vec, 0, retaddr);
         }
     }
 
@@ -244,8 +574,10 @@ static void ia64_ssc_read(CPUIA64State *env, uint64_t addr, void *buf,
 
 uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
 {
+    /* SKI convention: break imm selects SSC dispatcher, r15 holds SSC number. */
     uint64_t nr = env->r[15];
     uint64_t arg0 = env->r[32];
+    uint64_t arg1 = env->r[33];
     uint64_t arg2 = env->r[34];
     uint64_t arg3 = env->r[35];
 
@@ -272,7 +604,13 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
         qemu_log_mask(LOG_GUEST_ERROR, "SSC_OPEN '%s'\n", path);
         for (int i = 0; i < 16; i++) {
             if (!ssc_files[i].fp) {
-                ssc_files[i].fp = fopen(path, "rb");
+                const char *mode = "rb";
+                if (arg1 == 2) { /* SSC_WRITE_ACCESS */
+                    mode = "wb";
+                } else if (arg1 == 3) { /* SSC_READ_ACCESS | SSC_WRITE_ACCESS */
+                    mode = "r+b";
+                }
+                ssc_files[i].fp = fopen(path, mode);
                 if (!ssc_files[i].fp) {
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "SSC_OPEN failed errno=%d\n", errno);
@@ -336,6 +674,31 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
     case 66: { /* SSC_EXIT */
         exit(arg0);
     }
+    case 448: { /* platform-specific; ignore */
+        return 0;
+    }
+    case 96: { /* SSC_WRITE (ski convention) */
+        int fd = arg0 - 3;
+        if (fd < 0 || fd >= 16 || !ssc_files[fd].fp) {
+            return (uint64_t)-1;
+        }
+        struct {
+            uint64_t addr;
+            uint32_t len;
+        } req;
+        ia64_ssc_read(env, arg2, &req, sizeof(req));
+        fseeko(ssc_files[fd].fp, arg3, SEEK_SET);
+        uint8_t *tmp = g_malloc(req.len);
+        ia64_ssc_read(env, req.addr, tmp, req.len);
+        size_t n = fwrite(tmp, 1, req.len, ssc_files[fd].fp);
+        g_free(tmp);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "SSC_WRITE fd=%d addr=0x%lx len=%u off=0x%lx -> %zu\n",
+                      fd + 3, (unsigned long)req.addr, req.len,
+                      (unsigned long)arg3, n);
+        ssc_files[fd].last_count = n;
+        return 0;
+    }
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "SSC unhandled nr=%" PRIu64 " imm=%" PRIu64 "\n", nr, imm);
         return -1;
@@ -347,6 +710,9 @@ static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,
                             uint8_t p, uint8_t ed)
 {
+    if (!p) {
+        return;
+    }
     uint64_t mask = (1ULL << ps) - 1;
     uint64_t tag = va & ~mask;
     uint64_t pbase = pa & ~mask;
@@ -382,44 +748,62 @@ static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
 
 void HELPER(itc_d)(CPUIA64State *env, uint64_t src)
 {
+    static int log_count;
     uint8_t ps = (env->cr[21] >> 2) & 0x3f; /* ITIR.ps */
     if (ps == 0) {
         ps = 12; /* default to 4K */
     }
-    uint8_t ar = extract64(src, 52, 3);
-    uint8_t pl = extract64(src, 55, 2);
-    uint8_t d  = extract64(src, 57, 1);
-    uint8_t a  = extract64(src, 58, 1);
-    uint8_t p  = extract64(src, 63, 1);
-    uint8_t ed = extract64(src, 11, 1);
+    uint8_t ar = PTE_AR(src);
+    uint8_t pl = PTE_PL(src);
+    uint8_t d  = PTE_D(src);
+    uint8_t a  = PTE_A(src);
+    uint8_t p  = PTE_P(src);
+    uint8_t ed = PTE_ED(src);
     uint32_t rid = RR_RID(env->rr[extract64(env->cr_ifa, 61, 3)]);
+    if (log_count < 16) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "itc.d ip=0x%" PRIx64 " cr_ifa=0x%" PRIx64
+                      " ps=%u rid=0x%x src=0x%" PRIx64 "\n",
+                      env->ip, env->cr_ifa, ps, rid, src);
+        log_count++;
+    }
     ia64_insert_tlb(env, true, env->cr_ifa, src, rid, ps, ar, pl, d, a, p, ed);
 }
 
 void HELPER(itc_i)(CPUIA64State *env, uint64_t src)
 {
+    static int log_count;
     uint8_t ps = (env->cr[21] >> 2) & 0x3f; /* ITIR.ps */
     if (ps == 0) {
         ps = 12; /* default to 4K */
     }
-    uint8_t ar = extract64(src, 52, 3);
-    uint8_t pl = extract64(src, 55, 2);
-    uint8_t d  = extract64(src, 57, 1);
-    uint8_t a  = extract64(src, 58, 1);
-    uint8_t p  = extract64(src, 63, 1);
-    uint8_t ed = extract64(src, 11, 1);
+    uint8_t ar = PTE_AR(src);
+    uint8_t pl = PTE_PL(src);
+    uint8_t d  = PTE_D(src);
+    uint8_t a  = PTE_A(src);
+    uint8_t p  = PTE_P(src);
+    uint8_t ed = PTE_ED(src);
     uint32_t rid = RR_RID(env->rr[extract64(env->cr_ifa, 61, 3)]);
+    if (log_count < 16) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "itc.i ip=0x%" PRIx64 " cr_ifa=0x%" PRIx64
+                      " ps=%u rid=0x%x src=0x%" PRIx64 "\n",
+                      env->ip, env->cr_ifa, ps, rid, src);
+        log_count++;
+    }
     ia64_insert_tlb(env, false, env->cr_ifa, src, rid, ps, ar, pl, d, a, p, ed);
 }
 
 uint64_t HELPER(thash)(CPUIA64State *env)
 {
+    static int log_count;
     uint64_t va = env->cr_ifa;
     uint64_t pta = env->cr[8]; /* cr.pta stored in cr[8] */
     uint8_t rr = extract64(va, 61, 3);
     uint64_t mask = (1ULL << PTA_SIZE(pta)) - 1;
-    mask = extract64(mask, 3, 46);
-    uint64_t hpn = extract64(va, 3 + (61 - 1 - 3), 61 - (RR_PS(env->rr[rr])));
+    mask = extract64(mask, 15, 46);
+    uint64_t va_61 = va & ((1ULL << 61) - 1);
+    uint64_t hpn = va_61 >> RR_PS(env->rr[rr]);
     uint64_t offset;
     uint64_t addr;
 
@@ -430,8 +814,15 @@ uint64_t HELPER(thash)(CPUIA64State *env)
         offset = hpn << 3;
         addr = (uint64_t)rr << 61;
     }
-    addr |= ((PTA_BASE(pta) & ~mask) | (extract64(offset, 3, 46) & mask)) << 15
-            | extract64(offset, 49, 15);
+    addr |= ((PTA_BASE(pta) & ~mask) | (extract64(offset, 15, 46) & mask)) << 15
+            | extract64(offset, 0, 15);
+    if (log_count < 16) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "thash ifa=0x%" PRIx64 " rr=%u pta=0x%" PRIx64
+                      " -> 0x%" PRIx64 "\n",
+                      va, rr, pta, addr);
+        log_count++;
+    }
     return addr;
 }
 
@@ -439,8 +830,8 @@ uint64_t HELPER(ttag)(CPUIA64State *env)
 {
     uint64_t va = env->cr_ifa;
     uint8_t rr = extract64(va, 61, 3);
-    return (extract64(va, 3 + (61 - 1 - 3), 61 - RR_PS(env->rr[rr])) ^
-            (uint64_t)RR_RID(env->rr[rr]) << 39);
+    uint64_t va_61 = va & ((1ULL << 61) - 1);
+    return ((va_61 >> RR_PS(env->rr[rr])) ^ ((uint64_t)RR_RID(env->rr[rr]) << 39));
 }
 
 static void ia64_purge_tc_range(CPUIA64State *env, bool is_data,
@@ -525,15 +916,33 @@ void HELPER(ptc_ga)(CPUIA64State *env, uint64_t va, uint64_t tar)
 
 void HELPER(itr_d)(CPUIA64State *env, uint64_t pte, uint64_t tar)
 {
-    /* DTR insert */
-    uint8_t slot = extract64(tar, 0, 4);
-    uint8_t ps = TAR_PS(tar);
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "itr.d slot=%u ps=%u pte=0x%" PRIx64 " tar=0x%" PRIx64
-                  " cr_ifa=0x%" PRIx64 "\n",
-                  slot, ps, pte, tar, env->cr_ifa);
+    static uint64_t last_pte;
+    static uint64_t last_ifa;
+    static uint8_t last_slot;
+    static int log_count;
+
+    /* DTR insert: slot in low bits of tar operand, uses cr.ifa + cr.itir. */
+    uint8_t slot = tar & 0x7f;
+    slot &= 0xf;
+    uint8_t ps = (env->cr[21] >> 2) & 0x3f; /* ITIR.ps */
+    if (ps == 0) {
+        ps = 12; /* default to 4K */
+    }
+    if (log_count < 64 || pte != last_pte || env->cr_ifa != last_ifa ||
+        slot != last_slot) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "itr.d ip=0x%" PRIx64 " slot=%u ps=%u pte=0x%" PRIx64
+                      " sel=0x%" PRIx64 " cr_ifa=0x%" PRIx64
+                      " r2=0x%" PRIx64 " r3=0x%" PRIx64 "\n",
+                      env->ip, slot, ps, pte, tar, env->cr_ifa,
+                      env->r[2], env->r[3]);
+        log_count++;
+        last_pte = pte;
+        last_ifa = env->cr_ifa;
+        last_slot = slot;
+    }
     env->dtrs[slot].pte = pte;
-    env->dtrs[slot].itr = tar;
+    env->dtrs[slot].itr = env->cr[21];
     env->dtrs[slot].tag = env->cr_ifa & ~((1ULL << ps) - 1);
     env->dtrs[slot].pa = (PTE_PPN(pte) << 12) & ~((1ULL << ps) - 1);
     env->dtrs[slot].rid = RR_RID(RR(extract64(env->cr_ifa, 61, 3)));
@@ -546,14 +955,32 @@ void HELPER(itr_d)(CPUIA64State *env, uint64_t pte, uint64_t tar)
 
 void HELPER(itr_i)(CPUIA64State *env, uint64_t pte, uint64_t tar)
 {
-    uint8_t slot = extract64(tar, 0, 4);
-    uint8_t ps = TAR_PS(tar);
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "itr.i slot=%u ps=%u pte=0x%" PRIx64 " tar=0x%" PRIx64
-                  " cr_ifa=0x%" PRIx64 "\n",
-                  slot, ps, pte, tar, env->cr_ifa);
+    static uint64_t last_pte;
+    static uint64_t last_ifa;
+    static uint8_t last_slot;
+    static int log_count;
+
+    uint8_t slot = tar & 0x7f;
+    slot &= 0xf;
+    uint8_t ps = (env->cr[21] >> 2) & 0x3f; /* ITIR.ps */
+    if (ps == 0) {
+        ps = 12; /* default to 4K */
+    }
+    if (log_count < 64 || pte != last_pte || env->cr_ifa != last_ifa ||
+        slot != last_slot) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "itr.i ip=0x%" PRIx64 " slot=%u ps=%u pte=0x%" PRIx64
+                      " sel=0x%" PRIx64 " cr_ifa=0x%" PRIx64
+                      " r2=0x%" PRIx64 " r3=0x%" PRIx64 "\n",
+                      env->ip, slot, ps, pte, tar, env->cr_ifa,
+                      env->r[2], env->r[3]);
+        log_count++;
+        last_pte = pte;
+        last_ifa = env->cr_ifa;
+        last_slot = slot;
+    }
     env->itrs[slot].pte = pte;
-    env->itrs[slot].itr = tar;
+    env->itrs[slot].itr = env->cr[21];
     env->itrs[slot].tag = env->cr_ifa & ~((1ULL << ps) - 1);
     env->itrs[slot].pa = (PTE_PPN(pte) << 12) & ~((1ULL << ps) - 1);
     env->itrs[slot].rid = RR_RID(RR(extract64(env->cr_ifa, 61, 3)));
@@ -574,4 +1001,19 @@ void HELPER(ptr_i)(CPUIA64State *env, uint64_t va, uint64_t range)
 {
     uint8_t ps = extract64(range, 24, 6);
     ia64_purge_tc_range(env, false, va, ps);
+}
+
+void HELPER(flushrs)(CPUIA64State *env)
+{
+    /* RSE not modeled yet. */
+}
+
+void HELPER(srlz_d)(CPUIA64State *env)
+{
+    /* Serialization is a no-op in this model. */
+}
+
+void HELPER(srlz_i)(CPUIA64State *env)
+{
+    /* Serialization is a no-op in this model. */
 }

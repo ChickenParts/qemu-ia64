@@ -100,6 +100,9 @@ struct IPFPC {
 
 static uint64_t ipf_boot_ip;
 static uint64_t ipf_boot_r28;
+static uint64_t ipf_kernel_low;
+static uint64_t ipf_kernel_high;
+static uint64_t ipf_kernel_bias;
 
 #define FW_FILENAME "Flash.fd"
 
@@ -144,6 +147,96 @@ struct ia64_boot_param {
 /* Simple layout for boot helper data in guest physical memory. */
 #define IPF_BOOT_PARAM_ADDR  0x0000000000008000ULL
 #define IPF_CMDLINE_ADDR     0x0000000000009000ULL
+#define IPF_EFI_MEMMAP_ADDR  0x0000000000010000ULL
+#define IPF_EFI_SYSTAB_ADDR  0x0000000000011000ULL
+#define IPF_EFI_RUNTIME_ADDR 0x0000000000012000ULL
+#define IPF_EFI_STUBS_ADDR   0x0000000000013000ULL
+
+/* EFI table signatures (see Linux include/linux/efi.h). */
+#define EFI_SYSTEM_TABLE_SIGNATURE      0x5453595320494249ULL /* "IBI SYST" */
+#define EFI_RUNTIME_SERVICES_SIGNATURE  0x0565245354e5552ULL   /* "RUNTSERV" */
+#define EFI_RUNTIME_SERVICES_REVISION   0x00010000U
+
+/* Minimal EFI table header and runtime/system table layouts (64-bit). */
+typedef struct QEMU_PACKED {
+    uint64_t signature;
+    uint32_t revision;
+    uint32_t headersize;
+    uint32_t crc32;
+    uint32_t reserved;
+} IPFEfiTableHdr;
+
+typedef struct QEMU_PACKED {
+    IPFEfiTableHdr hdr;
+    uint64_t get_time;
+    uint64_t set_time;
+    uint64_t get_wakeup_time;
+    uint64_t set_wakeup_time;
+    uint64_t set_virtual_address_map;
+    uint64_t convert_pointer;
+    uint64_t get_variable;
+    uint64_t get_next_variable;
+    uint64_t set_variable;
+    uint64_t get_next_high_mono_count;
+    uint64_t reset_system;
+    uint64_t update_capsule;
+    uint64_t query_capsule_caps;
+    uint64_t query_variable_info;
+} IPFEfiRuntimeServices;
+
+typedef struct QEMU_PACKED {
+    IPFEfiTableHdr hdr;
+    uint64_t fw_vendor;
+    uint32_t fw_revision;
+    uint32_t pad0;
+    uint64_t con_in_handle;
+    uint64_t con_in;
+    uint64_t con_out_handle;
+    uint64_t con_out;
+    uint64_t stderr_handle;
+    uint64_t stderr;
+    uint64_t runtime;
+    uint64_t boottime;
+    uint64_t nr_tables;
+    uint64_t tables;
+} IPFEfiSystemTable;
+
+/*
+ * Minimal EFI memory descriptor (per UEFI spec) as expected by Linux/ia64.
+ * Size must match ia64_boot_param->efi_memdesc_size.
+ */
+struct efi_memory_desc {
+    uint32_t type;
+    uint32_t pad;
+    uint64_t phys_addr;
+    uint64_t virt_addr;
+    uint64_t num_pages;
+    uint64_t attribute;
+};
+
+/* EFI memory types (subset). */
+#define EFI_RESERVED_TYPE            0
+#define EFI_CONVENTIONAL_MEMORY      7
+
+/*
+ * Tiny EFI runtime service stubs (IA-64 machine code) placed in guest memory.
+ *
+ * - ipf_efi_set_virtual_address_map(): returns EFI_SUCCESS (0).
+ * - ipf_efi_stub_unsupported(): returns EFI_UNSUPPORTED (0x8000..0003).
+ *
+ * Generated with ia64-suse-linux-as/ld/objcopy; see /tmp snippets in logs.
+ */
+static const uint8_t ipf_efi_stub_set_virtual_address_map[] = {
+    0x11, 0x40, 0x00, 0x00, 0x00, 0x21, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x80, 0x08, 0x00, 0x84, 0x00,
+};
+
+static const uint8_t ipf_efi_stub_unsupported[] = {
+    0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x31, 0x00, 0x00, 0x68,
+    0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x80, 0x08, 0x00, 0x84, 0x00,
+};
 
 //static uint32_t ipf_to_legacy_io(target_phys_addr_t addr)
 //{
@@ -558,6 +651,24 @@ static void main_cpu_reset(void *opaque)
     if (ipf_boot_r28) {
         s->r[28] = ipf_boot_r28;
     }
+
+    /*
+     * Provide a small VHPT area in region 7 so Linux's early DTLB handler
+     * doesn't try to probe address 0 when rr[0..5] enable VHPT.
+     *
+     * This is a pragmatic "firmware default": VF=1, VRN=7, SIZE=0 (32KB),
+     * BASE=1MB, VE=1.
+     */
+    {
+        uint64_t vhpt_base = 0x0000000000100000ULL;
+        uint64_t pta = 0;
+        pta |= (7ULL << 61);                /* VRN=7 */
+        pta |= ((vhpt_base >> 15) & ((1ULL << 46) - 1)) << 15; /* BASE */
+        pta |= (1ULL << 8);                 /* VF=1 */
+        pta |= (0ULL << 2);                 /* SIZE=0 */
+        pta |= 1ULL;                        /* VE=1 */
+        s->cr[8] = pta;                     /* cr.pta */
+    }
 }
 
 /* Itanium hardware initialisation */
@@ -626,6 +737,9 @@ static void ipf_init(MachineState *machine)
     }
     (void)kernel_low;
     (void)kernel_high;
+    ipf_kernel_low = kernel_low;
+    ipf_kernel_high = kernel_high;
+    ipf_kernel_bias = 0xa000000100000000ULL - kernel_low;
 
     /* Initrd placement (optional). */
     if (initrd_filename) {
@@ -665,11 +779,104 @@ static void ipf_init(MachineState *machine)
     bp.console_info.num_cols = 80;
     bp.console_info.num_rows = 25;
 
-    /* Domain fields left zero; minimal EFI tables not populated. */
+    /*
+     * Minimal EFI memory map:
+     * - Reserve low memory containing boot params + EFI tables.
+     * - Mark the rest as conventional RAM.
+     *
+     * IA-64 Linux expects the EFI system table to live in non-conventional
+     * memory; otherwise it may be overwritten during early memblock init.
+     */
+    {
+        uint64_t reserve_end = 0x0000000000020000ULL; /* 128KB */
+        reserve_end = MIN(reserve_end, machine->ram_size);
+        reserve_end = QEMU_ALIGN_UP(reserve_end, 4096);
+
+        struct efi_memory_desc md[2] = { 0 };
+        md[0].type = EFI_RESERVED_TYPE;
+        md[0].phys_addr = 0;
+        md[0].virt_addr = 0;
+        md[0].num_pages = reserve_end / 4096;
+        md[0].attribute = 0;
+
+        md[1].type = EFI_CONVENTIONAL_MEMORY;
+        md[1].phys_addr = reserve_end;
+        md[1].virt_addr = 0;
+        md[1].num_pages = (machine->ram_size - reserve_end) / 4096;
+        md[1].attribute = 0;
+
+        address_space_write(&address_space_memory, IPF_EFI_MEMMAP_ADDR,
+                            MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)md, sizeof(md));
+        bp.efi_memmap = IPF_EFI_MEMMAP_ADDR;
+        bp.efi_memmap_size = sizeof(md);
+        bp.efi_memdesc_size = sizeof(md[0]);
+        bp.efi_memdesc_version = 1;
+    }
+
+    /*
+     * Minimal EFI system + runtime services tables.
+     *
+     * IA-64 Linux requires a non-NULL EFI system table and will call into
+     * runtime->set_virtual_address_map() during early boot.
+     */
+    {
+        uint64_t stub_ok = IPF_EFI_STUBS_ADDR;
+        uint64_t stub_unsupported = IPF_EFI_STUBS_ADDR +
+                                    sizeof(ipf_efi_stub_set_virtual_address_map);
+
+        address_space_write(&address_space_memory, stub_ok, MEMTXATTRS_UNSPECIFIED,
+                            ipf_efi_stub_set_virtual_address_map,
+                            sizeof(ipf_efi_stub_set_virtual_address_map));
+        address_space_write(&address_space_memory, stub_unsupported, MEMTXATTRS_UNSPECIFIED,
+                            ipf_efi_stub_unsupported,
+                            sizeof(ipf_efi_stub_unsupported));
+
+        IPFEfiRuntimeServices rt = { 0 };
+        rt.hdr.signature = EFI_RUNTIME_SERVICES_SIGNATURE;
+        rt.hdr.revision = EFI_RUNTIME_SERVICES_REVISION;
+        rt.hdr.headersize = sizeof(rt);
+        rt.set_virtual_address_map = stub_ok;
+        rt.get_time = stub_unsupported;
+        rt.set_time = stub_unsupported;
+        rt.get_wakeup_time = stub_unsupported;
+        rt.set_wakeup_time = stub_unsupported;
+        rt.get_variable = stub_unsupported;
+        rt.get_next_variable = stub_unsupported;
+        rt.set_variable = stub_unsupported;
+        rt.get_next_high_mono_count = stub_unsupported;
+        rt.reset_system = stub_unsupported;
+        rt.update_capsule = stub_unsupported;
+        rt.query_capsule_caps = stub_unsupported;
+        rt.query_variable_info = stub_unsupported;
+
+        address_space_write(&address_space_memory, IPF_EFI_RUNTIME_ADDR,
+                            MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)&rt, sizeof(rt));
+
+        IPFEfiSystemTable st = { 0 };
+        st.hdr.signature = EFI_SYSTEM_TABLE_SIGNATURE;
+        st.hdr.revision = 0x00010000;
+        st.hdr.headersize = sizeof(st);
+        st.runtime = IPF_EFI_RUNTIME_ADDR;
+        st.nr_tables = 0;
+        st.tables = 0;
+
+        address_space_write(&address_space_memory, IPF_EFI_SYSTAB_ADDR,
+                            MEMTXATTRS_UNSPECIFIED,
+                            (const uint8_t *)&st, sizeof(st));
+
+        bp.efi_systab = IPF_EFI_SYSTAB_ADDR;
+    }
 
     address_space_write(&address_space_memory, IPF_BOOT_PARAM_ADDR, MEMTXATTRS_UNSPECIFIED,
                         (const uint8_t *)&bp, sizeof(bp));
 
+    /*
+     * Boot in physical mode at the ELF entry point. Linux head.S expects
+     * execution reaches _start() in physical mode and will install TRs before
+     * switching to virtual mode.
+     */
     ipf_boot_ip = kernel_entry;
     ipf_boot_r28 = IPF_BOOT_PARAM_ADDR;
     env->ip = ipf_boot_ip;

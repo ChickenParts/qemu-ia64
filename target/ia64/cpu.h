@@ -13,6 +13,7 @@
 
 typedef struct CPUArchState {
     uint64_t r[128];     /* General Registers */
+    uint64_t banked_r[16]; /* Banked GRs r16..r31 (PSR.BN selects bank) */
     uint64_t f[128][2];  /* Floating Point Registers (82-bit, stored as 2x64 for now) */
     uint64_t pr;         /* Predicate Registers (64 bits) */
     uint64_t b[8];       /* Branch Registers */
@@ -56,6 +57,14 @@ typedef struct CPUArchState {
         uint8_t ps;
         uint8_t valid;
     } itrs[16], dtrs[16], itcs[128], dtcs[128];
+
+    struct IA64RSEFrame {
+        uint64_t r[96];     /* r32..r127 */
+        uint64_t ar_pfs;
+        uint64_t cfm;
+    } *rse_frames;
+    uint32_t rse_depth;
+    uint32_t rse_capacity;
 } CPUIA64State;
 
 struct ArchCPU {
@@ -86,6 +95,20 @@ struct IA64CPUClass {
 #define MMU_USER_IDX 0
 #define MMU_KERNEL_IDX 1
 #define MMU_PHYS_IDX 2
+
+/*
+ * PSR bit positions (LSB indexing, matching the IA-64 SDM and SKI's BitfR()
+ * extraction when converted to LSB indexing):
+ *   RI  bits 42:41
+ *   CPL bits 33:32
+ *   DT  bit 17
+ *   IC  bit 13
+ */
+#define IA64_PSR_IC       (1ULL << 13)
+#define IA64_PSR_IT       (1ULL << 36)
+#define IA64_PSR_DT       (1ULL << 17)
+#define IA64_PSR_BN       (1ULL << 44)
+#define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
 
 #define IA64_EXCP_BASE    0x200
 #define IA64_EXCP_VHPT_TRANS  (IA64_EXCP_BASE + 0x0)

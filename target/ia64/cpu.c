@@ -55,50 +55,25 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     env->ip = 0xFFFF0000ULL;
     env->psr = 0;
     env->cfm = 0;
+    env->pr = 1; /* p0 is always true */
+    memset(env->banked_r, 0, sizeof(env->banked_r));
+
+    g_free(env->rse_frames);
+    env->rse_frames = NULL;
+    env->rse_depth = 0;
+    env->rse_capacity = 0;
 
     /* Disable VHPT until firmware/guest enables it. */
     env->cr[8] = 0; /* PTA.ve = 0 */
-    /* Default region registers: VE=1, PS defaults to 28 (256MB) for region 0. */
+    /* Default region registers: VE=1, PS defaults to 28 (256MB), RID=0. */
     for (int i = 0; i < 8; i++) {
-        env->rr[i] = (uint64_t)(28ULL << 56) | (1ULL << 63);
+        env->rr[i] = (uint64_t)(28ULL << 2) | 1ULL;
     }
-    /* Prefill a large identity mapping so early faults don't spin. */
+    /* TLBs start empty; mappings are seeded in machine reset. */
     memset(env->itlb, 0, sizeof(env->itlb));
     memset(env->dtlb, 0, sizeof(env->dtlb));
-    env->itlb[0].tag = 0;
-    env->itlb[0].pa = 0;
-    env->itlb[0].rid = 0;
-    env->itlb[0].ps = 28; /* 256MB */
-    env->itlb[0].ar = 7;
-    env->itlb[0].pl = 0;
-    env->itlb[0].d = 1;
-    env->itlb[0].a = 1;
-    env->itlb[0].p = 1;
-    env->itlb[0].ed = 0;
-    env->itlb[0].valid = 1;
-    env->dtlb[0] = env->itlb[0];
-    /* Map kernel virtual region with static bias (VA-PA offset). */
-    uint8_t k_ps = 28; /* 256MB page, enough for the kernel text window. */
-    uint64_t bias = 0xa0000000fc000000ULL;
-    uint64_t kva_base = 0xa000000100000000ULL;
-    uint64_t mask = ~((1ULL << k_ps) - 1);
-    uint64_t tag = kva_base & mask;
-    uint64_t pa = tag - bias;
-    env->rr[5] = ((uint64_t)k_ps << 56) | (1ULL << 63);
-    env->itlb[1].tag = tag;
-    env->itlb[1].pa = pa;
-    env->itlb[1].rid = 0;
-    env->itlb[1].ps = k_ps;
-    env->itlb[1].ar = 7;
-    env->itlb[1].pl = 0;
-    env->itlb[1].d = 1;
-    env->itlb[1].a = 1;
-    env->itlb[1].p = 1;
-    env->itlb[1].ed = 0;
-    env->itlb[1].valid = 1;
-    env->dtlb[1] = env->itlb[1];
-    env->itlb_next = 2;
-    env->dtlb_next = 2;
+    env->itlb_next = 0;
+    env->dtlb_next = 0;
 }
 
 static void ia64_cpu_initfn(Object *obj)
@@ -165,7 +140,10 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 
 static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
-    return MMU_KERNEL_IDX;
+    CPUIA64State *env = cpu_env(cs);
+    uint8_t cpl = IA64_PSR_CPL(env->psr);
+    (void)ifetch;
+    return (cpl == 3) ? MMU_USER_IDX : MMU_KERNEL_IDX;
 }
 
 static void ia64_cpu_do_interrupt(CPUState *cs)
@@ -174,20 +152,13 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     CPUIA64State *env = &cpu->env;
     uint32_t vec = cs->exception_index - IA64_EXCP_BASE;
 
-    /* Save interrupted state */
-    env->cr_iip = env->ip;
-    env->cr_ipsr = env->psr;
-    env->cr_ifs = env->cfm;
-
-    /* Basic handler target */
-    if (env->cr_iha) {
-        env->ip = env->cr_iha;
-    } else {
-        uint64_t iva = env->cr[2]; /* cr.iva */
-        env->ip = iva + vec;
-    }
+    /* Basic handler target: always vector via cr.iva (IVT base). */
+    uint64_t iva = env->cr[2]; /* cr.iva */
+    env->ip = iva + vec;
     env->psr &= ~PSR_RI_MASK; /* clear RI */
 }
+
+static vaddr ia64_pointer_wrap(CPUState *cs, int idx, vaddr res, vaddr base);
 
 static const TCGCPUOps ia64_tcg_ops = {
     .initialize = ia64_tcg_init,
@@ -201,7 +172,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .cpu_exec_halt = ia64_cpu_has_work,
     .cpu_exec_interrupt = ia64_cpu_exec_interrupt,
     .cpu_exec_reset = cpu_reset,
-    .pointer_wrap = cpu_pointer_wrap_notreached,
+    .pointer_wrap = ia64_pointer_wrap,
     .do_interrupt = ia64_cpu_do_interrupt,
 #endif
 };
@@ -228,6 +199,15 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->sysemu_ops = &ia64_sysemu_ops;
 #endif
     cc->tcg_ops = &ia64_tcg_ops;
+}
+
+static vaddr ia64_pointer_wrap(CPUState *cs, int idx, vaddr res, vaddr base)
+{
+    (void)cs;
+    (void)idx;
+    (void)base;
+    /* No address truncation/wrapping for IA-64. */
+    return res;
 }
 
 
