@@ -44,6 +44,7 @@
 #include "qemu/error-report.h"
 #include "system/address-spaces.h"
 #include "elf.h"
+#include "hw/ia64/gfw.h"
 #include "target/ia64/cpu.h"
 #include "migration/vmstate.h"
 #include "system/reset.h"
@@ -70,11 +71,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPFMachineState, IPF_MACHINE)
 #pragma GCC diagnostic ignored "-Wunused-function"
 
 /*
- * Firmware layout helpers (simplified from historical ipf emulator code).
+ * Firmware layout helpers.
+ *
+ * NOTE: These addresses are the traditional IA-64 guest firmware window used
+ * by Xen/KVM GFW, and match the location of the IA-64 reset vector
+ * (0xffff0000 == GFW_START + 0x00ff0000).
  */
-#define GFW_SIZE        (16UL << 20)
-#define GFW_START       ((4UL << 30) - GFW_SIZE)
-
 
 struct IPFMachineState {
     MachineState parent;
@@ -659,7 +661,7 @@ static void main_cpu_reset(void *opaque)
      * This is a pragmatic "firmware default": VF=1, VRN=7, SIZE=0 (32KB),
      * BASE=1MB, VE=1.
      */
-    {
+    if (ipf_boot_ip) {
         uint64_t vhpt_base = 0x0000000000100000ULL;
         uint64_t pta = 0;
         pta |= (7ULL << 61);                /* VRN=7 */
@@ -710,18 +712,35 @@ static void ipf_init(MachineState *machine)
     image_size = get_image_size(bios_name);
     if (image_size > 0) {
         int64_t fw_offset = GFW_START + GFW_SIZE - image_size;
-        memory_region_init_rom(&m->rom, NULL, "ipf.rom", GFW_SIZE, &error_fatal);
+        /*
+         * Map the full GFW window as RAM so the VMM can populate the HOB list
+         * and NVRAM areas (as Xen/KVM do) before transferring control.
+         */
+        memory_region_init_ram(&m->rom, NULL, "ipf.gfw", GFW_SIZE, &error_fatal);
         memory_region_add_subregion(sysmem, GFW_START, &m->rom);
         if (load_image_targphys(bios_name, fw_offset, image_size) != image_size) {
             error_report("Unable to load firmware file '%s'", bios_name);
             exit(1);
         }
         DPRINTF("Loaded firmware '%s' at 0x%lx\n", bios_name, fw_offset);
+
+        if (ipf_gfw_build_hob(machine->ram_size, machine->smp.cpus,
+                              NVRAM_START) < 0) {
+            error_report("Unable to build GFW HOB list");
+            exit(1);
+        }
     }
 
     if (!kernel_filename) {
-        error_report("No -kernel specified for IPF");
-        exit(1);
+        if (image_size <= 0) {
+            error_report("IPF requires -kernel or a valid -bios");
+            exit(1);
+        }
+        /* Firmware-only boot: start at reset vector (cpu_reset() default). */
+        ipf_boot_ip = 0;
+        ipf_boot_r28 = 0;
+        qemu_register_reset(main_cpu_reset, cpu);
+        return;
     }
 
     /*
