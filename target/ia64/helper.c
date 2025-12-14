@@ -512,10 +512,10 @@ static uint64_t ia64_dbg_next_call_pc;
 void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
 {
     static int log_count;
-    ia64_dbg_next_call_pc = pc;
     if (log_count >= 32) {
         return;
     }
+    ia64_dbg_next_call_pc = pc;
     if (pc == 0xa0000001000665c0ULL) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "dbg_call pc=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
