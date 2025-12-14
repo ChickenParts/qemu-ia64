@@ -82,6 +82,11 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     env->psr = IA64_PSR_BN;
     env->cfm = 0;
     env->pr = 1; /* p0 is always true */
+    /* Architectural FP constants: f0=0.0, f1=1.0. */
+    env->f[0][0] = 0;
+    env->f[0][1] = 0;
+    env->f[1][0] = 0x8000000000000000ULL;
+    env->f[1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_BIAS);
 
     /* CPUID registers (Linux reads indices 0..4 in cpu_init/identify_cpu). */
     {

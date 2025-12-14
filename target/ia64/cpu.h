@@ -157,6 +157,17 @@ struct IA64CPUClass {
 #define IA64_PSR_BN       (1ULL << 44)
 #define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
 
+/*
+ * Floating-point helper conventions (minimal subset).
+ *
+ * The kernel uses getf.exp as part of ia64_fls().  Hardware returns the
+ * biased exponent (17 bits) plus a sign bit packed in bit 17.
+ */
+#define IA64_FP_EXP_BIAS      0xFFFFU
+#define IA64_FP_EXP_INTEGER   (IA64_FP_EXP_BIAS + 63U)
+#define IA64_FP_SEXP(sign, exp) \
+    ((((uint64_t)(sign) & 1ULL) << 17) | ((uint64_t)(exp) & 0x1FFFFULL))
+
 /* Application Register indices. */
 #define IA64_AR_ITC 44
 

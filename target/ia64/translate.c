@@ -616,9 +616,11 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
 
     if (major == 0x8 && x2a == 0) {
         /* A1 bitwise/add/sub/etc. */
-        /* Immediate sub: sub r1 = imm7, r3  (imm7 is bits 13..19) */
+        /* A3: sub r1 = imm8, r3 (imm7b + sign bit at 36) */
         if (x4 == 0x9 && x2b == 1 && ve == 0) {
-            uint64_t imm7 = r2;
+            uint64_t imm8 = extract64(insn, 13, 7) |
+                            (extract64(insn, 36, 1) << 7);
+            int64_t simm8 = sextract64(imm8, 0, 8);
             TCGv_i64 src = tcg_temp_new_i64();
             if (r3 == 0) {
                 tcg_gen_movi_i64(src, 0);
@@ -626,7 +628,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
                 tcg_gen_mov_i64(src, cpu_r[r3]);
             }
             TCGv_i64 t = tcg_temp_new_i64();
-            tcg_gen_movi_i64(t, imm7);
+            tcg_gen_movi_i64(t, simm8);
             tcg_gen_sub_i64(t, t, src);
             if (r1 != 0) {
                 tcg_gen_mov_i64(cpu_r[r1], t);
@@ -649,7 +651,13 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
                 tcg_gen_andi_i64(t, src, imm);
                 break;
             case 1: /* andcm */
-                tcg_gen_andi_i64(t, src, ~imm);
+                /*
+                 * andcm r1 = imm7, r3 is defined as:
+                 *   r1 = imm7 & ~r3
+                 * (immediate is the first operand, like the reg-reg form).
+                 */
+                tcg_gen_not_i64(t, src);
+                tcg_gen_andi_i64(t, t, imm);
                 break;
             case 2: /* or */
                 tcg_gen_ori_i64(t, src, imm);
@@ -1068,11 +1076,14 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         /*
          * Our simplified RSE model pushes a stacked-register snapshot on
          * br.call.  Some early-kernel PAL stubs return via br.ia b0 instead of
-         * br.ret b0, but architecturally both act as a return control transfer.
-         * Restore the caller window on any branch-to-b0 return path.
+         * br.ret b0, but other sequences use b0 as a normal branch target (e.g.
+         * PAL call paths that set b0 manually).  Unwind only when we can tell
+         * b0 came from a call.
          */
-        if (x6 == 0x21 || b2 == 0) {
+        if (x6 == 0x21) {
             gen_helper_ret_restore(tcg_env);
+        } else if (b2 == 0) {
+            gen_helper_ret_restore_b0(tcg_env);
         }
         TCGv_i64 tgt = tcg_temp_new_i64();
         tcg_gen_andi_i64(tgt, cpu_b[b2], ~0xFULL);
@@ -1081,7 +1092,7 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                                      tcg_constant_i32(ctx->ri),
                                      tcg_constant_i64(insn),
                                      tgt);
-        gen_record_branch(ctx, insn, (x6 == 0x21 || b2 == 0) ? 2 : 1, tgt);
+        gen_record_branch(ctx, insn, (x6 == 0x21) ? 2 : 1, tgt);
         tcg_gen_mov_i64(cpu_pc, tgt);
         gen_set_ri_const(0);
         if (qp == 0) {
@@ -1686,6 +1697,22 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     gen_set_label(skip_label);
                 }
                 break;
+            } else if (x3 == 0 && x6 == 0x34) {
+                /* ptc.e r3 */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 va = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(va, 0);
+                } else {
+                    tcg_gen_mov_i64(va, cpu_r[r3]);
+                }
+                gen_helper_ptc_e(tcg_env, va, tcg_constant_i64(0));
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
             } else if (x3 == 0 && x6 == 0xe) {
                 /* itr.d */
                 uint8_t qp = insn & 0x3f;
@@ -1847,6 +1874,17 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint8_t f2 = r2;
                 TCGv_i64 t = tcg_temp_new_i64();
                 gen_helper_getf_sig(t, tcg_env, tcg_constant_i32(f2));
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], t);
+                }
+                handled = true;
+            }
+            /* M19: getf.exp r1 = f2 (op=4 m=0 x=1 x6=0x1d) */
+            if (!handled && !is_imm && m == 0 && x == 1 && x6 == 0x1d) {
+                uint8_t f2 = r2 & 0x7f;
+                TCGv_i64 t = tcg_temp_new_i64();
+                tcg_gen_ld_i64(t, tcg_env,
+                               offsetof(CPUIA64State, f) + (f2 * 16) + 8);
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t);
                 }
@@ -2087,6 +2125,171 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             }
 
             /*
+             * ldf{e,8,s,d} variants.
+             *
+             * SKI models:
+             * - ldf8 as "dword" load (integer significand, exponent=bias+63)
+             * - ldfe/ldfd/ldfs as float loads with format-specific conversion
+             *
+             * GCC uses ldf8/setf.sig + fnorm + getf.exp to implement ia64_fls().
+             */
+            if (!handled && x == 0) {
+                bool is_ldfe = (x6 == 0x00 || x6 == 0x04 || x6 == 0x08 ||
+                                x6 == 0x0c || x6 == 0x20 || x6 == 0x24);
+                bool is_ldf8 = (x6 == 0x01 || x6 == 0x05 || x6 == 0x09 ||
+                                x6 == 0x0d || x6 == 0x21 || x6 == 0x25);
+                bool is_ldfs = (x6 == 0x02 || x6 == 0x06 || x6 == 0x0a ||
+                                x6 == 0x0e || x6 == 0x22 || x6 == 0x26);
+                bool is_ldfd = (x6 == 0x03 || x6 == 0x07 || x6 == 0x0b ||
+                                x6 == 0x0f || x6 == 0x23 || x6 == 0x27);
+
+                if (is_ldfe || is_ldf8 || is_ldfs || is_ldfd) {
+                    uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
+                    uint8_t r2 = extract64(insn, 13, 7);
+                    uint8_t r3 = extract64(insn, 20, 7);
+
+                    TCGv_i64 addr = tcg_temp_new_i64();
+                    if (r3 == 0) {
+                        tcg_gen_movi_i64(addr, 0);
+                    } else {
+                        tcg_gen_mov_i64(addr, cpu_r[r3]);
+                    }
+
+                    TCGv_i64 mant = tcg_temp_new_i64();
+                    TCGv_i64 expw = tcg_temp_new_i64();
+                    tcg_gen_movi_i64(mant, 0);
+                    tcg_gen_movi_i64(expw, 0);
+
+                    if (is_ldf8) {
+                        /* dword -> FP significand */
+                        tcg_gen_qemu_ld_i64(mant, addr, ctx->mem_idx,
+                                            MO_TE | MO_64);
+                        tcg_gen_movi_i64(expw, IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER));
+                    } else if (is_ldfe) {
+                        /*
+                         * ext (80-bit) in 16 bytes:
+                         * - low 64: mantissa (explicit integer bit)
+                         * - high: sign at bit48, exponent(15) at bits63:49
+                         */
+                        TCGv_i64 hi = tcg_temp_new_i64();
+                        tcg_gen_qemu_ld_i64(mant, addr, ctx->mem_idx,
+                                            MO_TE | MO_64);
+                        TCGv_i64 addr2 = tcg_temp_new_i64();
+                        tcg_gen_addi_i64(addr2, addr, 8);
+                        tcg_gen_qemu_ld_i64(hi, addr2, ctx->mem_idx,
+                                            MO_TE | MO_64);
+
+                        TCGv_i64 sign = tcg_temp_new_i64();
+                        TCGv_i64 exp15 = tcg_temp_new_i64();
+                        tcg_gen_shri_i64(sign, hi, 31);    /* bit48 -> bit17 */
+                        tcg_gen_andi_i64(sign, sign, 0x20000);
+                        tcg_gen_shri_i64(exp15, hi, 49);
+                        tcg_gen_andi_i64(exp15, exp15, 0x7fff);
+
+                        TCGv_i64 exp17 = tcg_temp_new_i64();
+                        tcg_gen_addi_i64(exp17, exp15, 0xc000);
+                        TCGLabel *have_exp = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_NE, exp15, 0, have_exp);
+                        tcg_gen_movi_i64(exp17, 0);
+                        gen_set_label(have_exp);
+
+                        tcg_gen_or_i64(expw, sign, exp17);
+                    } else if (is_ldfs) {
+                        /* IEEE single (32-bit) */
+                        TCGv_i64 bits32 = tcg_temp_new_i64();
+                        tcg_gen_qemu_ld_i64(bits32, addr, ctx->mem_idx,
+                                            MO_TE | MO_UL);
+                        tcg_gen_andi_i64(bits32, bits32, 0xffffffffULL);
+
+                        TCGv_i64 sign = tcg_temp_new_i64();
+                        TCGv_i64 exp8 = tcg_temp_new_i64();
+                        TCGv_i64 frac = tcg_temp_new_i64();
+                        tcg_gen_shri_i64(sign, bits32, 14); /* bit31 -> bit17 */
+                        tcg_gen_andi_i64(sign, sign, 0x20000);
+                        tcg_gen_shri_i64(exp8, bits32, 23);
+                        tcg_gen_andi_i64(exp8, exp8, 0xff);
+                        tcg_gen_andi_i64(frac, bits32, 0x7fffff);
+
+                        TCGv_i64 mant_tmp = tcg_temp_new_i64();
+                        TCGv_i64 exp17 = tcg_temp_new_i64();
+                        tcg_gen_mov_i64(mant_tmp, frac);
+                        tcg_gen_addi_i64(exp17, exp8, 0xff80);
+
+                        TCGLabel *denorm = gen_new_label();
+                        TCGLabel *ldfs_done = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_EQ, exp8, 0, denorm);
+                        tcg_gen_ori_i64(mant_tmp, mant_tmp, 1ULL << 23);
+                        tcg_gen_shli_i64(mant_tmp, mant_tmp, 40);
+                        tcg_gen_or_i64(expw, sign, exp17);
+                        tcg_gen_mov_i64(mant, mant_tmp);
+                        tcg_gen_br(ldfs_done);
+                        gen_set_label(denorm);
+                        tcg_gen_shli_i64(mant_tmp, mant_tmp, 40);
+                        tcg_gen_mov_i64(mant, mant_tmp);
+                        tcg_gen_or_i64(expw, sign, tcg_constant_i64(0));
+                        gen_set_label(ldfs_done);
+                    } else {
+                        /* IEEE double (64-bit) */
+                        TCGv_i64 bits64 = tcg_temp_new_i64();
+                        tcg_gen_qemu_ld_i64(bits64, addr, ctx->mem_idx,
+                                            MO_TE | MO_64);
+
+                        TCGv_i64 sign = tcg_temp_new_i64();
+                        TCGv_i64 exp11 = tcg_temp_new_i64();
+                        TCGv_i64 frac = tcg_temp_new_i64();
+                        tcg_gen_shri_i64(sign, bits64, 46); /* bit63 -> bit17 */
+                        tcg_gen_andi_i64(sign, sign, 0x20000);
+                        tcg_gen_shri_i64(exp11, bits64, 52);
+                        tcg_gen_andi_i64(exp11, exp11, 0x7ff);
+                        tcg_gen_andi_i64(frac, bits64, 0x000fffffffffffffULL);
+
+                        TCGv_i64 mant_tmp = tcg_temp_new_i64();
+                        TCGv_i64 exp17 = tcg_temp_new_i64();
+                        tcg_gen_mov_i64(mant_tmp, frac);
+                        tcg_gen_addi_i64(exp17, exp11, 0xfc00);
+
+                        TCGLabel *denorm = gen_new_label();
+                        TCGLabel *ldfd_done = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_EQ, exp11, 0, denorm);
+                        tcg_gen_ori_i64(mant_tmp, mant_tmp, 1ULL << 52);
+                        tcg_gen_shli_i64(mant_tmp, mant_tmp, 11);
+                        tcg_gen_or_i64(expw, sign, exp17);
+                        tcg_gen_mov_i64(mant, mant_tmp);
+                        tcg_gen_br(ldfd_done);
+                        gen_set_label(denorm);
+                        tcg_gen_shli_i64(mant_tmp, mant_tmp, 11);
+                        tcg_gen_mov_i64(mant, mant_tmp);
+                        tcg_gen_or_i64(expw, sign, tcg_constant_i64(0));
+                        gen_set_label(ldfd_done);
+                    }
+
+                    if (f1 > 1) {
+                        tcg_gen_st_i64(mant, tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
+                        tcg_gen_st_i64(expw, tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                    }
+
+                    if (major == 0x6 && m == 1) {
+                        /* M7: f1 = [r3], r2 (post-increment by r2). */
+                        if (r3 != 0 && r2 != 0) {
+                            tcg_gen_add_i64(cpu_r[r3], cpu_r[r3], cpu_r[r2]);
+                        }
+                    } else if (major == 0x7) {
+                        /* M8: f1 = [r3], imm9 (post-increment by imm9). */
+                        int64_t imm9 = sextract64((uint64_t)r2 |
+                                                  ((uint64_t)x << 7) |
+                                                  ((uint64_t)m << 8),
+                                                  0, 9);
+                        if (r3 != 0 && imm9 != 0) {
+                            tcg_gen_addi_i64(cpu_r[r3], cpu_r[r3], imm9);
+                        }
+                    }
+                    handled = true;
+                }
+            }
+
+            /*
              * stf8 [r3]=f2{,imm8} (seen in memset/entry save areas)
              * - major=6/7, x3=6, x6=0x31
              * - r3 is base address
@@ -2151,7 +2354,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 tcg_gen_addi_i64(addr2, addr, 8);
                 tcg_gen_qemu_ld_i64(hi, addr2, ctx->mem_idx, MO_TE | MO_64);
 
-                if (f1 != 0) {
+                if (f1 > 1) {
                     tcg_gen_st_i64(lo, tcg_env,
                                    offsetof(CPUIA64State, f) + (f1 * 16) + 0);
                     tcg_gen_st_i64(hi, tcg_env,
@@ -3078,12 +3281,83 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_or_i64(res, mant, se);
                     }
 
-                    if (f1 != 0) {
+                    if (f1 > 1) {
                         tcg_gen_st_i64(res, tcg_env,
                                        offsetof(CPUIA64State, f) + (f1 * 16) + 0);
                         tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
                                        offsetof(CPUIA64State, f) + (f1 * 16) + 8);
                     }
+                    handled = true;
+                }
+            }
+
+            /*
+             * fnorm.*: normalize an unnormalized significand.
+             *
+             * GCC uses ldf8/setf.sig (dword -> FP register) + fnorm + getf.exp
+             * to implement ia64_fls().  Per SKI, fnorm shares the fma encoding
+             * when f4==f1 (1.0) and f2==f0 (0.0).
+             */
+            if (!handled && f_major >= 0x8 && f_major <= 0xD) {
+                uint8_t x = extract64(insn, 36, 1);
+                uint8_t f4 = extract64(insn, 27, 7) & 0x7f;
+                uint8_t f3 = extract64(insn, 20, 7) & 0x7f;
+                uint8_t f2 = extract64(insn, 13, 7) & 0x7f;
+                uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
+
+                if (x == 0 && f4 == 1 && f2 == 0) {
+                    TCGv_i64 mant = tcg_temp_new_i64();
+                    TCGv_i64 expw = tcg_temp_new_i64();
+                    tcg_gen_ld_i64(mant, tcg_env,
+                                   offsetof(CPUIA64State, f) + (f3 * 16) + 0);
+                    tcg_gen_ld_i64(expw, tcg_env,
+                                   offsetof(CPUIA64State, f) + (f3 * 16) + 8);
+
+                    TCGv_i64 sign = tcg_temp_new_i64();
+                    TCGv_i64 exp = tcg_temp_new_i64();
+                    tcg_gen_andi_i64(sign, expw, 0x20000);
+                    tcg_gen_andi_i64(exp, expw, 0x1ffff);
+
+                    /* Default exponent for integer significands if unset. */
+                    TCGLabel *have_exp = gen_new_label();
+                    tcg_gen_brcondi_i64(TCG_COND_NE, exp, 0, have_exp);
+                    tcg_gen_movi_i64(exp, IA64_FP_EXP_INTEGER);
+                    gen_set_label(have_exp);
+
+                    TCGLabel *zero = gen_new_label();
+                    TCGLabel *done = gen_new_label();
+                    tcg_gen_brcondi_i64(TCG_COND_EQ, mant, 0, zero);
+
+                    /* Normalize mantissa and adjust exponent. */
+                    TCGv_i64 lz = tcg_temp_new_i64();
+                    tcg_gen_clzi_i64(lz, mant, 64);
+
+                    TCGv_i64 mant_norm = tcg_temp_new_i64();
+                    tcg_gen_shl_i64(mant_norm, mant, lz);
+
+                    TCGv_i64 exp_norm = tcg_temp_new_i64();
+                    tcg_gen_sub_i64(exp_norm, exp, lz);
+                    tcg_gen_andi_i64(exp_norm, exp_norm, 0x1ffff);
+
+                    TCGv_i64 expw_norm = tcg_temp_new_i64();
+                    tcg_gen_or_i64(expw_norm, sign, exp_norm);
+
+                    if (f1 > 1) {
+                        tcg_gen_st_i64(mant_norm, tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
+                        tcg_gen_st_i64(expw_norm, tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                    }
+                    tcg_gen_br(done);
+
+                    gen_set_label(zero);
+                    if (f1 > 1) {
+                        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
+                        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                    }
+                    gen_set_label(done);
                     handled = true;
                 }
             }
@@ -3428,6 +3702,11 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
                              tcg_constant_i64(ctx->base.pc_next),
                              tcg_constant_i32(ctx->ri));
     }
+    if (ctx->base.pc_next == 0xa00000010001a8c0ULL && ctx->ri == 2) { /* ia64_pal_default_handler */
+        gen_helper_dbg_probe(tcg_env,
+                             tcg_constant_i64(ctx->base.pc_next),
+                             tcg_constant_i32(ctx->ri));
+    }
 
     /* Linux/ia64 console/EFI bringup probes (vmlinux-ia64-main). */
     if (ctx->base.pc_next == 0xa00000010151a5e0ULL && ctx->ri == 0) { /* efi_init */
@@ -3453,6 +3732,11 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
                              tcg_constant_i32(ctx->ri));
     }
     if (ctx->base.pc_next == 0xa000000100074a00ULL && ctx->ri == 0) { /* warn_slowpath_fmt */
+        gen_helper_dbg_probe(tcg_env,
+                             tcg_constant_i64(ctx->base.pc_next),
+                             tcg_constant_i32(ctx->ri));
+    }
+    if (ctx->base.pc_next == 0xa00000010002de00ULL && ctx->ri == 0) { /* die */
         gen_helper_dbg_probe(tcg_env,
                              tcg_constant_i64(ctx->base.pc_next),
                              tcg_constant_i32(ctx->ri));

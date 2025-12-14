@@ -298,6 +298,20 @@ static uint64_t ia64_translate_tlb(CPUIA64State *env, bool is_data, uint64_t va,
 uint64_t HELPER(tpa)(CPUIA64State *env, uint64_t va)
 {
     uint8_t rr_idx = extract64(va, 61, 3);
+    /*
+     * Linux uses:
+     *  - region 7 (bit60==0) as a direct mapping of physical memory (__va()),
+     *  - region 6 as an identity-mapped uncached I/O region.
+     *
+     * These do not require a translation structure lookup.
+     */
+    if (rr_idx == 7 && extract64(va, 60, 1) == 0) {
+        return va & ((1ULL << 61) - 1);
+    }
+    if (rr_idx == 6) {
+        return va & ((1ULL << 61) - 1);
+    }
+
     uint64_t rr = env->rr[rr_idx];
     uint32_t rid = RR_RID(rr);
     bool hit = false;
@@ -526,11 +540,17 @@ void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
 void HELPER(setf_sig)(CPUIA64State *env, uint32_t f1, uint64_t val)
 {
     f1 &= 0x7f;
-    if (f1 == 0) {
+    if (f1 <= 1) {
         return;
     }
     env->f[f1][0] = val;
-    env->f[f1][1] = 0;
+    /*
+     * Match SKI's dword2freg(): treat the 64-bit payload as an unnormalized
+     * significand with an initial exponent of bias+63.
+     *
+     * fnorm + getf.exp then yields bias+msb_index, which Linux uses for fls().
+     */
+    env->f[f1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER);
 }
 
 uint64_t HELPER(getf_sig)(CPUIA64State *env, uint32_t f2)
@@ -546,6 +566,9 @@ void HELPER(xma_l)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     f2 &= 0x7f;
     f3 &= 0x7f;
     f4 &= 0x7f;
+    if (f1 <= 1) {
+        return;
+    }
     __uint128_t prod = (__uint128_t)env->f[f3][0] * (__uint128_t)env->f[f4][0];
     __uint128_t sum = prod + (__uint128_t)env->f[f2][0];
     env->f[f1][0] = (uint64_t)sum;
@@ -559,6 +582,9 @@ void HELPER(xma_h)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     f2 &= 0x7f;
     f3 &= 0x7f;
     f4 &= 0x7f;
+    if (f1 <= 1) {
+        return;
+    }
     __int128 prod = (__int128)(int64_t)env->f[f3][0] * (__int128)(int64_t)env->f[f4][0];
     __int128 sum = prod + (__int128)(int64_t)env->f[f2][0];
     env->f[f1][0] = (uint64_t)(sum >> 64);
@@ -572,6 +598,9 @@ void HELPER(xma_hu)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     f2 &= 0x7f;
     f3 &= 0x7f;
     f4 &= 0x7f;
+    if (f1 <= 1) {
+        return;
+    }
     __uint128_t prod = (__uint128_t)env->f[f3][0] * (__uint128_t)env->f[f4][0];
     __uint128_t sum = prod + (__uint128_t)env->f[f2][0];
     env->f[f1][0] = (uint64_t)(sum >> 64);
@@ -688,6 +717,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     static DbgProbeCount probes[64];
     static uint32_t nprobes;
 
+    bool abort_panic = false;
     uint32_t idx;
     for (idx = 0; idx < nprobes; idx++) {
         if (probes[idx].pc == pc) {
@@ -724,18 +754,57 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
                   " pta=%016" PRIx64 " itir=%016" PRIx64
                   " ar.k6=%016" PRIx64
-                  " r1=%016" PRIx64 " r12=%016" PRIx64 " r14=%016" PRIx64
+                  " r1=%016" PRIx64 " r8=%016" PRIx64 " r9=%016" PRIx64
+                  " r10=%016" PRIx64 " r11=%016" PRIx64
+                  " r12=%016" PRIx64 " r14=%016" PRIx64
                   " r16=%016" PRIx64 " r17=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
                   " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
-                  " b6=%016" PRIx64 " r45=%016" PRIx64 "\n",
+                  " b0=%016" PRIx64 " b6=%016" PRIx64 " r45=%016" PRIx64 "\n",
                   pc, ri,
                   env->psr, env->cfm, env->rse_depth,
                   env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
                   env->ar[6],
-                  env->r[1], env->r[12], env->r[14], env->r[16], env->r[17],
+                  env->r[1], env->r[8], env->r[9], env->r[10], env->r[11],
+                  env->r[12], env->r[14], env->r[16], env->r[17],
                   env->r[32], env->r[33], env->r[34], env->r[35],
-                  env->r[36], env->r[37], env->b[6], env->r[45]);
+                  env->r[36], env->r[37], env->b[0], env->b[6], env->r[45]);
+
+    if (pc == 0xa000000100073da0ULL || pc == 0xa000000100073620ULL) {
+        static int abort_on_panic = -1;
+        if (abort_on_panic == -1) {
+            const char *s = getenv("QEMU_IA64_ABORT_PANIC");
+            abort_on_panic = (s && *s) ? 1 : 0;
+        }
+        abort_panic = abort_on_panic;
+
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "panic_trace pc=%016" PRIx64 " ri=%u ip=%016" PRIx64
+                      " psr=%016" PRIx64 " cfm=%016" PRIx64 "\n",
+                      pc, ri, env->ip, env->psr, env->cfm);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "panic_trace last_br from=%016" PRIx64 " to=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                      env->last_branch_from, env->last_branch_to,
+                      env->last_branch_kind, env->last_branch_insn);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "panic_trace last_b0_write pc=%016" PRIx64 " val=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                      env->last_b0_write_pc, env->last_b0_write_val,
+                      env->last_b0_write_kind, env->last_b0_write_insn);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "panic_trace prev_b0_write pc=%016" PRIx64 " val=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                      env->prev_b0_write_pc, env->prev_b0_write_val,
+                      env->prev_b0_write_kind, env->prev_b0_write_insn);
+        for (int i = 0; i < 16; i++) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "panic_trace b0_trace[%02d] pc=%016" PRIx64 " val=%016" PRIx64
+                          " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                          i, env->b0_trace_pc[i], env->b0_trace_val[i],
+                          env->b0_trace_kind[i], env->b0_trace_insn[i]);
+        }
+    }
 
     if (pc == 0xa000000101197f30ULL) {
         uint64_t ptr = env->r[32];
@@ -748,6 +817,27 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                       " bytes[-4..+3]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
                       ptr, env->r[15],
                       b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+    }
+
+    if (pc == 0xa00000010002de00ULL) { /* die() */
+        uint64_t str = env->r[32];
+        char msg[160];
+        size_t n = 0;
+        for (; n + 1 < sizeof(msg); n++) {
+            uint8_t c = cpu_ldub_data(env, str + n);
+            if (c == 0) {
+                break;
+            }
+            if (c < 0x20 || c > 0x7e) {
+                msg[n] = '.';
+            } else {
+                msg[n] = (char)c;
+            }
+        }
+        msg[n] = '\0';
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "die_str pc=%016" PRIx64 " str=%016" PRIx64 " \"%s\"\n",
+                      pc, str, msg);
     }
 
     if (pc == 0xa000000100073da0ULL || pc == 0xa000000100073620ULL) {
@@ -769,6 +859,12 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "panic_fmt pc=%016" PRIx64 " fmt=%016" PRIx64 " \"%s\"\n",
                       pc, fmt, msg);
+
+        if (abort_panic) {
+            CPUState *cs = env_cpu(env);
+            cpu_restore_state(cs, GETPC());
+            cpu_abort(cs, "IA64: aborting on guest panic pc=%016" PRIx64, pc);
+        }
     }
 }
 
@@ -877,6 +973,31 @@ void HELPER(ret_restore)(CPUIA64State *env)
         log_count++;
     }
     (void)ia64_rse_pop_window(env);
+}
+
+void HELPER(ret_restore_b0)(CPUIA64State *env)
+{
+    /*
+     * Some code sequences (notably PAL call paths) use "br.ia b0" as a return
+     * control transfer without a matching br.call that created a new stacked
+     * register frame.  Only unwind our modeled RSE window if b0 was last
+     * written by br.call/brl.call.
+     */
+    uint8_t kind = env->last_b0_write_kind & 0xff;
+    bool do_pop = (kind == 1);
+    static int log_count;
+
+    if (log_count < 64) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ret_restore_b0 ip=0x%" PRIx64 " b0=0x%" PRIx64
+                      " last_b0_kind=%u depth=%u pop=%d\n",
+                      env->ip, env->b[0], kind, env->rse_depth, do_pop);
+        log_count++;
+    }
+
+    if (do_pop) {
+        (void)ia64_rse_pop_window(env);
+    }
 }
 
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
@@ -1573,7 +1694,22 @@ void HELPER(ptc_l)(CPUIA64State *env, uint64_t va, uint64_t tar)
 
 void HELPER(ptc_e)(CPUIA64State *env, uint64_t va, uint64_t tar)
 {
-    ia64_ptc(env, false, false, false, va, tar);
+    /*
+     * ptc.e: entry purge.
+     *
+     * SKI models ptc.e as an overpurge of the translation caches (flush all
+     * ITC/DTC entries).  This is sufficient for Linux local_flush_tlb_all(),
+     * which uses ptc.e in a loop based on PAL ptce_* parameters.
+     */
+    (void)va;
+    (void)tar;
+    for (int i = 0; i < 128; i++) {
+        env->itlb[i].valid = 0;
+        env->dtlb[i].valid = 0;
+        env->itcs[i].valid = 0;
+        env->dtcs[i].valid = 0;
+    }
+    tlb_flush(env_cpu(env));
 }
 
 void HELPER(ptc_g)(CPUIA64State *env, uint64_t va, uint64_t tar)
