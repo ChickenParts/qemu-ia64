@@ -73,6 +73,11 @@
 #define IA64_RSC_LOADRS_SHIFT 16
 #define IA64_RSC_LOADRS_MASK  0x3fffULL
 
+/* Linux/ia64 canonical per-cpu range: [-PERCPU_PAGE_SIZE, 0). */
+#define IA64_PERCPU_VA_BASE   0xfffffffffffc0000ULL
+#define IA64_PERCPU_PAGE_SIZE (1ULL << 18) /* 256KiB (PERCPU_PAGE_SHIFT=18) */
+#define IA64_KR_PER_CPU_DATA  3            /* ar.k3 */
+
 static inline uint64_t ia64_rsc_get_loadrs(uint64_t rsc)
 {
     return (rsc >> IA64_RSC_LOADRS_SHIFT) & IA64_RSC_LOADRS_MASK;
@@ -124,9 +129,88 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     static uint64_t last_ip;
     static uint32_t last_vec;
     static int log_count;
+    static uint32_t break_log_count;
 
     if (retaddr) {
         cpu_restore_state(cs, retaddr);
+    }
+
+    /*
+     * Debug helper: repair_env_string() BUG() in init/main.c is usually a
+     * symptom of command-line parsing seeing unexpected memory contents.
+     * When a BREAK is taken, opportunistically dump the current param/value
+     * pointers (r32/r33) when they are in the region-7 direct map, so the
+     * caller can see what string triggered the BUG.
+     */
+    if (vec == IA64_VEC_BREAK && break_log_count < 16) {
+        const char *s = getenv("QEMU_IA64_LOG_BREAK_STR");
+        if (s && *s) {
+            uint64_t param_va = env->r[32];
+            uint64_t val_va = env->r[33];
+            bool param_direct = (extract64(param_va, 61, 3) == 7 &&
+                                 extract64(param_va, 60, 1) == 0);
+            bool val_direct = (!val_va) || (extract64(val_va, 61, 3) == 7 &&
+                                            extract64(val_va, 60, 1) == 0);
+            if (param_direct && val_direct) {
+                uint64_t param_pa = param_va & ((1ULL << 61) - 1);
+                uint64_t val_pa = val_va ? (val_va & ((1ULL << 61) - 1)) : 0;
+                char pbuf[128];
+                char vbuf[128];
+                size_t plen = sizeof(pbuf) - 1, vlen = sizeof(vbuf) - 1;
+
+                MemTxResult r1 = address_space_read(&address_space_memory, param_pa,
+                                                    MEMTXATTRS_UNSPECIFIED,
+                                                    (uint8_t *)pbuf, sizeof(pbuf));
+                if (r1 == MEMTX_OK) {
+                    for (size_t i = 0; i + 1 < sizeof(pbuf); i++) {
+                        if (pbuf[i] == '\0') {
+                            plen = i;
+                            break;
+                        }
+                        if ((uint8_t)pbuf[i] < 0x20 || (uint8_t)pbuf[i] > 0x7e) {
+                            pbuf[i] = '.';
+                        }
+                    }
+                    pbuf[MIN(plen, sizeof(pbuf) - 1)] = '\0';
+                } else {
+                    strcpy(pbuf, "<unreadable>");
+                }
+
+                if (val_va) {
+                    MemTxResult r2 = address_space_read(&address_space_memory, val_pa,
+                                                        MEMTXATTRS_UNSPECIFIED,
+                                                        (uint8_t *)vbuf, sizeof(vbuf));
+                    if (r2 == MEMTX_OK) {
+                        for (size_t i = 0; i + 1 < sizeof(vbuf); i++) {
+                            if (vbuf[i] == '\0') {
+                                vlen = i;
+                                break;
+                            }
+                            if ((uint8_t)vbuf[i] < 0x20 || (uint8_t)vbuf[i] > 0x7e) {
+                                vbuf[i] = '.';
+                            }
+                        }
+                        vbuf[MIN(vlen, sizeof(vbuf) - 1)] = '\0';
+                    } else {
+                        strcpy(vbuf, "<unreadable>");
+                    }
+                } else {
+                    strcpy(vbuf, "<null>");
+                }
+
+                int64_t diff = (int64_t)(val_va - param_va);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64 break iim=0x%" PRIx64 " ip=%016" PRIx64
+                              " r32(param)=%016" PRIx64 "(pa=%016" PRIx64 ") \"%s\""
+                              " r33(val)=%016" PRIx64 "(pa=%016" PRIx64 ") \"%s\""
+                              " diff=%" PRId64 " plen=%zu expect={%zu,%zu}\n",
+                              iim, env->ip,
+                              param_va, param_pa, pbuf,
+                              val_va, val_pa, vbuf,
+                              diff, plen, plen + 1, plen + 2);
+                break_log_count++;
+            }
+        }
     }
 
     /* Optional fail-fast: stack pointer should never point into kernel .text. */
@@ -621,6 +705,36 @@ void HELPER(xma_hu)(CPUIA64State *env, uint32_t f1, uint32_t f3,
  * Emulate the architectural effect directly so that the kernel and runtime
  * can make forward progress while the full FP unit is brought up.
  */
+static bool ia64_divhelp_log_enabled(void)
+{
+    static int inited;
+    static bool enabled;
+
+    if (!inited) {
+        const char *s = getenv("QEMU_IA64_DIVHELP_LOG");
+        enabled = (s && *s);
+        inited = 1;
+    }
+    return enabled;
+}
+
+static void ia64_divhelp_log(CPUIA64State *env, const char *name,
+                             uint64_t a, uint64_t b, uint64_t res)
+{
+    static uint32_t count;
+
+    if (!ia64_divhelp_log_enabled()) {
+        return;
+    }
+    if (count++ >= 64) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "ia64: divhelp %s ip=%016" PRIx64
+                  " a=%016" PRIx64 " b=%016" PRIx64 " -> %016" PRIx64 "\n",
+                  name, env ? env->ip : 0, a, b, res);
+}
+
 uint64_t HELPER(divdi3)(CPUIA64State *env, uint64_t a, uint64_t b)
 {
     (void)env;
@@ -629,7 +743,9 @@ uint64_t HELPER(divdi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (sb == 0) {
         return 0;
     }
-    return (uint64_t)(sa / sb);
+    uint64_t res = (uint64_t)(sa / sb);
+    ia64_divhelp_log(env, "divdi3", a, b, res);
+    return res;
 }
 
 uint64_t HELPER(udivdi3)(CPUIA64State *env, uint64_t a, uint64_t b)
@@ -638,7 +754,9 @@ uint64_t HELPER(udivdi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (b == 0) {
         return 0;
     }
-    return a / b;
+    uint64_t res = a / b;
+    ia64_divhelp_log(env, "udivdi3", a, b, res);
+    return res;
 }
 
 uint64_t HELPER(moddi3)(CPUIA64State *env, uint64_t a, uint64_t b)
@@ -649,7 +767,9 @@ uint64_t HELPER(moddi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (sb == 0) {
         return 0;
     }
-    return (uint64_t)(sa % sb);
+    uint64_t res = (uint64_t)(sa % sb);
+    ia64_divhelp_log(env, "moddi3", a, b, res);
+    return res;
 }
 
 uint64_t HELPER(umoddi3)(CPUIA64State *env, uint64_t a, uint64_t b)
@@ -658,7 +778,9 @@ uint64_t HELPER(umoddi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (b == 0) {
         return 0;
     }
-    return a % b;
+    uint64_t res = a % b;
+    ia64_divhelp_log(env, "umoddi3", a, b, res);
+    return res;
 }
 
 uint64_t HELPER(divsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
@@ -669,7 +791,9 @@ uint64_t HELPER(divsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (sb == 0) {
         return 0;
     }
-    return (uint64_t)(int64_t)(sa / sb);
+    uint64_t res = (uint64_t)(int64_t)(sa / sb);
+    ia64_divhelp_log(env, "divsi3", a, b, res);
+    return res;
 }
 
 uint64_t HELPER(udivsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
@@ -680,7 +804,9 @@ uint64_t HELPER(udivsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (ub == 0) {
         return 0;
     }
-    return (uint64_t)(ua / ub);
+    uint64_t res = (uint64_t)(ua / ub);
+    ia64_divhelp_log(env, "udivsi3", a, b, res);
+    return res;
 }
 
 uint64_t HELPER(modsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
@@ -691,7 +817,9 @@ uint64_t HELPER(modsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (sb == 0) {
         return 0;
     }
-    return (uint64_t)(int64_t)(sa % sb);
+    uint64_t res = (uint64_t)(int64_t)(sa % sb);
+    ia64_divhelp_log(env, "modsi3", a, b, res);
+    return res;
 }
 
 uint64_t HELPER(umodsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
@@ -702,7 +830,9 @@ uint64_t HELPER(umodsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
     if (ub == 0) {
         return 0;
     }
-    return (uint64_t)(ua % ub);
+    uint64_t res = (uint64_t)(ua % ub);
+    ia64_divhelp_log(env, "umodsi3", a, b, res);
+    return res;
 }
 
 void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
@@ -757,7 +887,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64 " depth=%u"
                   " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
                   " pta=%016" PRIx64 " itir=%016" PRIx64
-                  " ar.k6=%016" PRIx64
+                  " ar.k6=%016" PRIx64 " ar.lc=%016" PRIx64 " ar.ec=%016" PRIx64
                   " r0=%016" PRIx64 " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
                   " r8=%016" PRIx64 " r9=%016" PRIx64
                   " r10=%016" PRIx64 " r11=%016" PRIx64
@@ -773,7 +903,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   pc, ri,
                   env->psr, env->cfm, env->pr, env->rse_depth,
                   env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
-                  env->ar[6],
+                  env->ar[6], env->ar[65], env->ar[66],
                   env->r[0], env->r[1], env->r[2], env->r[3],
                   env->r[8], env->r[9], env->r[10], env->r[11],
                   env->r[12], env->r[14], env->r[15], env->r[43],
@@ -1071,6 +1201,35 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     bool is_fetch = (access_type == MMU_INST_FETCH);
 
     /*
+     * Canonical per-cpu region mapping.
+     *
+     * Linux/ia64 keeps per-cpu variables at a fixed canonical virtual range
+     * (-PERCPU_PAGE_SIZE..0).  The OS maintains a runtime per-cpu area
+     * elsewhere and exposes it via ar.k3 (IA64_KR_PER_CPU_DATA) so that
+     * physical addresses can be computed as:
+     *
+     *   phys = ar.k3 + &per_cpu_var
+     *
+     * The canonical virtual mapping is normally established by IVT handlers,
+     * but for bringup we map it directly to the current per-cpu area so that
+     * local_cpu_data accesses see the initialized runtime values.
+     */
+    if ((uint64_t)address >= IA64_PERCPU_VA_BASE) {
+        uint64_t k3 = env->ar[IA64_KR_PER_CPU_DATA];
+        if (k3) {
+            hwaddr phys_addr = (uint64_t)address + k3;
+            int prot = PAGE_READ | PAGE_WRITE;
+            if (is_fetch) {
+                prot |= PAGE_EXEC;
+            }
+            tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                         phys_addr & TARGET_PAGE_MASK, prot,
+                         mmu_idx, TARGET_PAGE_SIZE);
+            return true;
+        }
+    }
+
+    /*
      * Linux uses region 7 addresses (__va()) as a direct map of physical memory.
      * However, region 7 also contains other (non-identity) kernel addresses
      * such as the negative percpu range. Only treat region 7 with bit60==0
@@ -1113,28 +1272,6 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                      phys_addr & TARGET_PAGE_MASK, prot,
                      mmu_idx, TARGET_PAGE_SIZE);
         return true;
-    }
-
-    /*
-     * Linux IA-64 kernels may place the percpu PT_LOAD segment in region 7
-     * high addresses (e.g. 0xfffffffffffc0000). If present, map it directly
-     * to the segment's physical address to avoid early-boot fault recursion
-     * before the kernel installs its final translation structures.
-     */
-    if (env->percpu_size) {
-        uint64_t va = env->percpu_va_base;
-        uint64_t sz = env->percpu_size;
-        if (address >= va && address < va + sz) {
-            hwaddr phys_addr = env->percpu_pa_base + (address - va);
-            int prot = PAGE_READ | PAGE_WRITE;
-            if (is_fetch) {
-                prot |= PAGE_EXEC;
-            }
-            tlb_set_page(cs, address & TARGET_PAGE_MASK,
-                         phys_addr & TARGET_PAGE_MASK, prot,
-                         mmu_idx, TARGET_PAGE_SIZE);
-            return true;
-        }
     }
 
     /* Region / page size info */
@@ -1357,6 +1494,57 @@ void HELPER(check_null_branch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     }
 }
 
+void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                        uint64_t threshold)
+{
+    if (threshold == 0) {
+        return;
+    }
+
+    env->dbg_tb_total++;
+
+    if (pc == env->dbg_tb_last_pc && ri == env->dbg_tb_last_ri) {
+        env->dbg_tb_same1++;
+        env->dbg_tb_same2 = 0;
+    } else if (pc == env->dbg_tb_last2_pc && ri == env->dbg_tb_last2_ri) {
+        env->dbg_tb_same2++;
+        env->dbg_tb_same1 = 0;
+    } else {
+        env->dbg_tb_same1 = 0;
+        env->dbg_tb_same2 = 0;
+    }
+
+    env->dbg_tb_last2_pc = env->dbg_tb_last_pc;
+    env->dbg_tb_last2_ri = env->dbg_tb_last_ri;
+    env->dbg_tb_last_pc = pc;
+    env->dbg_tb_last_ri = ri;
+
+    if (env->dbg_tb_same1 < threshold && env->dbg_tb_same2 < threshold) {
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    cpu_restore_state(cs, GETPC());
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64 hang_abort threshold=%" PRIu64 " total=%" PRIu64
+                  " tbpc=%016" PRIx64 " ri=%u"
+                  " same1=%" PRIu64 " same2=%" PRIu64
+                  " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                  " pr=%016" PRIx64
+                  " last_branch from=%016" PRIx64 " to=%016" PRIx64
+                  " kind=%" PRIu64 " insn=%011" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
+                  " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                  threshold, env->dbg_tb_total, pc, ri,
+                  env->dbg_tb_same1, env->dbg_tb_same2,
+                  env->ip, env->psr, env->cfm, env->pr,
+                  env->last_branch_from, env->last_branch_to,
+                  env->last_branch_kind, env->last_branch_insn,
+                  env->r[1], env->r[12], env->r[13],
+                  env->b[0], env->b[6]);
+    cpu_abort(cs, "IA64: hang detected at tbpc=%016" PRIx64 " ri=%u", pc, ri);
+}
+
 typedef struct {
     FILE *fp;
     uint64_t last_count;
@@ -1539,6 +1727,289 @@ uint64_t HELPER(ssc)(CPUIA64State *env, uint64_t imm)
         cpu_abort(env_cpu(env), "IA64: SSC unhandled nr=%" PRIu64 " imm=%" PRIu64,
                   nr, imm);
     }
+}
+
+static bool ia64_fw_log_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_LOG");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+#define IA64_PAL_STATUS_SUCCESS        0
+#define IA64_PAL_STATUS_UNIMPLEMENTED  (-1)
+
+#define IA64_PAL_CACHE_FLUSH     1
+#define IA64_PAL_CACHE_INFO      2
+#define IA64_PAL_CACHE_INIT      3
+#define IA64_PAL_CACHE_SUMMARY   4
+#define IA64_PAL_MEM_ATTRIB      5
+#define IA64_PAL_PTCE_INFO       6
+#define IA64_PAL_VM_SUMMARY      8
+#define IA64_PAL_FREQ_BASE       13
+#define IA64_PAL_FREQ_RATIOS     14
+#define IA64_PAL_RSE_INFO        19
+#define IA64_PAL_VM_PAGE_SIZE    34
+#define IA64_PAL_LOGICAL_TO_PHYSICAL 42
+#define IA64_PAL_CACHE_SHARED_INFO   43
+#define IA64_PAL_BRAND_INFO          274
+
+void HELPER(fw_pal)(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+    uint64_t idx = env->r[28];
+    bool from_call = ((env->last_b0_write_kind & 0xff) == 1);
+    uint64_t a1 = from_call ? env->r[33] : env->r[29];
+    uint64_t a2 = from_call ? env->r[34] : env->r[30];
+    uint64_t a3 = from_call ? env->r[35] : env->r[31];
+
+    int64_t status = IA64_PAL_STATUS_SUCCESS;
+    uint64_t v0 = 0, v1 = 0, v2 = 0;
+
+    switch (idx) {
+    case IA64_PAL_CACHE_FLUSH:
+    case IA64_PAL_CACHE_INIT:
+        /* Nothing to do for the software model. */
+        break;
+    case IA64_PAL_CACHE_SUMMARY:
+        /* levels=3, unique_caches=5 (enough for Linux cache init). */
+        v0 = 3;
+        v1 = 5;
+        break;
+    case IA64_PAL_CACHE_INFO: {
+        /*
+         * Return basic cache geometry.
+         *
+         * Inputs:
+         *   a1: cache_level
+         *   a2: cache_type (1=instruction, 2=data_or_unified)
+         */
+        uint8_t level = (uint8_t)a1;
+        uint8_t type = (uint8_t)a2;
+
+        uint8_t unified = (type == 2) ? 1 : 0;
+        uint8_t attr = 1;      /* PAL_CACHE_ATTR_WB */
+        uint8_t assoc = 8;
+        uint8_t line_size = 6; /* log2(64) */
+        uint8_t stride = 6;    /* 64-byte stride */
+
+        uint32_t cache_size = 0;
+        switch (level) {
+        case 0:
+            cache_size = unified ? (64 * 1024) : (32 * 1024);
+            break;
+        case 1:
+            cache_size = 256 * 1024;
+            break;
+        default:
+            cache_size = 1024 * 1024;
+            break;
+        }
+
+        /* pal_cache_config_info_1_t::pcci1_data */
+        v0 |= (uint64_t)(unified & 1) << 0;
+        v0 |= (uint64_t)(attr & 3) << 1;
+        v0 |= (uint64_t)assoc << 8;
+        v0 |= (uint64_t)line_size << 16;
+        v0 |= (uint64_t)stride << 24;
+
+        /* pal_cache_config_info_2_t::pcci2_data */
+        v1 = (uint64_t)cache_size;
+        v2 = 0;
+        break;
+    }
+    case IA64_PAL_MEM_ATTRIB:
+        /* bitmask; Linux uses low byte. */
+        v0 = 0xF1;
+        break;
+    case IA64_PAL_PTCE_INFO:
+        /*
+         * local_flush_tlb_all() uses ptc.e in a PAL-driven loop. Our ptc.e
+         * helper overpurges and flushes all translation caches, so the loop
+         * bounds are not important as long as they execute at least once.
+         */
+        v0 = 0;                  /* base */
+        v1 = (1ULL << 32) | 1ULL; /* count[0]=1,count[1]=1 */
+        v2 = 0;                  /* stride[0]=0,stride[1]=0 */
+        break;
+    case IA64_PAL_VM_SUMMARY: {
+        /* Provide sane VA/PA limits and TC parameters. */
+        uint8_t vw = 1;
+        uint8_t phys_add_size = 44;
+        uint8_t key_size = 18;
+        uint8_t max_pkr = 16;
+        uint8_t hash_tag_id = 0;
+        uint8_t max_dtr_entry = 7;
+        uint8_t max_itr_entry = 7;
+        uint8_t max_unique_tcs = 1;
+        uint8_t num_tc_levels = 1;
+
+        uint8_t impl_va_msb = 60;
+        uint8_t rid_size = 18;
+        uint16_t max_purges = 0xFFFF;
+
+        v0 |= (uint64_t)(vw & 1) << 0;
+        v0 |= (uint64_t)(phys_add_size & 0x7F) << 1;
+        v0 |= (uint64_t)key_size << 8;
+        v0 |= (uint64_t)max_pkr << 16;
+        v0 |= (uint64_t)hash_tag_id << 24;
+        v0 |= (uint64_t)max_dtr_entry << 32;
+        v0 |= (uint64_t)max_itr_entry << 40;
+        v0 |= (uint64_t)max_unique_tcs << 48;
+        v0 |= (uint64_t)num_tc_levels << 56;
+
+        v1 |= (uint64_t)impl_va_msb << 0;
+        v1 |= (uint64_t)rid_size << 8;
+        v1 |= (uint64_t)max_purges << 16;
+        break;
+    }
+    case IA64_PAL_VM_PAGE_SIZE:
+        v0 = 0x115557000ULL;
+        v1 = 0x115557000ULL;
+        break;
+    case IA64_PAL_FREQ_BASE:
+        v0 = 100000000ULL;
+        break;
+    case IA64_PAL_FREQ_RATIOS: {
+        /* u64 packing of struct pal_freq_ratio { u32 den, num; } */
+        uint32_t den = 1;
+        uint32_t num = 3;
+        v0 = (uint64_t)den | ((uint64_t)num << 32); /* proc ratio */
+        v1 = (uint64_t)den | ((uint64_t)1 << 32);   /* bus ratio */
+        v2 = (uint64_t)den | ((uint64_t)num << 32); /* itc ratio */
+        break;
+    }
+    case IA64_PAL_RSE_INFO:
+        v0 = 96;
+        v1 = 0;
+        break;
+    case IA64_PAL_LOGICAL_TO_PHYSICAL: {
+        /*
+         * Logical-to-physical mapping query.
+         *
+         * Linux calls this with proc_number=-1 during early CPU topology init.
+         * Provide a simple single-core/single-thread topology.
+         */
+        uint16_t la = (a1 == UINT64_MAX) ? 0 : (uint16_t)a1;
+        uint16_t num_log = 1;
+        uint8_t tpc = 1;
+        uint8_t cpp = 1;
+        uint8_t ppid = 0;
+
+        v0 = 0;
+        v0 |= (uint64_t)num_log;
+        v0 |= (uint64_t)tpc << 16;
+        v0 |= (uint64_t)cpp << 32;
+        v0 |= (uint64_t)ppid << 48;
+
+        v1 = 0; /* tid=0,cid=0 */
+        v2 = (uint64_t)la;
+        break;
+    }
+    case IA64_PAL_CACHE_SHARED_INFO:
+        /* Report cache not shared beyond this logical processor. */
+        v0 = 1; /* num_shared */
+        v1 = 0; /* tid=0,cid=0 */
+        v2 = 0; /* la=0 */
+        break;
+    case IA64_PAL_BRAND_INFO: {
+        /*
+         * Processor branding string.
+         *
+         * Kernel passes a pointer to a 128-byte buffer (on the stack) in a2.
+         * For bringup, report this call as unimplemented so Linux falls back
+         * to family/model-based naming without requiring buffer writes.
+         */
+        status = IA64_PAL_STATUS_UNIMPLEMENTED;
+        break;
+    }
+    default:
+        if (ia64_fw_log_enabled()) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: PAL idx=%" PRIu64 " a1=%" PRIu64 " a2=%" PRIu64
+                          " a3=%" PRIu64 " from_call=%d\n",
+                          idx, a1, a2, a3, from_call);
+        }
+        cpu_restore_state(cs, GETPC());
+        cpu_abort(cs, "IA64: PAL unhandled idx=%" PRIu64, idx);
+    }
+
+    if (ia64_fw_log_enabled()) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: PAL idx=%" PRIu64 " -> status=%" PRId64
+                      " v0=%016" PRIx64 " v1=%016" PRIx64 " v2=%016" PRIx64 "\n",
+                      idx, status, v0, v1, v2);
+    }
+
+    env->r[8] = (uint64_t)status;
+    env->r[9] = v0;
+    env->r[10] = v1;
+    env->r[11] = v2;
+}
+
+#define IA64_SAL_SET_VECTORS          0x01000000ULL
+#define IA64_SAL_GET_STATE_INFO       0x01000001ULL
+#define IA64_SAL_GET_STATE_INFO_SIZE  0x01000002ULL
+#define IA64_SAL_CLEAR_STATE_INFO     0x01000003ULL
+#define IA64_SAL_MC_RENDEZ            0x01000004ULL
+#define IA64_SAL_MC_SET_PARAMS        0x01000005ULL
+#define IA64_SAL_REGISTER_PHYS_ADDR   0x01000006ULL
+#define IA64_SAL_CACHE_FLUSH          0x01000008ULL
+#define IA64_SAL_CACHE_INIT           0x01000009ULL
+#define IA64_SAL_PCI_CONFIG_READ      0x01000010ULL
+#define IA64_SAL_PCI_CONFIG_WRITE     0x01000011ULL
+#define IA64_SAL_FREQ_BASE            0x01000012ULL
+#define IA64_SAL_PHYSICAL_ID_INFO     0x01000013ULL
+#define IA64_SAL_UPDATE_PAL           0x01000020ULL
+
+void HELPER(fw_sal)(CPUIA64State *env)
+{
+    uint64_t func = env->r[32];
+
+    int64_t status = 0;
+    uint64_t v0 = 0, v1 = 0, v2 = 0;
+
+    switch (func) {
+    case IA64_SAL_SET_VECTORS:
+    case IA64_SAL_CACHE_FLUSH:
+    case IA64_SAL_CACHE_INIT:
+    case IA64_SAL_MC_SET_PARAMS:
+    case IA64_SAL_REGISTER_PHYS_ADDR:
+        status = 0;
+        break;
+    case IA64_SAL_FREQ_BASE:
+        status = 0;
+        v0 = 100000000ULL; /* ticks per second */
+        v1 = ~0ULL;        /* drift info: -1 */
+        v2 = 0;
+        break;
+    case IA64_SAL_GET_STATE_INFO:
+    case IA64_SAL_GET_STATE_INFO_SIZE:
+    case IA64_SAL_CLEAR_STATE_INFO:
+    case IA64_SAL_MC_RENDEZ:
+    case IA64_SAL_PCI_CONFIG_READ:
+    case IA64_SAL_PCI_CONFIG_WRITE:
+    case IA64_SAL_PHYSICAL_ID_INFO:
+    case IA64_SAL_UPDATE_PAL:
+    default:
+        status = -1;
+        break;
+    }
+
+    if (ia64_fw_log_enabled()) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: SAL func=%016" PRIx64 " -> status=%" PRId64
+                      " v0=%016" PRIx64 " v1=%016" PRIx64 " v2=%016" PRIx64 "\n",
+                      func, status, v0, v1, v2);
+    }
+
+    env->r[8] = (uint64_t)status;
+    env->r[9] = v0;
+    env->r[10] = v1;
+    env->r[11] = v2;
 }
 
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,

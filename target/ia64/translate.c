@@ -42,6 +42,38 @@ static bool ia64_dbg_call_pc_inited;
 static uint64_t ia64_dbg_call_pcs[IA64_MAX_DBG_CALL_PCS];
 static size_t ia64_dbg_call_pc_count;
 
+static bool ia64_hang_abort_inited;
+static uint64_t ia64_hang_abort_threshold;
+
+static uint64_t ia64_get_hang_abort_threshold(void)
+{
+    if (ia64_hang_abort_inited) {
+        return ia64_hang_abort_threshold;
+    }
+    ia64_hang_abort_inited = true;
+
+    const char *s = getenv("QEMU_IA64_HANG_ABORT");
+    if (!s || !*s) {
+        ia64_hang_abort_threshold = 0;
+        return 0;
+    }
+
+    if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+        !strcmp(s, "yes")) {
+        ia64_hang_abort_threshold = 1000000;
+        return ia64_hang_abort_threshold;
+    }
+
+    char *endp = NULL;
+    uint64_t v = strtoull(s, &endp, 0);
+    if (endp && endp != s) {
+        ia64_hang_abort_threshold = v;
+    } else {
+        ia64_hang_abort_threshold = 1000000;
+    }
+    return ia64_hang_abort_threshold;
+}
+
 static void ia64_init_dbg_call_pcs(void)
 {
     if (ia64_dbg_call_pc_inited) {
@@ -584,6 +616,8 @@ static TCGv_i64 gen_load_cr_reg(uint8_t idx)
     case 23: return cpu_cr_ifs;
     case 24: return cpu_cr_iim;
     case 25: return cpu_cr_iha;
+    case 65: /* cr.ivr: return spurious vector when no pending IRQs */
+        return tcg_constant_i64(15);
     default:
         break;
     }
@@ -660,6 +694,14 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
 {
     DisasContext *ctx = container_of(db, DisasContext, base);
+
+    uint64_t hang_threshold = ia64_get_hang_abort_threshold();
+    if (hang_threshold) {
+        gen_helper_hang_abort(tcg_env,
+                              tcg_constant_i64(ctx->base.pc_next),
+                              tcg_constant_i32(ctx->ri),
+                              tcg_constant_i64(hang_threshold));
+    }
 
     if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
         qemu_log_mask(CPU_LOG_EXEC, "IA64: TB start pc=%016" PRIx64 "\n",
@@ -2712,7 +2754,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip = gen_qp_skip(qp);
                 uint8_t r1 = extract64(insn, 6, 7);
-                uint8_t ar = extract64(insn, 13, 7);
+                uint8_t ar = extract64(insn, 20, 7);
                 TCGv_i64 t = gen_load_ar(ar);
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t);
@@ -3409,6 +3451,67 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
             }
 
+            if (f_major == 0x0) {
+                /*
+                 * F9: fsxt.{r,l} f1 = f2, f3
+                 *
+                 * Used by the kernel for integer arithmetic lowered into
+                 * FP-unit ops (e.g. size_t multiplication in percpu setup).
+                 *
+                 * Mirror SKI's bit-level behavior on the "dword" payload:
+                 *  - fsxt.r: sign-extend low 32 bits of f3 using bit31 of f2
+                 *  - fsxt.l: sign-extend high 32 bits of f3 using sign bit of f2
+                 *
+                 * We model the integer payload in f[][0] and ignore the full
+                 * FP status/classification for now.
+                 */
+                uint8_t x = extract64(insn, 33, 1);
+                uint8_t x6 = extract64(insn, 27, 6);
+                if (x == 0 && (x6 == 0x3c || x6 == 0x3d)) {
+                    uint8_t f3 = extract64(insn, 20, 7);
+                    uint8_t f2 = extract64(insn, 13, 7);
+                    uint8_t f1 = extract64(insn, 6, 7);
+
+                    TCGv_i64 a = tcg_temp_new_i64();
+                    TCGv_i64 b = tcg_temp_new_i64();
+                    tcg_gen_ld_i64(a, tcg_env,
+                                   offsetof(CPUIA64State, f) + (f2 * 16) + 0);
+                    tcg_gen_ld_i64(b, tcg_env,
+                                   offsetof(CPUIA64State, f) + (f3 * 16) + 0);
+
+                    TCGv_i64 sign = tcg_temp_new_i64();
+                    TCGv_i64 ext = tcg_temp_new_i64();
+                    TCGv_i64 low = tcg_temp_new_i64();
+                    TCGv_i64 res = tcg_temp_new_i64();
+
+                    if (x6 == 0x3c) {
+                        /* fsxt.r */
+                        tcg_gen_shri_i64(sign, a, 31);
+                        tcg_gen_andi_i64(sign, sign, 1);
+                        tcg_gen_neg_i64(ext, sign);      /* 0 or -1 */
+                        tcg_gen_shli_i64(ext, ext, 32);  /* 0 or 0xffffffff00000000 */
+                        tcg_gen_andi_i64(low, b, 0xffffffffULL);
+                    } else {
+                        /* fsxt.l */
+                        tcg_gen_shri_i64(sign, a, 63);
+                        tcg_gen_andi_i64(sign, sign, 1);
+                        tcg_gen_neg_i64(ext, sign);
+                        tcg_gen_shli_i64(ext, ext, 32);
+                        tcg_gen_shri_i64(low, b, 32);
+                        tcg_gen_andi_i64(low, low, 0xffffffffULL);
+                    }
+                    tcg_gen_or_i64(res, ext, low);
+
+                    if (f1 > 1) {
+                        tcg_gen_st_i64(res, tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
+                        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
+                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                    }
+                    handled = true;
+                }
+            }
+
             /*
              * fnorm.*: normalize an unnormalized significand.
              *
@@ -3704,6 +3807,41 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
             /* Return value is in r8 per IA-64 calling convention. */
             tcg_gen_mov_i64(cpu_r[8], res);
             gen_helper_ret_restore(tcg_env);
+
+            TCGv_i64 tgt = tcg_temp_new_i64();
+            tcg_gen_andi_i64(tgt, cpu_b[0], ~0xFULL);
+            tcg_gen_mov_i64(cpu_pc, tgt);
+            gen_set_ri_const(0);
+
+            ctx->base.is_jmp = DISAS_NORETURN;
+            tcg_gen_exit_tb(NULL, 0);
+            return;
+        }
+    }
+
+    /*
+     * Synthetic firmware entry points (PAL + SAL) used for direct-kernel boot.
+     *
+     * hw/ia64/ipf.c builds a minimal SAL system table which points at fixed PAL
+     * and SAL procedure addresses in low RAM. Linux calls into those addresses
+     * via __va() (region 7 direct map); physical-mode PAL calls may reach the
+     * raw physical address as well.
+     */
+    if (ctx->ri == 0) {
+        uint64_t pc = ctx->base.pc_next;
+        uint64_t pal_pc = IA64_RGN7_BASE | IA64_IPF_FW_PAL_PROC_ADDR;
+        uint64_t sal_pc = IA64_RGN7_BASE | IA64_IPF_FW_SAL_PROC_ADDR;
+        bool is_pal = (pc == pal_pc) || (pc == IA64_IPF_FW_PAL_PROC_ADDR);
+        bool is_sal = (pc == sal_pc) || (pc == IA64_IPF_FW_SAL_PROC_ADDR);
+
+        if (is_pal || is_sal) {
+            if (is_sal) {
+                gen_helper_fw_sal(tcg_env);
+                gen_helper_ret_restore(tcg_env);
+            } else {
+                gen_helper_fw_pal(tcg_env);
+                gen_helper_ret_restore_b0(tcg_env);
+            }
 
             TCGv_i64 tgt = tcg_temp_new_i64();
             tcg_gen_andi_i64(tgt, cpu_b[0], ~0xFULL);

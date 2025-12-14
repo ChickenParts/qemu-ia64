@@ -112,6 +112,15 @@ typedef struct CPUArchState {
     uint64_t percpu_va_base;
     uint64_t percpu_pa_base;
     uint64_t percpu_size;
+
+    /* Debug: fail-fast hang detector (TB hot loop). */
+    uint64_t dbg_tb_last_pc;
+    uint64_t dbg_tb_last2_pc;
+    uint64_t dbg_tb_total;
+    uint64_t dbg_tb_same1;
+    uint64_t dbg_tb_same2;
+    uint32_t dbg_tb_last_ri;
+    uint32_t dbg_tb_last2_ri;
 } CPUIA64State;
 
 struct ArchCPU {
@@ -142,6 +151,27 @@ struct IA64CPUClass {
 #define MMU_USER_IDX 0
 #define MMU_KERNEL_IDX 1
 #define MMU_PHYS_IDX 2
+
+/*
+ * IPF machine firmware interface stubs.
+ *
+ * When booting a Linux kernel directly via -kernel (bypassing real firmware),
+ * hw/ia64/ipf.c synthesizes an EFI environment and a minimal SAL system table.
+ * Linux discovers the SAL systab via an EFI config table entry, then uses the
+ * SAL entrypoint descriptor to find the PAL and SAL procedure addresses.
+ *
+ * We provide small emulated PAL/SAL entry points at fixed physical addresses in
+ * low RAM (covered by the "reserved" EFI memory range) and a dedicated EFI
+ * PAL_CODE memory descriptor so Linux installs a PAL ITR mapping.
+ */
+#define IA64_IPF_FW_SAL_SYSTAB_ADDR 0x0000000000017000ULL
+#define IA64_IPF_FW_SAL_PROC_ADDR   0x0000000000018000ULL
+#define IA64_IPF_FW_PAL_PROC_ADDR   0x0000000000019000ULL
+#define IA64_IPF_FW_SAL_GP_ADDR     0x000000000001A000ULL
+#define IA64_IPF_FW_PAL_SIZE        0x0000000000001000ULL
+
+#define IA64_RGN_BASE(r)   ((uint64_t)(r) << 61)
+#define IA64_RGN7_BASE     IA64_RGN_BASE(7)
 
 /*
  * PSR bit positions (LSB indexing, matching the IA-64 SDM and SKI's BitfR()

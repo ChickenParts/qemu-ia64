@@ -47,11 +47,14 @@
 #include "qemu/bswap.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
+#include "system/ioport.h"
 #include "elf.h"
 #include "hw/ia64/gfw.h"
 #include "target/ia64/cpu.h"
 #include "migration/vmstate.h"
 #include "system/reset.h"
+#include "qemu/host-utils.h"
+#include "qemu/timer.h"
 
 #define DEBUG_IPF
 #ifdef DEBUG_IPF
@@ -92,6 +95,15 @@ struct IPFMachineState {
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
     MemoryRegion bmapm2;
+    MemoryRegion legacy_io_mmio;
+    MemoryRegion acpi_pm_mmio;
+    uint16_t acpi_pm1_evt_sts;
+    uint16_t acpi_pm1_evt_en;
+    uint16_t acpi_pm1_cnt;
+    uint64_t acpi_pm_timer_start_ns;
+    MemoryRegion iosapic_mmio;
+    uint32_t iosapic_reg_select;
+    uint32_t iosapic_reg[0x40];
 
     struct IpfTextWatch *text_watch[2];
 };
@@ -250,6 +262,31 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 
 /* IA-64 simulator-style UART base (see Linux drivers/tty/serial/8250/8250_early.c). */
 #define IPF_UART_BASE 0x00000000ff5e0000ULL
+
+/* ACPI PM1/PMTMR register block (I/O port encoded to segment 0xff). */
+#define IPF_ACPI_PM_BASE 0x00000000ff700000ULL
+
+/*
+ * Legacy port-I/O space window.
+ *
+ * Linux/ia64 represents legacy I/O ports as memory accesses into a dedicated
+ * "I/O port space" range described by EFI_MEMORY_MAPPED_IO_PORT_SPACE.
+ *
+ * Historically QEMU's IPF machine mapped this at 0xE0000000 for 64MB and
+ * translated offsets back into ioport numbers.
+ */
+#define IPF_LEGACY_IO_BASE 0x00000000e0000000ULL
+#define IPF_LEGACY_IO_SIZE (64ULL * 1024 * 1024)
+
+/* IA-64 IOSAPIC base used by Linux/ia64 (see asm/iosapic.h). */
+#define IPF_IOSAPIC_BASE 0x00000000fec00000ULL
+#define IPF_IOSAPIC_SIZE 0x00001000ULL
+
+#define IPF_IOSAPIC_REG_SELECT 0x0
+#define IPF_IOSAPIC_WINDOW     0x10
+#define IPF_IOSAPIC_EOI        0x40
+
+#define IPF_IOSAPIC_VERSION_REG 0x1
 
 typedef struct IpfTextWatch {
     MemoryRegion mr;
@@ -553,6 +590,156 @@ typedef struct QEMU_PACKED {
     IPFPcdpUart uart0;
 } IPFPcdpTable;
 
+/*
+ * Minimal SAL System Table (SST_) and entry-point descriptor.
+ *
+ * Linux/ia64 uses this to locate PAL and SAL procedure entry points.
+ * We provide synthetic procedures that are emulated by the IA-64 TCG backend.
+ */
+typedef struct QEMU_PACKED {
+    uint8_t signature[4]; /* "SST_" */
+    uint32_t size;
+    uint8_t sal_rev_minor;
+    uint8_t sal_rev_major;
+    uint16_t entry_count;
+    uint8_t checksum;
+    uint8_t reserved1[7];
+    uint8_t sal_a_rev_minor;
+    uint8_t sal_a_rev_major;
+    uint8_t sal_b_rev_minor;
+    uint8_t sal_b_rev_major;
+    uint8_t oem_id[32];
+    uint8_t product_id[32];
+    uint8_t reserved2[8];
+} IPFSalSystab;
+
+typedef struct QEMU_PACKED {
+    uint8_t type; /* 0 == SAL_DESC_ENTRY_POINT */
+    uint8_t reserved1[7];
+    uint64_t pal_proc;
+    uint64_t sal_proc;
+    uint64_t gp;
+    uint8_t reserved2[16];
+} IPFSalDescEntryPoint;
+
+#define IPF_SAL_DESC_ENTRY_POINT 0
+
+/*
+ * Minimal ACPI 2.0 tables for IA-64 Linux bringup.
+ *
+ * QEMU's IPF machine historically relied on guest firmware to provide ACPI
+ * tables. When booting a kernel directly via -kernel, synthesize the minimum
+ * required set via EFI config tables:
+ *   - RSDP (ACPI 2.0) -> XSDT -> FADT + MADT (+ DSDT referenced by FADT)
+ */
+typedef struct QEMU_PACKED {
+    uint8_t signature[4];
+    uint32_t length;
+    uint8_t revision;
+    uint8_t checksum;
+    uint8_t oem_id[6];
+    uint8_t oem_table_id[8];
+    uint32_t oem_revision;
+    uint8_t creator_id[4];
+    uint32_t creator_revision;
+} IPFAcpiTableHeader;
+
+typedef struct QEMU_PACKED {
+    uint8_t signature[8]; /* "RSD PTR " */
+    uint8_t checksum;
+    uint8_t oem_id[6];
+    uint8_t revision;
+    uint32_t rsdt_address;
+    uint32_t length;
+    uint64_t xsdt_address;
+    uint8_t extended_checksum;
+    uint8_t reserved[3];
+} IPFAcpiRsdp;
+
+typedef struct QEMU_PACKED {
+    IPFAcpiTableHeader header;
+    uint32_t address;
+    uint32_t flags;
+} IPFAcpiMadt;
+
+typedef struct QEMU_PACKED {
+    uint8_t type;
+    uint8_t length;
+} IPFAcpiSubtableHeader;
+
+typedef struct QEMU_PACKED {
+    IPFAcpiSubtableHeader header;
+    uint8_t processor_id;
+    uint8_t id;
+    uint8_t eid;
+    uint8_t reserved[3];
+    uint32_t lapic_flags;
+    uint32_t uid;
+} IPFAcpiMadtLocalSapic;
+
+typedef struct QEMU_PACKED {
+    IPFAcpiSubtableHeader header;
+    uint8_t id;
+    uint8_t reserved;
+    uint32_t global_irq_base;
+    uint64_t address;
+} IPFAcpiMadtIoSapic;
+
+typedef struct QEMU_PACKED {
+    IPFAcpiTableHeader header;
+    uint32_t facs;
+    uint32_t dsdt;
+    uint8_t model;
+    uint8_t preferred_profile;
+    uint16_t sci_interrupt;
+    uint32_t smi_command;
+    uint8_t acpi_enable;
+    uint8_t acpi_disable;
+    uint8_t s4_bios_request;
+    uint8_t pstate_control;
+    uint32_t pm1a_event_block;
+    uint32_t pm1b_event_block;
+    uint32_t pm1a_control_block;
+    uint32_t pm1b_control_block;
+    uint32_t pm2_control_block;
+    uint32_t pm_timer_block;
+    uint32_t gpe0_block;
+    uint32_t gpe1_block;
+    uint8_t pm1_event_length;
+    uint8_t pm1_control_length;
+    uint8_t pm2_control_length;
+    uint8_t pm_timer_length;
+    uint8_t gpe0_block_length;
+    uint8_t gpe1_block_length;
+    uint8_t gpe1_base;
+    uint8_t cst_control;
+    uint16_t c2_latency;
+    uint16_t c3_latency;
+    uint16_t flush_size;
+    uint16_t flush_stride;
+    uint8_t duty_offset;
+    uint8_t duty_width;
+    uint8_t day_alarm;
+    uint8_t month_alarm;
+    uint8_t century;
+    uint16_t boot_flags;
+    uint8_t reserved;
+    uint32_t flags;
+    IPFAcpiGenericAddress reset_register;
+    uint8_t reset_value;
+    uint8_t reserved2[3];
+    uint64_t Xfacs;
+    uint64_t Xdsdt;
+    IPFAcpiGenericAddress xpm1a_event_block;
+    IPFAcpiGenericAddress xpm1b_event_block;
+    IPFAcpiGenericAddress xpm1a_control_block;
+    IPFAcpiGenericAddress xpm1b_control_block;
+    IPFAcpiGenericAddress xpm2_control_block;
+    IPFAcpiGenericAddress xpm_timer_block;
+    IPFAcpiGenericAddress xgpe0_block;
+    IPFAcpiGenericAddress xgpe1_block;
+} IPFAcpiFadt;
+
 /* GUIDs (match Linux include/linux/efi.h). */
 static const IPFEfiGuid ipf_guid_sal_systab = {
     .data1 = 0xeb9d2d32,
@@ -568,6 +755,13 @@ static const IPFEfiGuid ipf_guid_hcdp = {
     .data4 = { 0x82, 0x79, 0xa8, 0x4b, 0x79, 0x61, 0x78, 0x98 },
 };
 
+static const IPFEfiGuid ipf_guid_acpi_20 = {
+    .data1 = 0x8868e871,
+    .data2 = 0xe4f1,
+    .data3 = 0x11d3,
+    .data4 = { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 },
+};
+
 static uint8_t ipf_byte_checksum(const void *buf, size_t len)
 {
     const uint8_t *p = buf;
@@ -577,6 +771,21 @@ static uint8_t ipf_byte_checksum(const void *buf, size_t len)
         sum += p[i];
     }
     return (uint8_t)(0 - sum);
+}
+
+static void ipf_acpi_init_header(IPFAcpiTableHeader *hdr, const char sig[4],
+                                 uint32_t length, uint8_t revision)
+{
+    memset(hdr, 0, sizeof(*hdr));
+    memcpy(hdr->signature, sig, 4);
+    hdr->length = cpu_to_le32(length);
+    hdr->revision = revision;
+    hdr->checksum = 0;
+    memcpy(hdr->oem_id, "QEMU  ", 6);
+    memcpy(hdr->oem_table_id, "QEMU-IPF ", 8);
+    hdr->oem_revision = cpu_to_le32(1);
+    memcpy(hdr->creator_id, "QEMU", 4);
+    hdr->creator_revision = cpu_to_le32(1);
 }
 
 /*
@@ -596,7 +805,10 @@ struct efi_memory_desc {
 #define EFI_RESERVED_TYPE            0
 #define EFI_LOADER_CODE              1
 #define EFI_LOADER_DATA              2
+#define EFI_MEMORY_MAPPED_IO         11
+#define EFI_MEMORY_MAPPED_IO_PORT_SPACE 12
 #define EFI_CONVENTIONAL_MEMORY      7
+#define EFI_PAL_CODE                 13
 
 /*
  * Tiny EFI runtime service stubs (IA-64 machine code) placed in guest memory.
@@ -1031,6 +1243,11 @@ static void main_cpu_reset(void *opaque)
     if (ipf_boot_r28) {
         s->r[28] = ipf_boot_r28;
     }
+    /*
+     * Seed ar.k0 (AR.KR0) with the legacy I/O port space base so that Linux
+     * can find a sane default even if EFI doesn't describe the range.
+     */
+    s->ar[0] = IPF_LEGACY_IO_BASE;
     if (ipf_boot_ip) {
         /*
          * Provide a deterministic initial stack pointer in physical mode.
@@ -1105,6 +1322,264 @@ static void ipf_init_uart(MemoryRegion *sysmem)
     DPRINTF("UART: mapped serial-mm at 0x%016" PRIx64 "\n", (uint64_t)IPF_UART_BASE);
 }
 
+static uint32_t ipf_to_legacy_io(hwaddr addr)
+{
+    /*
+     * Convert an address within the legacy I/O port space window back into
+     * a 16-bit ioport number.
+     *
+     * Linux/ia64 uses a sparse encoding where each group of 4 ports is
+     * separated by 4KB (see arch/ia64/include/asm/io.h IO_SPACE_LIMIT).
+     */
+    return (uint32_t)(((addr & 0x3ffffff) >> 12 << 2) | (addr & 0x3));
+}
+
+static uint64_t ipf_legacy_io_read(void *opaque, hwaddr addr, unsigned size)
+{
+    (void)opaque;
+    uint32_t port = ipf_to_legacy_io(addr);
+
+    switch (size) {
+    case 1:
+        return cpu_inb(port);
+    case 2:
+        return cpu_inw(port);
+    case 4:
+        return cpu_inl(port);
+    default:
+        return 0;
+    }
+}
+
+static void ipf_legacy_io_write(void *opaque, hwaddr addr, uint64_t data,
+                                unsigned size)
+{
+    (void)opaque;
+    uint32_t port = ipf_to_legacy_io(addr);
+
+    switch (size) {
+    case 1:
+        cpu_outb(port, data);
+        break;
+    case 2:
+        cpu_outw(port, data);
+        break;
+    case 4:
+        cpu_outl(port, data);
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ipf_legacy_io_ops = {
+    .read = ipf_legacy_io_read,
+    .write = ipf_legacy_io_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
+
+static void ipf_init_legacy_io(IPFMachineState *m, MemoryRegion *sysmem)
+{
+    memory_region_init_io(&m->legacy_io_mmio, OBJECT(m), &ipf_legacy_io_ops,
+                          NULL, "ipf.legacy-io", IPF_LEGACY_IO_SIZE);
+    memory_region_add_subregion(sysmem, IPF_LEGACY_IO_BASE, &m->legacy_io_mmio);
+    DPRINTF("LEGACY-IO: mapped at 0x%016" PRIx64 " (size=0x%" PRIx64 ")\n",
+            (uint64_t)IPF_LEGACY_IO_BASE, (uint64_t)IPF_LEGACY_IO_SIZE);
+}
+
+static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IPFMachineState *m = opaque;
+
+    switch (addr) {
+    case 0x00:
+    case 0x01: {
+        uint16_t v = m->acpi_pm1_evt_sts;
+        return (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+    }
+    case 0x02:
+    case 0x03: {
+        uint16_t v = m->acpi_pm1_evt_en;
+        return (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+    }
+    case 0x04:
+    case 0x05: {
+        uint16_t v = m->acpi_pm1_cnt;
+        return (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+    }
+    case 0x08:
+    case 0x09:
+    case 0x0a:
+    case 0x0b: {
+        /*
+         * ACPI PM timer: 24-bit free-running counter at 3.579545 MHz.
+         * Return the low bits; higher bits are reserved.
+         */
+        uint64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - m->acpi_pm_timer_start_ns;
+        uint32_t ticks = (uint32_t)muldiv64(ns, 3579545, NANOSECONDS_PER_SECOND);
+        uint32_t v = ticks & 0x00ffffffU;
+        unsigned shift = (addr & 3) * 8;
+        return (v >> shift) & ((1ULL << (size * 8)) - 1);
+    }
+    default:
+        return 0;
+    }
+}
+
+static void ipf_acpi_pm_write(void *opaque, hwaddr addr, uint64_t data,
+                              unsigned size)
+{
+    IPFMachineState *m = opaque;
+    uint64_t mask = (size >= 8) ? UINT64_MAX : ((1ULL << (size * 8)) - 1);
+    uint64_t val = data & mask;
+
+    switch (addr) {
+    case 0x00:
+    case 0x01: {
+        unsigned shift = (addr & 1) * 8;
+        uint16_t v = (uint16_t)(val << shift);
+        /* Writing 1 clears status bits (ACPI). */
+        m->acpi_pm1_evt_sts &= ~v;
+        break;
+    }
+    case 0x02:
+    case 0x03: {
+        unsigned shift = (addr & 1) * 8;
+        uint16_t v = (uint16_t)(val << shift);
+        uint16_t cur = m->acpi_pm1_evt_en;
+        cur &= ~(0xffu << shift);
+        cur |= v;
+        m->acpi_pm1_evt_en = cur;
+        break;
+    }
+    case 0x04:
+    case 0x05: {
+        unsigned shift = (addr & 1) * 8;
+        uint16_t v = (uint16_t)(val << shift);
+        uint16_t cur = m->acpi_pm1_cnt;
+        cur &= ~(0xffu << shift);
+        cur |= v;
+        m->acpi_pm1_cnt = cur;
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ipf_acpi_pm_ops = {
+    .read = ipf_acpi_pm_read,
+    .write = ipf_acpi_pm_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
+
+static void ipf_init_acpi_pm(IPFMachineState *m, MemoryRegion *sysmem)
+{
+    m->acpi_pm1_evt_sts = 0;
+    m->acpi_pm1_evt_en = 0;
+    m->acpi_pm1_cnt = 0;
+    m->acpi_pm_timer_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    memory_region_init_io(&m->acpi_pm_mmio, OBJECT(m), &ipf_acpi_pm_ops, m,
+                          "ipf.acpi-pm", 0x1000);
+    memory_region_add_subregion_overlap(sysmem, IPF_ACPI_PM_BASE,
+                                        &m->acpi_pm_mmio, 1);
+    DPRINTF("ACPI-PM: mapped at 0x%016" PRIx64 "\n", (uint64_t)IPF_ACPI_PM_BASE);
+}
+
+static uint64_t ipf_iosapic_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IPFMachineState *m = opaque;
+    uint32_t val = 0;
+
+    switch (addr) {
+    case IPF_IOSAPIC_REG_SELECT:
+        val = m->iosapic_reg_select;
+        break;
+    case IPF_IOSAPIC_WINDOW: {
+        uint32_t sel = m->iosapic_reg_select & 0xff;
+        if (sel == IPF_IOSAPIC_VERSION_REG) {
+            val = 0x000f0020U; /* 16 redirection entries, version 0x20 */
+        } else if (sel < ARRAY_SIZE(m->iosapic_reg)) {
+            val = m->iosapic_reg[sel];
+        }
+        break;
+    }
+    case IPF_IOSAPIC_EOI:
+        val = 0;
+        break;
+    default:
+        val = 0;
+        break;
+    }
+
+    return val;
+}
+
+static void ipf_iosapic_write(void *opaque, hwaddr addr, uint64_t data,
+                              unsigned size)
+{
+    IPFMachineState *m = opaque;
+    uint32_t val = (uint32_t)data;
+
+    switch (addr) {
+    case IPF_IOSAPIC_REG_SELECT:
+        m->iosapic_reg_select = val;
+        break;
+    case IPF_IOSAPIC_WINDOW: {
+        uint32_t sel = m->iosapic_reg_select & 0xff;
+        if (sel < ARRAY_SIZE(m->iosapic_reg)) {
+            m->iosapic_reg[sel] = val;
+        }
+        break;
+    }
+    case IPF_IOSAPIC_EOI:
+        /* Ignore end-of-interrupt for now. */
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ipf_iosapic_ops = {
+    .read = ipf_iosapic_read,
+    .write = ipf_iosapic_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
+
+static void ipf_init_iosapic(IPFMachineState *m, MemoryRegion *sysmem)
+{
+    /*
+     * Provide a minimal IOSAPIC register window so Linux can program interrupt
+     * routing based on MADT IO_SAPIC entries.
+     */
+    m->iosapic_reg_select = 0;
+    memset(m->iosapic_reg, 0, sizeof(m->iosapic_reg));
+
+    for (int i = 0; i < 16; i++) {
+        /* Mask all entries by default. */
+        m->iosapic_reg[0x10 + i * 2] = 1U << 16;
+        m->iosapic_reg[0x11 + i * 2] = 0;
+    }
+
+    memory_region_init_io(&m->iosapic_mmio, OBJECT(m), &ipf_iosapic_ops, m,
+                          "ipf.iosapic", IPF_IOSAPIC_SIZE);
+    memory_region_add_subregion(sysmem, IPF_IOSAPIC_BASE, &m->iosapic_mmio);
+    DPRINTF("IOSAPIC: mapped at 0x%016" PRIx64 "\n", (uint64_t)IPF_IOSAPIC_BASE);
+}
+
 /* Itanium hardware initialisation */
 static void ipf_init(MachineState *machine)
 {
@@ -1125,7 +1600,6 @@ static void ipf_init(MachineState *machine)
     uint64_t initrd_base = 0;
     uint64_t cmdline_addr = IPF_CMDLINE_ADDR;
     int64_t image_size;
-    (void)m;
     /* Initialize the cpu core */
     cpu = IA64_CPU(cpu_create(machine->cpu_type));
     if (!cpu) {
@@ -1149,6 +1623,9 @@ static void ipf_init(MachineState *machine)
     memory_region_init_ram(&m->rom, NULL, "ipf.gfw", GFW_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, GFW_START, &m->rom);
     ipf_init_uart(sysmem);
+    ipf_init_legacy_io(m, sysmem);
+    ipf_init_acpi_pm(m, sysmem);
+    ipf_init_iosapic(m, sysmem);
 
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
@@ -1315,11 +1792,19 @@ static void ipf_init(MachineState *machine)
      * memory; otherwise it may be overwritten during early memblock init.
      */
     {
-        uint64_t reserve_end = 0x0000000000020000ULL; /* 128KB */
-        reserve_end = MIN(reserve_end, machine->ram_size);
-        reserve_end = QEMU_ALIGN_UP(reserve_end, 4096);
         const uint64_t page_size = 4096;
         const uint64_t wb = (1ULL << 3); /* EFI_MEMORY_WB */
+        const uint64_t uc = (1ULL << 0); /* EFI_MEMORY_UC */
+
+        /* Reserve low memory containing boot params + EFI tables + SAL/PAL stubs. */
+        uint64_t reserve_end = 0x0000000000020000ULL; /* 128KB */
+        reserve_end = MAX(reserve_end, IA64_IPF_FW_SAL_GP_ADDR + page_size);
+        reserve_end = MIN(reserve_end, machine->ram_size);
+        reserve_end = QEMU_ALIGN_UP(reserve_end, page_size);
+
+        uint64_t pal_start = QEMU_ALIGN_DOWN(IA64_IPF_FW_PAL_PROC_ADDR, page_size);
+        uint64_t pal_end =
+            QEMU_ALIGN_UP(IA64_IPF_FW_PAL_PROC_ADDR + IA64_IPF_FW_PAL_SIZE, page_size);
 
         /* Reserve the loaded kernel image so bootmem/memblock don't clobber it. */
         uint64_t kern_start = QEMU_ALIGN_DOWN(kernel_low, page_size);
@@ -1339,14 +1824,33 @@ static void ipf_init(MachineState *machine)
             uint64_t start;
             uint64_t end;
             uint32_t type;
-        } ranges[5];
+        } ranges[8];
         size_t nr = 0;
 
-        ranges[nr++] = (struct Range){
-            .start = 0,
-            .end = reserve_end,
-            .type = EFI_RESERVED_TYPE,
-        };
+        /*
+         * Low-memory layout:
+         * - EFI/boot param data lives in EFI_RESERVED_TYPE.
+         * - PAL entry is advertised via a dedicated EFI_PAL_CODE descriptor so
+         *   Linux installs an ITR mapping for safe PAL calls in virtual mode.
+         */
+        if (reserve_end > 0) {
+            uint64_t lo0 = 0;
+            uint64_t lo1 = MIN(pal_start, reserve_end);
+            uint64_t lo2 = MIN(pal_end, reserve_end);
+            if (lo1 > lo0) {
+                ranges[nr++] = (struct Range){ .start = lo0, .end = lo1,
+                                               .type = EFI_RESERVED_TYPE };
+            }
+            if (lo2 > lo1) {
+                ranges[nr++] = (struct Range){ .start = lo1, .end = lo2,
+                                               .type = EFI_PAL_CODE };
+            }
+            if (reserve_end > lo2) {
+                ranges[nr++] = (struct Range){ .start = lo2, .end = reserve_end,
+                                               .type = EFI_RESERVED_TYPE };
+            }
+        }
+
         if (kern_end > kern_start) {
             ranges[nr++] = (struct Range){
                 .start = kern_start,
@@ -1373,8 +1877,8 @@ static void ipf_init(MachineState *machine)
             }
         }
 
-        /* Merge overlapping reserved/loader ranges. */
-        struct Range merged[5];
+        /* Merge overlapping ranges of the same type. */
+        struct Range merged[8];
         size_t nm = 0;
         for (size_t i = 0; i < nr; i++) {
             struct Range r = ranges[i];
@@ -1390,16 +1894,21 @@ static void ipf_init(MachineState *machine)
                 continue;
             }
             struct Range *last = &merged[nm - 1];
-            if (r.start <= last->end) {
+            if (r.start <= last->end && r.type == last->type) {
                 last->end = MAX(last->end, r.end);
-                last->type = EFI_RESERVED_TYPE;
             } else {
-                merged[nm++] = r;
+                if (r.start < last->end) {
+                    /* Overlap across different types should not happen. Clamp. */
+                    r.start = last->end;
+                }
+                if (r.end > r.start) {
+                    merged[nm++] = r;
+                }
             }
         }
 
         /* Emit EFI descriptors alternating conventional and reserved segments. */
-        struct efi_memory_desc md[8] = { 0 };
+        struct efi_memory_desc md[16] = { 0 };
         size_t nd = 0;
         uint64_t cur = 0;
         for (size_t i = 0; i < nm; i++) {
@@ -1434,6 +1943,18 @@ static void ipf_init(MachineState *machine)
                 .attribute = wb,
             };
         }
+
+        /*
+         * Describe legacy port-I/O space so Linux doesn't fall back to AR.KR0
+         * (which defaults to 0 and would alias low RAM).
+         */
+        md[nd++] = (struct efi_memory_desc){
+            .type = EFI_MEMORY_MAPPED_IO_PORT_SPACE,
+            .phys_addr = IPF_LEGACY_IO_BASE,
+            .virt_addr = 0,
+            .num_pages = IPF_LEGACY_IO_SIZE / page_size,
+            .attribute = uc,
+        };
 
         address_space_write(&address_space_memory, IPF_EFI_MEMMAP_ADDR,
                             MEMTXATTRS_UNSPECIFIED,
@@ -1544,12 +2065,219 @@ static void ipf_init(MachineState *machine)
                             MEMTXATTRS_UNSPECIFIED,
                             (const uint8_t *)&pcdp, sizeof(pcdp));
 
-        /* EFI configuration tables (SAL + HCDP). */
-        IPFEfiConfigTable conf[2] = { 0 };
+        /* SAL system table (SST_) with an entrypoint descriptor for PAL+SAL. */
+        {
+            IPFSalSystab sst = { 0 };
+            IPFSalDescEntryPoint ep = { 0 };
+            uint8_t buf[sizeof(sst) + sizeof(ep)] = { 0 };
+
+            memcpy(sst.signature, "SST_", 4);
+            sst.size = sizeof(buf);
+            sst.sal_rev_major = 2;
+            sst.sal_rev_minor = 0;
+            sst.entry_count = 1;
+            sst.sal_a_rev_major = 0;
+            sst.sal_a_rev_minor = 0;
+            sst.sal_b_rev_major = 0;
+            sst.sal_b_rev_minor = 0;
+            memcpy(sst.oem_id, "QEMU", 4);
+            memcpy(sst.product_id, "QEMU-IPF", 7);
+            sst.checksum = 0;
+
+            ep.type = IPF_SAL_DESC_ENTRY_POINT;
+            ep.pal_proc = IA64_IPF_FW_PAL_PROC_ADDR;
+            ep.sal_proc = IA64_IPF_FW_SAL_PROC_ADDR;
+            ep.gp = IA64_IPF_FW_SAL_GP_ADDR;
+
+            memcpy(buf, &sst, sizeof(sst));
+            memcpy(buf + sizeof(sst), &ep, sizeof(ep));
+            buf[offsetof(IPFSalSystab, checksum)] =
+                ipf_byte_checksum(buf, sizeof(buf));
+
+            address_space_write(&address_space_memory, IA64_IPF_FW_SAL_SYSTAB_ADDR,
+                                MEMTXATTRS_UNSPECIFIED,
+                                (const uint8_t *)buf, sizeof(buf));
+        }
+
+        /* ACPI 2.0 system description tables. */
+        hwaddr acpi_rsdp_addr = 0;
+        {
+            /*
+             * Place ACPI tables in reserved low memory, after the synthetic
+             * SAL/PAL stubs.
+             */
+            hwaddr cur = IA64_IPF_FW_SAL_GP_ADDR + 0x1000;
+            cur = QEMU_ALIGN_UP(cur, 16);
+
+            hwaddr rsdp_addr = cur;
+            cur = QEMU_ALIGN_UP(cur + sizeof(IPFAcpiRsdp), 16);
+
+            hwaddr rsdt_addr = cur;
+            uint8_t rsdt_buf[sizeof(IPFAcpiTableHeader) + 2 * sizeof(uint32_t)] = { 0 };
+            cur = QEMU_ALIGN_UP(cur + sizeof(rsdt_buf), 16);
+
+            hwaddr xsdt_addr = cur;
+            uint8_t xsdt_buf[sizeof(IPFAcpiTableHeader) + 2 * sizeof(uint64_t)] = { 0 };
+            cur = QEMU_ALIGN_UP(cur + sizeof(xsdt_buf), 16);
+
+            hwaddr fadt_addr = cur;
+            IPFAcpiFadt fadt = { 0 };
+            cur = QEMU_ALIGN_UP(cur + sizeof(fadt), 16);
+
+            static const uint8_t dsdt_aml[] = {
+                0x10, 0x01, 0x5c, /* Scope(\) {} */
+            };
+            hwaddr dsdt_addr = cur;
+            uint8_t dsdt_buf[sizeof(IPFAcpiTableHeader) + sizeof(dsdt_aml)] = { 0 };
+            cur = QEMU_ALIGN_UP(cur + sizeof(dsdt_buf), 16);
+
+            hwaddr madt_addr = cur;
+            uint8_t madt_buf[sizeof(IPFAcpiMadt) +
+                             sizeof(IPFAcpiMadtLocalSapic) +
+                             sizeof(IPFAcpiMadtIoSapic)] = { 0 };
+            cur = QEMU_ALIGN_UP(cur + sizeof(madt_buf), 16);
+
+            if (cur > 0x0000000000020000ULL || cur > machine->ram_size) {
+                error_report("RAM too small for IA-64 ACPI tables");
+                exit(1);
+            }
+
+            /* DSDT */
+            {
+                IPFAcpiTableHeader *hdr = (IPFAcpiTableHeader *)dsdt_buf;
+                ipf_acpi_init_header(hdr, "DSDT", sizeof(dsdt_buf), 2);
+                memcpy(dsdt_buf + sizeof(*hdr), dsdt_aml, sizeof(dsdt_aml));
+                hdr->checksum = ipf_byte_checksum(dsdt_buf, sizeof(dsdt_buf));
+                address_space_write(&address_space_memory, dsdt_addr,
+                                    MEMTXATTRS_UNSPECIFIED,
+                                    dsdt_buf, sizeof(dsdt_buf));
+            }
+
+            /* FADT (revision 3 required by Linux/ia64) */
+            ipf_acpi_init_header(&fadt.header, "FACP", sizeof(fadt), 3);
+            fadt.dsdt = cpu_to_le32((uint32_t)dsdt_addr);
+            fadt.Xdsdt = cpu_to_le64(dsdt_addr);
+            fadt.sci_interrupt = cpu_to_le16(9);
+            /* Minimal fixed feature register blocks (I/O port encoded). */
+            fadt.pm1a_event_block = cpu_to_le32((uint32_t)IPF_ACPI_PM_BASE);
+            fadt.pm1_event_length = 4;
+            fadt.pm1a_control_block = cpu_to_le32((uint32_t)(IPF_ACPI_PM_BASE + 0x04));
+            fadt.pm1_control_length = 2;
+            fadt.pm_timer_block = cpu_to_le32((uint32_t)(IPF_ACPI_PM_BASE + 0x08));
+            fadt.pm_timer_length = 4;
+
+            /* Extended (GAS) equivalents. */
+            fadt.xpm1a_event_block.space_id = 1; /* ACPI_ADR_SPACE_SYSTEM_IO */
+            fadt.xpm1a_event_block.bit_width = 32;
+            fadt.xpm1a_event_block.access_width = 0;
+            fadt.xpm1a_event_block.address = cpu_to_le64(IPF_ACPI_PM_BASE);
+            fadt.xpm1a_control_block.space_id = 1;
+            fadt.xpm1a_control_block.bit_width = 16;
+            fadt.xpm1a_control_block.access_width = 0;
+            fadt.xpm1a_control_block.address = cpu_to_le64(IPF_ACPI_PM_BASE + 0x04);
+            fadt.xpm_timer_block.space_id = 1;
+            fadt.xpm_timer_block.bit_width = 32;
+            fadt.xpm_timer_block.access_width = 0;
+            fadt.xpm_timer_block.address = cpu_to_le64(IPF_ACPI_PM_BASE + 0x08);
+            fadt.header.checksum = ipf_byte_checksum(&fadt, sizeof(fadt));
+            address_space_write(&address_space_memory, fadt_addr,
+                                MEMTXATTRS_UNSPECIFIED,
+                                (const uint8_t *)&fadt, sizeof(fadt));
+
+            /* MADT ("APIC") with one Local SAPIC CPU and one IOSAPIC. */
+            {
+                IPFAcpiMadt madt = { 0 };
+                IPFAcpiMadtLocalSapic lsapic = { 0 };
+                IPFAcpiMadtIoSapic iosapic = { 0 };
+
+                ipf_acpi_init_header(&madt.header, "APIC", sizeof(madt_buf), 2);
+                madt.address = cpu_to_le32(0xfee00000U); /* IA64_IPI_DEFAULT_BASE_ADDR */
+                madt.flags = cpu_to_le32(1);             /* ACPI_MADT_PCAT_COMPAT */
+
+                lsapic.header.type = 7; /* ACPI_MADT_TYPE_LOCAL_SAPIC */
+                lsapic.header.length = sizeof(lsapic);
+                lsapic.processor_id = 0;
+                lsapic.id = 0;
+                lsapic.eid = 0;
+                lsapic.lapic_flags = cpu_to_le32(1); /* ACPI_MADT_ENABLED */
+                lsapic.uid = cpu_to_le32(0);
+
+                iosapic.header.type = 6; /* ACPI_MADT_TYPE_IO_SAPIC */
+                iosapic.header.length = sizeof(iosapic);
+                iosapic.id = 0;
+                iosapic.global_irq_base = cpu_to_le32(0);
+                iosapic.address = cpu_to_le64(IPF_IOSAPIC_BASE);
+
+                memcpy(madt_buf, &madt, sizeof(madt));
+                memcpy(madt_buf + sizeof(madt), &lsapic, sizeof(lsapic));
+                memcpy(madt_buf + sizeof(madt) + sizeof(lsapic),
+                       &iosapic, sizeof(iosapic));
+                ((IPFAcpiMadt *)madt_buf)->header.checksum =
+                    ipf_byte_checksum(madt_buf, sizeof(madt_buf));
+                address_space_write(&address_space_memory, madt_addr,
+                                    MEMTXATTRS_UNSPECIFIED,
+                                    madt_buf, sizeof(madt_buf));
+            }
+
+            /* XSDT (FADT + MADT). */
+            {
+                IPFAcpiTableHeader *hdr = (IPFAcpiTableHeader *)xsdt_buf;
+                ipf_acpi_init_header(hdr, "XSDT", sizeof(xsdt_buf), 1);
+                uint64_t ent;
+                ent = cpu_to_le64(fadt_addr);
+                memcpy(xsdt_buf + sizeof(*hdr) + 0 * sizeof(ent), &ent, sizeof(ent));
+                ent = cpu_to_le64(madt_addr);
+                memcpy(xsdt_buf + sizeof(*hdr) + 1 * sizeof(ent), &ent, sizeof(ent));
+                hdr->checksum = ipf_byte_checksum(xsdt_buf, sizeof(xsdt_buf));
+                address_space_write(&address_space_memory, xsdt_addr,
+                                    MEMTXATTRS_UNSPECIFIED,
+                                    xsdt_buf, sizeof(xsdt_buf));
+            }
+
+            /* RSDT (FADT + MADT) for compatibility. */
+            {
+                IPFAcpiTableHeader *hdr = (IPFAcpiTableHeader *)rsdt_buf;
+                ipf_acpi_init_header(hdr, "RSDT", sizeof(rsdt_buf), 1);
+                uint32_t ent32;
+                ent32 = cpu_to_le32((uint32_t)fadt_addr);
+                memcpy(rsdt_buf + sizeof(*hdr) + 0 * sizeof(ent32), &ent32, sizeof(ent32));
+                ent32 = cpu_to_le32((uint32_t)madt_addr);
+                memcpy(rsdt_buf + sizeof(*hdr) + 1 * sizeof(ent32), &ent32, sizeof(ent32));
+                hdr->checksum = ipf_byte_checksum(rsdt_buf, sizeof(rsdt_buf));
+                address_space_write(&address_space_memory, rsdt_addr,
+                                    MEMTXATTRS_UNSPECIFIED,
+                                    rsdt_buf, sizeof(rsdt_buf));
+            }
+
+            /* RSDP (ACPI 2.0). */
+            {
+                IPFAcpiRsdp rsdp = { 0 };
+                memcpy(rsdp.signature, "RSD PTR ", 8);
+                memcpy(rsdp.oem_id, "QEMU  ", 6);
+                rsdp.revision = 2;
+                rsdp.rsdt_address = cpu_to_le32((uint32_t)rsdt_addr);
+                rsdp.length = cpu_to_le32(sizeof(rsdp));
+                rsdp.xsdt_address = cpu_to_le64(xsdt_addr);
+                rsdp.checksum = 0;
+                rsdp.extended_checksum = 0;
+                rsdp.checksum = ipf_byte_checksum(&rsdp, 20);
+                rsdp.extended_checksum = ipf_byte_checksum(&rsdp, sizeof(rsdp));
+                address_space_write(&address_space_memory, rsdp_addr,
+                                    MEMTXATTRS_UNSPECIFIED,
+                                    (const uint8_t *)&rsdp, sizeof(rsdp));
+            }
+
+            acpi_rsdp_addr = rsdp_addr;
+        }
+
+        /* EFI configuration tables (HCDP + SAL + ACPI). */
+        IPFEfiConfigTable conf[3] = { 0 };
         conf[0].guid = ipf_guid_hcdp;
         conf[0].table = IPF_EFI_PCDP_ADDR;
         conf[1].guid = ipf_guid_sal_systab;
-        conf[1].table = 0; /* avoid Linux using EFI_INVALID_TABLE_ADDR */
+        conf[1].table = IA64_IPF_FW_SAL_SYSTAB_ADDR;
+        conf[2].guid = ipf_guid_acpi_20;
+        conf[2].table = acpi_rsdp_addr;
         address_space_write(&address_space_memory, IPF_EFI_CONFTAB_ADDR,
                             MEMTXATTRS_UNSPECIFIED,
                             (const uint8_t *)conf, sizeof(conf));
