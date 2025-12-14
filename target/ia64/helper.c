@@ -65,6 +65,10 @@
 #define IA64_AR_BSPSTORE  18
 #define IA64_AR_RNAT      19
 
+/* CFM fields */
+#define IA64_CFM_SOR_SHIFT 14
+#define IA64_CFM_SOR_MASK  0xfULL
+
 /* ar.rsc loadrs field: bits 16..29, in bytes (see SKI ssDSym.c). */
 #define IA64_RSC_LOADRS_SHIFT 16
 #define IA64_RSC_LOADRS_MASK  0x3fffULL
@@ -750,25 +754,34 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 
     qemu_log_mask(LOG_GUEST_ERROR,
                   "dbg_probe pc=%016" PRIx64 " ri=%u"
-                  " psr=%016" PRIx64 " cfm=%016" PRIx64 " depth=%u"
+                  " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64 " depth=%u"
                   " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
                   " pta=%016" PRIx64 " itir=%016" PRIx64
                   " ar.k6=%016" PRIx64
-                  " r1=%016" PRIx64 " r8=%016" PRIx64 " r9=%016" PRIx64
+                  " r0=%016" PRIx64 " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
+                  " r8=%016" PRIx64 " r9=%016" PRIx64
                   " r10=%016" PRIx64 " r11=%016" PRIx64
-                  " r12=%016" PRIx64 " r14=%016" PRIx64
+                  " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
+                  " r43=%016" PRIx64
+                  " r62=%016" PRIx64
                   " r16=%016" PRIx64 " r17=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
                   " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
-                  " b0=%016" PRIx64 " b6=%016" PRIx64 " r45=%016" PRIx64 "\n",
+                  " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                  " b0=%016" PRIx64 " b6=%016" PRIx64
+                  " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
                   pc, ri,
-                  env->psr, env->cfm, env->rse_depth,
+                  env->psr, env->cfm, env->pr, env->rse_depth,
                   env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
                   env->ar[6],
-                  env->r[1], env->r[8], env->r[9], env->r[10], env->r[11],
-                  env->r[12], env->r[14], env->r[16], env->r[17],
+                  env->r[0], env->r[1], env->r[2], env->r[3],
+                  env->r[8], env->r[9], env->r[10], env->r[11],
+                  env->r[12], env->r[14], env->r[15], env->r[43],
+                  env->r[62],
+                  env->r[16], env->r[17],
                   env->r[32], env->r[33], env->r[34], env->r[35],
-                  env->r[36], env->r[37], env->b[0], env->b[6], env->r[45]);
+                  env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
+                  env->b[0], env->b[6], env->r[45], env->r[46]);
 
     if (pc == 0xa000000100073da0ULL || pc == 0xa000000100073620ULL) {
         static int abort_on_panic = -1;
@@ -868,6 +881,15 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     }
 }
 
+void HELPER(dbg_cmp)(CPUIA64State *env, uint64_t pc, uint64_t lhs, uint64_t rhs,
+                     uint32_t p1, uint32_t p2)
+{
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_cmp pc=%016" PRIx64 " p1=%u p2=%u lhs=%016" PRIx64 " rhs=%016" PRIx64
+                  " pr=%016" PRIx64 " cfm=%016" PRIx64 "\n",
+                  pc, p1, p2, lhs, rhs, env->pr, env->cfm);
+}
+
 void HELPER(record_b0_trace)(CPUIA64State *env, uint64_t pc, uint64_t insn,
                              uint64_t kind, uint64_t val)
 {
@@ -905,6 +927,37 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
     }
 
     return old_pfs;
+}
+
+void HELPER(rotate_grs)(CPUIA64State *env)
+{
+    /*
+     * Software pipelining rotates the *mapping* of GR32..(GR32+SOR-1) via RRBG.
+     *
+     * Our translator currently indexes stacked registers directly by their
+     * architectural number. Emulate the same architectural behavior by
+     * rotating the values in the rotating window whenever rotate_regs()
+     * updates RRBG.
+     *
+     * See SKI's PHYS_GR() mapping and rotate_regs() behavior.
+     */
+    uint32_t sor8 = extract64(env->cfm, IA64_CFM_SOR_SHIFT, 4);
+    if (sor8 == 0) {
+        return;
+    }
+
+    uint32_t sor_regs = sor8 << 3;
+    sor_regs = MIN(sor_regs, 96U);
+    sor_regs = MIN(sor_regs, (uint32_t)(env->cfm & 0x7fU));
+    if (sor_regs <= 1) {
+        return;
+    }
+
+    uint64_t last = env->r[32 + sor_regs - 1];
+    for (uint32_t i = sor_regs - 1; i > 0; i--) {
+        env->r[32 + i] = env->r[32 + i - 1];
+    }
+    env->r[32] = last;
 }
 
 void HELPER(call)(CPUIA64State *env)
