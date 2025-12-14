@@ -256,26 +256,60 @@ typedef struct IpfTextWatch {
     uint8_t *ram_ptr;
     hwaddr pa_base;
     IA64CPU *cpu;
+    uint32_t read_count;
     uint32_t write_count;
 } IpfTextWatch;
 
 static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
 {
     IpfTextWatch *w = opaque;
+    CPUIA64State *env = w->cpu ? &w->cpu->env : NULL;
     uint8_t *p = w->ram_ptr + w->pa_base + addr;
+    hwaddr pa = w->pa_base + addr;
+    uint64_t ret = 0;
 
     switch (size) {
     case 1:
-        return ldub_p(p);
+        ret = ldub_p(p);
+        break;
     case 2:
-        return lduw_le_p(p);
+        ret = lduw_le_p(p);
+        break;
     case 4:
-        return ldl_le_p(p);
+        ret = ldl_le_p(p);
+        break;
     case 8:
-        return ldq_le_p(p);
+        ret = ldq_le_p(p);
+        break;
     default:
-        return 0;
+        ret = 0;
+        break;
     }
+
+    if (w->read_count < 64) {
+        const char *s = getenv("QEMU_IA64_WATCH_READ");
+        if (s && *s) {
+            fprintf(stderr,
+                    "IPF_TEXT_WATCH: read size=%u pa=%016" HWADDR_PRIx " data=%016" PRIx64
+                    " ip=%016" PRIx64 " psr=%016" PRIx64
+                    " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
+                    " r12=%016" PRIx64 " r13=%016" PRIx64
+                    " r24=%016" PRIx64 " r27=%016" PRIx64 " r28=%016" PRIx64 " r31=%016" PRIx64
+                    " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                    " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                    size, pa, ret,
+                    env ? env->ip : 0, env ? env->psr : 0,
+                    env ? env->r[1] : 0, env ? env->r[2] : 0, env ? env->r[3] : 0,
+                    env ? env->r[12] : 0, env ? env->r[13] : 0,
+                    env ? env->r[24] : 0, env ? env->r[27] : 0, env ? env->r[28] : 0,
+                    env ? env->r[31] : 0,
+                    env ? env->r[32] : 0, env ? env->r[33] : 0, env ? env->r[34] : 0,
+                    env ? env->b[0] : 0, env ? env->b[6] : 0);
+            fflush(stderr);
+            w->read_count++;
+        }
+    }
+    return ret;
 }
 
 static void ipf_text_watch_write(void *opaque, hwaddr addr, uint64_t data,
