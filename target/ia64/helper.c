@@ -13,6 +13,7 @@
 #include "exec/page-protection.h"
 #include "exec/translation-block.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "qemu/bswap.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "exec/cpu-common.h"
@@ -415,7 +416,7 @@ uint64_t HELPER(tpa)(CPUIA64State *env, uint64_t va)
     if (rr_idx == 7 && extract64(va, 60, 1) == 0) {
         return va & ((1ULL << 61) - 1);
     }
-    if (rr_idx == 6) {
+    if (rr_idx == 6 && extract64(va, 60, 1) == 0) {
         return va & ((1ULL << 61) - 1);
     }
 
@@ -922,9 +923,10 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r8=%016" PRIx64 " r9=%016" PRIx64
                   " r10=%016" PRIx64 " r11=%016" PRIx64
                   " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
-                  " r19=%016" PRIx64 " r22=%016" PRIx64 " r27=%016" PRIx64
+                  " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
                   " r43=%016" PRIx64
+                  " r59=%016" PRIx64
                   " r62=%016" PRIx64
                   " r16=%016" PRIx64 " r17=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
@@ -939,8 +941,9 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   env->r[0], env->r[1], env->r[2], env->r[3],
                   env->r[8], env->r[9], env->r[10], env->r[11],
                   env->r[12], env->r[14], env->r[15],
-                  env->r[19], env->r[22], env->r[27], env->r[28], env->r[29],
+                  env->r[19], env->r[22], env->r[23], env->r[27], env->r[28], env->r[29],
                   env->r[43],
+                  env->r[59],
                   env->r[62],
                   env->r[16], env->r[17],
                   env->r[32], env->r[33], env->r[34], env->r[35],
@@ -1264,6 +1267,36 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     /*
+     * Per-cpu alias in region 6.
+     *
+     * Some early boot code uses per_cpu() pointers computed as:
+     *   ptr = __per_cpu_offset[cpu] + &percpu_symbol
+     *
+     * On ia64 this can yield a region-6 address whose bits are the canonical
+     * per-cpu virtual address with the region number decremented (i.e. a
+     * 0xdfff... alias of a 0xffff... canonical address). Map this alias to the
+     * current per-cpu physical area using ar.k3, mirroring the direct
+     * canonical mapping above.
+     */
+    if (extract64(address, 61, 3) == 6 && extract64(address, 60, 1) == 1) {
+        uint64_t canon = (uint64_t)address | (1ULL << 61); /* -> region 7 */
+        if (canon >= IA64_PERCPU_VA_BASE) {
+            uint64_t k3 = env->ar[IA64_KR_PER_CPU_DATA];
+            if (k3) {
+                hwaddr phys_addr = canon + k3;
+                int prot = PAGE_READ | PAGE_WRITE;
+                if (is_fetch) {
+                    prot |= PAGE_EXEC;
+                }
+                tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                             phys_addr & TARGET_PAGE_MASK, prot,
+                             mmu_idx, TARGET_PAGE_SIZE);
+                return true;
+            }
+        }
+    }
+
+    /*
      * Linux uses region 7 addresses (__va()) as a direct map of physical memory.
      * However, region 7 also contains other (non-identity) kernel addresses
      * such as the negative percpu range. Only treat region 7 with bit60==0
@@ -1282,7 +1315,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
      * Linux uses region 6 as an identity-mapped uncached I/O region
      * (RGN_UNCACHED). Treat it as a direct physical mapping.
      */
-    if (extract64(address, 61, 3) == 6) {
+    if (extract64(address, 61, 3) == 6 && extract64(address, 60, 1) == 0) {
         hwaddr phys_addr = address & ((1ULL << 61) - 1);
         int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
@@ -1616,6 +1649,33 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 
     CPUState *cs = env_cpu(env);
     cpu_restore_state(cs, GETPC());
+
+    uint32_t con_ok = 0;
+    uint8_t con_waiter = 0;
+    uint64_t con_owner = 0;
+    uint64_t con_waiter_va = env->dbg_console_waiter_va;
+    uint64_t con_owner_va = env->dbg_console_owner_va;
+    if (env->kernel_bias) {
+        if (con_waiter_va) {
+            hwaddr pa = (hwaddr)(con_waiter_va - env->kernel_bias);
+            if (address_space_read(&address_space_memory, pa,
+                                   MEMTXATTRS_UNSPECIFIED,
+                                   &con_waiter, sizeof(con_waiter)) == MEMTX_OK) {
+                con_ok |= 1;
+            }
+        }
+        if (con_owner_va) {
+            hwaddr pa = (hwaddr)(con_owner_va - env->kernel_bias);
+            uint64_t le = 0;
+            if (address_space_read(&address_space_memory, pa,
+                                   MEMTXATTRS_UNSPECIFIED,
+                                   &le, sizeof(le)) == MEMTX_OK) {
+                con_owner = le64_to_cpu(le);
+                con_ok |= 2;
+            }
+        }
+    }
+
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64 hang_abort threshold=%" PRIu64 " total=%" PRIu64
                   " tbpc=%016" PRIx64 " ri=%u"
@@ -1628,7 +1688,13 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " r1=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
                   " r24=%016" PRIx64 " r27=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
+                  " r31=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " r52=%016" PRIx64 " r53=%016" PRIx64
+                  " kbias=%016" PRIx64
+                  " con_waiter_va=%016" PRIx64 " con_waiter=%02x"
+                  " con_owner_va=%016" PRIx64 " con_owner=%016" PRIx64
+                  " con_ok=%u"
                   " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
                   threshold, env->dbg_tb_total, pc, ri,
                   env->dbg_tb_same1, env->dbg_tb_same2,
@@ -1638,7 +1704,13 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   env->last_branch_kind, env->last_branch_insn,
                   env->r[1], env->r[12], env->r[13],
                   env->r[24], env->r[27], env->r[28], env->r[29],
+                  env->r[31],
                   env->r[32], env->r[33], env->r[34],
+                  env->r[52], env->r[53],
+                  env->kernel_bias,
+                  con_waiter_va, (unsigned)con_waiter,
+                  con_owner_va, con_owner,
+                  con_ok,
                   env->b[0], env->b[6]);
     cpu_abort(cs, "IA64: hang detected at tbpc=%016" PRIx64 " ri=%u", pc, ri);
 }

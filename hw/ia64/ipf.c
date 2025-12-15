@@ -128,6 +128,8 @@ static uint64_t ipf_sym_ia64_bad_break;
 static uint64_t ipf_sym_search_extable;
 static uint64_t ipf_sym_stext;
 static uint64_t ipf_sym_etext;
+static uint64_t ipf_sym_console_owner;
+static uint64_t ipf_sym_console_waiter;
 
 static void ipf_kernel_sym_cb(const char *st_name, int st_info,
                               uint64_t st_value, uint64_t st_size)
@@ -151,6 +153,14 @@ static void ipf_kernel_sym_cb(const char *st_name, int st_info,
     }
     if (!ipf_sym_etext && st_name && strcmp(st_name, "_etext") == 0) {
         ipf_sym_etext = st_value;
+    }
+    if (!ipf_sym_console_owner && st_name &&
+        strcmp(st_name, "console_owner") == 0) {
+        ipf_sym_console_owner = st_value;
+    }
+    if (!ipf_sym_console_waiter && st_name &&
+        strcmp(st_name, "console_waiter") == 0) {
+        ipf_sym_console_waiter = st_value;
     }
 }
 
@@ -324,6 +334,15 @@ static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
         break;
     }
 
+    static int watch_read_enabled = -1;
+    if (watch_read_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_WATCH_READ");
+        watch_read_enabled = (s && *s) ? 1 : 0;
+    }
+    if (!watch_read_enabled) {
+        return ret;
+    }
+
     static int watch_limit = -1;
     if (watch_limit == -1) {
         watch_limit = 64;
@@ -337,27 +356,26 @@ static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
     }
 
     if (w->read_count < (unsigned)watch_limit) {
-        const char *s = getenv("QEMU_IA64_WATCH_READ");
-        if (s && *s) {
-            fprintf(stderr,
-                    "IPF_TEXT_WATCH: read size=%u pa=%016" HWADDR_PRIx " data=%016" PRIx64
-                    " ip=%016" PRIx64 " psr=%016" PRIx64
-                    " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
-                    " r12=%016" PRIx64 " r13=%016" PRIx64
-                    " r24=%016" PRIx64 " r27=%016" PRIx64 " r28=%016" PRIx64 " r31=%016" PRIx64
-                    " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
-                    " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
-                    size, pa, ret,
-                    env ? env->ip : 0, env ? env->psr : 0,
-                    env ? env->r[1] : 0, env ? env->r[2] : 0, env ? env->r[3] : 0,
-                    env ? env->r[12] : 0, env ? env->r[13] : 0,
-                    env ? env->r[24] : 0, env ? env->r[27] : 0, env ? env->r[28] : 0,
-                    env ? env->r[31] : 0,
-                    env ? env->r[32] : 0, env ? env->r[33] : 0, env ? env->r[34] : 0,
-                    env ? env->b[0] : 0, env ? env->b[6] : 0);
-            fflush(stderr);
-            w->read_count++;
-        }
+        fprintf(stderr,
+                "IPF_TEXT_WATCH: read size=%u pa=%016" HWADDR_PRIx " data=%016" PRIx64
+                " ip=%016" PRIx64 " psr=%016" PRIx64
+                " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
+                " r12=%016" PRIx64 " r13=%016" PRIx64
+                " r24=%016" PRIx64 " r27=%016" PRIx64 " r28=%016" PRIx64 " r31=%016" PRIx64
+                " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                " r52=%016" PRIx64 " r53=%016" PRIx64
+                " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                size, pa, ret,
+                env ? env->ip : 0, env ? env->psr : 0,
+                env ? env->r[1] : 0, env ? env->r[2] : 0, env ? env->r[3] : 0,
+                env ? env->r[12] : 0, env ? env->r[13] : 0,
+                env ? env->r[24] : 0, env ? env->r[27] : 0, env ? env->r[28] : 0,
+                env ? env->r[31] : 0,
+                env ? env->r[32] : 0, env ? env->r[33] : 0, env ? env->r[34] : 0,
+                env ? env->r[52] : 0, env ? env->r[53] : 0,
+                env ? env->b[0] : 0, env ? env->b[6] : 0);
+        fflush(stderr);
+        w->read_count++;
     }
     return ret;
 }
@@ -390,6 +408,7 @@ static void ipf_text_watch_write(void *opaque, hwaddr addr, uint64_t data,
                 " r12=%016" PRIx64 " r13=%016" PRIx64
                 " r24=%016" PRIx64 " r27=%016" PRIx64 " r28=%016" PRIx64 " r31=%016" PRIx64
                 " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                " r52=%016" PRIx64 " r53=%016" PRIx64
                 " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
                 size, pa, data,
                 env ? env->ip : 0, env ? env->psr : 0,
@@ -398,6 +417,7 @@ static void ipf_text_watch_write(void *opaque, hwaddr addr, uint64_t data,
                 env ? env->r[24] : 0, env ? env->r[27] : 0, env ? env->r[28] : 0,
                 env ? env->r[31] : 0,
                 env ? env->r[32] : 0, env ? env->r[33] : 0, env ? env->r[34] : 0,
+                env ? env->r[52] : 0, env ? env->r[53] : 0,
                 env ? env->b[0] : 0, env ? env->b[6] : 0);
         fflush(stderr);
     }
@@ -438,7 +458,7 @@ static const MemoryRegionOps ipf_text_watch_ops = {
 
 static void ipf_add_text_watch(IPFMachineState *m, MemoryRegion *sysmem,
                                IA64CPU *cpu, MemoryRegion *ram, hwaddr pa,
-                               const char *label)
+                               hwaddr size, const char *label)
 {
     for (size_t i = 0; i < ARRAY_SIZE(m->text_watch); i++) {
         if (!m->text_watch[i]) {
@@ -447,12 +467,13 @@ static void ipf_add_text_watch(IPFMachineState *m, MemoryRegion *sysmem,
             w->pa_base = pa;
             w->cpu = cpu;
             memory_region_init_io(&w->mr, OBJECT(m), &ipf_text_watch_ops, w,
-                                  label, 0x20);
+                                  label, size);
             memory_region_add_subregion_overlap(sysmem, pa, &w->mr, 1000);
             m->text_watch[i] = w;
             fprintf(stderr,
-                    "IPF_TEXT_WATCH: watching %s PA=%016" HWADDR_PRIx "\n",
-                    label, pa);
+                    "IPF_TEXT_WATCH: watching %s PA=%016" HWADDR_PRIx
+                    " size=%" HWADDR_PRIx "\n",
+                    label, pa, size);
             return;
         }
     }
@@ -1694,6 +1715,8 @@ static void ipf_init(MachineState *machine)
     ipf_sym_search_extable = 0;
     ipf_sym_stext = 0;
     ipf_sym_etext = 0;
+    ipf_sym_console_owner = 0;
+    ipf_sym_console_waiter = 0;
     if (load_elf_ram_sym(kernel_filename, NULL, NULL, NULL,
                          &kernel_entry, &kernel_low, &kernel_high, NULL,
                          ELFDATA2LSB, EM_IA_64, 0, 0,
@@ -1708,6 +1731,9 @@ static void ipf_init(MachineState *machine)
     ipf_kernel_bias = 0xa000000100000000ULL - kernel_low;
     env->kernel_stext = ipf_sym_stext;
     env->kernel_etext = ipf_sym_etext;
+    env->kernel_bias = ipf_kernel_bias;
+    env->dbg_console_owner_va = ipf_sym_console_owner;
+    env->dbg_console_waiter_va = ipf_sym_console_waiter;
     ipf_probe_percpu_segment(kernel_filename, cpu);
     {
         /*
@@ -1735,7 +1761,7 @@ static void ipf_init(MachineState *machine)
             if (ipf_sym_ia64_bad_break) {
                 ipf_add_text_watch(m, sysmem, cpu, machine->ram,
                                    ipf_sym_ia64_bad_break - ipf_kernel_bias,
-                                   "ia64_bad_break");
+                                   0x20, "ia64_bad_break");
             } else {
                 fprintf(stderr,
                         "IPF_TEXT_WATCH: symbol ia64_bad_break not found\n");
@@ -1746,7 +1772,7 @@ static void ipf_init(MachineState *machine)
             if (ipf_sym_search_extable) {
                 ipf_add_text_watch(m, sysmem, cpu, machine->ram,
                                    ipf_sym_search_extable - ipf_kernel_bias,
-                                   "search_extable");
+                                   0x20, "search_extable");
             } else {
                 fprintf(stderr,
                         "IPF_TEXT_WATCH: symbol search_extable not found\n");
@@ -1770,17 +1796,38 @@ static void ipf_init(MachineState *machine)
         if (!w || !*w) {
             continue;
         }
+        hwaddr size = 0x20;
         hwaddr pa = 0;
         if (strcmp(w, "console_srcu") == 0 || strcmp(w, "console_srcu+8") == 0) {
             const uint64_t console_srcu_va = 0xa000000101f57678ULL;
             pa = (console_srcu_va + 8) - ipf_kernel_bias;
-            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa,
+            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
                                data_watches[wi].label);
+        } else if (strcmp(w, "console_owner") == 0) {
+            if (!ipf_sym_console_owner) {
+                fprintf(stderr,
+                        "IPF_TEXT_WATCH: symbol console_owner not found\n");
+                continue;
+            }
+            pa = ipf_sym_console_owner - ipf_kernel_bias;
+            size = 8;
+            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
+                               "console_owner");
+        } else if (strcmp(w, "console_waiter") == 0) {
+            if (!ipf_sym_console_waiter) {
+                fprintf(stderr,
+                        "IPF_TEXT_WATCH: symbol console_waiter not found\n");
+                continue;
+            }
+            pa = ipf_sym_console_waiter - ipf_kernel_bias;
+            size = 1;
+            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
+                               "console_waiter");
         } else {
             char *endp = NULL;
             pa = (hwaddr)strtoull(w, &endp, 0);
             if (endp && endp != w) {
-                ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa,
+                ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
                                    data_watches[wi].label);
             }
         }

@@ -3294,14 +3294,14 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         }
         case 0x5: {
             uint8_t qp = insn & 0x3f;
-            TCGLabel *skip_label = gen_qp_skip(qp);
+            TCGLabel *skip_label = NULL;
 
             uint8_t x2a = extract64(insn, 34, 2);
             uint8_t ve = extract64(insn, 33, 1);
             bool handled = false;
 
             if (x2a == 0) {
-                /* Test instructions: tbit.* / tnat.* */
+                /* Test instructions: tbit.* / tnat.* (SKI I16/I17). */
                 uint8_t p2 = extract64(insn, 27, 6);
                 uint8_t p1 = extract64(insn, 6, 6);
                 uint8_t r3 = extract64(insn, 20, 7);
@@ -3311,80 +3311,52 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint8_t c = extract64(insn, 12, 1);
                 uint8_t bit13 = extract64(insn, 13, 1);
 
+                /*
+                 * Encoding/semantics follow SKI's tables:
+                 * - ta/tb select the predicate write mode:
+                 *     00: base ("... .z" or "... .z.unc")
+                 *     01: .and
+                 *     10: .or
+                 *     11: .or.andcm
+                 * - In base mode (ta=tb=0), c selects ".unc" (0 => base, 1 => .unc),
+                 *   and the test is always the ".z" form (no base ".nz" opcode).
+                 * - In the non-base modes, c selects z vs nz (0 => z, 1 => nz).
+                 *
+                 * Note: We do not model NaT bits yet; assume NaT(r3)=0 for tnat.
+                 */
+                enum {
+                    TEST_BASE = 0,
+                    TEST_AND,
+                    TEST_OR,
+                    TEST_OAC,
+                } mode;
+
+                bool is_unc = false;
+                bool is_z = true;
+                if (ta == 0 && tb == 0) {
+                    mode = TEST_BASE;
+                    is_unc = (c != 0);
+                    is_z = true;
+                } else if (ta == 0 && tb == 1) {
+                    mode = TEST_AND;
+                    is_z = (c == 0);
+                } else if (ta == 1 && tb == 0) {
+                    mode = TEST_OR;
+                    is_z = (c == 0);
+                } else {
+                    mode = TEST_OAC;
+                    is_z = (c == 0);
+                }
+
+                if (!is_unc) {
+                    skip_label = gen_qp_skip(qp);
+                }
+
+                /* Compute CMPRES1 (0/1), CMPRES2 is implied as ~CMPRES1. */
+                TCGv_i64 cmpres1 = tcg_temp_new_i64();
                 if (bit13) {
-                    /*
-                     * tnat.* p1,p2 = r3
-                     *
-                     * We currently do not model NaT bits, so assume NaT(r3)=0.
-                     * Linux uses tnat to augment predicates in exception paths.
-                     *
-                     * Encodings observed in Linux:
-                     * - c selects z vs nz (0 => z, 1 => nz)
-                     * - ta/tb select predicate combining:
-                     *     ta=0 tb=0: .unc (default)
-                     *     ta=0 tb=1: .and
-                     *     ta=1 tb=0: .or
-                     *     ta=1 tb=1: .or.andcm
-                     */
-                    bool is_nz = (c != 0);
-                    TCGv_i64 cond = tcg_temp_new_i64();
-                    tcg_gen_movi_i64(cond, is_nz ? 0 : 1);
-
-                    if (ta == 0 && tb == 0) {
-                        /* .unc: p1 = cond; p2 = ~cond */
-                        gen_set_predicates(p1, p2, cond);
-                        handled = true;
-                    } else {
-                        /* .and / .or / .or.andcm */
-                        uint64_t mask = 0;
-                        if (p1 != 0) {
-                            mask |= 1ULL << p1;
-                        }
-                        if (p2 != 0) {
-                            mask |= 1ULL << p2;
-                        }
-                        if (mask) {
-                            TCGv_i64 pr = tcg_temp_new_i64();
-                            tcg_gen_mov_i64(pr, cpu_pr);
-                            tcg_gen_andi_i64(pr, pr, ~mask);
-
-                            TCGv_i64 ncond = tcg_temp_new_i64();
-                            tcg_gen_xori_i64(ncond, cond, 1);
-                            tcg_gen_andi_i64(cond, cond, 1);
-                            tcg_gen_andi_i64(ncond, ncond, 1);
-
-                            if (p1 != 0) {
-                                TCGv_i64 old1 = tcg_temp_new_i64();
-                                TCGv_i64 new1 = tcg_temp_new_i64();
-                                tcg_gen_shri_i64(old1, cpu_pr, p1);
-                                tcg_gen_andi_i64(old1, old1, 1);
-                                if (ta == 0) {
-                                    tcg_gen_and_i64(new1, old1, cond);
-                                } else {
-                                    tcg_gen_or_i64(new1, old1, cond);
-                                }
-                                tcg_gen_shli_i64(new1, new1, p1);
-                                tcg_gen_or_i64(pr, pr, new1);
-                            }
-                            if (p2 != 0) {
-                                TCGv_i64 old2 = tcg_temp_new_i64();
-                                TCGv_i64 new2 = tcg_temp_new_i64();
-                                tcg_gen_shri_i64(old2, cpu_pr, p2);
-                                tcg_gen_andi_i64(old2, old2, 1);
-                                if (ta == 0 || tb) {
-                                    /* .and or .or.andcm: p2 = p2 & ~cond */
-                                    tcg_gen_and_i64(new2, old2, ncond);
-                                } else {
-                                    /* .or: p2 = p2 | ~cond */
-                                    tcg_gen_or_i64(new2, old2, ncond);
-                                }
-                                tcg_gen_shli_i64(new2, new2, p2);
-                                tcg_gen_or_i64(pr, pr, new2);
-                            }
-                            tcg_gen_mov_i64(cpu_pr, pr);
-                        }
-                        handled = true;
-                    }
+                    /* tnat.* p1,p2 = r3; NaT(r3)=0 => z=>1, nz=>0 */
+                    tcg_gen_movi_i64(cmpres1, is_z ? 1 : 0);
                 } else {
                     /* tbit.* p1,p2 = r3, pos6 */
                     TCGv_i64 src = tcg_temp_new_i64();
@@ -3394,25 +3366,102 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_mov_i64(src, cpu_r[r3]);
                     }
 
-                    TCGv_i64 bit = tcg_temp_new_i64();
-                    tcg_gen_shri_i64(bit, src, pos);
-                    tcg_gen_andi_i64(bit, bit, 1);
-
-                    /*
-                     * Decode the encodings observed in early Linux boot:
-                     * - For .or forms (ta=1), c selects z vs nz (0 => z, 1 => nz)
-                     * - Otherwise treat as tbit.z for now.
-                     */
-                    bool is_z = (ta == 1) ? (c == 0) : true;
+                    tcg_gen_shri_i64(cmpres1, src, pos);
+                    tcg_gen_andi_i64(cmpres1, cmpres1, 1);
                     if (is_z) {
-                        tcg_gen_xori_i64(bit, bit, 1);
+                        tcg_gen_xori_i64(cmpres1, cmpres1, 1);
                     }
-
-                    gen_set_predicates(p1, p2, bit);
-                    handled = true;
                 }
+
+                TCGv_i64 zero = tcg_temp_new_i64();
+                tcg_gen_movi_i64(zero, 0);
+                TCGv_i64 one = tcg_temp_new_i64();
+                tcg_gen_movi_i64(one, 1);
+
+                if (is_unc && qp != 0) {
+                    /*
+                     * ".unc": if qp false, clear both destination predicates; otherwise
+                     * perform the normal operation.
+                     */
+                    TCGLabel *doit = gen_new_label();
+                    TCGLabel *done = gen_new_label();
+                    TCGv_i64 t_qp = gen_pr_read_bit(qp);
+                    tcg_gen_brcondi_i64(TCG_COND_NE, t_qp, 0, doit);
+                    gen_pr_write_bit(p1, zero);
+                    gen_pr_write_bit(p2, zero);
+                    tcg_gen_br(done);
+                    gen_set_label(doit);
+                    /* Fall through into the normal write below. */
+                    switch (mode) {
+                    case TEST_BASE:
+                        gen_set_predicates(p1, p2, cmpres1);
+                        break;
+                    case TEST_AND: {
+                        TCGLabel *skip = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_NE, cmpres1, 0, skip);
+                        gen_pr_write_bit(p1, zero);
+                        gen_pr_write_bit(p2, zero);
+                        gen_set_label(skip);
+                        break;
+                    }
+                    case TEST_OR: {
+                        TCGLabel *skip = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_EQ, cmpres1, 0, skip);
+                        gen_pr_write_bit(p1, one);
+                        gen_pr_write_bit(p2, one);
+                        gen_set_label(skip);
+                        break;
+                    }
+                    case TEST_OAC: {
+                        TCGLabel *skip = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_EQ, cmpres1, 0, skip);
+                        gen_pr_write_bit(p1, one);
+                        gen_pr_write_bit(p2, zero);
+                        gen_set_label(skip);
+                        break;
+                    }
+                    default:
+                        g_assert_not_reached();
+                    }
+                    gen_set_label(done);
+                } else {
+                    switch (mode) {
+                    case TEST_BASE:
+                        gen_set_predicates(p1, p2, cmpres1);
+                        break;
+                    case TEST_AND: {
+                        TCGLabel *skip = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_NE, cmpres1, 0, skip);
+                        gen_pr_write_bit(p1, zero);
+                        gen_pr_write_bit(p2, zero);
+                        gen_set_label(skip);
+                        break;
+                    }
+                    case TEST_OR: {
+                        TCGLabel *skip = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_EQ, cmpres1, 0, skip);
+                        gen_pr_write_bit(p1, one);
+                        gen_pr_write_bit(p2, one);
+                        gen_set_label(skip);
+                        break;
+                    }
+                    case TEST_OAC: {
+                        TCGLabel *skip = gen_new_label();
+                        tcg_gen_brcondi_i64(TCG_COND_EQ, cmpres1, 0, skip);
+                        gen_pr_write_bit(p1, one);
+                        gen_pr_write_bit(p2, zero);
+                        gen_set_label(skip);
+                        break;
+                    }
+                    default:
+                        g_assert_not_reached();
+                    }
+                }
+
+                handled = true;
             } else if (x2a == 1 && ve == 1) {
                 /* shl r1 = r2, count6 (count encoded as 63 - imm6) */
+                skip_label = gen_qp_skip(qp);
                 uint8_t r1 = extract64(insn, 6, 7);
                 uint8_t r2 = extract64(insn, 13, 7);
                 uint8_t inv = extract64(insn, 20, 6);
@@ -3435,6 +3484,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                  *   where (63-count) is redundantly encoded in bits 27..32
                  * - extr/extr.u r1 = r3, pos6, len6 (len encoded as len-1)
                  */
+                skip_label = gen_qp_skip(qp);
                 uint8_t pos_or_cnt = extract64(insn, 14, 6);
                 uint8_t inv = extract64(insn, 27, 6);
 
@@ -3494,6 +3544,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
             } else if (x2a == 3 && ve == 0) {
                 /* I10: shrp r1 = r2, r3, count6 */
+                skip_label = gen_qp_skip(qp);
                 uint8_t r1 = extract64(insn, 6, 7);
                 uint8_t r2 = extract64(insn, 13, 7);
                 uint8_t r3 = extract64(insn, 20, 7);
@@ -3526,6 +3577,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 handled = true;
             } else if (x2a == 3 && ve == 1) {
                 /* dep r1 = imm1, r3, pos6, len6 (I14) */
+                skip_label = gen_qp_skip(qp);
                 uint8_t r1 = extract64(insn, 6, 7);
                 uint8_t r3 = extract64(insn, 20, 7);
                 /* I14: pos6 = 63 - cpos6b; len6 = len6d + 1 (SKI encoding.imm). */

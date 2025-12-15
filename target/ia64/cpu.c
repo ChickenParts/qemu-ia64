@@ -49,9 +49,12 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     CPUIA64State *env = &cpu->env;
     uint64_t kernel_stext = env->kernel_stext;
     uint64_t kernel_etext = env->kernel_etext;
+    uint64_t kernel_bias = env->kernel_bias;
     uint64_t percpu_va_base = env->percpu_va_base;
     uint64_t percpu_pa_base = env->percpu_pa_base;
     uint64_t percpu_size = env->percpu_size;
+    uint64_t dbg_console_owner_va = env->dbg_console_owner_va;
+    uint64_t dbg_console_waiter_va = env->dbg_console_waiter_va;
 
     if (icc->parent_phases.hold) {
         icc->parent_phases.hold(obj, type);
@@ -67,9 +70,12 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     memset(env, 0, sizeof(*env));
     env->kernel_stext = kernel_stext;
     env->kernel_etext = kernel_etext;
+    env->kernel_bias = kernel_bias;
     env->percpu_va_base = percpu_va_base;
     env->percpu_pa_base = percpu_pa_base;
     env->percpu_size = percpu_size;
+    env->dbg_console_owner_va = dbg_console_owner_va;
+    env->dbg_console_waiter_va = dbg_console_waiter_va;
 
     /* Basic bootstrap defaults */
     env->ip = 0xFFFF0000ULL;

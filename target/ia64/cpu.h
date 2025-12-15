@@ -108,10 +108,17 @@ typedef struct CPUArchState {
     uint64_t kernel_stext;
     uint64_t kernel_etext;
 
+    /* Optional kernel virtual-to-physical bias for region-5 linear mapping. */
+    uint64_t kernel_bias;
+
     /* Optional kernel percpu PT_LOAD mapping (virtual -> physical). */
     uint64_t percpu_va_base;
     uint64_t percpu_pa_base;
     uint64_t percpu_size;
+
+    /* Optional kernel symbol addresses for targeted bringup debugging. */
+    uint64_t dbg_console_owner_va;
+    uint64_t dbg_console_waiter_va;
 
     /* Debug: fail-fast hang detector (TB hot loop). */
     uint64_t dbg_tb_last_pc;
