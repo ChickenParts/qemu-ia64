@@ -8,8 +8,11 @@
 #define IA64_CPU_H
 
 #include "cpu-qom.h"
+#include "exec/cpu-interrupt.h"
 #include "exec/cpu-defs.h"
 #include "exec/cpu-common.h"
+
+typedef struct QEMUTimer QEMUTimer;
 
 typedef struct CPUArchState {
     uint64_t r[128];     /* General Registers */
@@ -136,6 +139,10 @@ struct ArchCPU {
     /*< public >*/
 
     CPUIA64State env;
+
+#ifndef CONFIG_USER_ONLY
+    QEMUTimer *itm_timer;
+#endif
 };
 
 struct IA64CPUClass {
@@ -189,10 +196,14 @@ struct IA64CPUClass {
  *   IC  bit 13
  */
 #define IA64_PSR_IC       (1ULL << 13)
+#define IA64_PSR_I        (1ULL << 14)
 #define IA64_PSR_IT       (1ULL << 36)
 #define IA64_PSR_DT       (1ULL << 17)
 #define IA64_PSR_BN       (1ULL << 44)
 #define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
+
+#define IA64_SPURIOUS_INT_VECTOR 0x0f
+#define IA64_ITV_MASK            (1ULL << 16)
 
 /*
  * Floating-point helper conventions (minimal subset).
@@ -244,6 +255,10 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb,
 bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool probe, uintptr_t retaddr);
+void ia64_intr_push_window(CPUIA64State *env);
+#ifndef CONFIG_USER_ONLY
+void ia64_itm_update(CPUIA64State *env);
+#endif
 
 #define cpu_signal_handler cpu_ia64_signal_handler
 #ifdef CONFIG_USER_ONLY

@@ -9,11 +9,17 @@
 #include "cpu.h"
 #include "qemu/bswap.h"
 #include "qemu/qemu-print.h"
+#include "qemu/timer.h"
 #include "qemu/module.h"
 #ifndef CONFIG_USER_ONLY
 #include "hw/core/sysemu-cpu-ops.h"
 #endif
 #include "accel/tcg/cpu-ops.h"
+
+#ifndef CONFIG_USER_ONLY
+static void ia64_itm_timer_cb(void *opaque);
+#endif
+static void ia64_cpu_do_interrupt(CPUState *cs);
 
 static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
 {
@@ -40,6 +46,13 @@ static void ia64_cpu_realizefn(DeviceState *dev, Error **errp)
         error_propagate(errp, local_err);
         return;
     }
+
+#ifndef CONFIG_USER_ONLY
+    if (!cpu->itm_timer) {
+        cpu->itm_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                      ia64_itm_timer_cb, cpu);
+    }
+#endif
 }
 
 static void ia64_cpu_reset_hold(Object *obj, ResetType type)
@@ -138,16 +151,78 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     memset(env->dtlb, 0, sizeof(env->dtlb));
     env->itlb_next = 0;
     env->dtlb_next = 0;
+
+#ifndef CONFIG_USER_ONLY
+    /* External interrupts start idle/spurious; timer vector masked by default. */
+    env->cr[65] = IA64_SPURIOUS_INT_VECTOR; /* cr.ivr */
+    env->cr[72] = IA64_ITV_MASK;            /* cr.itv */
+    if (cpu->itm_timer) {
+        timer_del(cpu->itm_timer);
+    }
+#endif
 }
 
 static void ia64_cpu_initfn(Object *obj)
 {
 }
 
+static void ia64_cpu_finalizefn(Object *obj)
+{
+    IA64CPU *cpu = IA64_CPU(obj);
 #ifndef CONFIG_USER_ONLY
+    if (cpu->itm_timer) {
+        timer_free(cpu->itm_timer);
+        cpu->itm_timer = NULL;
+    }
+#endif
+}
+
+#ifndef CONFIG_USER_ONLY
+static void ia64_itm_timer_cb(void *opaque)
+{
+    IA64CPU *cpu = opaque;
+    CPUState *cs = CPU(cpu);
+    CPUIA64State *env = &cpu->env;
+
+    uint64_t itv = env->cr[72];
+    if (itv & IA64_ITV_MASK) {
+        return; /* masked */
+    }
+
+    uint8_t vec = itv & 0xff;
+    if ((env->cr[65] & 0xff) == IA64_SPURIOUS_INT_VECTOR) {
+        env->cr[65] = vec;
+    }
+    cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+}
+
+void ia64_itm_update(CPUIA64State *env)
+{
+    IA64CPU *cpu = IA64_CPU(env_cpu(env));
+    if (!cpu->itm_timer) {
+        return;
+    }
+
+    uint64_t itv = env->cr[72];
+    if ((itv & IA64_ITV_MASK) || env->cr[1] == 0) {
+        timer_del(cpu->itm_timer);
+        return;
+    }
+
+    int64_t off = (int64_t)env->ar[IA64_AR_ITC];
+    int64_t when = (int64_t)env->cr[1] - off;
+    int64_t now = (int64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (when < now) {
+        when = now;
+    }
+    timer_mod_ns(cpu->itm_timer, (int64_t)when);
+}
+
 static bool ia64_cpu_has_work(CPUState *cs)
 {
-    return false;
+    CPUIA64State *env = cpu_env(cs);
+    return (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
+            (env->psr & IA64_PSR_I));
 }
 
 static const struct SysemuCPUOps ia64_sysemu_ops = {
@@ -157,6 +232,25 @@ static const struct SysemuCPUOps ia64_sysemu_ops = {
 
 static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
+    IA64CPU *cpu = IA64_CPU(cs);
+    CPUIA64State *env = &cpu->env;
+
+    if (interrupt_request & CPU_INTERRUPT_HARD) {
+        uint8_t vec = env->cr[65] & 0xff;
+        if ((env->psr & IA64_PSR_I) && vec != IA64_SPURIOUS_INT_VECTOR) {
+            ia64_intr_push_window(env);
+            env->cr_ipsr = env->psr;
+            env->cr_iip = env->ip & ~0xFULL;
+            env->cr_ifs = env->cfm;
+            env->cr_isr = 0;
+            env->cr_iim = 0;
+
+            cs->exception_index = IA64_EXCP_BASE + IA64_VEC_EXTERNAL_INTERRUPT;
+            cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+            ia64_cpu_do_interrupt(cs);
+            return true;
+        }
+    }
     return false;
 }
 #endif
@@ -265,20 +359,20 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     IA64CPU *cpu = IA64_CPU(cs);
     CPUIA64State *env = &cpu->env;
     uint32_t vec = cs->exception_index - IA64_EXCP_BASE;
+    uint64_t old_psr = env->psr;
 
     /* Basic handler target: always vector via cr.iva (IVT base). */
     uint64_t iva = env->cr[2]; /* cr.iva */
     env->ip = iva + vec;
-    env->psr &= ~PSR_RI_MASK; /* clear RI */
+    env->psr = old_psr & (IA64_PSR_IT | IA64_PSR_DT);
 
     /*
      * On interruption, Linux enters the IVT with BN=0 (alternate bank) and
      * later uses bsw.1 to switch back to the normal bank (BN=1) when it wants
      * to save/restore the interrupted context's r16..r31.
      */
-    if (env->psr & IA64_PSR_BN) {
+    if (old_psr & IA64_PSR_BN) {
         ia64_switch_banks_local(env);
-        env->psr &= ~IA64_PSR_BN;
     }
 }
 
@@ -342,6 +436,7 @@ static const TypeInfo ia64_cpu_type_infos[] = {
         .parent = TYPE_CPU,
         .instance_size = sizeof(IA64CPU),
         .instance_init = ia64_cpu_initfn,
+        .instance_finalize = ia64_cpu_finalizefn,
         .abstract = true,
         .class_size = sizeof(IA64CPUClass),
         .class_init = ia64_cpu_class_init,

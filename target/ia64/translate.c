@@ -616,8 +616,8 @@ static TCGv_i64 gen_load_cr_reg(uint8_t idx)
     case 23: return cpu_cr_ifs;
     case 24: return cpu_cr_iim;
     case 25: return cpu_cr_iha;
-    case 65: /* cr.ivr: return spurious vector when no pending IRQs */
-        return tcg_constant_i64(15);
+    case 65: /* cr.ivr: virtual interrupt request vector */
+        break;
     default:
         break;
     }
@@ -629,6 +629,15 @@ static TCGv_i64 gen_load_cr_reg(uint8_t idx)
 static void gen_store_cr_reg(uint8_t idx, TCGv_i64 v)
 {
     switch (idx) {
+    case 1:  /* cr.itm */
+        gen_helper_set_itm(tcg_env, v);
+        return;
+    case 67: /* cr.eoi */
+        gen_helper_eoi(tcg_env);
+        return;
+    case 72: /* cr.itv */
+        gen_helper_set_itv(tcg_env, v);
+        return;
     case 16: tcg_gen_mov_i64(cpu_cr_ipsr, v); break;
     case 17: tcg_gen_mov_i64(cpu_cr_isr, v); break;
     case 2:  tcg_gen_mov_i64(cpu_cr_iva, v); break;
@@ -1483,6 +1492,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             if (x3 == 5) {
                 /* M22: chk.a.clr r1, target25 (we don't model NaT yet; assume OK). */
                 /* no side effects when NaT is ignored */
+            } else if (x3 == 7 && x4 == 0 && x2 == 0) {
+                /*
+                 * chk.a.clr f1, target25
+                 *
+                 * The kernel uses advanced floating-point loads (ldf*.a) with
+                 * chk.a.clr recovery branches. We do not model the ALAT yet;
+                 * treat advanced loads as always successful, so the check does
+                 * not branch.
+                 */
             } else if (x3 == 0 && (x4 == 0x6 || x4 == 0x7)) {
                 /* M44: ssm/rsm imm24 (per ski encoding.format + encoding.imm) */
                 uint64_t imm21a = extract64(insn, 6, 21);

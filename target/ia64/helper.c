@@ -111,7 +111,6 @@ static inline uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
 
 static void ia64_rse_push_window(CPUIA64State *env);
 static bool ia64_rse_pop_window(CPUIA64State *env);
-static void ia64_intr_push_window(CPUIA64State *env);
 static bool ia64_intr_pop_window(CPUIA64State *env);
 
 static void ia64_switch_banks(CPUIA64State *env)
@@ -515,7 +514,7 @@ static void ia64_intr_ensure(CPUIA64State *env, uint32_t need)
     env->intr_capacity = new_cap;
 }
 
-static void ia64_intr_push_window(CPUIA64State *env)
+void ia64_intr_push_window(CPUIA64State *env)
 {
     ia64_intr_ensure(env, env->intr_depth + 1);
     struct IA64IntrFrame *frame = &env->intr_frames[env->intr_depth++];
@@ -2617,6 +2616,34 @@ void HELPER(set_itc)(CPUIA64State *env, uint64_t val)
 {
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     env->ar[IA64_AR_ITC] = (uint64_t)((int64_t)val - (int64_t)now);
+#ifndef CONFIG_USER_ONLY
+    ia64_itm_update(env);
+#endif
+}
+
+void HELPER(set_itm)(CPUIA64State *env, uint64_t val)
+{
+    env->cr[1] = val; /* cr.itm */
+#ifndef CONFIG_USER_ONLY
+    ia64_itm_update(env);
+#endif
+}
+
+void HELPER(set_itv)(CPUIA64State *env, uint64_t val)
+{
+    env->cr[72] = val; /* cr.itv */
+#ifndef CONFIG_USER_ONLY
+    ia64_itm_update(env);
+#endif
+}
+
+void HELPER(eoi)(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+    env->cr[65] = IA64_SPURIOUS_INT_VECTOR; /* cr.ivr */
+#ifndef CONFIG_USER_ONLY
+    cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+#endif
 }
 
 uint64_t HELPER(get_cpuid)(CPUIA64State *env, uint64_t idx)
