@@ -105,7 +105,8 @@ struct IPFMachineState {
     uint32_t iosapic_reg_select;
     uint32_t iosapic_reg[0x40];
 
-    struct IpfTextWatch *text_watch[2];
+    /* Lightweight debug watchpoints (see QEMU_IA64_WATCH_* env vars). */
+    struct IpfTextWatch *text_watch[8];
 };
 
 #define TYPE_IPF_PC "ipf-pc"
@@ -323,7 +324,19 @@ static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
         break;
     }
 
-    if (w->read_count < 64) {
+    static int watch_limit = -1;
+    if (watch_limit == -1) {
+        watch_limit = 64;
+        const char *slim = getenv("QEMU_IA64_WATCH_LIMIT");
+        if (slim && *slim) {
+            watch_limit = atoi(slim);
+        }
+        if (watch_limit < 0) {
+            watch_limit = 0;
+        }
+    }
+
+    if (w->read_count < (unsigned)watch_limit) {
         const char *s = getenv("QEMU_IA64_WATCH_READ");
         if (s && *s) {
             fprintf(stderr,
@@ -357,7 +370,19 @@ static void ipf_text_watch_write(void *opaque, hwaddr addr, uint64_t data,
     hwaddr pa = w->pa_base + addr;
     uint8_t *p = w->ram_ptr + w->pa_base + addr;
 
-    if (w->write_count < 64) {
+    static int watch_limit = -1;
+    if (watch_limit == -1) {
+        watch_limit = 64;
+        const char *slim = getenv("QEMU_IA64_WATCH_LIMIT");
+        if (slim && *slim) {
+            watch_limit = atoi(slim);
+        }
+        if (watch_limit < 0) {
+            watch_limit = 0;
+        }
+    }
+
+    if (w->write_count < (unsigned)watch_limit) {
         fprintf(stderr,
                 "IPF_TEXT_WATCH: write size=%u pa=%016" HWADDR_PRIx " data=%016" PRIx64
                 " ip=%016" PRIx64 " psr=%016" PRIx64
@@ -402,6 +427,10 @@ static const MemoryRegionOps ipf_text_watch_ops = {
     .write = ipf_text_watch_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+    },
+    .impl = {
         .min_access_size = 1,
         .max_access_size = 8,
     },
@@ -1727,20 +1756,32 @@ static void ipf_init(MachineState *machine)
 
     /* Optional RAM watchpoints for bringup debugging. */
     const char *watch_data = getenv("QEMU_IA64_WATCH_DATA");
-    if (watch_data && *watch_data) {
+    const char *watch_data2 = getenv("QEMU_IA64_WATCH_DATA2");
+    const struct {
+        const char *env;
+        const char *label;
+    } data_watches[] = {
+        { watch_data, "data_watch1" },
+        { watch_data2, "data_watch2" },
+    };
+
+    for (size_t wi = 0; wi < ARRAY_SIZE(data_watches); wi++) {
+        const char *w = data_watches[wi].env;
+        if (!w || !*w) {
+            continue;
+        }
         hwaddr pa = 0;
-        if (strcmp(watch_data, "console_srcu") == 0 ||
-            strcmp(watch_data, "console_srcu+8") == 0) {
+        if (strcmp(w, "console_srcu") == 0 || strcmp(w, "console_srcu+8") == 0) {
             const uint64_t console_srcu_va = 0xa000000101f57678ULL;
             pa = (console_srcu_va + 8) - ipf_kernel_bias;
             ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa,
-                               "console_srcu+8");
+                               data_watches[wi].label);
         } else {
             char *endp = NULL;
-            pa = (hwaddr)strtoull(watch_data, &endp, 0);
-            if (endp && endp != watch_data) {
+            pa = (hwaddr)strtoull(w, &endp, 0);
+            if (endp && endp != w) {
                 ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa,
-                                   "data_watch");
+                                   data_watches[wi].label);
             }
         }
     }

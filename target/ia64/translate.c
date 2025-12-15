@@ -1266,44 +1266,55 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                 ctx->base.is_jmp = DISAS_NORETURN;
             }
             tcg_gen_exit_tb(NULL, 0);
-        } else if (btype == 2 || btype == 3) {
-            /* B1: br.wexit/br.wtop target25 */
-            const bool is_wtop = (btype == 3);
-            TCGv_i64 p63 = gen_pr_read_bit(63);
-            TCGv_i64 ec = gen_load_ar(66); /* ar.ec */
+	        } else if (btype == 2 || btype == 3) {
+	            /* B1: br.wexit/br.wtop target25 */
+	            const bool is_wtop = (btype == 3);
+	            TCGv_i64 p63 = gen_pr_read_bit(63);
+	            TCGv_i64 ec = gen_load_ar(66); /* ar.ec */
+	            /* EC_CNT is bits 63..58 of ar.ec (see SKI state.h). */
+	            TCGv_i64 ec_cnt = tcg_temp_new_i64();
+	            tcg_gen_shri_i64(ec_cnt, ec, 58);
+	            tcg_gen_andi_i64(ec_cnt, ec_cnt, 0x3f);
 
-            /* cond = p63 || (ec > 1) for wtop, inverted for wexit. */
-            TCGv_i64 ec_gt1 = tcg_temp_new_i64();
-            tcg_gen_setcondi_i64(TCG_COND_GT, ec_gt1, ec, 1);
-            TCGv_i64 cond = tcg_temp_new_i64();
-            tcg_gen_or_i64(cond, p63, ec_gt1);
-            if (!is_wtop) {
-                tcg_gen_xori_i64(cond, cond, 1);
+	            /* cond = p63 || (ec > 1) for wtop, inverted for wexit. */
+	            TCGv_i64 ec_gt1 = tcg_temp_new_i64();
+	            tcg_gen_setcondi_i64(TCG_COND_GT, ec_gt1, ec_cnt, 1);
+	            TCGv_i64 cond = tcg_temp_new_i64();
+	            tcg_gen_or_i64(cond, p63, ec_gt1);
+	            if (!is_wtop) {
+	                tcg_gen_xori_i64(cond, cond, 1);
             }
             tcg_gen_andi_i64(cond, cond, 1);
 
             /* PrWrt(63, 0) */
-            gen_pr_write_bit(63, tcg_constant_i64(0));
+	            gen_pr_write_bit(63, tcg_constant_i64(0));
 
-            /*
-             * if (p63) rotate_regs();
-             * else if (ec > 0) { ec--; rotate_regs(); }
-             */
-            TCGLabel *after_sidefx = gen_new_label();
-            TCGLabel *check_ec = gen_new_label();
-            tcg_gen_brcondi_i64(TCG_COND_EQ, p63, 0, check_ec);
-            gen_rotate_regs();
-            tcg_gen_br(after_sidefx);
-            gen_set_label(check_ec);
-            tcg_gen_brcondi_i64(TCG_COND_EQ, ec, 0, after_sidefx);
-            TCGv_i64 ec1 = tcg_temp_new_i64();
-            tcg_gen_addi_i64(ec1, ec, -1);
-            gen_store_ar(66, ec1);
-            gen_rotate_regs();
-            gen_set_label(after_sidefx);
+	            /*
+	             * if (p63) rotate_regs();
+	             * else if (EC_CNT > 0) { EC_CNT--; rotate_regs(); }
+	             */
+	            TCGLabel *after_sidefx = gen_new_label();
+	            TCGLabel *check_ec = gen_new_label();
+	            tcg_gen_brcondi_i64(TCG_COND_EQ, p63, 0, check_ec);
+	            gen_rotate_regs();
+	            tcg_gen_br(after_sidefx);
+	            gen_set_label(check_ec);
+	            tcg_gen_brcondi_i64(TCG_COND_EQ, ec_cnt, 0, after_sidefx);
+	            TCGv_i64 ec_cnt1 = tcg_temp_new_i64();
+	            tcg_gen_addi_i64(ec_cnt1, ec_cnt, -1);
+	            /* Write EC_CNT back into ar.ec, preserving other fields. */
+	            TCGv_i64 ec_masked = tcg_temp_new_i64();
+	            tcg_gen_andi_i64(ec_masked, ec, ~(0x3fULL << 58));
+	            TCGv_i64 ec_cnt_sh = tcg_temp_new_i64();
+	            tcg_gen_shli_i64(ec_cnt_sh, ec_cnt1, 58);
+	            TCGv_i64 ec_new = tcg_temp_new_i64();
+	            tcg_gen_or_i64(ec_new, ec_masked, ec_cnt_sh);
+	            gen_store_ar(66, ec_new);
+	            gen_rotate_regs();
+	            gen_set_label(after_sidefx);
 
-            /* Conditional branch on cond. */
-            TCGLabel *not_taken = gen_new_label();
+	            /* Conditional branch on cond. */
+	            TCGLabel *not_taken = gen_new_label();
             tcg_gen_brcondi_i64(TCG_COND_EQ, cond, 0, not_taken);
             tcg_gen_movi_i64(cpu_pc, ctx->base.pc_next + disp);
             gen_set_ri_const(0);
@@ -1325,16 +1336,19 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
             tcg_gen_exit_tb(NULL, 0);
 
             gen_set_label(not_taken);
-        } else if (btype == 6 || btype == 7) {
-            /* B2: br.cexit/br.ctop target25 */
-            const bool is_ctop = (btype == 7);
-            TCGv_i64 lc = gen_load_ar(65); /* ar.lc */
-            TCGv_i64 ec = gen_load_ar(66); /* ar.ec */
+	        } else if (btype == 6 || btype == 7) {
+	            /* B2: br.cexit/br.ctop target25 */
+	            const bool is_ctop = (btype == 7);
+	            TCGv_i64 lc = gen_load_ar(65); /* ar.lc */
+	            TCGv_i64 ec = gen_load_ar(66); /* ar.ec */
+	            TCGv_i64 ec_cnt = tcg_temp_new_i64();
+	            tcg_gen_shri_i64(ec_cnt, ec, 58);
+	            tcg_gen_andi_i64(ec_cnt, ec_cnt, 0x3f);
 
-            TCGv_i64 lc_gt0 = tcg_temp_new_i64();
-            tcg_gen_setcondi_i64(TCG_COND_NE, lc_gt0, lc, 0);
-            TCGv_i64 ec_gt1 = tcg_temp_new_i64();
-            tcg_gen_setcondi_i64(TCG_COND_GT, ec_gt1, ec, 1);
+	            TCGv_i64 lc_gt0 = tcg_temp_new_i64();
+	            tcg_gen_setcondi_i64(TCG_COND_NE, lc_gt0, lc, 0);
+	            TCGv_i64 ec_gt1 = tcg_temp_new_i64();
+	            tcg_gen_setcondi_i64(TCG_COND_GT, ec_gt1, ec_cnt, 1);
 
             TCGv_i64 cond_base = tcg_temp_new_i64();
             tcg_gen_or_i64(cond_base, lc_gt0, ec_gt1);
@@ -1351,28 +1365,34 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
              * if (lc > 0) { lc--; PrWrt(63,1); rotate_regs(); }
              * else if (ec > 0) { ec--; PrWrt(63,0); rotate_regs(); }
              * else { PrWrt(63,0); }
-             */
-            TCGLabel *after_sidefx = gen_new_label();
-            TCGLabel *check_ec = gen_new_label();
-            tcg_gen_brcondi_i64(TCG_COND_EQ, lc_gt0, 0, check_ec);
-            {
-                TCGv_i64 lc1 = tcg_temp_new_i64();
-                tcg_gen_addi_i64(lc1, lc, -1);
-                gen_store_ar(65, lc1);
-                gen_pr_write_bit(63, tcg_constant_i64(1));
-                gen_rotate_regs();
-                tcg_gen_br(after_sidefx);
-            }
-            gen_set_label(check_ec);
-            tcg_gen_brcondi_i64(TCG_COND_EQ, ec, 0, after_sidefx);
-            {
-                TCGv_i64 ec1 = tcg_temp_new_i64();
-                tcg_gen_addi_i64(ec1, ec, -1);
-                gen_store_ar(66, ec1);
-                gen_pr_write_bit(63, tcg_constant_i64(0));
-                gen_rotate_regs();
-            }
-            gen_set_label(after_sidefx);
+	             */
+	            TCGLabel *after_sidefx = gen_new_label();
+	            TCGLabel *check_ec = gen_new_label();
+	            tcg_gen_brcondi_i64(TCG_COND_EQ, lc_gt0, 0, check_ec);
+	            {
+	                TCGv_i64 lc1 = tcg_temp_new_i64();
+	                tcg_gen_addi_i64(lc1, lc, -1);
+	                gen_store_ar(65, lc1);
+	                gen_pr_write_bit(63, tcg_constant_i64(1));
+	                gen_rotate_regs();
+	                tcg_gen_br(after_sidefx);
+	            }
+	            gen_set_label(check_ec);
+	            tcg_gen_brcondi_i64(TCG_COND_EQ, ec_cnt, 0, after_sidefx);
+	            {
+	                TCGv_i64 ec_cnt1 = tcg_temp_new_i64();
+	                tcg_gen_addi_i64(ec_cnt1, ec_cnt, -1);
+	                TCGv_i64 ec_masked = tcg_temp_new_i64();
+	                tcg_gen_andi_i64(ec_masked, ec, ~(0x3fULL << 58));
+	                TCGv_i64 ec_cnt_sh = tcg_temp_new_i64();
+	                tcg_gen_shli_i64(ec_cnt_sh, ec_cnt1, 58);
+	                TCGv_i64 ec_new = tcg_temp_new_i64();
+	                tcg_gen_or_i64(ec_new, ec_masked, ec_cnt_sh);
+	                gen_store_ar(66, ec_new);
+	                gen_pr_write_bit(63, tcg_constant_i64(0));
+	                gen_rotate_regs();
+	            }
+	            gen_set_label(after_sidefx);
 
             /* Conditional branch on cond. */
             TCGLabel *not_taken = gen_new_label();
@@ -1400,9 +1420,7 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                           tgt);
             bcall_log_count++;
         }
-        if (ia64_dbg_call_pc_match(ctx->base.pc_next) ||
-            tgt == 0xa000000100880440ULL ||
-            tgt == 0xa00000010018f8e0ULL) { /* __srcu_read_unlock */
+        if (ia64_dbg_call_pc_match(ctx->base.pc_next)) {
             gen_helper_dbg_call(tcg_env, tcg_constant_i64(ctx->base.pc_next));
         }
         gen_helper_call(tcg_env);
@@ -2722,6 +2740,17 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 if (ar == 18) {
                     gen_helper_set_bspstore(tcg_env, t);
+                } else if (ar == 66) {
+                    /*
+                     * ar.ec is a bitfield register: EC_CNT is bits 63..58.
+                     * Linux uses software-pipelined loops (e.g. __copy_user)
+                     * and expects mov.i ar.ec=X to populate EC_CNT, not the
+                     * low bits of the raw register.
+                     */
+                    TCGv_i64 ec = tcg_temp_new_i64();
+                    tcg_gen_andi_i64(ec, t, 0x3f);
+                    tcg_gen_shli_i64(ec, ec, 58);
+                    gen_store_ar(ar, ec);
                 } else {
                     gen_store_ar(ar, t);
                 }
@@ -2741,6 +2770,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 tcg_gen_movi_i64(t, simm8);
                 if (ar == 18) {
                     gen_helper_set_bspstore(tcg_env, t);
+                } else if (ar == 66) {
+                    TCGv_i64 ec = tcg_temp_new_i64();
+                    tcg_gen_andi_i64(ec, t, 0x3f);
+                    tcg_gen_shli_i64(ec, ec, 58);
+                    gen_store_ar(ar, ec);
                 } else {
                     gen_store_ar(ar, t);
                 }
@@ -2927,26 +2961,119 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             /* I3 mux1: za=0 zb=0 ve=0 x2a=3 x2b=2 x2c=2 : r1 = r2, mbtype4 */
             if (za == 0 && zb == 0 && ve == 0 && x2a == 3 && x2b == 2 && x2c == 2) {
                 uint8_t mbt4c = extract64(insn, 20, 4);
-                if (mbt4c == 0) { /* @brcst */
+                const uint8_t *map = NULL;
+
+                static const uint8_t map_brcst[8] = {7, 7, 7, 7, 7, 7, 7, 7};
+                static const uint8_t map_mix[8] = {0, 4, 2, 6, 1, 5, 3, 7};
+                static const uint8_t map_shuf[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+                static const uint8_t map_alt[8] = {0, 2, 4, 6, 1, 3, 5, 7};
+                static const uint8_t map_rev[8] = {7, 6, 5, 4, 3, 2, 1, 0};
+
+                switch (mbt4c) {
+                case 0x0: /* @brcst */
+                    map = map_brcst;
+                    break;
+                case 0x8: /* @mix */
+                    map = map_mix;
+                    break;
+                case 0x9: /* @shuf */
+                    map = map_shuf;
+                    break;
+                case 0xA: /* @alt */
+                    map = map_alt;
+                    break;
+                case 0xB: /* @rev */
+                    map = map_rev;
+                    break;
+                default:
+                    map = NULL;
+                    break;
+                }
+
+                if (!map) {
+                    gen_unimpl(ctx, insn, "mux1 mbtype");
+                    return;
+                }
+
+                if (r1 != 0) {
                     TCGv_i64 src = tcg_temp_new_i64();
-                    TCGv_i64 b = tcg_temp_new_i64();
+                    TCGv_i64 dst = tcg_temp_new_i64();
+                    TCGv_i64 t = tcg_temp_new_i64();
+
                     if (r2 == 0) {
                         tcg_gen_movi_i64(src, 0);
                     } else {
                         tcg_gen_mov_i64(src, cpu_r[r2]);
                     }
-                    tcg_gen_andi_i64(b, src, 0xff);
-                    if (r1 != 0) {
-                        TCGv_i64 t = tcg_temp_new_i64();
-                        tcg_gen_muli_i64(t, b, 0x0101010101010101ULL);
-                        tcg_gen_mov_i64(cpu_r[r1], t);
+
+                    tcg_gen_movi_i64(dst, 0);
+                    for (int i = 0; i < 8; i++) {
+                        int src_shift = (7 - map[i]) * 8;
+                        int dst_shift = (7 - i) * 8;
+                        if (src_shift) {
+                            tcg_gen_shri_i64(t, src, src_shift);
+                        } else {
+                            tcg_gen_mov_i64(t, src);
+                        }
+                        tcg_gen_andi_i64(t, t, 0xff);
+                        if (dst_shift) {
+                            tcg_gen_shli_i64(t, t, dst_shift);
+                        }
+                        tcg_gen_or_i64(dst, dst, t);
                     }
-                    if (skip_label) {
-                        gen_set_label(skip_label);
-                    }
-                    break;
+                    tcg_gen_mov_i64(cpu_r[r1], dst);
                 }
-                gen_unimpl(ctx, insn, "mux1 mbtype");
+
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I4 mux2: za=0 zb=1 ve=0 x2a=3 x2b=2 x2c=2 : r1 = r2, mhtype8 */
+            if (za == 0 && zb == 1 && ve == 0 && x2a == 3 && x2b == 2 && x2c == 2) {
+                uint8_t mht8c = extract64(insn, 20, 8);
+                uint8_t mht = (uint8_t)~mht8c; /* SKI reverses endianness */
+                uint8_t sel[4] = {
+                    (uint8_t)((mht >> 6) & 0x3),
+                    (uint8_t)((mht >> 4) & 0x3),
+                    (uint8_t)((mht >> 2) & 0x3),
+                    (uint8_t)((mht >> 0) & 0x3),
+                };
+
+                if (r1 != 0) {
+                    TCGv_i64 src = tcg_temp_new_i64();
+                    TCGv_i64 dst = tcg_temp_new_i64();
+                    TCGv_i64 t = tcg_temp_new_i64();
+
+                    if (r2 == 0) {
+                        tcg_gen_movi_i64(src, 0);
+                    } else {
+                        tcg_gen_mov_i64(src, cpu_r[r2]);
+                    }
+
+                    tcg_gen_movi_i64(dst, 0);
+                    for (int i = 0; i < 4; i++) {
+                        int src_shift = (3 - sel[i]) * 16;
+                        int dst_shift = (3 - i) * 16;
+                        if (src_shift) {
+                            tcg_gen_shri_i64(t, src, src_shift);
+                        } else {
+                            tcg_gen_mov_i64(t, src);
+                        }
+                        tcg_gen_andi_i64(t, t, 0xffff);
+                        if (dst_shift) {
+                            tcg_gen_shli_i64(t, t, dst_shift);
+                        }
+                        tcg_gen_or_i64(dst, dst, t);
+                    }
+                    tcg_gen_mov_i64(cpu_r[r1], dst);
+                }
+
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
             }
 
             /* I2 unpack4.{h,l}: za=1 zb=0 ve=0 x2a=2 x2c=1 */
@@ -2969,20 +3096,67 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     TCGv_i64 dst = tcg_temp_new_i64();
                     if (x2b == 0) {
                         /* unpack4.h == mix4.l: dst.w0=src1.w0, dst.w1=src2.w0 */
-                        TCGv_i64 w0 = tcg_temp_new_i64();
-                        TCGv_i64 w1 = tcg_temp_new_i64();
-                        tcg_gen_andi_i64(w0, a, 0xffffffffULL);
-                        tcg_gen_andi_i64(w1, b, 0xffffffffULL);
-                        tcg_gen_shli_i64(w1, w1, 32);
-                        tcg_gen_or_i64(dst, w0, w1);
+                        TCGv_i64 hi1 = tcg_temp_new_i64();
+                        TCGv_i64 hi2 = tcg_temp_new_i64();
+                        tcg_gen_shri_i64(hi1, a, 32);
+                        tcg_gen_andi_i64(hi1, hi1, 0xffffffffULL);
+                        tcg_gen_shri_i64(hi2, b, 32);
+                        tcg_gen_andi_i64(hi2, hi2, 0xffffffffULL);
+                        tcg_gen_shli_i64(hi1, hi1, 32);
+                        tcg_gen_or_i64(dst, hi1, hi2);
                     } else {
                         /* unpack4.l == mix4.r: dst.w0=src1.w1, dst.w1=src2.w1 */
-                        TCGv_i64 w0 = tcg_temp_new_i64();
-                        TCGv_i64 w1 = tcg_temp_new_i64();
-                        tcg_gen_shri_i64(w0, a, 32);
-                        tcg_gen_andi_i64(w0, w0, 0xffffffffULL);
-                        tcg_gen_andi_i64(w1, b, 0xffffffff00000000ULL);
-                        tcg_gen_or_i64(dst, w0, w1);
+                        TCGv_i64 lo1 = tcg_temp_new_i64();
+                        TCGv_i64 lo2 = tcg_temp_new_i64();
+                        tcg_gen_andi_i64(lo1, a, 0xffffffffULL);
+                        tcg_gen_andi_i64(lo2, b, 0xffffffffULL);
+                        tcg_gen_shli_i64(lo1, lo1, 32);
+                        tcg_gen_or_i64(dst, lo1, lo2);
+                    }
+                    tcg_gen_mov_i64(cpu_r[r1], dst);
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 mix4.{l,r}: za=1 zb=0 ve=0 x2a=2 x2c=2 */
+            if (za == 1 && zb == 0 && ve == 0 && x2a == 2 && x2c == 2 &&
+                (x2b == 0 || x2b == 2)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (r1 != 0) {
+                    TCGv_i64 dst = tcg_temp_new_i64();
+                    if (x2b == 2) {
+                        /* mix4.l: dst.w0=src1.w0, dst.w1=src2.w0 */
+                        TCGv_i64 hi1 = tcg_temp_new_i64();
+                        TCGv_i64 hi2 = tcg_temp_new_i64();
+                        tcg_gen_shri_i64(hi1, a, 32);
+                        tcg_gen_andi_i64(hi1, hi1, 0xffffffffULL);
+                        tcg_gen_shri_i64(hi2, b, 32);
+                        tcg_gen_andi_i64(hi2, hi2, 0xffffffffULL);
+                        tcg_gen_shli_i64(hi1, hi1, 32);
+                        tcg_gen_or_i64(dst, hi1, hi2);
+                    } else {
+                        /* mix4.r: dst.w0=src1.w1, dst.w1=src2.w1 */
+                        TCGv_i64 lo1 = tcg_temp_new_i64();
+                        TCGv_i64 lo2 = tcg_temp_new_i64();
+                        tcg_gen_andi_i64(lo1, a, 0xffffffffULL);
+                        tcg_gen_andi_i64(lo2, b, 0xffffffffULL);
+                        tcg_gen_shli_i64(lo1, lo1, 32);
+                        tcg_gen_or_i64(dst, lo1, lo2);
                     }
                     tcg_gen_mov_i64(cpu_r[r1], dst);
                 }
@@ -3006,9 +3180,19 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(cnt, cpu_r[r3]);
                 }
-                tcg_gen_andi_i64(cnt, cnt, 63);
                 if (r1 != 0) {
+                    /*
+                     * Shift counts are not masked. Per SKI: if CNT >= 64 the
+                     * result is 0.
+                     */
+                    TCGLabel *ge64 = gen_new_label();
+                    TCGLabel *done = gen_new_label();
+                    tcg_gen_brcondi_i64(TCG_COND_GEU, cnt, 64, ge64);
                     tcg_gen_shl_i64(cpu_r[r1], src, cnt);
+                    tcg_gen_br(done);
+                    gen_set_label(ge64);
+                    tcg_gen_movi_i64(cpu_r[r1], 0);
+                    gen_set_label(done);
                 }
                 if (skip_label) {
                     gen_set_label(skip_label);
@@ -3035,13 +3219,28 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(cnt, cpu_r[r2]);
                 }
-                tcg_gen_andi_i64(cnt, cnt, 63);
                 if (r1 != 0) {
+                    /*
+                     * Shift counts are not masked. Per SKI:
+                     * - shr.u: if CNT >= 64 the result is 0
+                     * - shr:   if CNT >= 64 the result is SRC1 >> 63
+                     */
+                    TCGLabel *ge64 = gen_new_label();
+                    TCGLabel *done = gen_new_label();
+                    tcg_gen_brcondi_i64(TCG_COND_GEU, cnt, 64, ge64);
                     if (x2b == 0) {
                         tcg_gen_shr_i64(cpu_r[r1], val, cnt);
                     } else {
                         tcg_gen_sar_i64(cpu_r[r1], val, cnt);
                     }
+                    tcg_gen_br(done);
+                    gen_set_label(ge64);
+                    if (x2b == 0) {
+                        tcg_gen_movi_i64(cpu_r[r1], 0);
+                    } else {
+                        tcg_gen_sari_i64(cpu_r[r1], val, 63);
+                    }
+                    gen_set_label(done);
                 }
                 if (skip_label) {
                     gen_set_label(skip_label);

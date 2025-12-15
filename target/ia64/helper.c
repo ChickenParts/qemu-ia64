@@ -367,6 +367,25 @@ static bool ia64_access_rights(uint8_t ar, uint8_t pl, uint8_t cpl,
 static uint64_t ia64_translate_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                                    uint32_t rid, bool *hit)
 {
+    /*
+     * Translation registers (ITR/DTR) are pinned and must survive TC purges.
+     * Consult them first (see SKI's TR semantics and Linux's IVT setup).
+     */
+    const typeof(env->itrs[0]) *trs = is_data ? env->dtrs : env->itrs;
+    for (int i = 0; i < ARRAY_SIZE(env->itrs); i++) {
+        if (!trs[i].valid || trs[i].rid != rid) {
+            continue;
+        }
+        if (!PTE_P(trs[i].pte)) {
+            continue;
+        }
+        uint64_t mask = ~((1ULL << trs[i].ps) - 1);
+        if ((va & mask) == trs[i].tag) {
+            *hit = true;
+            return trs[i].pa + (va & ~mask);
+        }
+    }
+
     const int n = ARRAY_SIZE(env->dtlb);
     for (int i = 0; i < n; i++) {
         const typeof(env->dtlb[0]) *e = is_data ? &env->dtlb[i] : &env->itlb[i];
@@ -596,7 +615,18 @@ static uint64_t ia64_dbg_next_call_pc;
 void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
 {
     static int log_count;
-    if (log_count >= 32) {
+    static int log_limit = -1;
+    if (log_limit == -1) {
+        log_limit = 32;
+        const char *s = getenv("QEMU_IA64_DBG_CALL_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+    if (log_count >= log_limit) {
         return;
     }
     ia64_dbg_next_call_pc = pc;
@@ -892,6 +922,8 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r8=%016" PRIx64 " r9=%016" PRIx64
                   " r10=%016" PRIx64 " r11=%016" PRIx64
                   " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
+                  " r19=%016" PRIx64 " r22=%016" PRIx64 " r27=%016" PRIx64
+                  " r28=%016" PRIx64 " r29=%016" PRIx64
                   " r43=%016" PRIx64
                   " r62=%016" PRIx64
                   " r16=%016" PRIx64 " r17=%016" PRIx64
@@ -906,7 +938,9 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   env->ar[6], env->ar[65], env->ar[66],
                   env->r[0], env->r[1], env->r[2], env->r[3],
                   env->r[8], env->r[9], env->r[10], env->r[11],
-                  env->r[12], env->r[14], env->r[15], env->r[43],
+                  env->r[12], env->r[14], env->r[15],
+                  env->r[19], env->r[22], env->r[27], env->r[28], env->r[29],
+                  env->r[43],
                   env->r[62],
                   env->r[16], env->r[17],
                   env->r[32], env->r[33], env->r[34], env->r[35],
@@ -1286,10 +1320,67 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     hwaddr phys_addr = address;
     bool hit = false;
     const typeof(env->dtlb[0]) *match = NULL;
+    typeof(env->dtlb[0]) tr_match;
 
     /*
      * Check instruction vs data TLBs. Rid must match; page mask uses ps.
      */
+    if (access_type == MMU_INST_FETCH) {
+        for (int i = 0; i < ARRAY_SIZE(env->itrs); i++) {
+            if (!env->itrs[i].valid || env->itrs[i].rid != rid) {
+                continue;
+            }
+            if (!PTE_P(env->itrs[i].pte)) {
+                continue;
+            }
+            uint64_t mask = ~((1ULL << env->itrs[i].ps) - 1);
+            if ((address & mask) == env->itrs[i].tag) {
+                phys_addr = env->itrs[i].pa + (address & ~mask);
+                tr_match.tag = env->itrs[i].tag;
+                tr_match.pa = env->itrs[i].pa;
+                tr_match.ps = env->itrs[i].ps;
+                tr_match.rid = rid;
+                tr_match.ar = PTE_AR(env->itrs[i].pte);
+                tr_match.pl = PTE_PL(env->itrs[i].pte);
+                tr_match.d  = PTE_D(env->itrs[i].pte);
+                tr_match.a  = PTE_A(env->itrs[i].pte);
+                tr_match.p  = 1;
+                tr_match.ed = PTE_ED(env->itrs[i].pte);
+                tr_match.valid = 1;
+                match = &tr_match;
+                hit = true;
+                break;
+            }
+        }
+    } else {
+        for (int i = 0; i < ARRAY_SIZE(env->dtrs); i++) {
+            if (!env->dtrs[i].valid || env->dtrs[i].rid != rid) {
+                continue;
+            }
+            if (!PTE_P(env->dtrs[i].pte)) {
+                continue;
+            }
+            uint64_t mask = ~((1ULL << env->dtrs[i].ps) - 1);
+            if ((address & mask) == env->dtrs[i].tag) {
+                phys_addr = env->dtrs[i].pa + (address & ~mask);
+                tr_match.tag = env->dtrs[i].tag;
+                tr_match.pa = env->dtrs[i].pa;
+                tr_match.ps = env->dtrs[i].ps;
+                tr_match.rid = rid;
+                tr_match.ar = PTE_AR(env->dtrs[i].pte);
+                tr_match.pl = PTE_PL(env->dtrs[i].pte);
+                tr_match.d  = PTE_D(env->dtrs[i].pte);
+                tr_match.a  = PTE_A(env->dtrs[i].pte);
+                tr_match.p  = 1;
+                tr_match.ed = PTE_ED(env->dtrs[i].pte);
+                tr_match.valid = 1;
+                match = &tr_match;
+                hit = true;
+                break;
+            }
+        }
+    }
+
     if (access_type == MMU_INST_FETCH) {
         for (int i = 0; i < ARRAY_SIZE(env->itlb); i++) {
             if (!env->itlb[i].valid) {
@@ -1531,16 +1622,23 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " same1=%" PRIu64 " same2=%" PRIu64
                   " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
                   " pr=%016" PRIx64
+                  " ar.lc=%016" PRIx64 " ar.ec=%016" PRIx64
                   " last_branch from=%016" PRIx64 " to=%016" PRIx64
                   " kind=%" PRIu64 " insn=%011" PRIx64
                   " r1=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
+                  " r24=%016" PRIx64 " r27=%016" PRIx64
+                  " r28=%016" PRIx64 " r29=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
                   " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
                   threshold, env->dbg_tb_total, pc, ri,
                   env->dbg_tb_same1, env->dbg_tb_same2,
                   env->ip, env->psr, env->cfm, env->pr,
+                  env->ar[65], env->ar[66],
                   env->last_branch_from, env->last_branch_to,
                   env->last_branch_kind, env->last_branch_insn,
                   env->r[1], env->r[12], env->r[13],
+                  env->r[24], env->r[27], env->r[28], env->r[29],
+                  env->r[32], env->r[33], env->r[34],
                   env->b[0], env->b[6]);
     cpu_abort(cs, "IA64: hang detected at tbpc=%016" PRIx64 " ri=%u", pc, ri);
 }
