@@ -1745,6 +1745,29 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     TCGv_i64 ret = tcg_temp_new_i64();
                     gen_helper_ssc(ret, tcg_env, timm);
                     tcg_gen_mov_i64(cpu_r[8], ret);
+                } else if ((imm & 0xff) == 0) {
+                    /*
+                     * Xen IA-64 guest firmware hypercalls encode the call
+                     * number in the BREAK immediate shifted left by 8:
+                     *   imm = hypercall_nr << 8
+                     *
+                     * Handle the essential PAL/SAL calls directly so the GFW
+                     * can run under TCG without taking a break fault.
+                     */
+                    uint64_t nr = imm >> 8;
+                    if (nr == 0x1100) {
+                        /* FW_HYPERCALL_SAL_CALL */
+                        gen_helper_fw_sal(tcg_env);
+                    } else if (nr == 0x1000) {
+                        /* FW_HYPERCALL_PAL_CALL */
+                        gen_helper_fw_pal(tcg_env);
+                    } else {
+                        gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+                        if (qp == 0) {
+                            ctx->base.is_jmp = DISAS_NORETURN;
+                        }
+                        tcg_gen_exit_tb(NULL, 0);
+                    }
                 } else {
                     gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
                     if (qp == 0) {
@@ -3980,6 +4003,47 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             }
 
             if (f_major == 0x0) {
+                /* F8: frcpa.s* f1,p2 = f2,f3 */
+                uint8_t x3 = extract64(insn, 33, 3);
+                uint8_t x2 = extract64(insn, 31, 2);
+                if (x3 == 3 && x2 == 0) {
+                    uint8_t p2 = extract64(insn, 27, 6);
+                    uint8_t f3 = extract64(insn, 20, 7);
+                    uint8_t f2 = extract64(insn, 13, 7);
+                    uint8_t f1 = extract64(insn, 6, 7);
+                    gen_helper_frcpa_s1(tcg_env,
+                                        tcg_constant_i32(f1),
+                                        tcg_constant_i32(p2),
+                                        tcg_constant_i32(f2),
+                                        tcg_constant_i32(f3));
+                    handled = true;
+                }
+            }
+
+            if (!handled && f_major == 0x0) {
+                /*
+                 * F10: fcvt.fxu.trunc.s1 f1 = f2
+                 *
+                 * Used by the Xen GFW firmware's FP runtime sequences.
+                 *
+                 * Encoding per SKI:
+                 *   op{40:37}=0 x{33}=0 x6{32:27}=0x1b sf{35:34}=1
+                 */
+                uint8_t x = extract64(insn, 33, 1);
+                uint8_t sf = extract64(insn, 34, 2);
+                uint8_t x6 = extract64(insn, 27, 6);
+                uint8_t f3 = extract64(insn, 20, 7);
+                if (x == 0 && sf == 1 && x6 == 0x1b && f3 == 0) {
+                    uint8_t f2 = extract64(insn, 13, 7);
+                    uint8_t f1 = extract64(insn, 6, 7);
+                    gen_helper_fcvt_fxu_trunc_s1(tcg_env,
+                                                 tcg_constant_i32(f1),
+                                                 tcg_constant_i32(f2));
+                    handled = true;
+                }
+            }
+
+            if (!handled && f_major == 0x0) {
                 /* F9: fmerge.{s,ns,se} f1 = f2, f3 */
                 uint8_t x = extract64(insn, 33, 1);
                 uint8_t x6 = extract64(insn, 27, 6);
@@ -4035,7 +4099,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
             }
 
-            if (f_major == 0x0) {
+            if (!handled && f_major == 0x0) {
                 /*
                  * F9: fsxt.{r,l} f1 = f2, f3
                  *
@@ -4164,6 +4228,37 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                     gen_set_label(done);
                     handled = true;
+                }
+
+                /*
+                 * FMA-family operations (fma/fms/fnma) used by reciprocal and
+                 * division sequences in firmware and runtime code.
+                 *
+                 * For now, model them using host long double arithmetic.
+                 */
+                if (!handled && x == 0) {
+                    if (f_major == 0x8 || f_major == 0x9) {
+                        gen_helper_fma_s1(tcg_env,
+                                          tcg_constant_i32(f1),
+                                          tcg_constant_i32(f3),
+                                          tcg_constant_i32(f4),
+                                          tcg_constant_i32(f2));
+                        handled = true;
+                    } else if (f_major == 0xA || f_major == 0xB) {
+                        gen_helper_fms_s1(tcg_env,
+                                          tcg_constant_i32(f1),
+                                          tcg_constant_i32(f3),
+                                          tcg_constant_i32(f4),
+                                          tcg_constant_i32(f2));
+                        handled = true;
+                    } else if (f_major == 0xC || f_major == 0xD) {
+                        gen_helper_fnma_s1(tcg_env,
+                                           tcg_constant_i32(f1),
+                                           tcg_constant_i32(f3),
+                                           tcg_constant_i32(f4),
+                                           tcg_constant_i32(f2));
+                        handled = true;
+                    }
                 }
             }
 

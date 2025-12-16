@@ -69,6 +69,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPFMachineState, IPF_MACHINE)
 
 
 #define FIRMWARE_FILE    "Flash.fd"
+/*
+ * Xen's IA-64 HVM builder enters guest firmware at a pseudo-reset entry point
+ * within the GFW window (see xc_ia64_hvm_build.c). This is a region-encoded
+ * address; our physical-mode TLB fill masks it into the 32-bit GFW window.
+ */
+#define IPF_GFW_ENTRY     0x80000000ffffffb0ULL
 
 // XXX: Disable Wunused-variable and Wunused-parameter and Wunused-function
 //      for this file.  We need to clean up the code and remove these pragmas.
@@ -130,6 +136,7 @@ struct IPFPC {
 
 static uint64_t ipf_boot_ip;
 static uint64_t ipf_boot_r28;
+static uint64_t ipf_ram_size;
 static uint64_t ipf_kernel_low;
 static uint64_t ipf_kernel_high;
 static uint64_t ipf_kernel_bias;
@@ -1365,22 +1372,32 @@ static void main_cpu_reset(void *opaque)
      * can find a sane default even if EFI doesn't describe the range.
      */
     s->ar[0] = IPF_LEGACY_IO_BASE;
-    if (ipf_boot_ip) {
-        /*
-         * Provide a deterministic initial stack pointer in physical mode.
-         * Linux/ia64 expects firmware/bootloader to provide a valid r12.
-         *
-         * Place it below the loaded kernel image to avoid clobbering it.
-         */
-        uint64_t stack_top = ipf_kernel_low;
-        if (stack_top > (1ULL << 20)) {
-            stack_top -= (1ULL << 20); /* 1MiB below kernel base */
-        } else {
-            stack_top = (1ULL << 20);
-        }
-        stack_top &= ~0xFULL;
-        s->r[12] = stack_top;
+
+    /*
+     * Provide a deterministic initial stack pointer and RSE backing store in
+     * physical mode.
+     *
+     * - Linux/ia64 expects firmware/bootloader to provide a valid r12.
+     * - The Xen/KVM IA-64 guest firmware expects a valid stack too.
+     *
+     * Place it below the loaded kernel image when available; otherwise use
+     * the top of guest RAM.
+     */
+    uint64_t stack_top = ipf_kernel_low ? ipf_kernel_low : ipf_ram_size;
+    if (stack_top > (1ULL << 20)) {
+        stack_top -= (1ULL << 20); /* 1MiB below base */
+    } else {
+        stack_top = (1ULL << 20);
     }
+    stack_top &= ~0xFULL;
+    s->r[12] = stack_top;
+
+    /* Backing store grows upward; keep it below the memory stack. */
+    uint64_t bspstore = (stack_top > (8ULL << 20)) ? (stack_top - (8ULL << 20))
+                                                   : (2ULL << 20);
+    bspstore &= ~0x7ULL;
+    s->ar[IA64_AR_BSPSTORE] = bspstore;
+    s->ar[IA64_AR_BSP] = bspstore;
 
     /*
      * Seed cr.pta so Linux/ia64's early IVT itlb/dtlb miss handlers can locate
@@ -1778,6 +1795,7 @@ static void ipf_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pcdev), &error_fatal);
 
     memory_region_add_subregion(sysmem, 0, machine->ram);
+    ipf_ram_size = machine->ram_size;
 
     /*
      * Map the GFW window at the top of 32-bit physical space.
@@ -1814,8 +1832,8 @@ static void ipf_init(MachineState *machine)
             error_report("IPF requires -kernel or a valid -bios");
             exit(1);
         }
-        /* Firmware-only boot: start at reset vector (cpu_reset() default). */
-        ipf_boot_ip = 0;
+        /* Firmware-only boot: enter Xen/KVM guest firmware entry point. */
+        ipf_boot_ip = IPF_GFW_ENTRY;
         ipf_boot_r28 = 0;
         qemu_register_reset(main_cpu_reset, cpu);
         return;
@@ -2563,7 +2581,8 @@ static void ipf_init(MachineState *machine)
         env->fw_preboot_ip = kernel_entry;
         env->fw_preboot_r28 = ipf_boot_r28;
         env->fw_preboot_kernel_low = kernel_low;
-        ipf_boot_ip = 0; /* start at reset vector (cpu_reset default) */
+        ipf_boot_r28 = 0;
+        ipf_boot_ip = IPF_GFW_ENTRY;
         DPRINTF("Firmware-preboot enabled: will hand off to kernel entry 0x%" PRIx64 "\n",
                 kernel_entry);
     } else {

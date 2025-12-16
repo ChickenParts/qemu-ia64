@@ -19,6 +19,7 @@
 #include "exec/cpu-common.h"
 #include "system/memory.h"
 #include "system/address-spaces.h"
+#include <math.h>
 
 /*
  * SKI BitfR/BitfX index from the MSB; QEMU extract64() indexes from the LSB.
@@ -757,6 +758,172 @@ void HELPER(xma_hu)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     __uint128_t sum = prod + (__uint128_t)env->f[f2][0];
     env->f[f1][0] = (uint64_t)(sum >> 64);
     env->f[f1][1] = 0;
+}
+
+static long double ia64_fp_to_ld(const CPUIA64State *env, uint32_t f)
+{
+    f &= 0x7f;
+    uint64_t mant = env->f[f][0];
+    uint64_t expw = env->f[f][1];
+
+    if (mant == 0) {
+        return 0.0L;
+    }
+
+    int sign = (expw & 0x20000ULL) ? 1 : 0;
+    uint64_t exp = expw & 0x1ffffULL;
+    if (exp == 0) {
+        exp = IA64_FP_EXP_INTEGER;
+    }
+
+    int64_t e = (int64_t)exp - (int64_t)IA64_FP_EXP_BIAS;
+    long double sig = (long double)mant / (long double)(1ULL << 63);
+    long double val = ldexpl(sig, (int)e);
+    return sign ? -val : val;
+}
+
+static void ia64_ld_to_fp(CPUIA64State *env, uint32_t f, long double val)
+{
+    f &= 0x7f;
+    if (f <= 1) {
+        return;
+    }
+
+    if (val == 0.0L || isnan(val) || isinf(val)) {
+        env->f[f][0] = 0;
+        env->f[f][1] = 0;
+        return;
+    }
+
+    int sign = (val < 0.0L) ? 1 : 0;
+    long double abs = fabsl(val);
+
+    int e = 0;
+    long double frac = frexpl(abs, &e); /* abs = frac * 2^e, frac in [0.5,1) */
+    frac *= 2.0L;
+    e -= 1;
+
+    long double scaled = ldexpl(frac, 63);
+    uint64_t mant = (uint64_t)(scaled + 0.5L);
+
+    uint64_t exp = (uint64_t)((int64_t)IA64_FP_EXP_BIAS + (int64_t)e);
+    exp &= 0x1ffffULL;
+    uint64_t expw = (sign ? 0x20000ULL : 0) | exp;
+
+    env->f[f][0] = mant;
+    env->f[f][1] = expw;
+}
+
+void HELPER(frcpa_s1)(CPUIA64State *env, uint32_t f1, uint32_t p2,
+                      uint32_t f2, uint32_t f3)
+{
+    f1 &= 0x7f;
+    f2 &= 0x7f;
+    f3 &= 0x7f;
+    p2 &= 0x3f;
+
+    long double den = ia64_fp_to_ld(env, f3);
+    bool ok = (den != 0.0L);
+    long double res = ok ? (1.0L / den) : 0.0L;
+
+    ia64_ld_to_fp(env, f1, res);
+
+    if (p2 != 0) {
+        if (ok) {
+            env->pr |= (1ULL << p2);
+        } else {
+            env->pr &= ~(1ULL << p2);
+        }
+        env->pr |= 1ULL; /* p0 is always true */
+    }
+}
+
+void HELPER(fma_s1)(CPUIA64State *env, uint32_t f1, uint32_t f3,
+                    uint32_t f4, uint32_t f2)
+{
+    long double a = ia64_fp_to_ld(env, f3);
+    long double b = ia64_fp_to_ld(env, f4);
+    long double c = ia64_fp_to_ld(env, f2);
+    ia64_ld_to_fp(env, f1, fmal(a, b, c));
+}
+
+void HELPER(fms_s1)(CPUIA64State *env, uint32_t f1, uint32_t f3,
+                    uint32_t f4, uint32_t f2)
+{
+    long double a = ia64_fp_to_ld(env, f3);
+    long double b = ia64_fp_to_ld(env, f4);
+    long double c = ia64_fp_to_ld(env, f2);
+    ia64_ld_to_fp(env, f1, fmal(a, b, -c));
+}
+
+void HELPER(fnma_s1)(CPUIA64State *env, uint32_t f1, uint32_t f3,
+                     uint32_t f4, uint32_t f2)
+{
+    long double a = ia64_fp_to_ld(env, f3);
+    long double b = ia64_fp_to_ld(env, f4);
+    long double c = ia64_fp_to_ld(env, f2);
+    ia64_ld_to_fp(env, f1, fmal(-a, b, c));
+}
+
+static void ia64_fcvt_invalid(CPUIA64State *env, const char *op,
+                              uint32_t fsrc, uint64_t expw, uint64_t mant)
+{
+    static uint32_t count;
+
+    if (count++ >= 16) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: %s invalid ip=%016" PRIx64 " f%u expw=%05" PRIx64
+                  " mant=%016" PRIx64 "\n",
+                  op, env->ip, fsrc & 0x7f, (uint64_t)(expw & 0x3ffffULL), mant);
+}
+
+void HELPER(fcvt_fxu_trunc_s1)(CPUIA64State *env, uint32_t f1, uint32_t f2)
+{
+    f1 &= 0x7f;
+    f2 &= 0x7f;
+    if (f1 <= 1) {
+        return;
+    }
+
+    uint64_t mant = env->f[f2][0];
+    uint64_t expw = env->f[f2][1];
+    uint64_t res = 0;
+
+    if (mant != 0) {
+        bool sign = (expw & 0x20000ULL) != 0;
+        uint64_t exp = expw & 0x1ffffULL;
+        if (exp == 0) {
+            exp = IA64_FP_EXP_INTEGER;
+        }
+
+        if (sign) {
+            res = 0x8000000000000000ULL;
+            ia64_fcvt_invalid(env, "fcvt.fxu.trunc.s1", f2, expw, mant);
+        } else {
+            int64_t shift = (int64_t)exp - (int64_t)IA64_FP_EXP_BIAS - 63;
+            if (shift <= -64) {
+                res = 0;
+            } else if (shift >= 64) {
+                res = 0x8000000000000000ULL;
+                ia64_fcvt_invalid(env, "fcvt.fxu.trunc.s1", f2, expw, mant);
+            } else if (shift >= 0) {
+                __uint128_t v = (__uint128_t)mant << shift;
+                if (v > UINT64_MAX) {
+                    res = 0x8000000000000000ULL;
+                    ia64_fcvt_invalid(env, "fcvt.fxu.trunc.s1", f2, expw, mant);
+                } else {
+                    res = (uint64_t)v;
+                }
+            } else {
+                res = mant >> (-shift);
+            }
+        }
+    }
+
+    env->f[f1][0] = res;
+    env->f[f1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER);
 }
 
 /*
@@ -1631,7 +1798,13 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
      */
     if ((is_fetch && !(env->psr & IA64_PSR_IT)) ||
         (!is_fetch && !(env->psr & IA64_PSR_DT))) {
-        hwaddr phys_addr = address;
+        /*
+         * Physical mode: the architecture still uses the region-encoded 64-bit
+         * address form. For our purposes, treat the low 61 bits as the
+         * physical address (i.e. ignore the region number) so Xen-style entry
+         * points like 0x80000000ffffffb0 map into the 32-bit GFW window.
+         */
+        hwaddr phys_addr = address & ((1ULL << 61) - 1);
         int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
                      phys_addr & TARGET_PAGE_MASK, prot,
