@@ -1299,6 +1299,24 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         }
         TCGv_i64 tgt = tcg_temp_new_i64();
         tcg_gen_andi_i64(tgt, cpu_b[b2], ~0xFULL);
+
+        /*
+         * Firmware-preboot handoff: Xen/KVM GFW returns via br.ret b0 where
+         * b0==0, leaving the VMM to enter the guest kernel. When enabled by
+         * the IPF machine, detect that return and jump to the loaded -kernel.
+         */
+        if (b2 == 0) {
+            TCGLabel *no_handoff = gen_new_label();
+            TCGv_i64 active = tcg_temp_new_i64();
+            tcg_gen_ld_i64(active, tcg_env,
+                           offsetof(CPUIA64State, fw_preboot_active));
+            tcg_gen_brcondi_i64(TCG_COND_EQ, active, 0, no_handoff);
+            tcg_gen_brcondi_i64(TCG_COND_NE, tgt, 0, no_handoff);
+            gen_helper_fw_enter_kernel(tcg_env);
+            tcg_gen_exit_tb(NULL, 0);
+            gen_set_label(no_handoff);
+        }
+
         gen_helper_check_null_branch(tcg_env,
                                      tcg_constant_i64(ctx->base.pc_next),
                                      tcg_constant_i32(ctx->ri),

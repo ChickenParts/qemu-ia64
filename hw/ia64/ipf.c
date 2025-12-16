@@ -91,6 +91,12 @@ struct IPFMachineState {
     PCIBus *pcibus;
     I2CBus *smbus;
 
+    /*
+     * If enabled, run the guest firmware first and hand off to the loaded
+     * -kernel ELF once the firmware returns (Xen/KVM GFW style).
+     */
+    bool firmware_preboot;
+
     MemoryRegion rom;
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
@@ -2489,14 +2495,30 @@ static void ipf_init(MachineState *machine)
                         (const uint8_t *)&bp, sizeof(bp));
 
     /*
-     * Boot in physical mode at the ELF entry point. Linux head.S expects
-     * execution reaches _start() in physical mode and will install TRs before
-     * switching to virtual mode.
+     * Boot in physical mode.
+     *
+     * Default: enter the ELF entry point directly (classic -kernel boot).
+     * Optional: run guest firmware first and hand off to the kernel once the
+     * firmware returns (Xen/KVM GFW-style preboot).
      */
-    ipf_boot_ip = kernel_entry;
     ipf_boot_r28 = IPF_BOOT_PARAM_ADDR;
-    env->ip = ipf_boot_ip;
-    env->r[28] = ipf_boot_r28;
+    if (m->firmware_preboot) {
+        if (image_size <= 0) {
+            error_report("IPF firmware-preboot requires a valid -bios");
+            exit(1);
+        }
+        env->fw_preboot_active = 1;
+        env->fw_preboot_ip = kernel_entry;
+        env->fw_preboot_r28 = ipf_boot_r28;
+        env->fw_preboot_kernel_low = kernel_low;
+        ipf_boot_ip = 0; /* start at reset vector (cpu_reset default) */
+        DPRINTF("Firmware-preboot enabled: will hand off to kernel entry 0x%" PRIx64 "\n",
+                kernel_entry);
+    } else {
+        ipf_boot_ip = kernel_entry;
+        env->ip = ipf_boot_ip;
+        env->r[28] = ipf_boot_r28;
+    }
     DPRINTF("Kernel entry 0x%" PRIx64 " low=0x%" PRIx64 " high=0x%" PRIx64 "\n",
             kernel_entry, kernel_low, kernel_high);
     qemu_register_reset(main_cpu_reset, cpu);
@@ -2710,6 +2732,19 @@ void ioapic_set_irq(void *opaque, int irq_num, int level)
 //	return ioapic_map_irq(pci_dev->devfn, irq_num);
 //}
 
+static bool ipf_machine_get_firmware_preboot(Object *obj, Error **errp)
+{
+    (void)errp;
+    return IPF_MACHINE(obj)->firmware_preboot;
+}
+
+static void ipf_machine_set_firmware_preboot(Object *obj, bool value,
+                                              Error **errp)
+{
+    (void)errp;
+    IPF_MACHINE(obj)->firmware_preboot = value;
+}
+
 static void ipf_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -2721,6 +2756,13 @@ static void ipf_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_ram_id = "ipf.ram";
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("itanium");
     mc->is_default = true;
+
+    object_class_property_add_bool(oc, "firmware-preboot",
+                                   ipf_machine_get_firmware_preboot,
+                                   ipf_machine_set_firmware_preboot);
+    object_class_property_set_description(
+        oc, "firmware-preboot",
+        "Run guest firmware first and then boot -kernel (GFW handoff)");
 }
 
 

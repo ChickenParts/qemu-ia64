@@ -107,6 +107,10 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     uint64_t dbg_ia64_switch_to_size = env->dbg_ia64_switch_to_size;
     uint64_t dbg_load_switch_stack_va = env->dbg_load_switch_stack_va;
     uint64_t dbg_load_switch_stack_size = env->dbg_load_switch_stack_size;
+    uint64_t fw_preboot_active = env->fw_preboot_active;
+    uint64_t fw_preboot_ip = env->fw_preboot_ip;
+    uint64_t fw_preboot_r28 = env->fw_preboot_r28;
+    uint64_t fw_preboot_kernel_low = env->fw_preboot_kernel_low;
 
     if (icc->parent_phases.hold) {
         icc->parent_phases.hold(obj, type);
@@ -139,6 +143,10 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     env->dbg_ia64_switch_to_size = dbg_ia64_switch_to_size;
     env->dbg_load_switch_stack_va = dbg_load_switch_stack_va;
     env->dbg_load_switch_stack_size = dbg_load_switch_stack_size;
+    env->fw_preboot_active = fw_preboot_active;
+    env->fw_preboot_ip = fw_preboot_ip;
+    env->fw_preboot_r28 = fw_preboot_r28;
+    env->fw_preboot_kernel_low = fw_preboot_kernel_low;
 
     /* Basic bootstrap defaults */
     env->ip = 0xFFFF0000ULL;

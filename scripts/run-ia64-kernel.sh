@@ -11,6 +11,7 @@ Environment overrides:
   IA64_BIOS    (default: stuff/Flash.fd if it exists, else empty)
   IA64_INITRD  (default: scratch/ia64_initramfs/initramfs.cpio.gz if it exists, else empty)
   IA64_APPEND  (default: console=hcdp console=ttyS0,115200n8 earlyprintk=hcdp ignore_loglevel loglevel=7)
+  IA64_FW_PREBOOT (default: empty; set to 1 to run firmware-preboot handoff)
   IA64_MEM     (default: 512M)
   IA64_SMP     (default: 1)
   IA64_LOGDIR  (default: scratch/ia64_logs)
@@ -57,9 +58,14 @@ qemu_log="$logdir/qemu.log"
 
 export QEMU_IA64_LOG_BREAK_STR="${QEMU_IA64_LOG_BREAK_STR:-1}"
 
+machine="ipf"
+if [[ -n "${IA64_FW_PREBOOT:-}" && "${IA64_FW_PREBOOT:-0}" != "0" ]]; then
+  machine="ipf,firmware-preboot=on"
+fi
+
 args=(
   -accel tcg
-  -M ipf
+  -M "$machine"
   -m "$mem"
   -smp "$smp"
   -display none

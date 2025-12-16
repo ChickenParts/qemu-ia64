@@ -1410,6 +1410,68 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
     }
 }
 
+void HELPER(fw_enter_kernel)(CPUIA64State *env)
+{
+    if (!env->fw_preboot_active || !env->fw_preboot_ip) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64 FW: handoff to kernel entry=%016" PRIx64
+                  " r28=%016" PRIx64 "\n",
+                  env->fw_preboot_ip, env->fw_preboot_r28);
+
+    /*
+     * Reset the CPU core state so the kernel starts from the same baseline as
+     * direct -kernel boot, while keeping any firmware-written memory intact.
+     */
+    CPUState *cs = env_cpu(env);
+    uint64_t entry = env->fw_preboot_ip;
+    uint64_t boot_r28 = env->fw_preboot_r28;
+    uint64_t kernel_low = env->fw_preboot_kernel_low;
+    uint64_t ar_k0 = env->ar[0];
+
+    cpu_reset(cs);
+
+    /* Preserve the legacy I/O port window base across the reset. */
+    env->ar[0] = ar_k0;
+
+    /* Provide a deterministic initial stack pointer in physical mode. */
+    uint64_t stack_top = kernel_low;
+    if (stack_top > (1ULL << 20)) {
+        stack_top -= (1ULL << 20); /* 1MiB below kernel base */
+    } else {
+        stack_top = (1ULL << 20);
+    }
+    stack_top &= ~0xFULL;
+    env->r[12] = stack_top;
+
+    /*
+     * Seed cr.pta so Linux/ia64's early IVT itlb/dtlb miss handlers can locate
+     * PTEs via cr.iha before ia64_mmu_init() programs the final VMLPT layout.
+     *
+     * Model a CPU with a 61-bit implemented VA space and Linux/ia64 64K pages:
+     *   vmlpt_bits = impl_va_bits - PAGE_SHIFT + pte_bits = 61 - 16 + 3 = 48
+     *   pta_base   = 2^61 - 2^vmlpt_bits
+     *
+     * Keep PTA.VE=0 so early Linux uses the software TLB miss handlers.
+     */
+    const uint64_t impl_va_bits = 61;
+    const uint64_t page_shift = 16;
+    const uint64_t pte_bits = 3;
+    const uint64_t vmlpt_bits = impl_va_bits - page_shift + pte_bits; /* 48 */
+    uint64_t pta_base = (1ULL << 61) - (1ULL << vmlpt_bits);
+    uint64_t pta = 0;
+    pta |= pta_base;
+    pta |= (vmlpt_bits << 2); /* SIZE */
+    env->cr[8] = pta;
+
+    env->r[28] = boot_r28;
+    env->ip = entry;
+
+    env->fw_preboot_active = 0;
+}
+
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,

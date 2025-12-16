@@ -157,6 +157,17 @@ typedef struct CPUArchState {
     uint64_t dbg_tb_same2;
     uint32_t dbg_tb_last_ri;
     uint32_t dbg_tb_last2_ri;
+
+    /*
+     * Firmware-preboot handoff state.
+     *
+     * When enabled by the IPF machine, guest firmware runs first and then
+     * transfers control to the loaded -kernel ELF once the firmware returns.
+     */
+    uint64_t fw_preboot_active;
+    uint64_t fw_preboot_ip;
+    uint64_t fw_preboot_r28;
+    uint64_t fw_preboot_kernel_low;
 } CPUIA64State;
 
 struct ArchCPU {
