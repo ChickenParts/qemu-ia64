@@ -230,11 +230,13 @@ struct IA64CPUClass {
 /*
  * PSR bit positions (LSB indexing, matching the IA-64 SDM and SKI's BitfR()
  * extraction when converted to LSB indexing):
+ *   AC  bit 3
  *   RI  bits 42:41
  *   CPL bits 33:32
  *   DT  bit 17
  *   IC  bit 13
  */
+#define IA64_PSR_AC       (1ULL << 3)
 #define IA64_PSR_IC       (1ULL << 13)
 #define IA64_PSR_I        (1ULL << 14)
 #define IA64_PSR_IT       (1ULL << 36)
@@ -261,8 +263,11 @@ struct IA64CPUClass {
 #define IA64_AR_BSP       17
 #define IA64_AR_BSPSTORE  18
 #define IA64_AR_RNAT      19
+#define IA64_AR_FPSR      40
 #define IA64_AR_ITC       44
 #define IA64_AR_PFS       64
+
+#define IA64_FPSR_DEFAULT 0x0009804c0270033fULL
 
 #define IA64_EXCP_BASE    0x200
 #define IA64_EXCP_VHPT_TRANS  (IA64_EXCP_BASE + 0x0)

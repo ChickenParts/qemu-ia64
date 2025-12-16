@@ -1436,14 +1436,15 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
      * register numbers as a window (r32..r127) and rely on helper_call() to
      * move caller OUT registers into callee IN registers.
      *
-     * alloc itself only changes CFM/ar.pfs and (optionally) clears newly
-     * allocated stacked registers.
+     * alloc changes CFM and updates ar.pfs to the previous CFM; the previous
+     * ar.pfs value is returned in the destination register.
      */
     uint64_t old_pfs = env->ar[64]; /* ar.pfs */
     uint64_t old_cfm = env->cfm;
     uint8_t old_sof = old_cfm & 0x7f;
 
     env->cfm = (sof & 0x7f) | ((sol & 0x7f) << 7) | ((sor & 0xf) << 14);
+    env->ar[64] = old_cfm;
 
     /* Clear newly allocated stacked regs (beyond previous SOF). */
     if (sof > old_sof) {
@@ -1534,12 +1535,7 @@ void HELPER(call)(CPUIA64State *env)
     /* Pre-alloc CFM for callee: treat all IN regs as locals. */
     env->cfm = (outs & 0x7f) | ((outs & 0x7f) << 7);
 
-    /*
-     * br.call seeds ar.pfs for the callee. Model this as the caller's CFM,
-     * which alloc will return in r1 and then replace with the callee's
-     * pre-alloc CFM.
-     */
-    env->ar[64] = caller_cfm;
+    /* ar.pfs is updated by the callee's alloc. */
 }
 
 void HELPER(ret_restore)(CPUIA64State *env)
