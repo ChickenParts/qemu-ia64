@@ -97,6 +97,10 @@ struct IPFMachineState {
      */
     bool firmware_preboot;
 
+    /* Primary UART is serial-mm at IPF_UART_BASE; also aliased to COM1 ioports. */
+    SerialMM *uart_mm;
+    MemoryRegion uart_ioport;
+
     MemoryRegion rom;
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
@@ -1411,7 +1415,40 @@ static void ipf_uart_dummy_irq(void *opaque, int n, int level)
     /* Polled UART use (earlycon) does not require an interrupt controller. */
 }
 
-static void ipf_init_uart(MemoryRegion *sysmem)
+static uint64_t ipf_uart_ioport_read(void *opaque, hwaddr addr, unsigned size)
+{
+    SerialMM *uart = opaque;
+    SerialState *s = &uart->serial;
+
+    if (size != 1 || addr >= 8) {
+        return 0;
+    }
+    return serial_io_ops.read(s, addr, 1);
+}
+
+static void ipf_uart_ioport_write(void *opaque, hwaddr addr, uint64_t data,
+                                  unsigned size)
+{
+    SerialMM *uart = opaque;
+    SerialState *s = &uart->serial;
+
+    if (size != 1 || addr >= 8) {
+        return;
+    }
+    serial_io_ops.write(s, addr, data & 0xff, 1);
+}
+
+static const MemoryRegionOps ipf_uart_ioport_ops = {
+    .read = ipf_uart_ioport_read,
+    .write = ipf_uart_ioport_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
+static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
 {
     Chardev *chr = serial_hd(0);
     if (!chr) {
@@ -1428,11 +1465,26 @@ static void ipf_init_uart(MemoryRegion *sysmem)
     qdev_prop_set_uint8(DEVICE(uart), "endianness", DEVICE_LITTLE_ENDIAN);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(uart), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(uart), 0, irq);
+    m->uart_mm = uart;
 
     /* Overlay the UART on top of the GFW RAM window. */
     MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
     memory_region_add_subregion_overlap(sysmem, IPF_UART_BASE, mr, 1);
     DPRINTF("UART: mapped serial-mm at 0x%016" PRIx64 "\n", (uint64_t)IPF_UART_BASE);
+
+    /*
+     * Guest firmware commonly uses legacy COM1 at I/O port 0x3f8. IA-64 uses
+     * a sparse memory-mapped I/O port window, which we translate to ioport
+     * numbers via cpu_inb/outb in ipf_legacy_io_{read,write}().
+     *
+     * Alias COM1 ioports to the same SerialState so firmware and kernel share
+     * one serial backend and one log file.
+     */
+    memory_region_init_io(&m->uart_ioport, OBJECT(m),
+                          &ipf_uart_ioport_ops, uart,
+                          "ipf.uart-ioport", 8);
+    memory_region_add_subregion(get_system_io(), 0x3f8, &m->uart_ioport);
+    DPRINTF("UART: aliased COM1 ioports at 0x3f8\n");
 }
 
 static uint32_t ipf_to_legacy_io(hwaddr addr)
@@ -1735,7 +1787,7 @@ static void ipf_init(MachineState *machine)
      */
     memory_region_init_ram(&m->rom, NULL, "ipf.gfw", GFW_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, GFW_START, &m->rom);
-    ipf_init_uart(sysmem);
+    ipf_init_uart(m, sysmem);
     ipf_init_legacy_io(m, sysmem);
     ipf_init_acpi_pm(m, sysmem);
     ipf_init_iosapic(m, sysmem);
