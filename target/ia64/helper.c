@@ -19,6 +19,7 @@
 #include "exec/cpu-common.h"
 #include "system/memory.h"
 #include "system/address-spaces.h"
+#include "system/ioport.h"
 #include <math.h>
 
 /*
@@ -1141,6 +1142,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
                   " r24=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
+                  " r30=%016" PRIx64 " r31=%016" PRIx64
                   " r43=%016" PRIx64
                   " r59=%016" PRIx64
                   " r62=%016" PRIx64
@@ -1162,6 +1164,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   env->r[12], env->r[14], env->r[15],
                   env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
                   env->r[24], env->r[28], env->r[29],
+                  env->r[30], env->r[31],
                   env->r[43],
                   env->r[59],
                   env->r[62],
@@ -2621,7 +2624,16 @@ void HELPER(fw_pal)(CPUIA64State *env)
 
 void HELPER(fw_sal)(CPUIA64State *env)
 {
-    uint64_t func = env->r[32];
+    uint64_t func_raw = env->r[32];
+    /*
+     * Some IA-64 guest firmware uses the low 24-bit SAL function numbers
+     * without the 0x01000000 prefix that Linux uses (e.g. 0x10 instead of
+     * 0x01000010 for PCI_CONFIG_READ). Normalize those calls here.
+     */
+    uint64_t func = func_raw;
+    if ((func & 0xff000000ULL) == 0) {
+        func |= 0x01000000ULL;
+    }
 
     int64_t status = 0;
     uint64_t v0 = 0, v1 = 0, v2 = 0;
@@ -2634,18 +2646,161 @@ void HELPER(fw_sal)(CPUIA64State *env)
     case IA64_SAL_REGISTER_PHYS_ADDR:
         status = 0;
         break;
+    case IA64_SAL_GET_STATE_INFO:
+        /*
+         * Match SKI/Xen firmware expectations: report no state info available
+         * (SAL_STATUS_NO_ENTRY == -5 in common implementations).
+         */
+        status = -5;
+        break;
+    case IA64_SAL_GET_STATE_INFO_SIZE:
+        status = 0;
+        v0 = 1;
+        break;
+    case IA64_SAL_CLEAR_STATE_INFO:
+    case IA64_SAL_MC_RENDEZ:
+        status = 0;
+        break;
     case IA64_SAL_FREQ_BASE:
         status = 0;
         v0 = 100000000ULL; /* ticks per second */
         v1 = ~0ULL;        /* drift info: -1 */
         v2 = 0;
         break;
-    case IA64_SAL_GET_STATE_INFO:
-    case IA64_SAL_GET_STATE_INFO_SIZE:
-    case IA64_SAL_CLEAR_STATE_INFO:
-    case IA64_SAL_MC_RENDEZ:
-    case IA64_SAL_PCI_CONFIG_READ:
-    case IA64_SAL_PCI_CONFIG_WRITE:
+    case IA64_SAL_PCI_CONFIG_READ: {
+        /*
+         * SAL-based PCI config space access (see Linux arch/ia64/pci/pci.c).
+         *
+         * The xenipf guest firmware expects these calls to succeed; implement
+         * them via PCI config mechanism #1 (0xcf8/0xcfc) which is provided by
+         * the IPF machine.
+         *
+         * Arguments:
+         *   r33: encoded pci_config_addr
+         *   r34: access size (1/2/4[/8])
+         *   r35: type/mode (0 = legacy, 1 = extended)
+         */
+        uint64_t pci_addr = env->r[33];
+        uint64_t size = env->r[34];
+        uint64_t mode = env->r[35];
+
+        uint16_t seg;
+        uint8_t bus, devfn;
+        uint16_t reg;
+
+        if (mode == 0) {
+            seg = (pci_addr >> 24) & 0xff;
+            bus = (pci_addr >> 16) & 0xff;
+            devfn = (pci_addr >> 8) & 0xff;
+            reg = pci_addr & 0xff;
+        } else if (mode == 1) {
+            seg = (pci_addr >> 28) & 0xffff;
+            bus = (pci_addr >> 20) & 0xff;
+            devfn = (pci_addr >> 12) & 0xff;
+            reg = pci_addr & 0xfff;
+        } else {
+            status = -1;
+            break;
+        }
+
+        if (seg != 0 || reg > 0xff) {
+            status = -1;
+            break;
+        }
+
+        uint32_t cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
+                           ((uint32_t)devfn << 8) | (reg & ~3U);
+        cpu_outl(0xcf8, cfgaddr);
+
+        /*
+         * Match SKI/Xen firmware expectations: size==1/2 selects byte/word,
+         * anything else reads a dword.
+         */
+        if (size == 1) {
+            v0 = cpu_inb(0xcfc + (reg & 3));
+            status = 0;
+        } else if (size == 2) {
+            v0 = cpu_inw(0xcfc + (reg & 2));
+            status = 0;
+        } else {
+            v0 = cpu_inl(0xcfc);
+            status = 0;
+        }
+
+        if (ia64_fw_log_enabled()) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: SAL_PCI_CONFIG_READ mode=%" PRIu64
+                          " seg=%u bus=%u devfn=%u reg=0x%x size=%" PRIu64
+                          " -> status=%" PRId64 " v0=%016" PRIx64 "\n",
+                          mode, seg, bus, devfn, reg, size, status, v0);
+        }
+        break;
+    }
+    case IA64_SAL_PCI_CONFIG_WRITE: {
+        /*
+         * Arguments:
+         *   r33: encoded pci_config_addr
+         *   r34: access size (1/2/4[/8])
+         *   r35: value
+         *   r36: type/mode (0 = legacy, 1 = extended)
+         */
+        uint64_t pci_addr = env->r[33];
+        uint64_t size = env->r[34];
+        uint64_t value = env->r[35];
+        uint64_t mode = env->r[36];
+
+        uint16_t seg;
+        uint8_t bus, devfn;
+        uint16_t reg;
+
+        if (mode == 0) {
+            seg = (pci_addr >> 24) & 0xff;
+            bus = (pci_addr >> 16) & 0xff;
+            devfn = (pci_addr >> 8) & 0xff;
+            reg = pci_addr & 0xff;
+        } else if (mode == 1) {
+            seg = (pci_addr >> 28) & 0xffff;
+            bus = (pci_addr >> 20) & 0xff;
+            devfn = (pci_addr >> 12) & 0xff;
+            reg = pci_addr & 0xfff;
+        } else {
+            status = -1;
+            break;
+        }
+
+        if (seg != 0 || reg > 0xff) {
+            status = -1;
+            break;
+        }
+
+        uint32_t cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
+                           ((uint32_t)devfn << 8) | (reg & ~3U);
+        cpu_outl(0xcf8, cfgaddr);
+
+        /*
+         * Match SKI/Xen firmware expectations: size==1/2 selects byte/word,
+         * anything else writes a dword.
+         */
+        if (size == 1) {
+            cpu_outb(0xcfc + (reg & 3), (uint8_t)value);
+            status = 0;
+        } else if (size == 2) {
+            cpu_outw(0xcfc + (reg & 2), (uint16_t)value);
+            status = 0;
+        } else {
+            cpu_outl(0xcfc, (uint32_t)value);
+            status = 0;
+        }
+
+        if (ia64_fw_log_enabled()) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: SAL_PCI_CONFIG_WRITE mode=%" PRIu64
+                          " seg=%u bus=%u devfn=%u reg=0x%x size=%" PRIu64
+                          " value=%016" PRIx64 " -> status=%" PRId64 "\n",
+                          mode, seg, bus, devfn, reg, size, value, status);
+        }
+        break;
+    }
     case IA64_SAL_PHYSICAL_ID_INFO:
     case IA64_SAL_UPDATE_PAL:
     default:
@@ -2655,9 +2810,9 @@ void HELPER(fw_sal)(CPUIA64State *env)
 
     if (ia64_fw_log_enabled()) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: SAL func=%016" PRIx64 " -> status=%" PRId64
+                      "IA64: SAL func=%016" PRIx64 " (raw=%016" PRIx64 ") -> status=%" PRId64
                       " v0=%016" PRIx64 " v1=%016" PRIx64 " v2=%016" PRIx64 "\n",
-                      func, status, v0, v1, v2);
+                      func, func_raw, status, v0, v1, v2);
     }
 
     env->r[8] = (uint64_t)status;
