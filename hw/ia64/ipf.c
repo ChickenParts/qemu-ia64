@@ -109,6 +109,7 @@ struct IPFMachineState {
     MemoryRegion uart_ioport;
 
     MemoryRegion rom;
+    MemoryRegion fw_workram;
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
     MemoryRegion bmapm2;
@@ -335,7 +336,11 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_UART_BASE 0x00000000ff5e0000ULL
 
 /* ACPI PM1/PMTMR register block (I/O port encoded to segment 0xff). */
-#define IPF_ACPI_PM_BASE 0x00000000ff700000ULL
+/*
+ * Keep below the loaded Flash.fd image (max 12MiB) and outside the region
+ * used by the xenipf firmware for its early RSE backing store (0xff300000+).
+ */
+#define IPF_ACPI_PM_BASE 0x00000000ff100000ULL
 
 /*
  * Legacy port-I/O space window.
@@ -356,6 +361,17 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_IOSAPIC_REG_SELECT 0x0
 #define IPF_IOSAPIC_WINDOW     0x10
 #define IPF_IOSAPIC_EOI        0x40
+
+/*
+ * Firmware work RAM.
+ *
+ * The xenipf firmware keeps some global data just above the 4GiB boundary
+ * (e.g. GP values around 0x1000_0000_0xxx). Provide a small RAM window there
+ * so PEI can initialize and dispatch modules without silently reading zeros
+ * from unmapped space.
+ */
+#define IPF_FW_WORKRAM_BASE 0x0000000100000000ULL
+#define IPF_FW_WORKRAM_SIZE (16ULL << 20)
 
 #define IPF_IOSAPIC_VERSION_REG 0x1
 
@@ -1372,6 +1388,7 @@ static void main_cpu_reset(void *opaque)
     CPUState *env = opaque;
     IA64CPU *cpu = IA64_CPU(env);
     CPUIA64State *s = &cpu->env;
+    const bool booting_firmware = (ipf_boot_ip == IPF_GFW_ENTRY);
 
     cpu_reset(env);
     DPRINTF("Reset CPU: boot_ip=0x%" PRIx64 " boot_r28=0x%" PRIx64 "\n",
@@ -1387,6 +1404,7 @@ static void main_cpu_reset(void *opaque)
      * can find a sane default even if EFI doesn't describe the range.
      */
     s->ar[0] = IPF_LEGACY_IO_BASE;
+    s->ar[IA64_AR_FPSR] = IA64_FPSR_DEFAULT;
 
     /*
      * Provide a deterministic initial stack pointer and RSE backing store in
@@ -1415,19 +1433,29 @@ static void main_cpu_reset(void *opaque)
     s->ar[IA64_AR_BSP] = bspstore;
 
     /*
-     * Seed cr.pta so Linux/ia64's early IVT itlb/dtlb miss handlers can locate
-     * PTEs via cr.iha before ia64_mmu_init() programs the final VMLPT layout.
-     *
-     * Model a CPU with a 61-bit implemented VA space and Linux/ia64 64K pages:
-     *   vmlpt_bits = impl_va_bits - PAGE_SHIFT + pte_bits = 61 - 16 + 3 = 48
-     *   pta_base   = 2^61 - 2^vmlpt_bits
-     * Use short-format VHPT entries (VF=0) and enable the VHPT walker (VE=1).
+     * Xen's IA-64 HVM builder provides a distinct bootstrap state for guest
+     * firmware. Match it so the PEI dispatcher can run the BFV PEIMs.
      */
-    if (ipf_boot_ip) {
+    if (booting_firmware) {
+        s->psr = IA64_PSR_AC | IA64_PSR_BN;
+        s->cr[21] = ((uint64_t)TARGET_PAGE_BITS << 2); /* cr.itir (ps) */
+        s->cr[8] = (15ULL << 2);                       /* cr.pta */
+    } else if (ipf_boot_ip) {
+        /*
+         * Seed cr.pta so Linux/ia64's early IVT itlb/dtlb miss handlers can
+         * locate PTEs via cr.iha before ia64_mmu_init() programs the final
+         * VMLPT layout.
+         *
+         * Model a CPU with a 61-bit implemented VA space and Linux/ia64 base
+         * page size (TARGET_PAGE_BITS):
+         *   vmlpt_bits = impl_va_bits - PAGE_SHIFT + pte_bits
+         *            = 61 - TARGET_PAGE_BITS + 3
+         *   pta_base   = 2^61 - 2^vmlpt_bits
+         */
         const uint64_t impl_va_bits = 61;
-        const uint64_t page_shift = 16;
+        const uint64_t page_shift = TARGET_PAGE_BITS;
         const uint64_t pte_bits = 3;
-        const uint64_t vmlpt_bits = impl_va_bits - page_shift + pte_bits; /* 48 */
+        const uint64_t vmlpt_bits = impl_va_bits - page_shift + pte_bits;
         uint64_t pta_base = (1ULL << 61) - (1ULL << vmlpt_bits);
 
         uint64_t pta = 0;
@@ -1917,6 +1945,7 @@ static void ipf_init(MachineState *machine)
     uint64_t initrd_base = 0;
     uint64_t cmdline_addr = IPF_CMDLINE_ADDR;
     int64_t image_size;
+    bool run_firmware = (!kernel_filename) || m->firmware_preboot;
     /* Initialize the cpu core */
     cpu = IA64_CPU(cpu_create(machine->cpu_type));
     if (!cpu) {
@@ -1940,10 +1969,20 @@ static void ipf_init(MachineState *machine)
      */
     memory_region_init_ram(&m->rom, NULL, "ipf.gfw", GFW_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, GFW_START, &m->rom);
+
+    /* Small scratch RAM above 4GiB for xenipf firmware global data. */
+    memory_region_init_ram(&m->fw_workram, NULL, "ipf.fw-workram",
+                           IPF_FW_WORKRAM_SIZE, &error_fatal);
+    memory_region_add_subregion(sysmem, IPF_FW_WORKRAM_BASE, &m->fw_workram);
+    DPRINTF("FW work RAM: mapped at 0x%016" PRIx64 " size=%" PRIu64 "\n",
+            (uint64_t)IPF_FW_WORKRAM_BASE, (uint64_t)IPF_FW_WORKRAM_SIZE);
+
     ipf_init_uart(m, sysmem);
     ipf_init_legacy_io(m, sysmem);
-    ipf_init_acpi_pm(m, sysmem);
     ipf_init_iosapic(m, sysmem);
+    if (!run_firmware) {
+        ipf_init_acpi_pm(m, sysmem);
+    }
 
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
@@ -1962,7 +2001,6 @@ static void ipf_init(MachineState *machine)
         }
     }
 
-    bool run_firmware = (!kernel_filename) || m->firmware_preboot;
     if (run_firmware) {
         ipf_init_pci(m);
         /*

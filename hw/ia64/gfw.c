@@ -34,6 +34,10 @@ typedef struct {
     uint64_t size;
 } hob_mem_t;
 
+/* Xen IA-64 guest physical layout leaves the legacy VGA window unmapped. */
+#define VGA_IO_START 0x000a0000ULL
+#define VGA_IO_SIZE  0x00020000ULL
+
 typedef enum {
     HOB_TYPE_INFO = 0,
     HOB_TYPE_TERMINAL,
@@ -135,9 +139,19 @@ static int add_mem_hob(void *hob_buf, uint64_t dom_mem_size)
 {
     hob_mem_t memhob;
 
-    /* Less than 3G. */
+    /*
+     * Less than 3G accounting legacy VGA hole.
+     *
+     * Xen's IA-64 HVM builder presents guest RAM as discontiguous around
+     * 0xa0000..0xc0000, so the highest RAM address below 3G is
+     * dom_mem_size + VGA_IO_SIZE.
+     */
     memhob.start = 0;
-    memhob.size = MIN(dom_mem_size, 0xC0000000ULL);
+    if (dom_mem_size < VGA_IO_START) {
+        memhob.size = dom_mem_size;
+    } else {
+        memhob.size = MIN(dom_mem_size + VGA_IO_SIZE, 0xC0000000ULL);
+    }
     if (hob_add(hob_buf, HOB_TYPE_MEM, &memhob, sizeof(memhob)) < 0) {
         return -1;
     }
@@ -145,7 +159,7 @@ static int add_mem_hob(void *hob_buf, uint64_t dom_mem_size)
     if (dom_mem_size > 0xC0000000ULL) {
         /* 4G .. 4G + remainder. */
         memhob.start = 0x100000000ULL;
-        memhob.size = dom_mem_size - 0xC0000000ULL;
+        memhob.size = dom_mem_size + VGA_IO_SIZE - 0xC0000000ULL;
         if (hob_add(hob_buf, HOB_TYPE_MEM, &memhob, sizeof(memhob)) < 0) {
             return -1;
         }
@@ -382,4 +396,3 @@ int ipf_gfw_build_hob(uint64_t memsize, uint64_t vcpus, uint64_t nvram_addr)
     }
     return 0;
 }
-
