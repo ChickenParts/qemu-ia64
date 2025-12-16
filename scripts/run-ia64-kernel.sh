@@ -26,6 +26,10 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
 qemu_bin="${QEMU_BIN:-./build/qemu-system-ia64}"
 kernel="${IA64_KERNEL:-stuff/vmlinux-ia64-main}"
 initrd="${IA64_INITRD:-}"
@@ -71,4 +75,3 @@ if [[ -n "$initrd" ]]; then
 fi
 
 exec "$qemu_bin" "${args[@]}" "$@"
-
