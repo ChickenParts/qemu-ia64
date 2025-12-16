@@ -10,7 +10,7 @@ Environment overrides:
   IA64_KERNEL  (default: stuff/vmlinux-ia64-main)
   IA64_BIOS    (default: stuff/Flash.fd if it exists, else empty)
   IA64_INITRD  (default: scratch/ia64_initramfs/initramfs.cpio.gz if it exists, else empty)
-  IA64_APPEND  (default: console=hcdp earlyprintk=hcdp ignore_loglevel loglevel=7 keep_bootcon)
+  IA64_APPEND  (default: console=hcdp console=ttyS0,115200n8 earlyprintk=hcdp ignore_loglevel loglevel=7)
   IA64_MEM     (default: 512M)
   IA64_SMP     (default: 1)
   IA64_LOGDIR  (default: scratch/ia64_logs)
@@ -32,7 +32,7 @@ fi
 
 qemu_bin="${QEMU_BIN:-./build/qemu-system-ia64}"
 kernel="${IA64_KERNEL:-stuff/vmlinux-ia64-main}"
-append="${IA64_APPEND:-console=hcdp earlyprintk=hcdp ignore_loglevel loglevel=7 keep_bootcon}"
+append="${IA64_APPEND:-console=hcdp console=ttyS0,115200n8 earlyprintk=hcdp ignore_loglevel loglevel=7}"
 mem="${IA64_MEM:-512M}"
 smp="${IA64_SMP:-1}"
 logdir="${IA64_LOGDIR:-scratch/ia64_logs}"

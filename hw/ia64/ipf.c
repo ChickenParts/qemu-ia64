@@ -2285,8 +2285,26 @@ static void ipf_init(MachineState *machine)
             IPFAcpiFadt fadt = { 0 };
             cur = QEMU_ALIGN_UP(cur + sizeof(fadt), 16);
 
+            /*
+             * DSDT AML:
+             * - Scope(\_SB) { Device(COM0) { _HID="PNP0501" ... Memory32Fixed(0xff5e0000, 8) } }
+             *
+             * This allows Linux's PNP/8250 code to enumerate the serial-mm UART
+             * and enables a real tty console (ttyS0) when requested via
+             * "console=ttyS0".
+             *
+             * Generated with iasl from:
+             *   Scope(\\_SB){Device(COM0){Name(_HID,"PNP0501") Name(_UID,0)
+             *     Method(_STA){Return(0x0f)}
+             *     Name(_CRS,ResourceTemplate(){Memory32Fixed(ReadWrite,0xFF5E0000,8)})}}
+             */
             static const uint8_t dsdt_aml[] = {
-                0x10, 0x01, 0x5c, /* Scope(\) {} */
+                0x10, 0x42, 0x04, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x3a, 0x43, 0x4f,
+                0x4d, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30,
+                0x35, 0x30, 0x31, 0x00, 0x08, 0x5f, 0x55, 0x49, 0x44, 0x00, 0x14, 0x09,
+                0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x0a, 0x0f, 0x08, 0x5f, 0x43, 0x52,
+                0x53, 0x11, 0x11, 0x0a, 0x0e, 0x86, 0x09, 0x00, 0x01, 0x00, 0x00, 0x5e,
+                0xff, 0x08, 0x00, 0x00, 0x00, 0x79, 0x00,
             };
             hwaddr dsdt_addr = cur;
             uint8_t dsdt_buf[sizeof(IPFAcpiTableHeader) + sizeof(dsdt_aml)] = { 0 };
