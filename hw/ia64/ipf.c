@@ -31,6 +31,7 @@
 #include "hw/i386/pc.h"
 /* #include "fdc.h" */
 #include "hw/pci/pci.h"
+#include "hw/pci/pci_host.h"
 #include "hw/block/block.h"
 #include "qemu/typedefs.h"
 #include "hw/sysbus.h"
@@ -132,6 +133,13 @@ struct IPFPC {
     SysBusDevice parent_obj;
 
     IA64CPU *cpu;
+};
+
+#define TYPE_IPF_PCI_HOST "ipf-pci-host"
+OBJECT_DECLARE_SIMPLE_TYPE(IPFPCIHost, IPF_PCI_HOST)
+
+struct IPFPCIHost {
+    PCIHostState parent_obj;
 };
 
 static uint64_t ipf_boot_ip;
@@ -1573,6 +1581,76 @@ static void ipf_init_legacy_io(IPFMachineState *m, MemoryRegion *sysmem)
             (uint64_t)IPF_LEGACY_IO_BASE, (uint64_t)IPF_LEGACY_IO_SIZE);
 }
 
+static const char *ipf_pcihost_root_bus_path(PCIHostState *host_bridge,
+                                             PCIBus *rootbus)
+{
+    (void)host_bridge;
+    (void)rootbus;
+    return "0000:00";
+}
+
+static void ipf_pcihost_initfn(Object *obj)
+{
+    PCIHostState *phb = PCI_HOST_BRIDGE(obj);
+    memory_region_init_io(&phb->conf_mem, obj, &pci_host_conf_le_ops, phb,
+                          "pci-conf-idx", 4);
+    memory_region_init_io(&phb->data_mem, obj, &pci_host_data_le_ops, phb,
+                          "pci-conf-data", 4);
+}
+
+static void ipf_pcihost_realize(DeviceState *dev, Error **errp)
+{
+    PCIHostState *phb = PCI_HOST_BRIDGE(dev);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+
+    /*
+     * PCI config mechanism #1 (PC-style): cfgaddr/cfgdata I/O ports.
+     *
+     * IA-64 guests access I/O ports through the sparse legacy I/O MMIO window
+     * (see ipf_legacy_io_{read,write}()).
+     */
+    memory_region_add_subregion(get_system_io(), 0xcf8, &phb->conf_mem);
+    memory_region_add_subregion(get_system_io(), 0xcfc, &phb->data_mem);
+    sysbus_init_ioports(sbd, 0xcf8, 4);
+    sysbus_init_ioports(sbd, 0xcfc, 4);
+
+    phb->bus = pci_root_bus_new(dev, "pci", get_system_memory(),
+                                get_system_io(), 0, TYPE_PCI_BUS);
+
+    DPRINTF("PCI: mapped cfgaddr 0xcf8 cfgdata 0xcfc\n");
+    (void)errp;
+}
+
+static void ipf_pcihost_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIHostBridgeClass *hc = PCI_HOST_BRIDGE_CLASS(klass);
+
+    dc->realize = ipf_pcihost_realize;
+    dc->user_creatable = false;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
+    dc->fw_name = "pci";
+
+    hc->root_bus_path = ipf_pcihost_root_bus_path;
+
+    (void)data;
+}
+
+static const TypeInfo ipf_pcihost_info = {
+    .name = TYPE_IPF_PCI_HOST,
+    .parent = TYPE_PCI_HOST_BRIDGE,
+    .instance_size = sizeof(IPFPCIHost),
+    .instance_init = ipf_pcihost_initfn,
+    .class_init = ipf_pcihost_class_init,
+};
+
+static void ipf_init_pci(IPFMachineState *m)
+{
+    DeviceState *pcihost = qdev_new(TYPE_IPF_PCI_HOST);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(pcihost), &error_fatal);
+    m->pcibus = PCI_HOST_BRIDGE(pcihost)->bus;
+}
+
 static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
 {
     IPFMachineState *m = opaque;
@@ -1825,6 +1903,16 @@ static void ipf_init(MachineState *machine)
             error_report("Unable to build GFW HOB list");
             exit(1);
         }
+    }
+
+    bool run_firmware = (!kernel_filename) || m->firmware_preboot;
+    if (run_firmware) {
+        ipf_init_pci(m);
+        /*
+         * Attach a PCI VGA device so the guest firmware can present a UI.
+         * This honors the user's -vga selection (e.g. std/cirrus/virtio).
+         */
+        pci_vga_init(m->pcibus);
     }
 
     if (!kernel_filename) {
@@ -2848,6 +2936,7 @@ static void ipf_register_type(void)
 {
     type_register_static(&ipf_typeinfo);
     type_register_static(&ipf_pc_info);
+    type_register_static(&ipf_pcihost_info);
 
 }
 
