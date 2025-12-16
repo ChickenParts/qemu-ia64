@@ -1431,6 +1431,52 @@ void HELPER(fw_enter_kernel)(CPUIA64State *env)
     uint64_t kernel_low = env->fw_preboot_kernel_low;
     uint64_t ar_k0 = env->ar[0];
 
+    /* Snapshot the boot parameters after firmware ran. */
+    {
+        typedef struct ia64_boot_param {
+            uint64_t command_line;
+            uint64_t efi_systab;
+            uint64_t efi_memmap;
+            uint64_t efi_memmap_size;
+            uint64_t efi_memdesc_size;
+            uint32_t efi_memdesc_version;
+            struct {
+                uint16_t num_cols;
+                uint16_t num_rows;
+                uint16_t orig_x;
+                uint16_t orig_y;
+            } console_info;
+            uint64_t fpswa;
+            uint64_t initrd_start;
+            uint64_t initrd_size;
+            uint64_t domain_start;
+            uint64_t domain_size;
+        } IpfBootParam;
+
+        IpfBootParam bp = { 0 };
+        MemTxResult r =
+            address_space_read(&address_space_memory, boot_r28,
+                               MEMTXATTRS_UNSPECIFIED, &bp, sizeof(bp));
+        if (r == MEMTX_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64 FW: boot_param cmdline=%016" PRIx64
+                          " efi_systab=%016" PRIx64
+                          " efi_memmap=%016" PRIx64 " memmap_size=%" PRIu64
+                          " desc_size=%" PRIu64 " desc_ver=%u"
+                          " initrd=%016" PRIx64 "+%" PRIu64
+                          " domain=%016" PRIx64 "+%" PRIu64 "\n",
+                          bp.command_line, bp.efi_systab,
+                          bp.efi_memmap, bp.efi_memmap_size,
+                          bp.efi_memdesc_size, bp.efi_memdesc_version,
+                          bp.initrd_start, bp.initrd_size,
+                          bp.domain_start, bp.domain_size);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64 FW: boot_param read failed at %016" PRIx64 "\n",
+                          boot_r28);
+        }
+    }
+
     cpu_reset(cs);
 
     /* Preserve the legacy I/O port window base across the reset. */
