@@ -142,6 +142,13 @@ struct IPFPCIHost {
     PCIHostState parent_obj;
 };
 
+#define TYPE_IPF_PCI_ROOT_DEVICE "ipf-pci-root"
+OBJECT_DECLARE_SIMPLE_TYPE(IPFPCIRoot, IPF_PCI_ROOT_DEVICE)
+
+struct IPFPCIRoot {
+    PCIDevice parent_obj;
+};
+
 static uint64_t ipf_boot_ip;
 static uint64_t ipf_boot_r28;
 static uint64_t ipf_ram_size;
@@ -1644,11 +1651,61 @@ static const TypeInfo ipf_pcihost_info = {
     .class_init = ipf_pcihost_class_init,
 };
 
+static const VMStateDescription ipf_pci_root_vmstate = {
+    .name = "ipf-pci-root",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_PCI_DEVICE(parent_obj, IPFPCIRoot),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static void ipf_pci_root_class_init(ObjectClass *klass, const void *data)
+{
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
+    dc->desc = "IPF PCI host bridge (PCI-facing)";
+    dc->vmsd = &ipf_pci_root_vmstate;
+    dc->user_creatable = false;
+
+    /*
+     * The xenipf guest firmware expects a conventional host bridge at 00:00.0.
+     * Vendor/device IDs are not currently used by our platform code; pick an
+     * Intel host bridge-like identity and correct class code.
+     */
+    k->vendor_id = PCI_VENDOR_ID_INTEL;
+    k->device_id = 0x122e;
+    k->revision = 0;
+    k->class_id = PCI_CLASS_BRIDGE_HOST;
+
+    (void)data;
+}
+
+static const TypeInfo ipf_pci_root_info = {
+    .name = TYPE_IPF_PCI_ROOT_DEVICE,
+    .parent = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(IPFPCIRoot),
+    .class_init = ipf_pci_root_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
+};
+
 static void ipf_init_pci(IPFMachineState *m)
 {
     DeviceState *pcihost = qdev_new(TYPE_IPF_PCI_HOST);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pcihost), &error_fatal);
     m->pcibus = PCI_HOST_BRIDGE(pcihost)->bus;
+
+    /*
+     * Ensure 00:00.0 is a host bridge device so guest firmware enumeration
+     * doesn't mis-identify the first device (e.g. VGA) as the host bridge.
+     */
+    pci_create_simple(m->pcibus, PCI_DEVFN(0, 0), TYPE_IPF_PCI_ROOT_DEVICE);
 }
 
 static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
@@ -2937,6 +2994,7 @@ static void ipf_register_type(void)
     type_register_static(&ipf_typeinfo);
     type_register_static(&ipf_pc_info);
     type_register_static(&ipf_pcihost_info);
+    type_register_static(&ipf_pci_root_info);
 
 }
 
