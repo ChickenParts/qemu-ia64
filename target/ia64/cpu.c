@@ -18,6 +18,31 @@
 
 #ifndef CONFIG_USER_ONLY
 static void ia64_itm_timer_cb(void *opaque);
+
+typedef struct IA64RSEContext {
+    uint64_t bspstore;
+    struct IA64RSEFrame *frames;
+    uint32_t depth;
+    uint32_t cap;
+} IA64RSEContext;
+
+static void ia64_rse_ctxs_free(IA64CPU *cpu)
+{
+    if (!cpu->rse_ctxs) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < cpu->rse_ctxs_len; i++) {
+        g_free(cpu->rse_ctxs[i].frames);
+        cpu->rse_ctxs[i].frames = NULL;
+        cpu->rse_ctxs[i].depth = 0;
+        cpu->rse_ctxs[i].cap = 0;
+    }
+    g_free(cpu->rse_ctxs);
+    cpu->rse_ctxs = NULL;
+    cpu->rse_ctxs_len = 0;
+    cpu->rse_ctxs_cap = 0;
+}
 #endif
 static void ia64_cpu_do_interrupt(CPUState *cs);
 
@@ -25,6 +50,12 @@ static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
 {
     IA64CPU *cpu = IA64_CPU(cs);
     cpu->env.ip = value;
+}
+
+static vaddr ia64_cpu_get_pc(CPUState *cs)
+{
+    IA64CPU *cpu = IA64_CPU(cs);
+    return cpu->env.ip;
 }
 
 static void ia64_cpu_realizefn(DeviceState *dev, Error **errp)
@@ -68,6 +99,14 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     uint64_t percpu_size = env->percpu_size;
     uint64_t dbg_console_owner_va = env->dbg_console_owner_va;
     uint64_t dbg_console_waiter_va = env->dbg_console_waiter_va;
+    uint64_t dbg_switch_mode_phys_va = env->dbg_switch_mode_phys_va;
+    uint64_t dbg_switch_mode_virt_va = env->dbg_switch_mode_virt_va;
+    uint64_t dbg_switch_mode_phys_size = env->dbg_switch_mode_phys_size;
+    uint64_t dbg_switch_mode_virt_size = env->dbg_switch_mode_virt_size;
+    uint64_t dbg_ia64_switch_to_va = env->dbg_ia64_switch_to_va;
+    uint64_t dbg_ia64_switch_to_size = env->dbg_ia64_switch_to_size;
+    uint64_t dbg_load_switch_stack_va = env->dbg_load_switch_stack_va;
+    uint64_t dbg_load_switch_stack_size = env->dbg_load_switch_stack_size;
 
     if (icc->parent_phases.hold) {
         icc->parent_phases.hold(obj, type);
@@ -78,6 +117,9 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
      *
      * Note: preserve machine-provided diagnostic ranges across reset.
      */
+#ifndef CONFIG_USER_ONLY
+    ia64_rse_ctxs_free(cpu);
+#endif
     g_free(env->rse_frames);
     g_free(env->intr_frames);
     memset(env, 0, sizeof(*env));
@@ -89,6 +131,14 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     env->percpu_size = percpu_size;
     env->dbg_console_owner_va = dbg_console_owner_va;
     env->dbg_console_waiter_va = dbg_console_waiter_va;
+    env->dbg_switch_mode_phys_va = dbg_switch_mode_phys_va;
+    env->dbg_switch_mode_virt_va = dbg_switch_mode_virt_va;
+    env->dbg_switch_mode_phys_size = dbg_switch_mode_phys_size;
+    env->dbg_switch_mode_virt_size = dbg_switch_mode_virt_size;
+    env->dbg_ia64_switch_to_va = dbg_ia64_switch_to_va;
+    env->dbg_ia64_switch_to_size = dbg_ia64_switch_to_size;
+    env->dbg_load_switch_stack_va = dbg_load_switch_stack_va;
+    env->dbg_load_switch_stack_size = dbg_load_switch_stack_size;
 
     /* Basic bootstrap defaults */
     env->ip = 0xFFFF0000ULL;
@@ -164,17 +214,33 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
 
 static void ia64_cpu_initfn(Object *obj)
 {
+#ifndef CONFIG_USER_ONLY
+    IA64CPU *cpu = IA64_CPU(obj);
+    cpu->itm_timer = NULL;
+    cpu->rse_ctxs = NULL;
+    cpu->rse_ctxs_len = 0;
+    cpu->rse_ctxs_cap = 0;
+#endif
 }
 
 static void ia64_cpu_finalizefn(Object *obj)
 {
     IA64CPU *cpu = IA64_CPU(obj);
 #ifndef CONFIG_USER_ONLY
+    ia64_rse_ctxs_free(cpu);
     if (cpu->itm_timer) {
         timer_free(cpu->itm_timer);
         cpu->itm_timer = NULL;
     }
 #endif
+    g_free(cpu->env.rse_frames);
+    cpu->env.rse_frames = NULL;
+    cpu->env.rse_depth = 0;
+    cpu->env.rse_capacity = 0;
+    g_free(cpu->env.intr_frames);
+    cpu->env.intr_frames = NULL;
+    cpu->env.intr_depth = 0;
+    cpu->env.intr_capacity = 0;
 }
 
 #ifndef CONFIG_USER_ONLY
@@ -216,6 +282,68 @@ void ia64_itm_update(CPUIA64State *env)
         when = now;
     }
     timer_mod_ns(cpu->itm_timer, (int64_t)when);
+}
+
+static IA64RSEContext *ia64_rse_ctx_lookup(IA64CPU *cpu, uint64_t bspstore)
+{
+    for (uint32_t i = 0; i < cpu->rse_ctxs_len; i++) {
+        if (cpu->rse_ctxs[i].bspstore == bspstore) {
+            return &cpu->rse_ctxs[i];
+        }
+    }
+    return NULL;
+}
+
+static IA64RSEContext *ia64_rse_ctx_get(IA64CPU *cpu, uint64_t bspstore)
+{
+    IA64RSEContext *ctx = ia64_rse_ctx_lookup(cpu, bspstore);
+    if (ctx) {
+        return ctx;
+    }
+
+    if (cpu->rse_ctxs_len == cpu->rse_ctxs_cap) {
+        uint32_t new_cap = cpu->rse_ctxs_cap ? cpu->rse_ctxs_cap * 2 : 8;
+        cpu->rse_ctxs = g_realloc_n(cpu->rse_ctxs, new_cap,
+                                    sizeof(*cpu->rse_ctxs));
+        cpu->rse_ctxs_cap = new_cap;
+    }
+    ctx = &cpu->rse_ctxs[cpu->rse_ctxs_len++];
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->bspstore = bspstore;
+    return ctx;
+}
+
+void ia64_rse_switch_bspstore(CPUIA64State *env, uint64_t new_bspstore)
+{
+    IA64CPU *cpu = IA64_CPU(env_cpu(env));
+    uint64_t old_bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
+
+    new_bspstore &= ~0x7ULL;
+    if (old_bspstore == new_bspstore) {
+        return;
+    }
+
+    /*
+     * Preserve the modeled stacked window + call frames per task backing
+     * store. Linux swaps bspstore when switching tasks; restore the saved
+     * window state associated with the new backing store.
+     */
+    IA64RSEContext *old = ia64_rse_ctx_get(cpu, old_bspstore);
+    g_free(old->frames);
+    old->frames = env->rse_frames;
+    old->depth = env->rse_depth;
+    old->cap = env->rse_capacity;
+    env->rse_frames = NULL;
+    env->rse_depth = 0;
+    env->rse_capacity = 0;
+
+    IA64RSEContext *next = ia64_rse_ctx_get(cpu, new_bspstore);
+    env->rse_frames = next->frames;
+    env->rse_depth = next->depth;
+    env->rse_capacity = next->cap;
+    next->frames = NULL;
+    next->depth = 0;
+    next->cap = 0;
 }
 
 static bool ia64_cpu_has_work(CPUState *cs)
@@ -410,6 +538,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->class_by_name = object_class_by_name;
     cc->dump_state = ia64_cpu_dump_state;
     cc->set_pc = ia64_cpu_set_pc;
+    cc->get_pc = ia64_cpu_get_pc;
     cc->gdb_read_register = NULL; // TODO
     cc->gdb_write_register = NULL; // TODO
     cc->gdb_num_core_regs = 0;

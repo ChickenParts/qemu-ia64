@@ -907,6 +907,18 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
     }
 
     /* Instruction counter expired.  */
+    if (!icount_enabled()) {
+        fprintf(stderr,
+                "TCG BUG: TB_EXIT_REQUESTED without exitreq/icount\n"
+                "  pc=%016" VADDR_PRIx " tb=%p tb->pc=%016" VADDR_PRIx
+                " tb->cflags=0x%x tb_exit=%d\n"
+                "  icount_decr=0x%08x exit_request=%d interrupt_request=0x%x\n",
+                pc, tb, tb->pc, tb->cflags, *tb_exit,
+                qatomic_read(&cpu->neg.icount_decr.u32),
+                qatomic_read(&cpu->exit_request),
+                cpu->interrupt_request);
+        fflush(stderr);
+    }
     assert(icount_enabled());
 #ifndef CONFIG_USER_ONLY
     /* Ensure global icount has gone forward */

@@ -60,12 +60,6 @@
 #define IA64_ISR_R_BIT 34 /* read access */
 #define IA64_ISR_CODE_MASK 0xf
 
-/* RSE-related AR indices */
-#define IA64_AR_RSC       16
-#define IA64_AR_BSP       17
-#define IA64_AR_BSPSTORE  18
-#define IA64_AR_RNAT      19
-
 /* CFM fields */
 #define IA64_CFM_SOR_SHIFT 14
 #define IA64_CFM_SOR_MASK  0xfULL
@@ -112,6 +106,46 @@ static inline uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
 static void ia64_rse_push_window(CPUIA64State *env);
 static bool ia64_rse_pop_window(CPUIA64State *env);
 static bool ia64_intr_pop_window(CPUIA64State *env);
+
+#ifndef CONFIG_USER_ONLY
+static bool ia64_pc_in_sym(const CPUIA64State *env, uint64_t pc,
+                           uint64_t sym_va, uint64_t sym_size)
+{
+    const uint64_t bias = env->kernel_bias;
+    if (!sym_va || !sym_size) {
+        return false;
+    }
+    if (pc >= sym_va && pc < sym_va + sym_size) {
+        return true;
+    }
+    if (bias) {
+        uint64_t sym_pa = sym_va - bias;
+        if (pc >= sym_pa && pc < sym_pa + sym_size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ia64_is_task_switch_pc(const CPUIA64State *env, uint64_t pc)
+{
+    /*
+     * Only switch our modeled call-frame stack when Linux is actually
+     * switching tasks (ia64_switch_to/load_switch_stack). The IVT and various
+     * PAL/SAL/EFI paths also touch ar.bspstore but must not affect our per-task
+     * bookkeeping.
+     */
+    if (ia64_pc_in_sym(env, pc, env->dbg_ia64_switch_to_va,
+                       env->dbg_ia64_switch_to_size)) {
+        return true;
+    }
+    if (ia64_pc_in_sym(env, pc, env->dbg_load_switch_stack_va,
+                       env->dbg_load_switch_stack_size)) {
+        return true;
+    }
+    return false;
+}
+#endif
 
 static void ia64_switch_banks(CPUIA64State *env)
 {
@@ -880,6 +914,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 
     static DbgProbeCount probes[64];
     static uint32_t nprobes;
+    static int dbg_probe_limit = -1;
 
     bool abort_panic = false;
     uint32_t idx;
@@ -897,7 +932,18 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         nprobes++;
     }
 
-    if (probes[idx].count++ >= 8) {
+    if (dbg_probe_limit == -1) {
+        dbg_probe_limit = 8;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_LIMIT");
+        if (s && *s) {
+            dbg_probe_limit = atoi(s);
+        }
+        if (dbg_probe_limit < 0) {
+            dbg_probe_limit = 0;
+        }
+    }
+
+    if (probes[idx].count++ >= (uint32_t)dbg_probe_limit) {
         return;
     }
 
@@ -917,12 +963,16 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64 " depth=%u"
                   " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
                   " pta=%016" PRIx64 " itir=%016" PRIx64
+                  " ar.rsc=%016" PRIx64 " ar.bsp=%016" PRIx64 " ar.bspstore=%016" PRIx64
+                  " ar.rnat=%016" PRIx64 " ar.pfs=%016" PRIx64
                   " ar.k6=%016" PRIx64 " ar.lc=%016" PRIx64 " ar.ec=%016" PRIx64
                   " r0=%016" PRIx64 " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
                   " r8=%016" PRIx64 " r9=%016" PRIx64
                   " r10=%016" PRIx64 " r11=%016" PRIx64
                   " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
+                  " r18=%016" PRIx64
                   " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
+                  " r24=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
                   " r43=%016" PRIx64
                   " r59=%016" PRIx64
@@ -931,22 +981,27 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
                   " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
                   " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                  " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
                   " b0=%016" PRIx64 " b6=%016" PRIx64
                   " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
                   pc, ri,
                   env->psr, env->cfm, env->pr, env->rse_depth,
                   env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
-                  env->ar[6], env->ar[65], env->ar[66],
+                  env->ar[IA64_AR_RSC], env->ar[IA64_AR_BSP],
+                  env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RNAT],
+                  env->ar[IA64_AR_PFS], env->ar[6], env->ar[65], env->ar[66],
                   env->r[0], env->r[1], env->r[2], env->r[3],
                   env->r[8], env->r[9], env->r[10], env->r[11],
                   env->r[12], env->r[14], env->r[15],
-                  env->r[19], env->r[22], env->r[23], env->r[27], env->r[28], env->r[29],
+                  env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
+                  env->r[24], env->r[28], env->r[29],
                   env->r[43],
                   env->r[59],
                   env->r[62],
                   env->r[16], env->r[17],
                   env->r[32], env->r[33], env->r[34], env->r[35],
                   env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
+                  env->r[47], env->r[48], env->r[49],
                   env->b[0], env->b[6], env->r[45], env->r[46]);
 
     if (pc == 0xa000000100073da0ULL || pc == 0xa000000100073620ULL) {
@@ -1065,6 +1120,142 @@ void HELPER(record_b0_trace)(CPUIA64State *env, uint64_t pc, uint64_t insn,
     env->b0_trace_kind[idx] = kind;
     env->b0_trace_val[idx] = val;
     env->b0_trace_idx = (idx + 1) & 15U;
+}
+
+static inline bool ia64_ranges_overlap(uint64_t a1, uint32_t s1,
+                                       uint64_t a2, uint32_t s2)
+{
+    if (s1 == 0 || s2 == 0) {
+        return false;
+    }
+    uint64_t e1 = a1 + (uint64_t)s1;
+    uint64_t e2 = a2 + (uint64_t)s2;
+    return !(e1 <= a2 || e2 <= a1);
+}
+
+static void ia64_alat_clear_entries(struct IA64ALATEntry *entries,
+                                   uint32_t *count, size_t n)
+{
+    if (*count == 0) {
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        entries[i].valid = 0;
+    }
+    *count = 0;
+}
+
+void HELPER(alat_invalidate_all)(CPUIA64State *env)
+{
+    ia64_alat_clear_entries(env->alat_gr, &env->alat_gr_valid,
+                            ARRAY_SIZE(env->alat_gr));
+    ia64_alat_clear_entries(env->alat_fr, &env->alat_fr_valid,
+                            ARRAY_SIZE(env->alat_fr));
+}
+
+void HELPER(alat_record_gr)(CPUIA64State *env, uint32_t reg,
+                            uint64_t addr, uint32_t size)
+{
+    reg &= 0x7f;
+    if (reg == 0 || size == 0) {
+        return;
+    }
+    struct IA64ALATEntry *e = &env->alat_gr[reg];
+    if (!e->valid) {
+        env->alat_gr_valid++;
+    }
+    e->addr = addr;
+    e->size = size;
+    e->valid = 1;
+}
+
+void HELPER(alat_record_fr)(CPUIA64State *env, uint32_t reg,
+                            uint64_t addr, uint32_t size)
+{
+    reg &= 0x7f;
+    if (reg <= 1 || size == 0) {
+        return;
+    }
+    struct IA64ALATEntry *e = &env->alat_fr[reg];
+    if (!e->valid) {
+        env->alat_fr_valid++;
+    }
+    e->addr = addr;
+    e->size = size;
+    e->valid = 1;
+}
+
+uint64_t HELPER(alat_check_gr)(CPUIA64State *env, uint32_t reg, uint32_t clr)
+{
+    reg &= 0x7f;
+    if (reg == 0) {
+        return 1;
+    }
+    struct IA64ALATEntry *e = &env->alat_gr[reg];
+    uint64_t miss = e->valid ? 0 : 1;
+    if (clr && e->valid) {
+        e->valid = 0;
+        if (env->alat_gr_valid) {
+            env->alat_gr_valid--;
+        }
+    }
+    if (clr && miss) {
+        e->valid = 0;
+    }
+    return miss;
+}
+
+uint64_t HELPER(alat_check_fr)(CPUIA64State *env, uint32_t reg, uint32_t clr)
+{
+    reg &= 0x7f;
+    if (reg <= 1) {
+        return 1;
+    }
+    struct IA64ALATEntry *e = &env->alat_fr[reg];
+    uint64_t miss = e->valid ? 0 : 1;
+    if (clr && e->valid) {
+        e->valid = 0;
+        if (env->alat_fr_valid) {
+            env->alat_fr_valid--;
+        }
+    }
+    if (clr && miss) {
+        e->valid = 0;
+    }
+    return miss;
+}
+
+void HELPER(alat_invalidate)(CPUIA64State *env, uint64_t addr, uint32_t size)
+{
+    if (size == 0) {
+        return;
+    }
+
+    if (env->alat_gr_valid) {
+        for (uint32_t r = 1; r < 128; r++) {
+            struct IA64ALATEntry *e = &env->alat_gr[r];
+            if (!e->valid) {
+                continue;
+            }
+            if (ia64_ranges_overlap(addr, size, e->addr, e->size)) {
+                e->valid = 0;
+                env->alat_gr_valid--;
+            }
+        }
+    }
+
+    if (env->alat_fr_valid) {
+        for (uint32_t f = 2; f < 128; f++) {
+            struct IA64ALATEntry *e = &env->alat_fr[f];
+            if (!e->valid) {
+                continue;
+            }
+            if (ia64_ranges_overlap(addr, size, e->addr, e->size)) {
+                e->valid = 0;
+                env->alat_fr_valid--;
+            }
+        }
+    }
 }
 
 uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t sor)
@@ -1922,6 +2113,8 @@ static bool ia64_fw_log_enabled(void)
 #define IA64_PAL_FREQ_RATIOS     14
 #define IA64_PAL_RSE_INFO        19
 #define IA64_PAL_VM_PAGE_SIZE    34
+#define IA64_PAL_HALT            28
+#define IA64_PAL_HALT_LIGHT      29
 #define IA64_PAL_LOGICAL_TO_PHYSICAL 42
 #define IA64_PAL_CACHE_SHARED_INFO   43
 #define IA64_PAL_BRAND_INFO          274
@@ -2051,6 +2244,17 @@ void HELPER(fw_pal)(CPUIA64State *env)
         v2 = (uint64_t)den | ((uint64_t)num << 32); /* itc ratio */
         break;
     }
+    case IA64_PAL_HALT:
+    case IA64_PAL_HALT_LIGHT:
+        /*
+         * Enter (light) halt state.
+         *
+         * For bringup under TCG we do not model low-power suspension here.
+         * Linux uses PAL_HALT_LIGHT in arch_safe_halt() when idling; returning
+         * success keeps the CPU running and avoids stalling boot if interrupt
+         * delivery is not yet fully modeled.
+         */
+        break;
     case IA64_PAL_RSE_INFO:
         v0 = 96;
         v1 = 0;
@@ -2590,6 +2794,11 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
      * ar.rsc.loadrs.
      */
     bspstore &= ~0x7ULL;
+#ifndef CONFIG_USER_ONLY
+    if (ia64_is_task_switch_pc(env, env->ip)) {
+        ia64_rse_switch_bspstore(env, bspstore);
+    }
+#endif
     env->ar[IA64_AR_BSPSTORE] = bspstore;
     env->ar[IA64_AR_BSP] = bspstore;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);

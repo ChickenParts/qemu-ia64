@@ -36,6 +36,24 @@ typedef struct CPUArchState {
     uint64_t rr[8];
     uint64_t cpuid[5];
 
+    /*
+     * Advanced Load Address Table (ALAT), used by ld*.a + chk.a.{nc,clr}.
+     *
+     * For bringup we only model enough to satisfy Linux' usage patterns:
+     * - Record ld*.a destinations with their load address + size.
+     * - Invalidate overlapping entries on stores.
+     * - chk.a.{nc,clr} branches on miss; .clr also clears the entry.
+     */
+    struct IA64ALATEntry {
+        uint64_t addr;
+        uint32_t size;
+        uint8_t valid;
+    } alat_gr[128];
+    uint32_t alat_gr_valid;
+
+    struct IA64ALATEntry alat_fr[128];
+    uint32_t alat_fr_valid;
+
     struct {
         uint64_t tag;   /* virtual base aligned to page */
         uint64_t pa;    /* physical base aligned to page */
@@ -122,6 +140,14 @@ typedef struct CPUArchState {
     /* Optional kernel symbol addresses for targeted bringup debugging. */
     uint64_t dbg_console_owner_va;
     uint64_t dbg_console_waiter_va;
+    uint64_t dbg_switch_mode_phys_va;
+    uint64_t dbg_switch_mode_virt_va;
+    uint64_t dbg_switch_mode_phys_size;
+    uint64_t dbg_switch_mode_virt_size;
+    uint64_t dbg_ia64_switch_to_va;
+    uint64_t dbg_ia64_switch_to_size;
+    uint64_t dbg_load_switch_stack_va;
+    uint64_t dbg_load_switch_stack_size;
 
     /* Debug: fail-fast hang detector (TB hot loop). */
     uint64_t dbg_tb_last_pc;
@@ -142,6 +168,9 @@ struct ArchCPU {
 
 #ifndef CONFIG_USER_ONLY
     QEMUTimer *itm_timer;
+    struct IA64RSEContext *rse_ctxs;
+    uint32_t rse_ctxs_len;
+    uint32_t rse_ctxs_cap;
 #endif
 };
 
@@ -216,8 +245,13 @@ struct IA64CPUClass {
 #define IA64_FP_SEXP(sign, exp) \
     ((((uint64_t)(sign) & 1ULL) << 17) | ((uint64_t)(exp) & 0x1FFFFULL))
 
-/* Application Register indices. */
-#define IA64_AR_ITC 44
+/* Application Register indices (subset). */
+#define IA64_AR_RSC       16
+#define IA64_AR_BSP       17
+#define IA64_AR_BSPSTORE  18
+#define IA64_AR_RNAT      19
+#define IA64_AR_ITC       44
+#define IA64_AR_PFS       64
 
 #define IA64_EXCP_BASE    0x200
 #define IA64_EXCP_VHPT_TRANS  (IA64_EXCP_BASE + 0x0)
@@ -258,6 +292,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 void ia64_intr_push_window(CPUIA64State *env);
 #ifndef CONFIG_USER_ONLY
 void ia64_itm_update(CPUIA64State *env);
+void ia64_rse_switch_bspstore(CPUIA64State *env, uint64_t new_bspstore);
 #endif
 
 #define cpu_signal_handler cpu_ia64_signal_handler
