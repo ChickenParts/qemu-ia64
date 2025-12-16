@@ -130,6 +130,14 @@ static uint64_t ipf_sym_stext;
 static uint64_t ipf_sym_etext;
 static uint64_t ipf_sym_console_owner;
 static uint64_t ipf_sym_console_waiter;
+static uint64_t ipf_sym_switch_mode_phys;
+static uint64_t ipf_sym_switch_mode_virt;
+static uint64_t ipf_sym_switch_mode_phys_size;
+static uint64_t ipf_sym_switch_mode_virt_size;
+static uint64_t ipf_sym_ia64_switch_to;
+static uint64_t ipf_sym_ia64_switch_to_size;
+static uint64_t ipf_sym_load_switch_stack;
+static uint64_t ipf_sym_load_switch_stack_size;
 
 static void ipf_kernel_sym_cb(const char *st_name, int st_info,
                               uint64_t st_value, uint64_t st_size)
@@ -161,6 +169,26 @@ static void ipf_kernel_sym_cb(const char *st_name, int st_info,
     if (!ipf_sym_console_waiter && st_name &&
         strcmp(st_name, "console_waiter") == 0) {
         ipf_sym_console_waiter = st_value;
+    }
+    if (!ipf_sym_switch_mode_phys && st_name &&
+        strcmp(st_name, "ia64_switch_mode_phys") == 0) {
+        ipf_sym_switch_mode_phys = st_value;
+        ipf_sym_switch_mode_phys_size = st_size;
+    }
+    if (!ipf_sym_switch_mode_virt && st_name &&
+        strcmp(st_name, "ia64_switch_mode_virt") == 0) {
+        ipf_sym_switch_mode_virt = st_value;
+        ipf_sym_switch_mode_virt_size = st_size;
+    }
+    if (!ipf_sym_ia64_switch_to && st_name &&
+        strcmp(st_name, "ia64_switch_to") == 0) {
+        ipf_sym_ia64_switch_to = st_value;
+        ipf_sym_ia64_switch_to_size = st_size;
+    }
+    if (!ipf_sym_load_switch_stack && st_name &&
+        strcmp(st_name, "load_switch_stack") == 0) {
+        ipf_sym_load_switch_stack = st_value;
+        ipf_sym_load_switch_stack_size = st_size;
     }
 }
 
@@ -343,6 +371,21 @@ static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
         return ret;
     }
 
+    static int watch_size_mask = -1;
+    if (watch_size_mask == -1) {
+        watch_size_mask = 0;
+        const char *s = getenv("QEMU_IA64_WATCH_SIZE");
+        if (s && *s) {
+            watch_size_mask = atoi(s);
+        }
+        if (watch_size_mask < 0) {
+            watch_size_mask = 0;
+        }
+    }
+    if (watch_size_mask && (((unsigned)watch_size_mask & size) == 0)) {
+        return ret;
+    }
+
     static int watch_limit = -1;
     if (watch_limit == -1) {
         watch_limit = 64;
@@ -375,8 +418,8 @@ static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
                 env ? env->r[52] : 0, env ? env->r[53] : 0,
                 env ? env->b[0] : 0, env ? env->b[6] : 0);
         fflush(stderr);
-        w->read_count++;
     }
+    w->read_count++;
     return ret;
 }
 
@@ -400,28 +443,42 @@ static void ipf_text_watch_write(void *opaque, hwaddr addr, uint64_t data,
         }
     }
 
-    if (w->write_count < (unsigned)watch_limit) {
-        fprintf(stderr,
-                "IPF_TEXT_WATCH: write size=%u pa=%016" HWADDR_PRIx " data=%016" PRIx64
-                " ip=%016" PRIx64 " psr=%016" PRIx64
-                " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
-                " r12=%016" PRIx64 " r13=%016" PRIx64
-                " r24=%016" PRIx64 " r27=%016" PRIx64 " r28=%016" PRIx64 " r31=%016" PRIx64
-                " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
-                " r52=%016" PRIx64 " r53=%016" PRIx64
-                " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
-                size, pa, data,
-                env ? env->ip : 0, env ? env->psr : 0,
-                env ? env->r[1] : 0, env ? env->r[2] : 0, env ? env->r[3] : 0,
-                env ? env->r[12] : 0, env ? env->r[13] : 0,
-                env ? env->r[24] : 0, env ? env->r[27] : 0, env ? env->r[28] : 0,
-                env ? env->r[31] : 0,
-                env ? env->r[32] : 0, env ? env->r[33] : 0, env ? env->r[34] : 0,
-                env ? env->r[52] : 0, env ? env->r[53] : 0,
-                env ? env->b[0] : 0, env ? env->b[6] : 0);
-        fflush(stderr);
+    static int watch_size_mask = -1;
+    if (watch_size_mask == -1) {
+        watch_size_mask = 0;
+        const char *s = getenv("QEMU_IA64_WATCH_SIZE");
+        if (s && *s) {
+            watch_size_mask = atoi(s);
+        }
+        if (watch_size_mask < 0) {
+            watch_size_mask = 0;
+        }
     }
-    w->write_count++;
+
+    if (!watch_size_mask || (((unsigned)watch_size_mask & size) != 0)) {
+        if (w->write_count < (unsigned)watch_limit) {
+            fprintf(stderr,
+                    "IPF_TEXT_WATCH: write size=%u pa=%016" HWADDR_PRIx " data=%016" PRIx64
+                    " ip=%016" PRIx64 " psr=%016" PRIx64
+                    " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
+                    " r12=%016" PRIx64 " r13=%016" PRIx64
+                    " r24=%016" PRIx64 " r27=%016" PRIx64 " r28=%016" PRIx64 " r31=%016" PRIx64
+                    " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                    " r52=%016" PRIx64 " r53=%016" PRIx64
+                    " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                    size, pa, data,
+                    env ? env->ip : 0, env ? env->psr : 0,
+                    env ? env->r[1] : 0, env ? env->r[2] : 0, env ? env->r[3] : 0,
+                    env ? env->r[12] : 0, env ? env->r[13] : 0,
+                    env ? env->r[24] : 0, env ? env->r[27] : 0, env ? env->r[28] : 0,
+                    env ? env->r[31] : 0,
+                    env ? env->r[32] : 0, env ? env->r[33] : 0, env ? env->r[34] : 0,
+                    env ? env->r[52] : 0, env ? env->r[53] : 0,
+                    env ? env->b[0] : 0, env ? env->b[6] : 0);
+            fflush(stderr);
+        }
+        w->write_count++;
+    }
 
     /* Forward the write into underlying RAM. */
     switch (size) {
@@ -1717,6 +1774,14 @@ static void ipf_init(MachineState *machine)
     ipf_sym_etext = 0;
     ipf_sym_console_owner = 0;
     ipf_sym_console_waiter = 0;
+    ipf_sym_switch_mode_phys = 0;
+    ipf_sym_switch_mode_virt = 0;
+    ipf_sym_switch_mode_phys_size = 0;
+    ipf_sym_switch_mode_virt_size = 0;
+    ipf_sym_ia64_switch_to = 0;
+    ipf_sym_ia64_switch_to_size = 0;
+    ipf_sym_load_switch_stack = 0;
+    ipf_sym_load_switch_stack_size = 0;
     if (load_elf_ram_sym(kernel_filename, NULL, NULL, NULL,
                          &kernel_entry, &kernel_low, &kernel_high, NULL,
                          ELFDATA2LSB, EM_IA_64, 0, 0,
@@ -1734,6 +1799,14 @@ static void ipf_init(MachineState *machine)
     env->kernel_bias = ipf_kernel_bias;
     env->dbg_console_owner_va = ipf_sym_console_owner;
     env->dbg_console_waiter_va = ipf_sym_console_waiter;
+    env->dbg_switch_mode_phys_va = ipf_sym_switch_mode_phys;
+    env->dbg_switch_mode_virt_va = ipf_sym_switch_mode_virt;
+    env->dbg_switch_mode_phys_size = ipf_sym_switch_mode_phys_size;
+    env->dbg_switch_mode_virt_size = ipf_sym_switch_mode_virt_size;
+    env->dbg_ia64_switch_to_va = ipf_sym_ia64_switch_to;
+    env->dbg_ia64_switch_to_size = ipf_sym_ia64_switch_to_size;
+    env->dbg_load_switch_stack_va = ipf_sym_load_switch_stack;
+    env->dbg_load_switch_stack_size = ipf_sym_load_switch_stack_size;
     ipf_probe_percpu_segment(kernel_filename, cpu);
     {
         /*
@@ -2246,24 +2319,31 @@ static void ipf_init(MachineState *machine)
             fadt.dsdt = cpu_to_le32((uint32_t)dsdt_addr);
             fadt.Xdsdt = cpu_to_le64(dsdt_addr);
             fadt.sci_interrupt = cpu_to_le16(9);
-            /* Minimal fixed feature register blocks (I/O port encoded). */
-            fadt.pm1a_event_block = cpu_to_le32((uint32_t)IPF_ACPI_PM_BASE);
+            /*
+             * Fixed-feature register blocks.
+             *
+             * On IA-64, Linux expects these blocks to be described via Generic
+             * Address Structures when they are MMIO.  The legacy 32-bit fields
+             * are defined as System I/O port addresses; avoid populating them
+             * with MMIO addresses above 64K.
+             */
+            fadt.pm1a_event_block = 0;
             fadt.pm1_event_length = 4;
-            fadt.pm1a_control_block = cpu_to_le32((uint32_t)(IPF_ACPI_PM_BASE + 0x04));
+            fadt.pm1a_control_block = 0;
             fadt.pm1_control_length = 2;
-            fadt.pm_timer_block = cpu_to_le32((uint32_t)(IPF_ACPI_PM_BASE + 0x08));
+            fadt.pm_timer_block = 0;
             fadt.pm_timer_length = 4;
 
             /* Extended (GAS) equivalents. */
-            fadt.xpm1a_event_block.space_id = 1; /* ACPI_ADR_SPACE_SYSTEM_IO */
+            fadt.xpm1a_event_block.space_id = 0; /* ACPI_ADR_SPACE_SYSTEM_MEMORY */
             fadt.xpm1a_event_block.bit_width = 32;
             fadt.xpm1a_event_block.access_width = 0;
             fadt.xpm1a_event_block.address = cpu_to_le64(IPF_ACPI_PM_BASE);
-            fadt.xpm1a_control_block.space_id = 1;
+            fadt.xpm1a_control_block.space_id = 0;
             fadt.xpm1a_control_block.bit_width = 16;
             fadt.xpm1a_control_block.access_width = 0;
             fadt.xpm1a_control_block.address = cpu_to_le64(IPF_ACPI_PM_BASE + 0x04);
-            fadt.xpm_timer_block.space_id = 1;
+            fadt.xpm_timer_block.space_id = 0;
             fadt.xpm_timer_block.bit_width = 32;
             fadt.xpm_timer_block.access_width = 0;
             fadt.xpm_timer_block.address = cpu_to_le64(IPF_ACPI_PM_BASE + 0x08);
