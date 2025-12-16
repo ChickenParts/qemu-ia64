@@ -17,6 +17,15 @@ boot*.serial
 boot*.console
 mon*.out
 
+# IA-64 firmware bringup artifacts
+stuff/*.log
+stuff/*.out
+stuff/*.err
+stuff/chunk-*.bin
+stuff/fw*.bin
+stuff/fw*.ppm
+stuff/fw*.png
+
 # Local kernel / reference trees (kept out of git)
 stuff/linux-ia64/
 stuff/ski/
