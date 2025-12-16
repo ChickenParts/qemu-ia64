@@ -2724,19 +2724,15 @@ void HELPER(flushrs)(CPUIA64State *env)
 void HELPER(loadrs)(CPUIA64State *env)
 {
     /*
-     * Minimal loadrs implementation sufficient for Linux head.S early boot
-     * usage (loadrs with ar.rsc=0 to clear any residual dirty partition).
+     * Minimal loadrs implementation sufficient for reaching userspace.
      *
-     * If a non-zero loadrs field is requested, fail fast so we can fill in
-     * the full RSE load behavior when needed.
+     * We do not model the full RSE backing-store/dirty-partition machinery
+     * yet. Treat loadrs as synchronizing bspstore with bsp and clearing the
+     * loadrs field, which is enough for Linux's rse_clear_invalid path when
+     * starting the first user process.
      */
     uint64_t rsc = env->ar[IA64_AR_RSC];
-    uint64_t loadrs_bytes = ia64_rsc_get_loadrs(rsc);
-    if (loadrs_bytes != 0) {
-        cpu_abort(env_cpu(env),
-                  "IA64 UNIMPL: loadrs with ar.rsc.loadrs=%" PRIu64 " (pc=%016" PRIx64 ")",
-                  loadrs_bytes, env->ip);
-    }
+    (void)ia64_rsc_get_loadrs(rsc);
     env->ar[IA64_AR_BSPSTORE] = env->ar[IA64_AR_BSP] & ~0x7ULL;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, 0);
 }

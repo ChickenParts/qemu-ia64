@@ -1183,6 +1183,51 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
         }
     }
 
+    /* A9 psub4: r1 = r2, r3 (SKI encoding.opcode). */
+    if (!handled && major == 0x8 && x2a == 1) {
+        uint8_t za = extract64(insn, 36, 1);
+        uint8_t zb = ve; /* bit 33 in A9 encodings */
+
+        if (za == 1 && zb == 0 && x4 == 0x1 && x2b == 0) {
+            TCGv_i64 a = tcg_temp_new_i64();
+            TCGv_i64 b = tcg_temp_new_i64();
+
+            if (r2 == 0) {
+                tcg_gen_movi_i64(a, 0);
+            } else {
+                tcg_gen_mov_i64(a, cpu_r[r2]);
+            }
+            if (r3 == 0) {
+                tcg_gen_movi_i64(b, 0);
+            } else {
+                tcg_gen_mov_i64(b, cpu_r[r3]);
+            }
+
+            if (r1 != 0) {
+                TCGv_i64 lo = tcg_temp_new_i64();
+                TCGv_i64 hi = tcg_temp_new_i64();
+                TCGv_i64 t1 = tcg_temp_new_i64();
+                TCGv_i64 t2 = tcg_temp_new_i64();
+
+                tcg_gen_andi_i64(t1, a, 0xffffffffULL);
+                tcg_gen_andi_i64(t2, b, 0xffffffffULL);
+                tcg_gen_sub_i64(lo, t1, t2);
+                tcg_gen_andi_i64(lo, lo, 0xffffffffULL);
+
+                tcg_gen_shri_i64(t1, a, 32);
+                tcg_gen_shri_i64(t2, b, 32);
+                tcg_gen_andi_i64(t1, t1, 0xffffffffULL);
+                tcg_gen_andi_i64(t2, t2, 0xffffffffULL);
+                tcg_gen_sub_i64(hi, t1, t2);
+                tcg_gen_andi_i64(hi, hi, 0xffffffffULL);
+                tcg_gen_shli_i64(hi, hi, 32);
+
+                tcg_gen_or_i64(cpu_r[r1], hi, lo);
+            }
+            handled = true;
+        }
+    }
+
     /* addl r1 = imm22, r3 (A5 format, op=9; r3 is encoded as 2-bit r0..r3) */
     if (!handled && major == 0x9) {
         uint8_t r3s = extract64(insn, 20, 2);
@@ -1714,6 +1759,44 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_mov_i64(va, cpu_r[r3]);
                 }
                 gen_helper_fc(tcg_env, va);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && (x6 == 0x1a || x6 == 0x1b || x6 == 0x1e)) {
+                /* M46: thash/ttag/tpa r1 = r3 (SKI encoding.opcode). */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 va = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(va, 0);
+                } else {
+                    tcg_gen_mov_i64(va, cpu_r[r3]);
+                }
+
+                TCGv_i64 dst = tcg_temp_new_i64();
+                if (x6 == 0x1e) {
+                    gen_helper_tpa(dst, tcg_env, va);
+                } else {
+                    TCGv_i64 old_ifa = tcg_temp_new_i64();
+                    tcg_gen_ld_i64(old_ifa, tcg_env,
+                                   offsetof(CPUIA64State, cr_ifa));
+                    tcg_gen_st_i64(va, tcg_env, offsetof(CPUIA64State, cr_ifa));
+                    if (x6 == 0x1a) {
+                        gen_helper_thash(dst, tcg_env);
+                    } else {
+                        gen_helper_ttag(dst, tcg_env);
+                    }
+                    tcg_gen_st_i64(old_ifa, tcg_env,
+                                   offsetof(CPUIA64State, cr_ifa));
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], dst);
+                }
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
