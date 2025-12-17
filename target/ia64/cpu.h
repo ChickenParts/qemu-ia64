@@ -152,6 +152,10 @@ typedef struct CPUArchState {
     /* Debug: fail-fast hang detector (TB hot loop). */
     uint64_t dbg_tb_last_pc;
     uint64_t dbg_tb_last2_pc;
+    uint64_t dbg_tb_last_lc;
+    uint64_t dbg_tb_last2_lc;
+    uint64_t dbg_tb_last_ec;
+    uint64_t dbg_tb_last2_ec;
     uint64_t dbg_tb_total;
     uint64_t dbg_tb_same1;
     uint64_t dbg_tb_same2;

@@ -583,10 +583,39 @@ static bool ia64_rse_pop_window(CPUIA64State *env)
     if (env->rse_depth == 0) {
         return false;
     }
-    struct IA64RSEFrame *frame = &env->rse_frames[--env->rse_depth];
+    struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth - 1];
+
+    /*
+     * Model the shared physical registers between caller OUT and callee IN.
+     *
+     * Real IA-64 calls do not preserve the caller's OUT registers: they are
+     * the callee's IN registers, so any callee writes must be visible to the
+     * caller after the return.
+     *
+     * Capture the current IN values (env->r[32..]) before restoring the saved
+     * caller frame, and then copy them back into the caller's OUT window.
+     */
+    uint64_t outvals[96] = { 0 };
+    uint8_t caller_sof = frame->cfm & 0x7f;
+    uint8_t caller_sol = (frame->cfm >> 7) & 0x7f;
+    uint8_t caller_outs = (caller_sof > caller_sol) ? (caller_sof - caller_sol) : 0;
+    caller_outs = MIN(caller_outs, (uint8_t)96);
+    for (uint8_t i = 0; i < caller_outs; i++) {
+        outvals[i] = env->r[32 + i];
+    }
+
+    frame = &env->rse_frames[--env->rse_depth];
     memcpy(&env->r[32], frame->r, sizeof(frame->r));
     env->ar[64] = frame->ar_pfs;
     env->cfm = frame->cfm;
+
+    if (caller_outs && caller_sol < 96) {
+        uint8_t max_copy = MIN(caller_outs, (uint8_t)(96 - caller_sol));
+        uint8_t out0 = 32 + caller_sol;
+        for (uint8_t i = 0; i < max_copy; i++) {
+            env->r[out0 + i] = outvals[i];
+        }
+    }
     return true;
 }
 
@@ -2088,6 +2117,34 @@ void HELPER(check_null_branch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     }
 }
 
+void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                           uint64_t addr, uint32_t size, uint64_t val)
+{
+    static int log_limit = -1;
+    static int log_count;
+
+    if (log_limit == -1) {
+        log_limit = 64;
+        const char *s = getenv("QEMU_IA64_WATCH_STORE_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+
+    if (log_count++ >= log_limit) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "store_watch pc=%016" PRIx64 " ri=%u"
+                  " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                  " addr=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
+                  pc, ri, env->ip, env->psr, env->cfm, addr, size, val);
+}
+
 void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                         uint64_t threshold)
 {
@@ -2097,10 +2154,15 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 
     env->dbg_tb_total++;
 
-    if (pc == env->dbg_tb_last_pc && ri == env->dbg_tb_last_ri) {
+    uint64_t lc = env->ar[65];
+    uint64_t ec = env->ar[66];
+
+    if (pc == env->dbg_tb_last_pc && ri == env->dbg_tb_last_ri &&
+        lc == env->dbg_tb_last_lc && ec == env->dbg_tb_last_ec) {
         env->dbg_tb_same1++;
         env->dbg_tb_same2 = 0;
-    } else if (pc == env->dbg_tb_last2_pc && ri == env->dbg_tb_last2_ri) {
+    } else if (pc == env->dbg_tb_last2_pc && ri == env->dbg_tb_last2_ri &&
+               lc == env->dbg_tb_last2_lc && ec == env->dbg_tb_last2_ec) {
         env->dbg_tb_same2++;
         env->dbg_tb_same1 = 0;
     } else {
@@ -2110,8 +2172,12 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 
     env->dbg_tb_last2_pc = env->dbg_tb_last_pc;
     env->dbg_tb_last2_ri = env->dbg_tb_last_ri;
+    env->dbg_tb_last2_lc = env->dbg_tb_last_lc;
+    env->dbg_tb_last2_ec = env->dbg_tb_last_ec;
     env->dbg_tb_last_pc = pc;
     env->dbg_tb_last_ri = ri;
+    env->dbg_tb_last_lc = lc;
+    env->dbg_tb_last_ec = ec;
 
     if (env->dbg_tb_same1 < threshold && env->dbg_tb_same2 < threshold) {
         return;

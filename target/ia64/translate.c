@@ -199,6 +199,35 @@ static bool ia64_dbg_probe_match(uint64_t pc, int ri)
     return false;
 }
 
+static bool ia64_store_watch_inited;
+static bool ia64_store_watch_enabled;
+static uint64_t ia64_store_watch_addr;
+
+static void ia64_init_store_watch(void)
+{
+    if (ia64_store_watch_inited) {
+        return;
+    }
+    ia64_store_watch_inited = true;
+
+    const char *s = getenv("QEMU_IA64_WATCH_STORE");
+    if (!s || !*s) {
+        return;
+    }
+    char *endp = NULL;
+    ia64_store_watch_addr = strtoull(s, &endp, 0);
+    if (endp == s) {
+        return;
+    }
+    ia64_store_watch_enabled = true;
+}
+
+static bool ia64_store_watch_match(void)
+{
+    ia64_init_store_watch();
+    return ia64_store_watch_enabled;
+}
+
 void ia64_tcg_init(void)
 {
     cpu_pc = tcg_global_mem_new_i64(tcg_env,
@@ -2500,6 +2529,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 handled = true;
             } else if (x_mem == 0 && x6 >= 0x30 && x6 <= 0x3b) {
                 /* st1/st2/st4/st8 (including .rel/.spill variants) */
+                uint32_t size = 1U << (x6 & 0x3);
                 MemOp mop = memop_for_size_idx(x6);
                 TCGv_i64 src = tcg_temp_new_i64();
                 if (r2 == 0) {
@@ -2507,9 +2537,21 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(src, cpu_r[r2]);
                 }
+                if (ia64_store_watch_match()) {
+                    TCGLabel *skip_watch = gen_new_label();
+                    tcg_gen_brcondi_i64(TCG_COND_NE, addr,
+                                        ia64_store_watch_addr,
+                                        skip_watch);
+                    gen_helper_dbg_mem_watch(tcg_env,
+                                             tcg_constant_i64(ctx->base.pc_next),
+                                             tcg_constant_i32(ctx->ri),
+                                             addr,
+                                             tcg_constant_i32(size),
+                                             src);
+                    gen_set_label(skip_watch);
+                }
                 tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, mop);
                 {
-                    uint32_t size = 1U << (x6 & 0x3);
                     gen_helper_alat_invalidate(tcg_env, addr,
                                                tcg_constant_i32(size));
                 }
@@ -2906,6 +2948,26 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_mov_i64(val, cpu_r[r2]);
                 }
                 gen_helper_setf_sig(tcg_env, tcg_constant_i32(f1), val);
+                handled = true;
+            }
+
+            /* M18: setf.exp f1 = r2 (op=6 m=0 x=1 x6=0x1d) */
+            if (!handled && major == 0x6 && m == 0 && x == 1 && x6 == 0x1d) {
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
+                TCGv_i64 expw = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(expw, 0);
+                } else {
+                    tcg_gen_mov_i64(expw, cpu_r[r2]);
+                }
+                tcg_gen_andi_i64(expw, expw, 0x3ffffULL);
+                if (f1 > 1) {
+                    tcg_gen_st_i64(tcg_constant_i64(1ULL << 63), tcg_env,
+                                   offsetof(CPUIA64State, f) + (f1 * 16) + 0);
+                    tcg_gen_st_i64(expw, tcg_env,
+                                   offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                }
                 handled = true;
             }
 
