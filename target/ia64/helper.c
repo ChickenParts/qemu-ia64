@@ -1218,6 +1218,13 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     static DbgProbeCount probes[64];
     static uint32_t nprobes;
     static int dbg_probe_limit = -1;
+    static int dbg_str_enabled = -1;
+    static int dbg_str_limit = -1;
+    static int dbg_dump_enabled = -1;
+    static int dbg_dump_bundles = -1;
+    static int dbg_assert_buf_enabled = -1;
+    static int dbg_assert_buf_len = -1;
+    static int dbg_assert_buf_dump = -1;
 
     bool abort_panic = false;
     uint32_t idx;
@@ -1248,6 +1255,61 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 
     if (probes[idx].count++ >= (uint32_t)dbg_probe_limit) {
         return;
+    }
+
+    if (dbg_str_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_STR");
+        dbg_str_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dbg_str_limit == -1) {
+        dbg_str_limit = 4;
+        const char *s = getenv("QEMU_IA64_DBG_STR_LIMIT");
+        if (s && *s) {
+            dbg_str_limit = atoi(s);
+        }
+        if (dbg_str_limit < 0) {
+            dbg_str_limit = 0;
+        }
+    }
+
+    if (dbg_dump_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_DUMP_CODE");
+        dbg_dump_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dbg_dump_bundles == -1) {
+        dbg_dump_bundles = 64;
+        const char *s = getenv("QEMU_IA64_DBG_DUMP_BUNDLES");
+        if (s && *s) {
+            dbg_dump_bundles = atoi(s);
+        }
+        if (dbg_dump_bundles < 0) {
+            dbg_dump_bundles = 0;
+        }
+        if (dbg_dump_bundles > 512) {
+            dbg_dump_bundles = 512;
+        }
+    }
+
+    if (dbg_assert_buf_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_ASSERT_BUF");
+        dbg_assert_buf_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dbg_assert_buf_len == -1) {
+        dbg_assert_buf_len = 512;
+        const char *s = getenv("QEMU_IA64_DBG_ASSERT_BUF_LEN");
+        if (s && *s) {
+            dbg_assert_buf_len = atoi(s);
+        }
+        if (dbg_assert_buf_len < 0) {
+            dbg_assert_buf_len = 0;
+        }
+        if (dbg_assert_buf_len > 4096) {
+            dbg_assert_buf_len = 4096;
+        }
+    }
+    if (dbg_assert_buf_dump == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_ASSERT_BUF_DUMP");
+        dbg_assert_buf_dump = (s && *s) ? 1 : 0;
     }
 
     /*
@@ -1286,7 +1348,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
                   " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
                   " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
-                  " b0=%016" PRIx64 " b6=%016" PRIx64
+                  " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
                   " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
                   pc, ri,
                   env->psr, env->cfm, env->pr, env->rse_depth,
@@ -1307,7 +1369,195 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   env->r[32], env->r[33], env->r[34], env->r[35],
                   env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
                   env->r[47], env->r[48], env->r[49],
-                  env->b[0], env->b[6], env->r[45], env->r[46]);
+                  env->b[0], env->b[6], env->b[7], env->r[45], env->r[46]);
+
+    if (dbg_assert_buf_enabled && dbg_assert_buf_len > 0) {
+        /*
+         * Heuristic: DebugAssert() implementations typically build an
+         * EFI_DEBUG_ASSERT_DATA blob on the stack. Scan a small window
+         * above the current stack pointer for printable strings so asserts
+         * can be identified even when the status code path is not wired up.
+         */
+        CPUState *cs = env_cpu(env);
+        uint64_t base = env->r[12] + 16;
+        uint8_t buf[4096];
+        size_t want = (size_t)dbg_assert_buf_len;
+        if (want > sizeof(buf)) {
+            want = sizeof(buf);
+        }
+        if (want > 0 && cpu_memory_rw_debug(cs, base, buf, want, false) == 0) {
+            if (dbg_assert_buf_dump) {
+                g_mkdir_with_parents("scratch/ia64_logs", 0755);
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/dbg_assert_buf_%016" PRIx64 ".bin", pc);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    fwrite(buf, 1, want, fp);
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "dbg_assert_buf_dump pc=%016" PRIx64 " file=%s bytes=%zu\n",
+                                  pc, path, want);
+                }
+            }
+
+            size_t i = 0;
+            while (i < want) {
+                while (i < want) {
+                    unsigned char c = buf[i];
+                    if (c >= 0x20 && c < 0x7f) {
+                        break;
+                    }
+                    i++;
+                }
+                size_t start = i;
+                while (i < want) {
+                    unsigned char c = buf[i];
+                    if (!(c >= 0x20 && c < 0x7f)) {
+                        break;
+                    }
+                    i++;
+                }
+                size_t len = i - start;
+                if (len >= 6) {
+                    char s[256];
+                    size_t n = len < (sizeof(s) - 1) ? len : (sizeof(s) - 1);
+                    memcpy(s, &buf[start], n);
+                    s[n] = '\0';
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "dbg_assert_buf pc=%016" PRIx64
+                                  " sp=%016" PRIx64 " addr=%016" PRIx64
+                                  " +0x%zx \"%s\"\n",
+                                  pc, env->r[12], base, start, s);
+                }
+            }
+        }
+    }
+
+    if (dbg_dump_enabled && dbg_dump_bundles > 0 && probes[idx].count == 1) {
+        CPUState *cs = env_cpu(env);
+        uint64_t base = pc & ~0xFULL;
+        uint64_t start = base;
+        if (dbg_dump_bundles > 16) {
+            uint64_t back = (uint64_t)(dbg_dump_bundles / 4) * 16ULL;
+            if (start >= back) {
+                start -= back;
+            } else {
+                start = 0;
+            }
+        }
+
+        g_mkdir_with_parents("scratch/ia64_logs", 0755);
+        char path[256];
+        snprintf(path, sizeof(path), "scratch/ia64_logs/dbg_code_%016" PRIx64 ".bin", base);
+        FILE *fp = fopen(path, "wb");
+        if (fp) {
+            for (int i = 0; i < dbg_dump_bundles; i++) {
+                uint8_t bundle[16];
+                uint64_t bpc = start + (uint64_t)i * 16;
+                if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle), false) != 0) {
+                    break;
+                }
+                fwrite(bundle, 1, sizeof(bundle), fp);
+            }
+            fclose(fp);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "dbg_dump_code pc=%016" PRIx64 " start=%016" PRIx64
+                          " bundles=%d file=%s\n",
+                          pc, start, dbg_dump_bundles, path);
+        }
+    }
+
+    if (dbg_str_enabled && dbg_str_limit > 0) {
+        CPUState *cs = env_cpu(env);
+        struct {
+            const char *name;
+            uint64_t val;
+        } cand[] = {
+            { "r28", env->r[28] }, { "r29", env->r[29] }, { "r30", env->r[30] }, { "r31", env->r[31] },
+            { "r32", env->r[32] }, { "r33", env->r[33] }, { "r34", env->r[34] }, { "r35", env->r[35] },
+            { "r36", env->r[36] }, { "r37", env->r[37] }, { "r38", env->r[38] }, { "r39", env->r[39] },
+            { "r40", env->r[40] }, { "r41", env->r[41] }, { "r42", env->r[42] }, { "r43", env->r[43] },
+            { "r8", env->r[8] }, { "r9", env->r[9] }, { "r10", env->r[10] }, { "r11", env->r[11] },
+        };
+
+        int printed = 0;
+        for (size_t i = 0; i < ARRAY_SIZE(cand) && printed < dbg_str_limit; i++) {
+            uint64_t raw = cand[i].val;
+            if (raw == 0) {
+                continue;
+            }
+
+            uint64_t addrs[8];
+            size_t naddrs = 0;
+            addrs[naddrs++] = raw;
+            /*
+             * Some firmware build environments pass small offsets rather than
+             * full pointers; try common FV bases used by the xenipf firmware.
+             */
+            if (raw < 0x200000) {
+                addrs[naddrs++] = 0x00000000ffe00000ULL + raw; /* variable FV */
+                addrs[naddrs++] = 0x00000000ffe20000ULL + raw; /* north FV */
+                addrs[naddrs++] = 0x00000000ff600000ULL + raw; /* south FV */
+            }
+
+            for (size_t a = 0; a < naddrs && printed < dbg_str_limit; a++) {
+                uint64_t addr = addrs[a];
+                if (addr < 0x1000) {
+                    continue;
+                }
+
+                char out[256];
+                size_t out_len = 0;
+                for (size_t j = 0; j + 1 < sizeof(out); j++) {
+                    uint8_t b = 0;
+                    if (cpu_memory_rw_debug(cs, addr + j, &b, 1, false) != 0) {
+                        break;
+                    }
+                    out[j] = (char)b;
+                    if (b == '\0') {
+                        out_len = j;
+                        break;
+                    }
+                }
+                if (out_len < 4) {
+                    continue;
+                }
+
+                size_t printable = 0;
+                size_t alnum = 0;
+                for (size_t j = 0; j < out_len; j++) {
+                    unsigned char c = (unsigned char)out[j];
+                    if (c == '\n' || c == '\r' || c == '\t') {
+                        printable++;
+                        continue;
+                    }
+                    if (c >= 0x20 && c < 0x7f) {
+                        printable++;
+                        if ((c >= '0' && c <= '9') ||
+                            (c >= 'A' && c <= 'Z') ||
+                            (c >= 'a' && c <= 'z')) {
+                            alnum++;
+                        }
+                        continue;
+                    }
+                }
+                if (printable < out_len * 9 / 10) {
+                    continue;
+                }
+                if (alnum < 2) {
+                    continue;
+                }
+
+                out[out_len] = '\0';
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "dbg_str pc=%016" PRIx64 " %s=%016" PRIx64
+                              " addr=%016" PRIx64 " \"%s\"\n",
+                              pc, cand[i].name, raw, addr, out);
+                printed++;
+            }
+        }
+    }
 
     if (pc == 0xa000000100073da0ULL || pc == 0xa000000100073620ULL) {
         static int abort_on_panic = -1;
