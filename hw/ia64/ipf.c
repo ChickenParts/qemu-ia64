@@ -109,6 +109,7 @@ struct IPFMachineState {
     MemoryRegion uart_ioport;
 
     MemoryRegion rom;
+    MemoryRegion vga_hole_ram;
     MemoryRegion fw_workram;
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
@@ -361,6 +362,18 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_IOSAPIC_REG_SELECT 0x0
 #define IPF_IOSAPIC_WINDOW     0x10
 #define IPF_IOSAPIC_EOI        0x40
+
+/*
+ * Xen-style VGA hole compensation.
+ *
+ * The Xen/KVM IA-64 guest firmware (and our HOB builder in hw/ia64/gfw.c)
+ * accounts for the legacy VGA window at 0xa0000..0xc0000 by reporting RAM as
+ * if it extends past the user-requested size by the hole size. When a VGA
+ * device overlays that window, this extra region restores the effective RAM
+ * capacity back to the requested value.
+ */
+#define IPF_VGA_HOLE_START 0x000a0000ULL
+#define IPF_VGA_HOLE_SIZE  0x00020000ULL
 
 /*
  * Firmware work RAM.
@@ -1960,6 +1973,21 @@ static void ipf_init(MachineState *machine)
 
     memory_region_add_subregion(sysmem, 0, machine->ram);
     ipf_ram_size = machine->ram_size;
+
+    /*
+     * The Xen guest firmware's memory sizing logic expects a VGA hole at
+     * 0xa0000..0xc0000 and compensates by treating RAM as if it extends past
+     * the requested size by the hole size. When we run guest firmware with a
+     * VGA device, provide that compensation RAM so firmware allocations at the
+     * top of RAM are backed by real memory.
+     */
+    if (run_firmware && machine->ram_size > IPF_VGA_HOLE_START) {
+        memory_region_init_ram(&m->vga_hole_ram, NULL, "ipf.vga-hole-ram",
+                               IPF_VGA_HOLE_SIZE, &error_fatal);
+        memory_region_add_subregion(sysmem, machine->ram_size, &m->vga_hole_ram);
+        DPRINTF("VGA hole RAM: mapped at 0x%016" PRIx64 " size=%" PRIu64 "\n",
+                (uint64_t)machine->ram_size, (uint64_t)IPF_VGA_HOLE_SIZE);
+    }
 
     /*
      * Map the GFW window at the top of 32-bit physical space.
