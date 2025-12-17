@@ -55,6 +55,7 @@
 #include "migration/vmstate.h"
 #include "system/reset.h"
 #include "qemu/host-utils.h"
+#include "qemu/log.h"
 #include "qemu/timer.h"
 
 #define DEBUG_IPF
@@ -126,6 +127,9 @@ struct IPFMachineState {
 
     /* Lightweight debug watchpoints (see QEMU_IA64_WATCH_* env vars). */
     struct IpfTextWatch *text_watch[8];
+
+    /* I/O tracing state (QEMU_IPF_TRACE_* env vars). */
+    uint32_t trace_pci_cfgaddr;
 };
 
 #define TYPE_IPF_PC "ipf-pc"
@@ -1572,29 +1576,92 @@ static uint32_t ipf_to_legacy_io(hwaddr addr)
     return (uint32_t)(((addr & 0x3ffffff) >> 12 << 2) | (addr & 0x3));
 }
 
+static void ipf_trace_ioport(IPFMachineState *m, bool is_write,
+                             uint32_t port, unsigned size, uint32_t val)
+{
+    static int trace_pci = -1;
+    static int trace_vga = -1;
+    static int trace_limit = -1;
+    static int trace_count;
+
+    if (trace_pci == -1) {
+        trace_pci = getenv("QEMU_IPF_TRACE_PCI") ? 1 : 0;
+        trace_vga = getenv("QEMU_IPF_TRACE_VGA") ? 1 : 0;
+        trace_limit = 256;
+        const char *s = getenv("QEMU_IPF_TRACE_LIMIT");
+        if (s && *s) {
+            trace_limit = atoi(s);
+        }
+        if (trace_limit < 0) {
+            trace_limit = 0;
+        }
+    }
+
+    if (trace_count >= trace_limit) {
+        return;
+    }
+
+    if (trace_pci && (port == 0xcf8 || port == 0xcfc)) {
+        trace_count++;
+        if (port == 0xcf8 && is_write && size == 4) {
+            m->trace_pci_cfgaddr = val;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ipf pci cfgaddr %s size=%u val=%08x\n",
+                          is_write ? "wr" : "rd", size, val);
+            return;
+        }
+
+        uint32_t cfgaddr = m->trace_pci_cfgaddr;
+        uint8_t bus = (cfgaddr >> 16) & 0xff;
+        uint8_t dev = (cfgaddr >> 11) & 0x1f;
+        uint8_t func = (cfgaddr >> 8) & 0x7;
+        uint16_t reg = (cfgaddr & 0xfc);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ipf pci cfgdata %s bus=%u dev=%u fn=%u reg=0x%02x size=%u val=%08x\n",
+                      is_write ? "wr" : "rd", bus, dev, func, reg, size, val);
+        return;
+    }
+
+    if (trace_vga && port >= 0x3b0 && port <= 0x3df) {
+        trace_count++;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ipf vga ioport %s port=0x%04x size=%u val=%08x\n",
+                      is_write ? "wr" : "rd", port, size, val);
+        return;
+    }
+}
+
 static uint64_t ipf_legacy_io_read(void *opaque, hwaddr addr, unsigned size)
 {
-    (void)opaque;
+    IPFMachineState *m = opaque;
     uint32_t port = ipf_to_legacy_io(addr);
+    uint32_t val = 0;
 
     switch (size) {
     case 1:
-        return cpu_inb(port);
+        val = cpu_inb(port);
+        break;
     case 2:
-        return cpu_inw(port);
+        val = cpu_inw(port);
+        break;
     case 4:
-        return cpu_inl(port);
+        val = cpu_inl(port);
+        break;
     default:
-        return 0;
+        val = 0;
+        break;
     }
+    ipf_trace_ioport(m, false, port, size, val);
+    return val;
 }
 
 static void ipf_legacy_io_write(void *opaque, hwaddr addr, uint64_t data,
                                 unsigned size)
 {
-    (void)opaque;
+    IPFMachineState *m = opaque;
     uint32_t port = ipf_to_legacy_io(addr);
 
+    ipf_trace_ioport(m, true, port, size, (uint32_t)data);
     switch (size) {
     case 1:
         cpu_outb(port, data);
@@ -1623,7 +1690,7 @@ static const MemoryRegionOps ipf_legacy_io_ops = {
 static void ipf_init_legacy_io(IPFMachineState *m, MemoryRegion *sysmem)
 {
     memory_region_init_io(&m->legacy_io_mmio, OBJECT(m), &ipf_legacy_io_ops,
-                          NULL, "ipf.legacy-io", IPF_LEGACY_IO_SIZE);
+                          m, "ipf.legacy-io", IPF_LEGACY_IO_SIZE);
     memory_region_add_subregion(sysmem, IPF_LEGACY_IO_BASE, &m->legacy_io_mmio);
     DPRINTF("LEGACY-IO: mapped at 0x%016" PRIx64 " (size=0x%" PRIx64 ")\n",
             (uint64_t)IPF_LEGACY_IO_BASE, (uint64_t)IPF_LEGACY_IO_SIZE);
