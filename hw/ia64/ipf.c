@@ -108,6 +108,8 @@ struct IPFMachineState {
     /* Primary UART is serial-mm at IPF_UART_BASE; also aliased to COM1 ioports. */
     SerialMM *uart_mm;
     MemoryRegion uart_ioport;
+    MemoryRegion debugcon_e9;
+    MemoryRegion debugcon_402;
 
     MemoryRegion rom;
     MemoryRegion vga_hole_ram;
@@ -1492,6 +1494,66 @@ static void ipf_uart_dummy_irq(void *opaque, int n, int level)
     /* Polled UART use (earlycon) does not require an interrupt controller. */
 }
 
+static uint64_t ipf_debugcon_read(void *opaque, hwaddr addr, unsigned size)
+{
+    (void)opaque;
+    (void)addr;
+    (void)size;
+    return 0;
+}
+
+static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
+                               unsigned size)
+{
+    uint8_t ch = data & 0xff;
+
+    if (size != 1) {
+        return;
+    }
+
+    /*
+     * Prefer logging into -D/-d guest_errors so scripts can capture output.
+     * Fall back to stderr when guest-error logging is disabled.
+     */
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "%c", ch);
+        return;
+    }
+
+    (void)addr;
+    fputc(ch, stderr);
+    fflush(stderr);
+}
+
+static const MemoryRegionOps ipf_debugcon_ops = {
+    .read = ipf_debugcon_read,
+    .write = ipf_debugcon_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
+static void ipf_init_debugcon(IPFMachineState *m)
+{
+    /*
+     * Capture common firmware debug output ports:
+     * - 0xe9: Bochs/QEMU debug port.
+     * - 0x402: isa-debugcon default.
+     *
+     * Emit characters via LOG_GUEST_ERROR so scripts/run-ia64-firmware.sh can
+     * capture them in its -D log.
+     */
+    memory_region_init_io(&m->debugcon_e9, OBJECT(m), &ipf_debugcon_ops, m,
+                          "ipf.debugcon-e9", 1);
+    memory_region_add_subregion(get_system_io(), 0xe9, &m->debugcon_e9);
+
+    memory_region_init_io(&m->debugcon_402, OBJECT(m), &ipf_debugcon_ops, m,
+                          "ipf.debugcon-402", 1);
+    memory_region_add_subregion(get_system_io(), 0x402, &m->debugcon_402);
+}
+
 static uint64_t ipf_uart_ioport_read(void *opaque, hwaddr addr, unsigned size)
 {
     SerialMM *uart = opaque;
@@ -2073,6 +2135,7 @@ static void ipf_init(MachineState *machine)
             (uint64_t)IPF_FW_WORKRAM_BASE, (uint64_t)IPF_FW_WORKRAM_SIZE);
 
     ipf_init_uart(m, sysmem);
+    ipf_init_debugcon(m);
     ipf_init_legacy_io(m, sysmem);
     ipf_init_iosapic(m, sysmem);
     if (!run_firmware) {
