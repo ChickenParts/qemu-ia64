@@ -12,7 +12,7 @@ Environment overrides:
   IA64_SMP        (default: 1)
   IA64_LOGDIR     (default: scratch/ia64_logs)
   IA64_DISPLAY    (default: none)
-  IA64_HANG_ABORT (default: 20000; empty/0 disables)
+  IA64_HANG_ABORT (default: 0; empty/0 disables)
 
 Outputs:
   - Serial log is timestamped (kept):  $IA64_LOGDIR/serial.fw.<ts>.log
@@ -42,7 +42,7 @@ ts="$(date +%Y%m%d-%H%M%S)"
 serial_log="$logdir/serial.fw.$ts.log"
 qemu_log="$logdir/qemu.fw.log"
 
-hang_abort="${IA64_HANG_ABORT:-20000}"
+hang_abort="${IA64_HANG_ABORT:-0}"
 if [[ -n "${hang_abort:-}" && "${hang_abort:-0}" != "0" ]]; then
   export QEMU_IA64_HANG_ABORT="$hang_abort"
 fi
@@ -61,4 +61,3 @@ args=(
 )
 
 exec "$qemu_bin" "${args[@]}" "$@"
-
