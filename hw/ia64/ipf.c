@@ -3104,6 +3104,11 @@ static void ipf_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_ram_size = 256 * 1024 * 1024;
     mc->default_ram_id = "ipf.ram";
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("itanium");
+    /*
+     * Xen/EDK guest firmware expects a plain VGA-compatible device. Prefer the
+     * standard VGA model over cirrus unless the user overrides with -vga.
+     */
+    mc->default_display = "std";
     mc->is_default = true;
 
     object_class_property_add_bool(oc, "firmware-preboot",
