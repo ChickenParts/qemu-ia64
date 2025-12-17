@@ -361,8 +361,37 @@ static bool ia64_cpu_has_work(CPUState *cs)
             (env->psr & IA64_PSR_I));
 }
 
+static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
+{
+    IA64CPU *cpu = IA64_CPU(cs);
+    CPUIA64State *env = &cpu->env;
+
+    /*
+     * Minimal debug translation for cpu_memory_rw_debug() / gdb access.
+     *
+     * - In physical mode (DT off), treat the low 61 bits as a physical
+     *   address (ignore the region number), matching ia64_cpu_tlb_fill().
+     * - In translated mode, support the common identity-mapped regions used
+     *   by Linux (region 6/7 direct maps).
+     *
+     * This is sufficient for firmware bringup and basic debug reads.
+     */
+    if (!(env->psr & IA64_PSR_DT)) {
+        return addr & ((1ULL << 61) - 1);
+    }
+
+    if (extract64(addr, 61, 3) == 7 && extract64(addr, 60, 1) == 0) {
+        return addr & ((1ULL << 61) - 1);
+    }
+    if (extract64(addr, 61, 3) == 6 && extract64(addr, 60, 1) == 0) {
+        return addr & ((1ULL << 61) - 1);
+    }
+
+    return (hwaddr)-1;
+}
+
 static const struct SysemuCPUOps ia64_sysemu_ops = {
-    .get_phys_page_debug = NULL,
+    .get_phys_page_debug = ia64_cpu_get_phys_page_debug,
     .has_work = ia64_cpu_has_work,
 };
 

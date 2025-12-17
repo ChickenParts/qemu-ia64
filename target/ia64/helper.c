@@ -2186,6 +2186,30 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     CPUState *cs = env_cpu(env);
     cpu_restore_state(cs, GETPC());
 
+    /* Dump bundles at the stuck TB start to aid bringup/debugging. */
+    for (int i = 0; i < 8; i++) {
+        uint64_t bpc = pc + (uint64_t)i * 16;
+        uint8_t bundle[16];
+        if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle), false) != 0) {
+            break;
+        }
+        uint64_t low, high;
+        memcpy(&low, &bundle[0], sizeof(low));
+        memcpy(&high, &bundle[8], sizeof(high));
+        low = le64_to_cpu(low);
+        high = le64_to_cpu(high);
+        uint8_t template = low & 0x1f;
+        uint64_t slot0 = (low >> 5) & 0x1ffffffffffULL;
+        uint64_t slot1 = ((low >> 46) | (high << 18)) & 0x1ffffffffffULL;
+        uint64_t slot2 = (high >> 23) & 0x1ffffffffffULL;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64 hang_abort bundle[%d] pc=%016" PRIx64
+                      " low=%016" PRIx64 " high=%016" PRIx64
+                      " tmpl=%u s0=%011" PRIx64 " s1=%011" PRIx64
+                      " s2=%011" PRIx64 "\n",
+                      i, bpc, low, high, template, slot0, slot1, slot2);
+    }
+
     uint32_t con_ok = 0;
     uint8_t con_waiter = 0;
     uint64_t con_owner = 0;
