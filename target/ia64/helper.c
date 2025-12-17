@@ -1777,6 +1777,12 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
      * The patterns below were identified by disassembling the hot loops
      * surfaced by the ia64 hang detector (see QEMU_IA64_HANG_ABORT).
      */
+    static int trace_enabled = -1;
+    static int trace_count;
+    if (trace_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_FASTPATH_TRACE");
+        trace_enabled = (s && *s) ? 1 : 0;
+    }
     if (ri != 0) {
         return 0;
     }
@@ -1807,27 +1813,48 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         uint64_t frame = env->r[12] & va_mask;
         uint8_t tmp[8];
         cpu_physical_memory_read(frame + 0, tmp, sizeof(tmp));
-        uint64_t dst = ldq_le_p(tmp);
+        uint64_t dst_raw = ldq_le_p(tmp);
         cpu_physical_memory_read(frame + 8, tmp, sizeof(tmp));
         uint64_t count = ldq_le_p(tmp);
         cpu_physical_memory_read(frame + 16, tmp, sizeof(tmp));
-        uint64_t src = ldq_le_p(tmp);
+        uint64_t src_raw = ldq_le_p(tmp);
 
-        if (count && !ia64_fw_fastpath_copy(dst, src, count)) {
+        /*
+         * Firmware passes region-encoded pointers even in physical mode.
+         * Match ia64_cpu_tlb_fill()'s physical-mode masking.
+         */
+        uint64_t dst_phys = dst_raw & va_mask;
+        uint64_t src_phys = src_raw & va_mask;
+
+        if (count && !ia64_fw_fastpath_copy(dst_phys, src_phys, count)) {
             return 0;
         }
 
-        dst += count;
-        src += count;
-        count = 0;
+        if (trace_enabled && trace_count++ < 64) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath memcpy pc=%016" PRIx64
+                          " dst=%016" PRIx64 " src=%016" PRIx64
+                          " len=%" PRIu64 "\n",
+                          pc, dst_raw, src_raw, count);
+        }
 
-        stq_le_p(tmp, dst);
+        dst_raw += count;
+        src_raw += count;
+        /*
+         * Mirror the loop's final stored count value: when count reaches 0 it
+         * stores -1 and exits (decrement before the exit branch).
+         */
+        count = UINT64_MAX;
+
+        stq_le_p(tmp, dst_raw);
         cpu_physical_memory_write(frame + 0, tmp, sizeof(tmp));
         stq_le_p(tmp, count);
         cpu_physical_memory_write(frame + 8, tmp, sizeof(tmp));
-        stq_le_p(tmp, src);
+        stq_le_p(tmp, src_raw);
         cpu_physical_memory_write(frame + 16, tmp, sizeof(tmp));
 
+        /* Mirror the loop's (p15) mov r8=r0 success return. */
+        env->r[8] = 0;
         env->ip = pc + 0xc0;
         env->psr &= ~PSR_RI_MASK;
         return 1;
@@ -1871,9 +1898,10 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
             uint64_t frame = env->r[12] & va_mask;
             uint8_t tmp[8];
             cpu_physical_memory_read(frame + 0, tmp, sizeof(tmp));
-            uint64_t dst = ldq_le_p(tmp);
+            uint64_t dst_raw = ldq_le_p(tmp);
             cpu_physical_memory_read(frame + 24, tmp, sizeof(tmp));
             uint64_t count = ldq_le_p(tmp);
+            uint64_t dst_phys = dst_raw & va_mask;
 
             uint32_t exit_off = 0;
             int fill_val = 0;
@@ -1893,14 +1921,23 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                 return 0;
             }
 
-            if (count && !ia64_fw_fastpath_fill(dst, count, fill_val)) {
+            if (count && !ia64_fw_fastpath_fill(dst_phys, count, fill_val)) {
                 return 0;
             }
 
-            dst += count;
-            count = 0;
+            if (trace_enabled && trace_count++ < 64) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "fw_fastpath fill pc=%016" PRIx64
+                              " dst=%016" PRIx64
+                              " len=%" PRIu64 " val=0x%02x\n",
+                              fill_head_pc, dst_raw, count, fill_val & 0xff);
+            }
 
-            stq_le_p(tmp, dst);
+            dst_raw += count;
+            /* Mirror the loop's final stored count value (see memcpy case). */
+            count = UINT64_MAX;
+
+            stq_le_p(tmp, dst_raw);
             cpu_physical_memory_write(frame + 0, tmp, sizeof(tmp));
             stq_le_p(tmp, count);
             cpu_physical_memory_write(frame + 24, tmp, sizeof(tmp));
