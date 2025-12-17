@@ -1120,6 +1120,94 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
     ia64_fault(cs, env, false, false, IA64_VEC_BREAK, iim, GETPC());
 }
 
+uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
+{
+    /*
+     * Xenipf firmware and some EDK components use break(0) as a last-resort
+     * trap/breakpoint. In our bringup environment, a missing handler would
+     * otherwise recurse into the empty break vector (0x2c00) and hang.
+     *
+     * Heuristic: treat break(0) as a fail-fast call that returns to b0 when
+     * the CPU is currently in a br.call-created frame. Otherwise, just
+     * advance to the next bundle.
+     */
+    uint8_t kind = env->last_b0_write_kind & 0xff;
+    bool in_call = (kind == 1);
+    static int dump_enabled = -1;
+    static int dump_len = -1;
+
+    if (dump_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_DUMP");
+        dump_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dump_len == -1) {
+        dump_len = 4096;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_DUMP_LEN");
+        if (s && *s) {
+            dump_len = atoi(s);
+        }
+        if (dump_len < 0) {
+            dump_len = 0;
+        }
+        if (dump_len > 65536) {
+            dump_len = 65536;
+        }
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_break0 pc=%016" PRIx64 " in_call=%d b0=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                      " r35=%016" PRIx64 " r36=%016" PRIx64 "\n",
+                      pc, in_call, env->b[0],
+                      env->r[32], env->r[33], env->r[34], env->r[35], env->r[36]);
+    }
+
+    if (dump_enabled && dump_len > 0 && env->r[36]) {
+        CPUState *cs = env_cpu(env);
+        g_autofree uint8_t *buf = g_malloc0((size_t)dump_len);
+        if (cpu_memory_rw_debug(cs, env->r[36], buf, (size_t)dump_len, false) == 0) {
+            size_t i = 0;
+            while (i < (size_t)dump_len) {
+                while (i < (size_t)dump_len) {
+                    unsigned char c = buf[i];
+                    if (c >= 0x20 && c < 0x7f) {
+                        break;
+                    }
+                    i++;
+                }
+                size_t start = i;
+                while (i < (size_t)dump_len) {
+                    unsigned char c = buf[i];
+                    if (!(c >= 0x20 && c < 0x7f)) {
+                        break;
+                    }
+                    i++;
+                }
+                size_t len = i - start;
+                if (len >= 8) {
+                    char s[256];
+                    size_t n = len < (sizeof(s) - 1) ? len : (sizeof(s) - 1);
+                    memcpy(s, &buf[start], n);
+                    s[n] = '\0';
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_break0_str +0x%zx \"%s\"\n",
+                                  start, s);
+                }
+            }
+        }
+    }
+
+    if (in_call && env->b[0]) {
+        uint64_t ret = env->b[0] & ~0xFULL;
+        HELPER(ret_restore_b0)(env);
+        env->psr &= ~PSR_RI_MASK;
+        return ret;
+    }
+
+    return (pc & ~0xFULL) + 16;
+}
+
 void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 {
     typedef struct {

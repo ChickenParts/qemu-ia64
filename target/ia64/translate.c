@@ -1822,7 +1822,24 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                      * can run under TCG without taking a break fault.
                      */
                     uint64_t nr = imm >> 8;
-                    if (nr == 0x1100) {
+                    if (nr == 0x0) {
+                        /*
+                         * Firmware break(0) call gate.
+                         *
+                         * Some xenipf/EDK paths end up executing a break(0)
+                         * without a proper IVT installed yet. Handle it as a
+                         * firmware call that returns to b0 to avoid trapping
+                         * into the empty break vector.
+                         */
+                        TCGv_i64 next = tcg_temp_new_i64();
+                        gen_helper_fw_break0(next, tcg_env,
+                                             tcg_constant_i64(ctx->base.pc_next));
+                        tcg_gen_mov_i64(cpu_pc, next);
+                        gen_set_ri_const(0);
+                        ctx->base.is_jmp = DISAS_NORETURN;
+                        tcg_gen_exit_tb(NULL, 0);
+                        return;
+                    } else if (nr == 0x1100) {
                         /* FW_HYPERCALL_SAL_CALL */
                         gen_helper_fw_sal(tcg_env);
                     } else if (nr == 0x1000) {
