@@ -22,6 +22,24 @@
 #include "system/ioport.h"
 #include <math.h>
 
+static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
+{
+    /*
+     * IA-64 uses region-encoded virtual addresses even in physical mode.
+     * Firmware also commonly forms sign-extended 32-bit addresses (e.g.
+     * 0xffffffffffE00000) via addl/adds from a small GP value.
+     *
+     * - If the address is canonically sign-extended 32-bit, treat it as a
+     *   32-bit physical address.
+     * - Otherwise fall back to the low 61 bits (ignore the region number).
+     */
+    uint64_t hi32 = addr & 0xffffffff00000000ULL;
+    if (hi32 == 0 || hi32 == 0xffffffff00000000ULL) {
+        return (hwaddr)(uint32_t)addr;
+    }
+    return (hwaddr)(addr & ((1ULL << 61) - 1));
+}
+
 /*
  * SKI BitfR/BitfX index from the MSB; QEMU extract64() indexes from the LSB.
  * Convert the architectural field layout accordingly.
@@ -1791,8 +1809,7 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         return 0;
     }
 
-    const uint64_t va_mask = (1ULL << 61) - 1;
-    hwaddr phys_pc = (hwaddr)(pc & va_mask);
+    hwaddr phys_pc = ia64_phys_mode_addr(pc);
 
     uint8_t buf[32];
     cpu_physical_memory_read(phys_pc, buf, sizeof(buf));
@@ -1810,7 +1827,7 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         high0 == 0x2000000000420030ULL &&
         low1 == 0x00f010183e00f80bULL &&
         high1 == 0x84006083e070007cULL) {
-        uint64_t frame = env->r[12] & va_mask;
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
         uint8_t tmp[8];
         cpu_physical_memory_read(frame + 0, tmp, sizeof(tmp));
         uint64_t dst_raw = ldq_le_p(tmp);
@@ -1823,8 +1840,8 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
          * Firmware passes region-encoded pointers even in physical mode.
          * Match ia64_cpu_tlb_fill()'s physical-mode masking.
          */
-        uint64_t dst_phys = dst_raw & va_mask;
-        uint64_t src_phys = src_raw & va_mask;
+        hwaddr dst_phys = ia64_phys_mode_addr(dst_raw);
+        hwaddr src_phys = ia64_phys_mode_addr(src_raw);
 
         if (count && !ia64_fw_fastpath_copy(dst_phys, src_phys, count)) {
             return 0;
@@ -1879,7 +1896,7 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         if (low0 == 0x000011983c7c0019ULL &&
             (high0 == 0x48ffff8800000200ULL || high0 == 0x48ffff9800000200ULL)) {
             fill_head_pc = pc - 0x80;
-            fill_head_phys_pc = (hwaddr)((fill_head_pc) & va_mask);
+            fill_head_phys_pc = ia64_phys_mode_addr(fill_head_pc);
         }
 
         uint8_t fbuf[80];
@@ -1895,13 +1912,13 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
             f_high0 == 0x2000000000420030ULL &&
             f_low1 == 0x00f010183e00f80bULL &&
             f_high1 == 0x84006183e070007cULL) {
-            uint64_t frame = env->r[12] & va_mask;
+            hwaddr frame = ia64_phys_mode_addr(env->r[12]);
             uint8_t tmp[8];
             cpu_physical_memory_read(frame + 0, tmp, sizeof(tmp));
             uint64_t dst_raw = ldq_le_p(tmp);
             cpu_physical_memory_read(frame + 24, tmp, sizeof(tmp));
             uint64_t count = ldq_le_p(tmp);
-            uint64_t dst_phys = dst_raw & va_mask;
+            hwaddr dst_phys = ia64_phys_mode_addr(dst_raw);
 
             uint32_t exit_off = 0;
             int fill_val = 0;
@@ -2067,11 +2084,12 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         (!is_fetch && !(env->psr & IA64_PSR_DT))) {
         /*
          * Physical mode: the architecture still uses the region-encoded 64-bit
-         * address form. For our purposes, treat the low 61 bits as the
-         * physical address (i.e. ignore the region number) so Xen-style entry
-         * points like 0x80000000ffffffb0 map into the 32-bit GFW window.
+         * address form. Handle both region-encoded and sign-extended 32-bit
+         * physical addresses produced by firmware, so accesses into the 32-bit
+         * GFW window (e.g. 0x80000000ffffffb0 and 0xffffffffffE00000) map
+         * correctly.
          */
-        hwaddr phys_addr = address & ((1ULL << 61) - 1);
+        hwaddr phys_addr = ia64_phys_mode_addr(address);
         int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
                      phys_addr & TARGET_PAGE_MASK, prot,

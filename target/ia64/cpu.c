@@ -377,6 +377,10 @@ static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
      * This is sufficient for firmware bringup and basic debug reads.
      */
     if (!(env->psr & IA64_PSR_DT)) {
+        uint64_t hi32 = addr & 0xffffffff00000000ULL;
+        if (hi32 == 0 || hi32 == 0xffffffff00000000ULL) {
+            return (hwaddr)(uint32_t)addr;
+        }
         return addr & ((1ULL << 61) - 1);
     }
 
