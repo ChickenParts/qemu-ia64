@@ -12,6 +12,7 @@ Environment overrides:
   IA64_SMP        (default: 1)
   IA64_LOGDIR     (default: scratch/ia64_logs)
   IA64_DISPLAY    (default: none)
+  IA64_FW_FASTPATH (default: 1; enable memcpy/memset accel)
   IA64_HANG_ABORT (default: 0; empty/0 disables)
 
 Outputs:
@@ -35,12 +36,17 @@ mem="${IA64_MEM:-512M}"
 smp="${IA64_SMP:-1}"
 logdir="${IA64_LOGDIR:-scratch/ia64_logs}"
 display="${IA64_DISPLAY:-none}"
+fw_fastpath="${IA64_FW_FASTPATH:-1}"
 
 mkdir -p "$logdir"
 
 ts="$(date +%Y%m%d-%H%M%S)"
 serial_log="$logdir/serial.fw.$ts.log"
 qemu_log="$logdir/qemu.fw.log"
+
+if [[ -n "${fw_fastpath:-}" && "${fw_fastpath:-0}" != "0" ]]; then
+  export QEMU_IA64_FW_FASTPATH=1
+fi
 
 hang_abort="${IA64_HANG_ABORT:-0}"
 if [[ -n "${hang_abort:-}" && "${hang_abort:-0}" != "0" ]]; then

@@ -1713,6 +1713,208 @@ void HELPER(fw_enter_kernel)(CPUIA64State *env)
     env->fw_preboot_active = 0;
 }
 
+#ifndef CONFIG_USER_ONLY
+static bool ia64_fw_fastpath_copy(uint64_t dst, uint64_t src, uint64_t len)
+{
+    while (len) {
+        hwaddr src_len = len;
+        hwaddr dst_len = len;
+        void *src_p = cpu_physical_memory_map(src, &src_len, false);
+        if (!src_p) {
+            return false;
+        }
+        void *dst_p = cpu_physical_memory_map(dst, &dst_len, true);
+        if (!dst_p) {
+            cpu_physical_memory_unmap(src_p, src_len, false, 0);
+            return false;
+        }
+
+        hwaddr chunk = MIN(src_len, dst_len);
+        memmove(dst_p, src_p, chunk);
+
+        cpu_physical_memory_unmap(src_p, src_len, false, chunk);
+        cpu_physical_memory_unmap(dst_p, dst_len, true, chunk);
+
+        src += chunk;
+        dst += chunk;
+        len -= chunk;
+    }
+    return true;
+}
+
+static bool ia64_fw_fastpath_fill(uint64_t dst, uint64_t len, int value)
+{
+    while (len) {
+        hwaddr dst_len = len;
+        void *dst_p = cpu_physical_memory_map(dst, &dst_len, true);
+        if (!dst_p) {
+            return false;
+        }
+
+        hwaddr chunk = dst_len;
+        memset(dst_p, value, chunk);
+        cpu_physical_memory_unmap(dst_p, dst_len, true, chunk);
+
+        dst += chunk;
+        len -= chunk;
+    }
+    return true;
+}
+#endif /* !CONFIG_USER_ONLY */
+
+uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)ri;
+    return 0;
+#else
+    /*
+     * Fast-path for common bytewise memset/memcpy loops in the Xen/EDK guest
+     * firmware. This massively speeds up PEI/DXE memory init under TCG.
+     *
+     * The patterns below were identified by disassembling the hot loops
+     * surfaced by the ia64 hang detector (see QEMU_IA64_HANG_ABORT).
+     */
+    if (ri != 0) {
+        return 0;
+    }
+    if (env->psr & IA64_PSR_DT) {
+        /* Only handle physical-mode loops. */
+        return 0;
+    }
+
+    const uint64_t va_mask = (1ULL << 61) - 1;
+    hwaddr phys_pc = (hwaddr)(pc & va_mask);
+
+    uint8_t buf[32];
+    cpu_physical_memory_read(phys_pc, buf, sizeof(buf));
+    uint64_t low0 = ldq_le_p(buf + 0);
+    uint64_t high0 = ldq_le_p(buf + 8);
+    uint64_t low1 = ldq_le_p(buf + 16);
+    uint64_t high1 = ldq_le_p(buf + 24);
+
+    /*
+     * Bytewise memcpy loop (forward):
+     *   struct { dst, count, src } at r12 offsets 0,8,16.
+     *   exit at pc + 0xc0.
+     */
+    if (low0 == 0x41e021001820f811ULL &&
+        high0 == 0x2000000000420030ULL &&
+        low1 == 0x00f010183e00f80bULL &&
+        high1 == 0x84006083e070007cULL) {
+        uint64_t frame = env->r[12] & va_mask;
+        uint8_t tmp[8];
+        cpu_physical_memory_read(frame + 0, tmp, sizeof(tmp));
+        uint64_t dst = ldq_le_p(tmp);
+        cpu_physical_memory_read(frame + 8, tmp, sizeof(tmp));
+        uint64_t count = ldq_le_p(tmp);
+        cpu_physical_memory_read(frame + 16, tmp, sizeof(tmp));
+        uint64_t src = ldq_le_p(tmp);
+
+        if (count && !ia64_fw_fastpath_copy(dst, src, count)) {
+            return 0;
+        }
+
+        dst += count;
+        src += count;
+        count = 0;
+
+        stq_le_p(tmp, dst);
+        cpu_physical_memory_write(frame + 0, tmp, sizeof(tmp));
+        stq_le_p(tmp, count);
+        cpu_physical_memory_write(frame + 8, tmp, sizeof(tmp));
+        stq_le_p(tmp, src);
+        cpu_physical_memory_write(frame + 16, tmp, sizeof(tmp));
+
+        env->ip = pc + 0xc0;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
+    if ((low0 == 0xc1e021001860f811ULL &&
+         high0 == 0x2000000000420030ULL &&
+         low1 == 0x00f010183e00f80bULL &&
+         high1 == 0x84006183e070007cULL) ||
+        (low0 == 0x000011983c7c0019ULL &&
+         (high0 == 0x48ffff8800000200ULL ||
+          high0 == 0x48ffff9800000200ULL))) {
+        /*
+         * Bytewise memset/memfill loops:
+         *   struct { dst, ..., count, fill_byte } in r12 frame.
+         *
+         * Some hot loops enter at the tail bundle (store + br.many backedge).
+         * Detect that and match against the loop head.
+         */
+        uint64_t fill_head_pc = pc;
+        hwaddr fill_head_phys_pc = phys_pc;
+        if (low0 == 0x000011983c7c0019ULL &&
+            (high0 == 0x48ffff8800000200ULL || high0 == 0x48ffff9800000200ULL)) {
+            fill_head_pc = pc - 0x80;
+            fill_head_phys_pc = (hwaddr)((fill_head_pc) & va_mask);
+        }
+
+        uint8_t fbuf[80];
+        cpu_physical_memory_read(fill_head_phys_pc, fbuf, sizeof(fbuf));
+        uint64_t f_low0 = ldq_le_p(fbuf + 0);
+        uint64_t f_high0 = ldq_le_p(fbuf + 8);
+        uint64_t f_low1 = ldq_le_p(fbuf + 16);
+        uint64_t f_high1 = ldq_le_p(fbuf + 24);
+        uint64_t f_high3 = ldq_le_p(fbuf + 56);
+        uint64_t f_low4 = ldq_le_p(fbuf + 64);
+
+        if (f_low0 == 0xc1e021001860f811ULL &&
+            f_high0 == 0x2000000000420030ULL &&
+            f_low1 == 0x00f010183e00f80bULL &&
+            f_high1 == 0x84006183e070007cULL) {
+            uint64_t frame = env->r[12] & va_mask;
+            uint8_t tmp[8];
+            cpu_physical_memory_read(frame + 0, tmp, sizeof(tmp));
+            uint64_t dst = ldq_le_p(tmp);
+            cpu_physical_memory_read(frame + 24, tmp, sizeof(tmp));
+            uint64_t count = ldq_le_p(tmp);
+
+            uint32_t exit_off = 0;
+            int fill_val = 0;
+            if (f_high3 == 0x4200005807800200ULL &&
+                f_low4 == 0x01e021001800f811ULL) {
+                /* Zero fill, exit at pc + 0x80. */
+                exit_off = 0x80;
+                fill_val = 0;
+            } else if (f_high3 == 0x4200006807800200ULL &&
+                       f_low4 == 0x01e021001880f811ULL) {
+                /* Byte fill, exit at pc + 0x90. */
+                exit_off = 0x90;
+                uint8_t b;
+                cpu_physical_memory_read(frame + 32, &b, 1);
+                fill_val = b;
+            } else {
+                return 0;
+            }
+
+            if (count && !ia64_fw_fastpath_fill(dst, count, fill_val)) {
+                return 0;
+            }
+
+            dst += count;
+            count = 0;
+
+            stq_le_p(tmp, dst);
+            cpu_physical_memory_write(frame + 0, tmp, sizeof(tmp));
+            stq_le_p(tmp, count);
+            cpu_physical_memory_write(frame + 24, tmp, sizeof(tmp));
+
+            env->ip = fill_head_pc + exit_off;
+            env->psr &= ~PSR_RI_MASK;
+            return 1;
+        }
+    }
+
+    return 0;
+#endif
+}
+
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,

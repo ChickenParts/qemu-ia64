@@ -45,6 +45,31 @@ static size_t ia64_dbg_call_pc_count;
 static bool ia64_hang_abort_inited;
 static uint64_t ia64_hang_abort_threshold;
 
+static bool ia64_fw_fastpath_inited;
+static bool ia64_fw_fastpath_enabled;
+
+static bool ia64_get_fw_fastpath_enabled(void)
+{
+    if (ia64_fw_fastpath_inited) {
+        return ia64_fw_fastpath_enabled;
+    }
+    ia64_fw_fastpath_inited = true;
+
+    const char *s = getenv("QEMU_IA64_FW_FASTPATH");
+    if (!s || !*s) {
+        ia64_fw_fastpath_enabled = false;
+        return false;
+    }
+
+    if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
+        !strcmp(s, "no")) {
+        ia64_fw_fastpath_enabled = false;
+    } else {
+        ia64_fw_fastpath_enabled = true;
+    }
+    return ia64_fw_fastpath_enabled;
+}
+
 static uint64_t ia64_get_hang_abort_threshold(void)
 {
     if (ia64_hang_abort_inited) {
@@ -781,6 +806,19 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
 {
     DisasContext *ctx = container_of(db, DisasContext, base);
+
+#ifndef CONFIG_USER_ONLY
+    if (ia64_get_fw_fastpath_enabled()) {
+        TCGv_i32 handled = tcg_temp_new_i32();
+        gen_helper_fw_fastpath(handled, tcg_env,
+                               tcg_constant_i64(ctx->base.pc_next),
+                               tcg_constant_i32(ctx->ri));
+        TCGLabel *skip = gen_new_label();
+        tcg_gen_brcondi_i32(TCG_COND_EQ, handled, 0, skip);
+        tcg_gen_exit_tb(NULL, 0);
+        gen_set_label(skip);
+    }
+#endif
 
     uint64_t hang_threshold = ia64_get_hang_abort_threshold();
     if (hang_threshold) {
