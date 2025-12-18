@@ -84,6 +84,7 @@ typedef struct CPUArchState {
         uint64_t r[96];     /* r32..r127 */
         uint64_t ar_pfs;
         uint64_t cfm;
+        uint64_t ret_addr;  /* caller return address (bundle PC) */
     } *rse_frames;
     uint32_t rse_depth;
     uint32_t rse_capacity;
@@ -172,6 +173,18 @@ typedef struct CPUArchState {
     uint64_t fw_preboot_ip;
     uint64_t fw_preboot_r28;
     uint64_t fw_preboot_kernel_low;
+
+    /* Debug: last observed EFI PHIT values (xenipf/EDK firmware bringup). */
+    uint64_t fw_phit_mem_top;
+    uint64_t fw_phit_mem_bottom;
+    uint64_t fw_phit_free_top;
+    uint64_t fw_phit_free_bottom;
+
+    /* Firmware bringup: cached EFI system table physical address. */
+    uint64_t fw_efi_systab_pa;
+
+    /* Firmware bringup: one-way SAL systab config-table install guard. */
+    uint64_t fw_sal_systab_installed;
 } CPUIA64State;
 
 struct ArchCPU {

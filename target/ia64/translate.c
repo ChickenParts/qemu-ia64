@@ -37,6 +37,60 @@ static TCGv_i64 cpu_cr_ifa;
 static TCGv_i64 cpu_cr_iim;
 static TCGv_i64 cpu_cr_iha;
 
+#define IA64_MAX_BCALL_LOG 4096
+static bool ia64_bcall_log_inited;
+static uint64_t ia64_bcall_log_min_pc;
+static uint64_t ia64_bcall_log_max_pc;
+static int ia64_bcall_log_limit;
+static int ia64_bcall_log_count;
+
+static void ia64_init_bcall_log(void)
+{
+    if (ia64_bcall_log_inited) {
+        return;
+    }
+    ia64_bcall_log_inited = true;
+
+    ia64_bcall_log_min_pc = 0;
+    ia64_bcall_log_max_pc = UINT64_MAX;
+    ia64_bcall_log_limit = 64;
+
+    const char *s = getenv("QEMU_IA64_BCALL_LOG_MIN_PC");
+    if (s && *s) {
+        ia64_bcall_log_min_pc = strtoull(s, NULL, 0) & ~0xFULL;
+    }
+    s = getenv("QEMU_IA64_BCALL_LOG_MAX_PC");
+    if (s && *s) {
+        ia64_bcall_log_max_pc = strtoull(s, NULL, 0) & ~0xFULL;
+    }
+    s = getenv("QEMU_IA64_BCALL_LOG_LIMIT");
+    if (s && *s) {
+        ia64_bcall_log_limit = atoi(s);
+    }
+    if (ia64_bcall_log_limit < 0) {
+        ia64_bcall_log_limit = 0;
+    }
+    if (ia64_bcall_log_limit > IA64_MAX_BCALL_LOG) {
+        ia64_bcall_log_limit = IA64_MAX_BCALL_LOG;
+    }
+}
+
+static bool ia64_bcall_should_log(uint64_t pc)
+{
+    ia64_init_bcall_log();
+    if (ia64_bcall_log_limit == 0) {
+        return false;
+    }
+    if (pc < ia64_bcall_log_min_pc || pc > ia64_bcall_log_max_pc) {
+        return false;
+    }
+    if (ia64_bcall_log_count >= ia64_bcall_log_limit) {
+        return false;
+    }
+    ia64_bcall_log_count++;
+    return true;
+}
+
 #define IA64_MAX_DBG_CALL_PCS 8
 static bool ia64_dbg_call_pc_inited;
 static uint64_t ia64_dbg_call_pcs[IA64_MAX_DBG_CALL_PCS];
@@ -227,6 +281,10 @@ static bool ia64_dbg_probe_match(uint64_t pc, int ri)
 static bool ia64_store_watch_inited;
 static bool ia64_store_watch_enabled;
 static uint64_t ia64_store_watch_addr;
+static bool ia64_store_watch_range_inited;
+static bool ia64_store_watch_range_enabled;
+static uint64_t ia64_store_watch_range_lo;
+static uint64_t ia64_store_watch_range_hi;
 
 static void ia64_init_store_watch(void)
 {
@@ -251,6 +309,81 @@ static bool ia64_store_watch_match(void)
 {
     ia64_init_store_watch();
     return ia64_store_watch_enabled;
+}
+
+static void ia64_init_store_watch_range(void)
+{
+    if (ia64_store_watch_range_inited) {
+        return;
+    }
+    ia64_store_watch_range_inited = true;
+
+    const char *s = getenv("QEMU_IA64_WATCH_STORE_RANGE");
+    if (!s || !*s) {
+        return;
+    }
+
+    char *endp = NULL;
+    uint64_t lo = strtoull(s, &endp, 0);
+    if (!endp || endp == s) {
+        return;
+    }
+    while (*endp && (isspace((unsigned char)*endp) || *endp == ',')) {
+        endp++;
+    }
+    if (*endp == ':' || *endp == '-') {
+        endp++;
+    } else if (*endp == '.' && endp[1] == '.') {
+        endp += 2;
+    }
+    while (*endp && isspace((unsigned char)*endp)) {
+        endp++;
+    }
+    if (!*endp) {
+        return;
+    }
+    char *endp2 = NULL;
+    uint64_t hi = strtoull(endp, &endp2, 0);
+    if (!endp2 || endp2 == endp) {
+        return;
+    }
+    if (hi <= lo) {
+        return;
+    }
+
+    ia64_store_watch_range_lo = lo;
+    ia64_store_watch_range_hi = hi;
+    ia64_store_watch_range_enabled = true;
+}
+
+static bool ia64_store_watch_range_match(void)
+{
+    ia64_init_store_watch_range();
+    return ia64_store_watch_range_enabled;
+}
+
+static TCGv_i64 gen_phys_mode_addr(TCGv_i64 addr)
+{
+    /*
+     * Mirror ia64_phys_mode_addr() for debugging instrumentation.
+     *
+     * - If canonically sign-extended 32-bit, treat as 32-bit physical address.
+     * - Otherwise mask off region bits (low 61 bits).
+     */
+    TCGv_i64 hi32 = tcg_temp_new_i64();
+    tcg_gen_andi_i64(hi32, addr, 0xffffffff00000000ULL);
+
+    TCGv_i64 out = tcg_temp_new_i64();
+    TCGLabel *use_low32 = gen_new_label();
+    TCGLabel *done = gen_new_label();
+    tcg_gen_brcondi_i64(TCG_COND_EQ, hi32, 0, use_low32);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, hi32, 0xffffffff00000000ULL, use_low32);
+    tcg_gen_andi_i64(out, addr, (1ULL << 61) - 1);
+    tcg_gen_br(done);
+    gen_set_label(use_low32);
+    tcg_gen_andi_i64(out, addr, 0xffffffffULL);
+    gen_set_label(done);
+    return out;
 }
 
 void ia64_tcg_init(void)
@@ -839,6 +972,21 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     tcg_gen_insn_start(ctx->base.pc_next, ctx->ri);
+
+#ifndef CONFIG_USER_ONLY
+    /*
+     * xenipf/EDK firmware quirk: MP init assumes an MP buffer base pointer is
+     * present on the stack; when missing it treats CPU0 as an AP and calls a
+     * NULL rendezvous function pointer. Patch in a minimal MP buffer before
+     * the signature compare executes.
+     */
+    if (ctx->mem_idx == MMU_PHYS_IDX &&
+        ctx->ri == 0 &&
+        ctx->base.pc_next == 0x00000000ffe59900ULL) {
+        gen_helper_fw_xenipf_mpbuffer_fix(tcg_env,
+                                          tcg_constant_i64(ctx->base.pc_next));
+    }
+#endif
 }
 
 static void decode_a_unit(DisasContext *ctx, uint64_t insn)
@@ -1334,7 +1482,6 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
     uint8_t x6 = (insn >> 27) & 0x3f;
 
     TCGLabel *skip_label = gen_qp_skip(qp);
-    static int bcall_log_count;
 
     /* rfi: op=0, x6=0x8 */
     if (major == 0x0 && x6 == 0x8) {
@@ -1404,9 +1551,15 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
          * If b1 == b2 (common "br.call b0=b0" pattern), the target register
          * must be read before writing the return pointer.
          */
-        gen_helper_call(tcg_env);
         TCGv_i64 tgt = tcg_temp_new_i64();
         tcg_gen_andi_i64(tgt, cpu_b[b2], ~0xFULL);
+        if (ia64_bcall_should_log(ctx->base.pc_next)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "br.call(reg) pc=%016" PRIx64 " insn=%011" PRIx64
+                          " b1=%u b2=%u\n",
+                          ctx->base.pc_next, insn, b1, b2);
+        }
+        gen_helper_call(tcg_env, tcg_constant_i64(ctx->base.pc_next), tgt);
         gen_helper_check_null_branch(tcg_env,
                                      tcg_constant_i64(ctx->base.pc_next),
                                      tcg_constant_i32(ctx->ri),
@@ -1594,18 +1747,18 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         uint64_t imm = extract64(insn, 13, 20) | (extract64(insn, 36, 1) << 20);
         int64_t disp = sextract64(imm, 0, 21) << 4;
         uint64_t tgt = ctx->base.pc_next + disp;
-        if (bcall_log_count < 64) {
+        if (ia64_bcall_should_log(ctx->base.pc_next)) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "br.call pc=%016" PRIx64 " insn=%011" PRIx64
                           " b1=%u disp=%" PRId64 " tgt=%016" PRIx64 "\n",
                           ctx->base.pc_next, insn, b1, disp,
                           tgt);
-            bcall_log_count++;
         }
         if (ia64_dbg_call_pc_match(ctx->base.pc_next)) {
             gen_helper_dbg_call(tcg_env, tcg_constant_i64(ctx->base.pc_next));
         }
-        gen_helper_call(tcg_env);
+        gen_helper_call(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                        tcg_constant_i64(tgt));
         tcg_gen_movi_i64(cpu_b[b1], ctx->base.pc_next + 16);
         if (b1 == 0) {
             gen_record_b0_write(ctx, insn, 1,
@@ -2592,15 +2745,35 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(src, cpu_r[r2]);
                 }
+                TCGv_i64 watch_addr = addr;
+                if (ctx->mem_idx == MMU_PHYS_IDX) {
+                    watch_addr = gen_phys_mode_addr(addr);
+                }
                 if (ia64_store_watch_match()) {
                     TCGLabel *skip_watch = gen_new_label();
-                    tcg_gen_brcondi_i64(TCG_COND_NE, addr,
+                    tcg_gen_brcondi_i64(TCG_COND_NE, watch_addr,
                                         ia64_store_watch_addr,
                                         skip_watch);
                     gen_helper_dbg_mem_watch(tcg_env,
                                              tcg_constant_i64(ctx->base.pc_next),
                                              tcg_constant_i32(ctx->ri),
-                                             addr,
+                                             watch_addr,
+                                             tcg_constant_i32(size),
+                                             src);
+                    gen_set_label(skip_watch);
+                }
+                if (ia64_store_watch_range_match()) {
+                    TCGLabel *skip_watch = gen_new_label();
+                    tcg_gen_brcondi_i64(TCG_COND_LT, watch_addr,
+                                        ia64_store_watch_range_lo,
+                                        skip_watch);
+                    tcg_gen_brcondi_i64(TCG_COND_GE, watch_addr,
+                                        ia64_store_watch_range_hi,
+                                        skip_watch);
+                    gen_helper_dbg_mem_watch(tcg_env,
+                                             tcg_constant_i64(ctx->base.pc_next),
+                                             tcg_constant_i32(ctx->ri),
+                                             watch_addr,
                                              tcg_constant_i32(size),
                                              src);
                     gen_set_label(skip_watch);
@@ -4500,7 +4673,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 if (ia64_dbg_call_pc_match(ctx->base.pc_next)) {
                     gen_helper_dbg_call(tcg_env, tcg_constant_i64(ctx->base.pc_next));
                 }
-                gen_helper_call(tcg_env);
+                gen_helper_call(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                                tcg_constant_i64(tgt));
                 tcg_gen_movi_i64(cpu_b[b1], ctx->base.pc_next + 16);
                 if (b1 == 0) {
                     gen_record_b0_write(ctx, insn, 1,

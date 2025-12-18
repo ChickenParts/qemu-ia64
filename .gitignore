@@ -30,3 +30,7 @@ stuff/fw*.png
 stuff/linux-ia64/
 stuff/ski/
 stuff/vmlinux-ia64-main
+
+# Local firmware/kernel build artifacts and reference trees
+EDK/
+Edk 1.06.zip

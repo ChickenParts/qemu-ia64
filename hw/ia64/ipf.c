@@ -98,6 +98,7 @@ struct IPFMachineState {
 
     PCIBus *pcibus;
     I2CBus *smbus;
+    IA64CPU *cpu;
 
     /*
      * If enabled, run the guest firmware first and hand off to the loaded
@@ -110,9 +111,15 @@ struct IPFMachineState {
     MemoryRegion uart_ioport;
     MemoryRegion debugcon_e9;
     MemoryRegion debugcon_402;
+    bool debugcon_line_mode;
+    size_t debugcon_line_len;
+    char debugcon_line[512];
+    bool debugcon_trace_once;
 
     MemoryRegion rom;
-    MemoryRegion vga_hole_ram;
+    MemoryRegion ram_low;
+    MemoryRegion ram_high;
+    MemoryRegion ram_slack;
     MemoryRegion fw_workram;
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
@@ -380,6 +387,7 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
  */
 #define IPF_VGA_HOLE_START 0x000a0000ULL
 #define IPF_VGA_HOLE_SIZE  0x00020000ULL
+#define IPF_FW_SLACK_SIZE  (64ULL << 20)
 
 /*
  * Firmware work RAM.
@@ -393,6 +401,138 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_FW_WORKRAM_SIZE (16ULL << 20)
 
 #define IPF_IOSAPIC_VERSION_REG 0x1
+
+/*
+ * Firmware call-gates / stubs.
+ *
+ * The xenipf/EDK firmware uses a status-code reporter very early during PEI
+ * memory services init. In some builds the reporter function pointer and
+ * CallerId GUID pointer are sourced from GP-relative indirections into the
+ * variable FV region (0xffe0....). When those entries are left in the erased
+ * (0xff) state, the firmware attempts to call through a NULL/garbage plabel
+ * and crashes before it can initialize devices like VGA.
+ *
+ * Provide a tiny IA-64 stub function that executes break(0) so the existing
+ * fw_break0 helper can consume the status-code arguments and return to b0.
+ * Patch the early global pointers if they appear uninitialized.
+ */
+
+#define IPF_FW_STATUS_CALLER_ID_ADDR      0x00000000ffe00076ULL
+#define IPF_FW_STATUS_REPORT_PLABEL_ADDR  0x00000000ffe011b6ULL
+
+static void ipf_patch_firmware_statuscode_callgate(void)
+{
+    /*
+     * IA-64 bundle:
+     *   [MII] break.m 0
+     *         nop.i 0
+     *         nop.i 0
+     *
+     * Assembled with ia64-suse-linux-as for reproducibility.
+     */
+    static const uint8_t break0_bundle[16] = {
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    };
+
+    uint64_t caller_id_raw = 0;
+    MemTxResult caller_res =
+        address_space_read(&address_space_memory, IPF_FW_STATUS_CALLER_ID_ADDR,
+                           MEMTXATTRS_UNSPECIFIED, &caller_id_raw,
+                           sizeof(caller_id_raw));
+    uint64_t caller_id = le64_to_cpu(caller_id_raw);
+
+    uint64_t report_plabel_ptr_raw = 0;
+    MemTxResult report_res =
+        address_space_read(&address_space_memory,
+                           IPF_FW_STATUS_REPORT_PLABEL_ADDR,
+                           MEMTXATTRS_UNSPECIFIED, &report_plabel_ptr_raw,
+                           sizeof(report_plabel_ptr_raw));
+    uint64_t report_plabel_ptr = le64_to_cpu(report_plabel_ptr_raw);
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: firmware status-code prepatch: caller_id=%016" PRIx64
+                      " report_plabel_ptr=%016" PRIx64
+                      " (caller_res=%d report_res=%d)\n",
+                      caller_id, report_plabel_ptr, (int)caller_res,
+                      (int)report_res);
+    }
+
+    if (caller_res != MEMTX_OK || report_res != MEMTX_OK) {
+        return;
+    }
+
+    if (caller_id != UINT64_MAX && report_plabel_ptr != UINT64_MAX) {
+        return;
+    }
+
+    /*
+     * Reserve a small scratch area at the end of the firmware work RAM.
+     * Keep it self-contained so we can patch the early indirections without
+     * requiring symbol information from the guest firmware.
+     */
+    hwaddr scratch = (IPF_FW_WORKRAM_BASE + IPF_FW_WORKRAM_SIZE) - 0x1000;
+    scratch &= ~0xFULL;
+
+    hwaddr stub_code = scratch;
+    hwaddr stub_plabel = scratch + 0x20;
+    hwaddr stub_object = scratch + 0x40;
+
+    /* Write stub code. */
+    address_space_write(&address_space_memory, stub_code,
+                        MEMTXATTRS_UNSPECIFIED, break0_bundle,
+                        sizeof(break0_bundle));
+    cpu_flush_icache_range(stub_code, sizeof(break0_bundle));
+
+    /* Function descriptor (plabel): { entry, gp }. */
+    struct QEMU_PACKED {
+        uint64_t entry;
+        uint64_t gp;
+    } plabel = {
+        .entry = cpu_to_le64((uint64_t)stub_code),
+        .gp = cpu_to_le64(0),
+    };
+    address_space_write(&address_space_memory, stub_plabel,
+                        MEMTXATTRS_UNSPECIFIED, (const uint8_t *)&plabel,
+                        sizeof(plabel));
+
+    /* Object with a function pointer at offset 0x70 (112). */
+    uint8_t obj[0x80];
+    memset(obj, 0, sizeof(obj));
+    stq_le_p(&obj[0x70], (uint64_t)stub_plabel);
+    address_space_write(&address_space_memory, stub_object,
+                        MEMTXATTRS_UNSPECIFIED, obj, sizeof(obj));
+
+    /*
+     * Patch early globals:
+     * - CallerId: default to NULL
+     * - ReportStatusCode: point at our stub object
+     *
+     * Only patch if the firmware left them in the erased (all-0xff) state.
+     */
+    if (caller_id == UINT64_MAX) {
+        uint64_t zero = 0;
+        address_space_write(&address_space_memory, IPF_FW_STATUS_CALLER_ID_ADDR,
+                            MEMTXATTRS_UNSPECIFIED, &zero, sizeof(zero));
+    }
+
+    if (report_plabel_ptr == UINT64_MAX) {
+        uint64_t g = cpu_to_le64((uint64_t)stub_object);
+        address_space_write(&address_space_memory,
+                            IPF_FW_STATUS_REPORT_PLABEL_ADDR,
+                            MEMTXATTRS_UNSPECIFIED, &g, sizeof(g));
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: firmware status-code callgate patched: caller_id=%016" PRIx64
+                      " report_plabel_ptr=%016" PRIx64 " stub_code=%016" HWADDR_PRIx
+                      " stub_plabel=%016" HWADDR_PRIx " stub_object=%016" HWADDR_PRIx "\n",
+                      caller_id, report_plabel_ptr,
+                      stub_code, stub_plabel, stub_object);
+    }
+}
 
 typedef struct IpfTextWatch {
     MemoryRegion mr;
@@ -797,6 +937,40 @@ typedef struct QEMU_PACKED {
 } IPFSalDescEntryPoint;
 
 #define IPF_SAL_DESC_ENTRY_POINT 0
+
+static uint8_t ipf_byte_checksum(const void *buf, size_t len);
+
+static void ipf_write_sal_systab(void)
+{
+    IPFSalSystab sst = { 0 };
+    IPFSalDescEntryPoint ep = { 0 };
+    uint8_t buf[sizeof(sst) + sizeof(ep)] = { 0 };
+
+    memcpy(sst.signature, "SST_", 4);
+    sst.size = sizeof(buf);
+    sst.sal_rev_major = 2;
+    sst.sal_rev_minor = 0;
+    sst.entry_count = 1;
+    sst.sal_a_rev_major = 0;
+    sst.sal_a_rev_minor = 0;
+    sst.sal_b_rev_major = 0;
+    sst.sal_b_rev_minor = 0;
+    memcpy(sst.oem_id, "QEMU", 4);
+    memcpy(sst.product_id, "QEMU-IPF", 7);
+    sst.checksum = 0;
+
+    ep.type = IPF_SAL_DESC_ENTRY_POINT;
+    ep.pal_proc = IA64_IPF_FW_PAL_PROC_ADDR;
+    ep.sal_proc = IA64_IPF_FW_SAL_PROC_ADDR;
+    ep.gp = IA64_IPF_FW_SAL_GP_ADDR;
+
+    memcpy(buf, &sst, sizeof(sst));
+    memcpy(buf + sizeof(sst), &ep, sizeof(ep));
+    buf[offsetof(IPFSalSystab, checksum)] = ipf_byte_checksum(buf, sizeof(buf));
+
+    address_space_write(&address_space_memory, IA64_IPF_FW_SAL_SYSTAB_ADDR,
+                        MEMTXATTRS_UNSPECIFIED, (const uint8_t *)buf, sizeof(buf));
+}
 
 /*
  * Minimal ACPI 2.0 tables for IA-64 Linux bringup.
@@ -1505,9 +1679,70 @@ static uint64_t ipf_debugcon_read(void *opaque, hwaddr addr, unsigned size)
 static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
                                unsigned size)
 {
+    IPFMachineState *m = opaque;
     uint8_t ch = data & 0xff;
 
     if (size != 1) {
+        return;
+    }
+
+    if (m->debugcon_line_mode) {
+        if (ch == '\r') {
+            return;
+        }
+        if (ch != '\n' && m->debugcon_line_len + 1 < sizeof(m->debugcon_line)) {
+            m->debugcon_line[m->debugcon_line_len++] = ch;
+            m->debugcon_line[m->debugcon_line_len] = '\0';
+            return;
+        }
+
+        uint64_t ip = 0, psr = 0, b0 = 0;
+        if (m->cpu) {
+            CPUIA64State *env = &m->cpu->env;
+            ip = env->ip;
+            psr = env->psr;
+            b0 = env->b[0];
+        }
+
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "FWDBG ip=%016" PRIx64 " psr=%016" PRIx64 " b0=%016" PRIx64
+                          " %s\n",
+                          ip, psr, b0, m->debugcon_line);
+
+            if (!m->debugcon_trace_once &&
+                (strstr(m->debugcon_line, "AllocatePoolPages: failed") ||
+                 strstr(m->debugcon_line, "AllocatePool: failed") ||
+                 strstr(m->debugcon_line, "ASSERT!Status"))) {
+                m->debugcon_trace_once = true;
+                if (m->cpu) {
+                    CPUIA64State *env = &m->cpu->env;
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "FWDBG_CTX last_br from=%016" PRIx64 " to=%016" PRIx64
+                                  " kind=%" PRIu64 " insn=%011" PRIx64
+                                  " last_b0 pc=%016" PRIx64 " val=%016" PRIx64 " kind=%" PRIu64 "\n",
+                                  env->last_branch_from, env->last_branch_to,
+                                  env->last_branch_kind, env->last_branch_insn,
+                                  env->last_b0_write_pc, env->last_b0_write_val,
+                                  env->last_b0_write_kind & 0xff);
+                    for (int i = 0; i < 16; i++) {
+                        int idx = (env->b0_trace_idx + i) & 0xf;
+                        if (!env->b0_trace_pc[idx]) {
+                            continue;
+                        }
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "FWDBG_CTX b0_trace[%02d] pc=%016" PRIx64
+                                      " val=%016" PRIx64 " kind=%" PRIu64
+                                      " insn=%011" PRIx64 "\n",
+                                      i, env->b0_trace_pc[idx], env->b0_trace_val[idx],
+                                      env->b0_trace_kind[idx] & 0xff,
+                                      env->b0_trace_insn[idx]);
+                    }
+                }
+            }
+        }
+        m->debugcon_line_len = 0;
+        m->debugcon_line[0] = '\0';
         return;
     }
 
@@ -1552,6 +1787,11 @@ static void ipf_init_debugcon(IPFMachineState *m)
     memory_region_init_io(&m->debugcon_402, OBJECT(m), &ipf_debugcon_ops, m,
                           "ipf.debugcon-402", 1);
     memory_region_add_subregion(get_system_io(), 0x402, &m->debugcon_402);
+
+    m->debugcon_line_len = 0;
+    m->debugcon_line[0] = '\0';
+    m->debugcon_line_mode = getenv("QEMU_IPF_DEBUGCON_LINE") ? true : false;
+    m->debugcon_trace_once = false;
 }
 
 static uint64_t ipf_uart_ioport_read(void *opaque, hwaddr addr, unsigned size)
@@ -2095,27 +2335,59 @@ static void ipf_init(MachineState *machine)
         exit(1);
     }
     env = &cpu->env;
+    m->cpu = cpu;
 
     pcdev = qdev_new(TYPE_IPF_PC);
     object_property_set_link(OBJECT(pcdev), "cpu", OBJECT(cpu), &error_abort);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pcdev), &error_fatal);
 
-    memory_region_add_subregion(sysmem, 0, machine->ram);
+    /*
+     * Xenipf firmware (and our GFW HOB builder) expect a legacy VGA hole at
+     * 0xa0000..0xc0000. Present RAM as discontiguous around that window so the
+     * top of RAM appears as ram_size + hole_size without increasing the total
+     * RAM bytes provided by -m.
+     */
+    if (run_firmware && machine->ram_size > IPF_VGA_HOLE_START) {
+        hwaddr low_size = MIN((hwaddr)machine->ram_size, (hwaddr)IPF_VGA_HOLE_START);
+        hwaddr high_size = (hwaddr)machine->ram_size - low_size;
+
+        memory_region_init_alias(&m->ram_low, OBJECT(machine), "ipf.ram.low",
+                                 machine->ram, 0, low_size);
+        memory_region_add_subregion(sysmem, 0, &m->ram_low);
+
+        if (high_size) {
+            memory_region_init_alias(&m->ram_high, OBJECT(machine), "ipf.ram.high",
+                                     machine->ram, low_size, high_size);
+            memory_region_add_subregion(sysmem, IPF_VGA_HOLE_START + IPF_VGA_HOLE_SIZE,
+                                        &m->ram_high);
+        }
+    } else {
+        memory_region_add_subregion(sysmem, 0, machine->ram);
+    }
     ipf_ram_size = machine->ram_size;
 
     /*
-     * The Xen guest firmware's memory sizing logic expects a VGA hole at
-     * 0xa0000..0xc0000 and compensates by treating RAM as if it extends past
-     * the requested size by the hole size. When we run guest firmware with a
-     * VGA device, provide that compensation RAM so firmware allocations at the
-     * top of RAM are backed by real memory.
+     * Firmware slack RAM.
+     *
+     * The xenipf/EDK firmware sometimes locates relocated PEI/DXE images such
+     * that the module-global pointer (r1/gp) and its small-data/GOT area end
+     * up slightly above the top of guest RAM as reported through Xen's HOB
+     * list (ram_size + VGA hole). Provide a small scratch region above RAM so
+     * these accesses hit real memory rather than an unmapped hole.
+     *
+     * This region is intentionally not included in the guest memory map that
+     * the firmware reports to the OS.
      */
-    if (run_firmware && machine->ram_size > IPF_VGA_HOLE_START) {
-        memory_region_init_ram(&m->vga_hole_ram, NULL, "ipf.vga-hole-ram",
-                               IPF_VGA_HOLE_SIZE, &error_fatal);
-        memory_region_add_subregion(sysmem, machine->ram_size, &m->vga_hole_ram);
-        DPRINTF("VGA hole RAM: mapped at 0x%016" PRIx64 " size=%" PRIu64 "\n",
-                (uint64_t)machine->ram_size, (uint64_t)IPF_VGA_HOLE_SIZE);
+    if (run_firmware) {
+        hwaddr ram_top = (hwaddr)machine->ram_size;
+        if (machine->ram_size > IPF_VGA_HOLE_START) {
+            ram_top += IPF_VGA_HOLE_SIZE;
+        }
+        memory_region_init_ram(&m->ram_slack, NULL, "ipf.ram.slack",
+                               IPF_FW_SLACK_SIZE, &error_fatal);
+        memory_region_add_subregion(sysmem, ram_top, &m->ram_slack);
+        DPRINTF("FW slack RAM: mapped at 0x%016" PRIx64 " size=%" PRIu64 "\n",
+                (uint64_t)ram_top, (uint64_t)IPF_FW_SLACK_SIZE);
     }
 
     /*
@@ -2145,17 +2417,34 @@ static void ipf_init(MachineState *machine)
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
     if (image_size > 0) {
-        int64_t fw_offset = GFW_START + GFW_SIZE - image_size;
-        if (load_image_targphys(bios_name, fw_offset, image_size) != image_size) {
-            error_report("Unable to load firmware file '%s'", bios_name);
+        hwaddr fw_offset = GFW_START + GFW_SIZE - image_size;
+        g_autofree uint8_t *buf = g_malloc((size_t)image_size);
+        if (load_image_size(bios_name, buf, (size_t)image_size) != image_size) {
+            error_report("Unable to read firmware file '%s'", bios_name);
             exit(1);
         }
+        address_space_write(&address_space_memory, fw_offset,
+                            MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
+        cpu_flush_icache_range(fw_offset, (size_t)image_size);
         DPRINTF("Loaded firmware '%s' at 0x%lx\n", bios_name, fw_offset);
 
         if (ipf_gfw_build_hob(machine->ram_size, machine->smp.cpus,
                               NVRAM_START) < 0) {
             error_report("Unable to build GFW HOB list");
             exit(1);
+        }
+
+        /*
+         * Provide a minimal SAL system table at a fixed low physical address.
+         *
+         * xenipf/EDK firmware's ExtendedSal DXE driver expects to discover an
+         * SST_ via EFI configuration tables. The IA-64 backend emulates the
+         * PAL/SAL procedure entry points referenced by this table.
+         */
+        ipf_write_sal_systab();
+
+        if (run_firmware) {
+            ipf_patch_firmware_statuscode_callgate();
         }
     }
 
@@ -2644,38 +2933,7 @@ static void ipf_init(MachineState *machine)
                             (const uint8_t *)&pcdp, sizeof(pcdp));
 
         /* SAL system table (SST_) with an entrypoint descriptor for PAL+SAL. */
-        {
-            IPFSalSystab sst = { 0 };
-            IPFSalDescEntryPoint ep = { 0 };
-            uint8_t buf[sizeof(sst) + sizeof(ep)] = { 0 };
-
-            memcpy(sst.signature, "SST_", 4);
-            sst.size = sizeof(buf);
-            sst.sal_rev_major = 2;
-            sst.sal_rev_minor = 0;
-            sst.entry_count = 1;
-            sst.sal_a_rev_major = 0;
-            sst.sal_a_rev_minor = 0;
-            sst.sal_b_rev_major = 0;
-            sst.sal_b_rev_minor = 0;
-            memcpy(sst.oem_id, "QEMU", 4);
-            memcpy(sst.product_id, "QEMU-IPF", 7);
-            sst.checksum = 0;
-
-            ep.type = IPF_SAL_DESC_ENTRY_POINT;
-            ep.pal_proc = IA64_IPF_FW_PAL_PROC_ADDR;
-            ep.sal_proc = IA64_IPF_FW_SAL_PROC_ADDR;
-            ep.gp = IA64_IPF_FW_SAL_GP_ADDR;
-
-            memcpy(buf, &sst, sizeof(sst));
-            memcpy(buf + sizeof(sst), &ep, sizeof(ep));
-            buf[offsetof(IPFSalSystab, checksum)] =
-                ipf_byte_checksum(buf, sizeof(buf));
-
-            address_space_write(&address_space_memory, IA64_IPF_FW_SAL_SYSTAB_ADDR,
-                                MEMTXATTRS_UNSPECIFIED,
-                                (const uint8_t *)buf, sizeof(buf));
-        }
+        ipf_write_sal_systab();
 
         /* ACPI 2.0 system description tables. */
         hwaddr acpi_rsdp_addr = 0;

@@ -21,6 +21,7 @@
 #include "system/address-spaces.h"
 #include "system/ioport.h"
 #include <math.h>
+#include <zlib.h>
 
 static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
 {
@@ -123,7 +124,7 @@ static inline uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
     return addr + ((uint64_t)(num_regs + delta / 0x3f) << 3);
 }
 
-static void ia64_rse_push_window(CPUIA64State *env);
+static void ia64_rse_push_window(CPUIA64State *env, uint64_t ret_addr);
 static bool ia64_rse_pop_window(CPUIA64State *env);
 static bool ia64_intr_pop_window(CPUIA64State *env);
 
@@ -587,13 +588,14 @@ static bool ia64_intr_pop_window(CPUIA64State *env)
     return true;
 }
 
-static void ia64_rse_push_window(CPUIA64State *env)
+static void ia64_rse_push_window(CPUIA64State *env, uint64_t ret_addr)
 {
     ia64_rse_ensure(env, env->rse_depth + 1);
     struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth++];
     memcpy(frame->r, &env->r[32], sizeof(frame->r));
     frame->ar_pfs = env->ar[64]; /* ar.pfs */
     frame->cfm = env->cfm;
+    frame->ret_addr = ret_addr & ~0xFULL;
 }
 
 static bool ia64_rse_pop_window(CPUIA64State *env)
@@ -713,6 +715,36 @@ void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
         return;
     }
     ia64_dbg_next_call_pc = pc;
+
+    {
+        /*
+         * Dump the raw bundle words for the call site so mismatches between
+         * decoded control flow and the firmware image can be diagnosed without
+         * a full disassembly log.
+         */
+        CPUState *cs = env_cpu(env);
+        uint64_t base = pc & ~0xFULL;
+        uint8_t bundle[16];
+        if (cpu_memory_rw_debug(cs, base, bundle, sizeof(bundle), false) == 0) {
+            uint64_t low = 0;
+            uint64_t high = 0;
+            memcpy(&low, &bundle[0], sizeof(low));
+            memcpy(&high, &bundle[8], sizeof(high));
+
+            uint8_t tmpl = low & 0x1f;
+            uint64_t s0 = (low >> 5) & 0x1ffffffffffULL;
+            uint64_t s1 = ((low >> 46) | (high << 18)) & 0x1ffffffffffULL;
+            uint64_t s2 = (high >> 23) & 0x1ffffffffffULL;
+
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "dbg_call_bundle pc=%016" PRIx64
+                          " low=%016" PRIx64 " high=%016" PRIx64
+                          " tmpl=%02x s0=%011" PRIx64 " s1=%011" PRIx64
+                          " s2=%011" PRIx64 "\n",
+                          base, low, high, tmpl, s0, s1, s2);
+        }
+    }
+
     if (pc == 0xa0000001000665c0ULL) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "dbg_call pc=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
@@ -726,6 +758,41 @@ void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
         uint8_t sol = (env->cfm >> 7) & 0x7f;
         uint8_t outs = (sof > sol) ? (sof - sol) : 0;
         uint8_t out0 = 32 + sol;
+        if (pc == 0x000000001ff726d0ULL) {
+            /*
+             * CoreAcquireLockOrFail() call site: out0 is the lock's TPL loaded
+             * from *Lock (EFI_LOCK.Tpl at offset 0). The xenipf firmware
+             * occasionally reaches this call with a zero TPL, which causes
+             * CoreRaiseTpl() to ASSERT. Dump the lock pointer/fields to help
+             * identify which lock is uninitialized or corrupted.
+             */
+            uint64_t out0v = env->r[out0];
+            if (out0v == 0) {
+                CPUState *cs = env_cpu(env);
+                uint64_t lockp = env->r[31];
+                uint64_t tpl = 0, owner = 0, cnt = 0;
+                bool ok_tpl = false, ok_owner = false, ok_cnt = false;
+                if (lockp >= 0x1000) {
+                    uint8_t buf[24];
+                    if (cpu_memory_rw_debug(cs, lockp, buf, sizeof(buf), false) == 0) {
+                        memcpy(&tpl, &buf[0], 8);
+                        memcpy(&owner, &buf[8], 8);
+                        memcpy(&cnt, &buf[16], 8);
+                        ok_tpl = ok_owner = ok_cnt = true;
+                    }
+                }
+
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "dbg_call_lock pc=%016" PRIx64 " sp=%016" PRIx64
+                              " b0=%016" PRIx64
+                              " lockp=%016" PRIx64 " out0(Tpl)=%016" PRIx64
+                              " mem{Tpl=%016" PRIx64 "%s Owner=%016" PRIx64 "%s Lock=%016" PRIx64 "%s}\n",
+                              pc, env->r[12], env->b[0], lockp, out0v,
+                              tpl, ok_tpl ? "" : "?",
+                              owner, ok_owner ? "" : "?",
+                              cnt, ok_cnt ? "" : "?");
+            }
+        }
         qemu_log_mask(LOG_GUEST_ERROR,
                       "dbg_call pc=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
                       " sof=%u sol=%u outs=%u out0=r%u"
@@ -1120,6 +1187,1108 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
     ia64_fault(cs, env, false, false, IA64_VEC_BREAK, iim, GETPC());
 }
 
+/*
+ * Minimal EFI status code definitions used for firmware assert decoding.
+ * Values match EDK's EfiStatusCode.h.
+ */
+#define IA64_EFI_STATUS_CODE_TYPE_MASK       0x000000FFu
+#define IA64_EFI_STATUS_CODE_SEVERITY_MASK   0xFF000000u
+#define IA64_EFI_STATUS_CODE_OPERATION_MASK  0x0000FFFFu
+#define IA64_EFI_ERROR_CODE                  0x00000002u
+#define IA64_EFI_ERROR_UNRECOVERED           0x90000000u
+#define IA64_EFI_SW_EC_ILLEGAL_SOFTWARE_STATE 0x00000007u
+
+static bool ia64_fw_is_printable_ascii(uint8_t b)
+{
+    return b == '\t' || b == '\r' || b == '\n' || (b >= 0x20 && b < 0x7f);
+}
+
+static bool ia64_fw_read_bytes_any(CPUState *cs, uint64_t addr,
+                                   uint8_t *buf, size_t len)
+{
+    if (len == 0) {
+        return true;
+    }
+    if (cpu_memory_rw_debug(cs, addr, buf, len, false) == 0) {
+        return true;
+    }
+    MemTxResult r = address_space_read(&address_space_memory, (hwaddr)addr,
+                                       MEMTXATTRS_UNSPECIFIED, buf, len);
+    return (r == MEMTX_OK);
+}
+
+static size_t ia64_fw_read_ascii_string(CPUState *cs, uint64_t addr,
+                                        char *out, size_t out_size)
+{
+    if (!out || out_size < 2) {
+        return 0;
+    }
+
+    size_t i;
+    for (i = 0; i + 1 < out_size; i++) {
+        uint8_t b = 0;
+        if (!ia64_fw_read_bytes_any(cs, addr + i, &b, 1)) {
+            break;
+        }
+        out[i] = (char)b;
+        if (b == '\0') {
+            return i;
+        }
+        if (!ia64_fw_is_printable_ascii(b)) {
+            break;
+        }
+    }
+    out[0] = '\0';
+    return 0;
+}
+
+static size_t ia64_fw_read_ucs2le_string(CPUState *cs, uint64_t addr,
+                                        char *out, size_t out_size)
+{
+    if (!out || out_size < 2) {
+        return 0;
+    }
+
+    size_t i;
+    for (i = 0; i + 1 < out_size; i++) {
+        uint8_t bytes[2] = { 0 };
+        if (!ia64_fw_read_bytes_any(cs, addr + i * 2, bytes, 2)) {
+            break;
+        }
+        uint16_t ch = (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
+        if (ch == 0) {
+            out[i] = '\0';
+            return i;
+        }
+        if (ch > 0x7e || !ia64_fw_is_printable_ascii((uint8_t)ch)) {
+            break;
+        }
+        out[i] = (char)ch;
+    }
+    out[0] = '\0';
+    return 0;
+}
+
+/*
+ * Firmware bringup helpers: EFI system table scanning and configuration-table
+ * injection.
+ *
+ * xenipf/EDK firmware's ExtendedSal DXE driver expects an EFI configuration
+ * table entry for the SAL System Table GUID. On real platforms, this entry
+ * points at an SST_ structure that describes the PAL/SAL procedure entry
+ * points. For our TCG bringup, the IPF machine provides a minimal SST_ at a
+ * fixed low physical address, and the IA-64 backend emulates the PAL/SAL
+ * entrypoint procedures.
+ *
+ * The firmware assert we hit is consistent with `EFI_NOT_FOUND` when looking
+ * up `gEfiSalSystemTableGuid` via `EfiLibGetSystemConfigurationTable()`.
+ */
+#define IA64_EFI_SYSTEM_TABLE_SIGNATURE 0x5453595320494249ULL /* "IBI SYST" */
+#define IA64_EFI_BOOT_SERVICES_SIGNATURE 0x56524553544f4f42ULL /* "BOOTSERV" */
+#define IA64_EFI_RUNTIME_SERVICES_SIGNATURE 0x56524553544e5552ULL /* "RUNTSERV" */
+#define IA64_EFI_SAL_SYSTAB_INJECT_PA   0x000000000001c000ULL
+
+typedef struct QEMU_PACKED {
+    uint32_t data1;
+    uint16_t data2;
+    uint16_t data3;
+    uint8_t data4[8];
+} IA64EfiGuid;
+
+typedef struct QEMU_PACKED {
+    uint64_t signature;
+    uint32_t revision;
+    uint32_t headersize;
+    uint32_t crc32;
+    uint32_t reserved;
+} IA64EfiTableHeader;
+
+typedef struct QEMU_PACKED {
+    IA64EfiTableHeader hdr;
+    uint64_t fw_vendor;
+    uint32_t fw_revision;
+    uint32_t pad;
+    uint64_t con_in_handle;
+    uint64_t con_in;
+    uint64_t con_out_handle;
+    uint64_t con_out;
+    uint64_t std_err_handle;
+    uint64_t std_err;
+    uint64_t runtime;
+    uint64_t boot;
+    uint64_t nr_tables;
+    uint64_t tables;
+} IA64EfiSystemTable;
+
+typedef struct QEMU_PACKED {
+    IA64EfiGuid guid;
+    uint64_t table;
+} IA64EfiConfigTableEntry;
+
+static const IA64EfiGuid ia64_efi_guid_sal_systab = {
+    .data1 = 0xeb9d2d32,
+    .data2 = 0x2d88,
+    .data3 = 0x11d3,
+    .data4 = { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d },
+};
+
+static bool ia64_fw_guid_equal(const IA64EfiGuid *a, const IA64EfiGuid *b)
+{
+    return a->data1 == b->data1 && a->data2 == b->data2 && a->data3 == b->data3 &&
+           memcmp(a->data4, b->data4, sizeof(a->data4)) == 0;
+}
+
+static uint64_t ia64_fw_addr_with_same_region(uint64_t exemplar, hwaddr pa)
+{
+    uint64_t hi32 = exemplar & 0xffffffff00000000ULL;
+    if (hi32 == 0 || hi32 == 0xffffffff00000000ULL) {
+        return (uint64_t)pa;
+    }
+    return (exemplar & ~((1ULL << 61) - 1)) | (uint64_t)pa;
+}
+
+static bool ia64_fw_read_phys(hwaddr addr, void *buf, size_t len)
+{
+    if (len == 0) {
+        return true;
+    }
+    MemTxResult r = address_space_read(&address_space_memory, addr,
+                                       MEMTXATTRS_UNSPECIFIED, buf, len);
+    return r == MEMTX_OK;
+}
+
+static bool ia64_fw_write_phys(hwaddr addr, const void *buf, size_t len)
+{
+    if (len == 0) {
+        return true;
+    }
+    MemTxResult r = address_space_write(&address_space_memory, addr,
+                                        MEMTXATTRS_UNSPECIFIED, buf, len);
+    return r == MEMTX_OK;
+}
+
+static bool ia64_fw_find_efi_system_table(CPUState *cs,
+                                         uint64_t start,
+                                         uint64_t end,
+                                         uint64_t *out_pa)
+{
+    if (end <= start || (end - start) > (512ULL << 20)) {
+        return false;
+    }
+
+    const uint64_t sig = IA64_EFI_SYSTEM_TABLE_SIGNATURE;
+    const size_t chunk = 64 * 1024;
+    g_autofree uint8_t *buf = g_malloc(chunk + 8);
+
+    for (uint64_t base = start; base + 8 <= end; base += chunk) {
+        size_t len = (size_t)MIN((uint64_t)chunk, end - base);
+        if (!ia64_fw_read_phys((hwaddr)base, buf, len)) {
+            continue;
+        }
+        for (size_t i = 0; i + 8 <= len; i++) {
+            if (ldq_le_p(&buf[i]) != sig) {
+                continue;
+            }
+            uint64_t cand = base + i;
+            IA64EfiSystemTable st;
+            if (!ia64_fw_read_bytes_any(cs, cand, (uint8_t *)&st, sizeof(st))) {
+                continue;
+            }
+            if (st.hdr.signature != sig) {
+                continue;
+            }
+            if (st.hdr.headersize < sizeof(st) || st.hdr.headersize > 4096) {
+                continue;
+            }
+            /*
+             * The system table may temporarily have 0 configuration tables.
+             * Accept that case so we can inject the SAL systab entry.
+             */
+            if (st.nr_tables > 128) {
+                continue;
+            }
+            if (st.nr_tables != 0 && st.tables == 0) {
+                continue;
+            }
+
+            /*
+             * Strong validation: boot/runtime services table headers must be
+             * present and have the expected signatures.
+             */
+            if (st.boot == 0 || st.runtime == 0) {
+                continue;
+            }
+            IA64EfiTableHeader boot_hdr, rt_hdr;
+            if (!ia64_fw_read_bytes_any(cs, st.boot, (uint8_t *)&boot_hdr,
+                                        sizeof(boot_hdr)) ||
+                !ia64_fw_read_bytes_any(cs, st.runtime, (uint8_t *)&rt_hdr,
+                                        sizeof(rt_hdr))) {
+                continue;
+            }
+            if (boot_hdr.signature != IA64_EFI_BOOT_SERVICES_SIGNATURE ||
+                rt_hdr.signature != IA64_EFI_RUNTIME_SERVICES_SIGNATURE) {
+                continue;
+            }
+
+            *out_pa = cand;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ia64_fw_try_install_sal_systab(CPUIA64State *env)
+{
+    if (env->fw_sal_systab_installed) {
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    uint64_t systab_pa = env->fw_efi_systab_pa;
+    if (systab_pa == 0) {
+        uint64_t start = env->fw_phit_mem_bottom;
+        uint64_t end = env->fw_phit_mem_top;
+
+        /*
+         * Prefer the PHIT-reported EFI memory range (where DXE typically
+         * allocates the EFI system table). Fall back to a conservative
+         * scan of the xenipf/EDK heap-ish region.
+         */
+        if (start && end && end > start) {
+            /*
+             * xenipf/EDK frequently allocates DXE structures above the PHIT
+             * EfiMemoryTop (notably within our "slack" RAM). Include a
+             * generous headroom to catch those allocations.
+             */
+            uint64_t scan_start = start > (16ULL << 20) ? start - (16ULL << 20) : 0;
+            uint64_t scan_end = end + (128ULL << 20);
+
+            /*
+             * Tighten the scan around the current call site hints (stack and
+             * firmware status-code buffers) so we find the table even if PHIT
+             * values are stale.
+             */
+            const uint64_t probes[] = { env->r[12], env->r[9], env->r[10], env->r[11] };
+            for (size_t i = 0; i < ARRAY_SIZE(probes); i++) {
+                uint64_t p = probes[i];
+                if (p < 0x10000000ULL || p >= 0x30000000ULL) {
+                    continue;
+                }
+                uint64_t lo = p > (32ULL << 20) ? p - (32ULL << 20) : 0;
+                uint64_t hi = p + (32ULL << 20);
+                scan_start = MIN(scan_start, lo);
+                scan_end = MAX(scan_end, hi);
+            }
+
+            ia64_fw_find_efi_system_table(cs, scan_start, scan_end, &systab_pa);
+        } else {
+            ia64_fw_find_efi_system_table(cs, 0x1e000000ULL, 0x24000000ULL, &systab_pa);
+        }
+
+        if (systab_pa == 0) {
+            return;
+        }
+        env->fw_efi_systab_pa = systab_pa;
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw: located EFI system table at %016" PRIx64 "\n",
+                          systab_pa);
+        }
+    }
+
+    IA64EfiSystemTable st;
+    if (!ia64_fw_read_bytes_any(cs, systab_pa, (uint8_t *)&st, sizeof(st))) {
+        return;
+    }
+    if (st.hdr.signature != IA64_EFI_SYSTEM_TABLE_SIGNATURE) {
+        env->fw_efi_systab_pa = 0;
+        return;
+    }
+    if (st.boot == 0 || st.runtime == 0) {
+        env->fw_efi_systab_pa = 0;
+        return;
+    }
+    IA64EfiTableHeader boot_hdr, rt_hdr;
+    if (!ia64_fw_read_bytes_any(cs, st.boot, (uint8_t *)&boot_hdr, sizeof(boot_hdr)) ||
+        !ia64_fw_read_bytes_any(cs, st.runtime, (uint8_t *)&rt_hdr, sizeof(rt_hdr))) {
+        env->fw_efi_systab_pa = 0;
+        return;
+    }
+    if (boot_hdr.signature != IA64_EFI_BOOT_SERVICES_SIGNATURE ||
+        rt_hdr.signature != IA64_EFI_RUNTIME_SERVICES_SIGNATURE) {
+        env->fw_efi_systab_pa = 0;
+        return;
+    }
+
+    uint64_t nr = st.nr_tables;
+    if (nr > 128) {
+        return;
+    }
+
+    uint64_t tables_exemplar = st.tables;
+    size_t entries_len = 0;
+    g_autofree IA64EfiConfigTableEntry *entries = NULL;
+    if (nr != 0) {
+        if (st.tables == 0) {
+            return;
+        }
+        entries_len = nr * sizeof(IA64EfiConfigTableEntry);
+        entries = g_malloc0(entries_len);
+        if (!ia64_fw_read_bytes_any(cs, st.tables, (uint8_t *)entries, entries_len)) {
+            return;
+        }
+    } else {
+        /*
+         * No configuration tables yet. Use another system-table pointer as
+         * the "region exemplar" if available.
+         */
+        if (tables_exemplar == 0) {
+            tables_exemplar = st.boot ? st.boot : st.runtime;
+        }
+    }
+
+    for (uint64_t i = 0; i < nr; i++) {
+        if (ia64_fw_guid_equal(&entries[i].guid, &ia64_efi_guid_sal_systab)) {
+            env->fw_sal_systab_installed = 1;
+            return;
+        }
+    }
+
+    /* Build a new config table array with one appended entry. */
+    uint64_t new_nr = nr + 1;
+    size_t new_len = new_nr * sizeof(IA64EfiConfigTableEntry);
+    g_autofree IA64EfiConfigTableEntry *new_entries = g_malloc0(new_len);
+    if (entries_len) {
+        memcpy(new_entries, entries, entries_len);
+    }
+    new_entries[nr].guid = ia64_efi_guid_sal_systab;
+    new_entries[nr].table =
+        ia64_fw_addr_with_same_region(tables_exemplar, IA64_IPF_FW_SAL_SYSTAB_ADDR);
+
+    hwaddr inject_pa = IA64_EFI_SAL_SYSTAB_INJECT_PA;
+    if (!ia64_fw_write_phys(inject_pa, new_entries, new_len)) {
+        return;
+    }
+
+    /* Update system table fields (nr_tables + tables pointer). */
+    uint8_t le8[8];
+    stq_le_p(le8, new_nr);
+    if (!ia64_fw_write_phys((hwaddr)systab_pa + offsetof(IA64EfiSystemTable, nr_tables),
+                            le8, sizeof(le8))) {
+        return;
+    }
+    uint64_t new_tables_ptr = ia64_fw_addr_with_same_region(tables_exemplar, inject_pa);
+    stq_le_p(le8, new_tables_ptr);
+    if (!ia64_fw_write_phys((hwaddr)systab_pa + offsetof(IA64EfiSystemTable, tables),
+                            le8, sizeof(le8))) {
+        return;
+    }
+
+    /* Recompute the EFI system table CRC32 (best-effort). */
+    if (st.hdr.headersize >= sizeof(IA64EfiSystemTable) && st.hdr.headersize <= 4096) {
+        g_autofree uint8_t *st_bytes = g_malloc(st.hdr.headersize);
+        if (ia64_fw_read_phys((hwaddr)systab_pa, st_bytes, st.hdr.headersize)) {
+            stl_le_p(st_bytes + offsetof(IA64EfiTableHeader, crc32), 0);
+            uint32_t crc = (uint32_t)crc32(0, st_bytes, st.hdr.headersize);
+            uint8_t le4[4];
+            stl_le_p(le4, crc);
+            ia64_fw_write_phys((hwaddr)systab_pa + offsetof(IA64EfiTableHeader, crc32),
+                               le4, sizeof(le4));
+        }
+    }
+
+    env->fw_sal_systab_installed = 1;
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw: installed SAL systab config entry (SST_ at %016" PRIx64 ")\n",
+                      (uint64_t)IA64_IPF_FW_SAL_SYSTAB_ADDR);
+    }
+}
+
+static bool ia64_fw_validate_efi_hob_list(CPUState *cs, uint64_t base,
+                                         uint64_t *end_out, int *count_out)
+{
+    enum {
+        EFI_HOB_TYPE_HANDOFF = 0x0001,
+        EFI_HOB_TYPE_END_OF_HOB_LIST = 0xffff,
+    };
+
+    uint64_t cur = base;
+    for (int iter = 0; iter < 16384; iter++) {
+        uint8_t h[8];
+        if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+            return false;
+        }
+        uint16_t type = lduw_le_p(&h[0]);
+        uint16_t len = lduw_le_p(&h[2]);
+        if (iter == 0 && type != EFI_HOB_TYPE_HANDOFF) {
+            return false;
+        }
+        if (len < sizeof(h)) {
+            return false;
+        }
+        cur += len;
+        if (cur - base > (16ULL << 20)) {
+            return false;
+        }
+        if (type == EFI_HOB_TYPE_END_OF_HOB_LIST) {
+            if (end_out) {
+                *end_out = cur;
+            }
+            if (count_out) {
+                *count_out = iter + 1;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
+{
+    /*
+     * Best-effort EFI HOB list dump to diagnose early DXE ASSERTs.
+     * The xenipf firmware typically places the HOB list in low RAM.
+     */
+    enum {
+        EFI_HOB_TYPE_HANDOFF = 0x0001,
+        EFI_HOB_TYPE_MEMORY_ALLOCATION = 0x0002,
+        EFI_HOB_TYPE_RESOURCE_DESCRIPTOR = 0x0003,
+        EFI_HOB_TYPE_GUID_EXTENSION = 0x0004,
+        EFI_HOB_TYPE_FV = 0x0005,
+        EFI_HOB_TYPE_CPU = 0x0006,
+        EFI_HOB_TYPE_END_OF_HOB_LIST = 0xffff,
+    };
+    enum {
+        EFI_RESOURCE_ATTRIBUTE_PRESENT = 0x00000001u,
+        EFI_RESOURCE_ATTRIBUTE_INITIALIZED = 0x00000002u,
+        EFI_RESOURCE_ATTRIBUTE_TESTED = 0x00000004u,
+    };
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    const uint8_t phit_magic[8] = { 0x01, 0x00, 0x38, 0x00, 0, 0, 0, 0 };
+    uint64_t candidates[] = {
+        0x0000000002000000ULL, /* common xenipf PEI workspace */
+        0x0000000000100000ULL,
+        0x0000000001000000ULL,
+        stack_hint ? (stack_hint & ~0x00ffffffULL) : 0,
+    };
+
+    uint64_t hob_base = 0;
+    uint64_t hob_end = 0;
+    uint64_t hob_best_span = 0;
+    int hob_best_count = 0;
+    uint8_t hdr[8];
+    for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
+        uint64_t addr = candidates[i];
+        if (!addr) {
+            continue;
+        }
+        if (cpu_memory_rw_debug(cs, addr, hdr, sizeof(hdr), false) != 0 ||
+            memcmp(hdr, phit_magic, sizeof(phit_magic)) != 0) {
+            continue;
+        }
+
+        uint8_t phit[0x38];
+        if (cpu_memory_rw_debug(cs, addr, phit, sizeof(phit), false) != 0) {
+            continue;
+        }
+        uint64_t mem_top = ldq_le_p(&phit[16]);
+        uint64_t mem_bottom = ldq_le_p(&phit[24]);
+        if (mem_top <= mem_bottom) {
+            continue;
+        }
+
+        uint64_t end;
+        int count;
+        if (!ia64_fw_validate_efi_hob_list(cs, addr, &end, &count)) {
+            continue;
+        }
+        uint64_t span = end - addr;
+        if (span > hob_best_span) {
+            hob_best_span = span;
+            hob_best_count = count;
+            hob_base = addr;
+            hob_end = end;
+        }
+    }
+
+    if (!hob_base) {
+        uint64_t scan_ranges[][2] = {
+            { 0, 64ULL << 20 },
+            { 0, 0 },
+        };
+        if (stack_hint > (32ULL << 20)) {
+            scan_ranges[1][0] = stack_hint - (32ULL << 20);
+            scan_ranges[1][1] = 64ULL << 20;
+        }
+
+        const size_t chunk = 64 * 1024;
+        g_autofree uint8_t *buf = g_malloc(chunk);
+        for (size_t r = 0; r < ARRAY_SIZE(scan_ranges); r++) {
+            uint64_t scan_base = scan_ranges[r][0];
+            uint64_t scan_len = scan_ranges[r][1];
+            if (!scan_len) {
+                continue;
+            }
+            for (uint64_t off = 0; off < scan_len; off += chunk - 8) {
+                uint64_t addr = scan_base + off;
+                if (cpu_memory_rw_debug(cs, addr, buf, chunk, false) != 0) {
+                    continue;
+                }
+                for (size_t j = 0; j + sizeof(phit_magic) <= chunk; j++) {
+                    if (buf[j] != 0x01) {
+                        continue;
+                    }
+                    if (memcmp(&buf[j], phit_magic, sizeof(phit_magic)) != 0) {
+                        continue;
+                    }
+                    uint64_t cand = addr + j;
+                    uint8_t phit[0x38];
+                    if (cpu_memory_rw_debug(cs, cand, phit, sizeof(phit), false) != 0) {
+                        continue;
+                    }
+                    uint64_t mem_top = ldq_le_p(&phit[16]);
+                    uint64_t mem_bottom = ldq_le_p(&phit[24]);
+                    if (mem_top <= mem_bottom) {
+                        continue;
+                    }
+
+                    uint64_t end;
+                    int count;
+                    if (!ia64_fw_validate_efi_hob_list(cs, cand, &end, &count)) {
+                        continue;
+                    }
+                    uint64_t span = end - cand;
+                    if (span > hob_best_span) {
+                        hob_best_span = span;
+                        hob_best_count = count;
+                        hob_base = cand;
+                        hob_end = end;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!hob_base) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_hob_dump: PHIT HOB not found\n");
+        return;
+    }
+
+    uint8_t phit[0x38];
+    if (cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), false) != 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_hob_dump: PHIT read failed addr=%016" PRIx64 "\n",
+                      hob_base);
+        return;
+    }
+
+    uint64_t mem_bottom = ldq_le_p(&phit[24]);
+    if (mem_bottom && mem_bottom != hob_base) {
+        uint64_t alt_end;
+        int alt_count;
+        if (ia64_fw_validate_efi_hob_list(cs, mem_bottom, &alt_end, &alt_count)) {
+            uint64_t alt_span = alt_end - mem_bottom;
+            if (alt_span > hob_best_span) {
+                hob_base = mem_bottom;
+                hob_end = alt_end;
+                hob_best_span = alt_span;
+                hob_best_count = alt_count;
+                if (cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), false) != 0) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: efi_hob_dump: PHIT read failed addr=%016" PRIx64 "\n",
+                                  hob_base);
+                    return;
+                }
+            }
+        }
+    }
+
+    uint32_t version = ldl_le_p(&phit[8]);
+    uint32_t boot_mode = ldl_le_p(&phit[12]);
+    uint64_t mem_top = ldq_le_p(&phit[16]);
+    mem_bottom = ldq_le_p(&phit[24]);
+    uint64_t free_top = ldq_le_p(&phit[32]);
+    uint64_t free_bottom = ldq_le_p(&phit[40]);
+    uint64_t end_hob = ldq_le_p(&phit[48]);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: efi_hob_dump: base=%016" PRIx64
+                  " version=%u boot_mode=%u"
+                  " mem=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " free=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " end=%016" PRIx64 " span=0x%" PRIx64 " hobs=%d\n",
+                  hob_base, version, boot_mode,
+                  mem_bottom, mem_top, free_bottom, free_top,
+                  end_hob, hob_best_span, hob_best_count);
+
+    uint64_t cur = hob_base;
+    for (int iter = 0; iter < 4096; iter++) {
+        uint8_t h[8];
+        if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_dump: header read failed addr=%016" PRIx64 "\n",
+                          cur);
+            break;
+        }
+        uint16_t type = lduw_le_p(&h[0]);
+        uint16_t len = lduw_le_p(&h[2]);
+        if (len < sizeof(h)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_dump: bad hob len=%u type=%u addr=%016" PRIx64 "\n",
+                          len, type, cur);
+            break;
+        }
+        if (type == EFI_HOB_TYPE_END_OF_HOB_LIST) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_dump: end_hob addr=%016" PRIx64 "\n",
+                          cur);
+            break;
+        }
+
+        if (type == EFI_HOB_TYPE_RESOURCE_DESCRIPTOR && len >= 0x30) {
+            uint8_t rh[0x30];
+            if (cpu_memory_rw_debug(cs, cur, rh, sizeof(rh), false) == 0) {
+                uint32_t rtype = ldl_le_p(&rh[24]);
+                uint32_t rattr = ldl_le_p(&rh[28]);
+                uint64_t start = ldq_le_p(&rh[32]);
+                uint64_t rlen = ldq_le_p(&rh[40]);
+                bool tested = (rattr & (EFI_RESOURCE_ATTRIBUTE_PRESENT |
+                                        EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+                                        EFI_RESOURCE_ATTRIBUTE_TESTED)) ==
+                              (EFI_RESOURCE_ATTRIBUTE_PRESENT |
+                               EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+                               EFI_RESOURCE_ATTRIBUTE_TESTED);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: efi_hob_dump: RES type=%u attr=0x%08x tested=%d start=%016" PRIx64
+                              " len=%016" PRIx64 "\n",
+                              rtype, rattr, tested ? 1 : 0, start, rlen);
+            }
+        }
+        if (type == EFI_HOB_TYPE_MEMORY_ALLOCATION && len >= 0x30) {
+            uint8_t mh[0x30];
+            if (cpu_memory_rw_debug(cs, cur, mh, sizeof(mh), false) == 0) {
+                uint32_t guid0 = ldl_le_p(&mh[8]);
+                uint16_t guid1 = lduw_le_p(&mh[12]);
+                uint16_t guid2 = lduw_le_p(&mh[14]);
+                const uint8_t *g = &mh[16];
+                uint64_t base = ldq_le_p(&mh[24]);
+                uint64_t mlen = ldq_le_p(&mh[32]);
+                uint32_t mtype = ldl_le_p(&mh[40]);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: efi_hob_dump: ALLOC memtype=%u base=%016" PRIx64
+                              " len=%016" PRIx64
+                              " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                              mtype, base, mlen,
+                              guid0, guid1, guid2,
+                              g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
+            }
+        }
+        if (type == EFI_HOB_TYPE_FV && len >= 0x18) {
+            uint8_t fv[0x18];
+            if (cpu_memory_rw_debug(cs, cur, fv, sizeof(fv), false) == 0) {
+                uint64_t base = ldq_le_p(&fv[8]);
+                uint64_t flen = ldq_le_p(&fv[16]);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: efi_hob_dump: FV base=%016" PRIx64 " len=%016" PRIx64 "\n",
+                              base, flen);
+            }
+        }
+        if (type == EFI_HOB_TYPE_CPU && len >= 0x10) {
+            uint8_t cpu_h[0x10];
+            if (cpu_memory_rw_debug(cs, cur, cpu_h, sizeof(cpu_h), false) == 0) {
+                uint8_t mem_bits = cpu_h[8];
+                uint8_t io_bits = cpu_h[9];
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: efi_hob_dump: CPU mem_bits=%u io_bits=%u\n",
+                              mem_bits, io_bits);
+            }
+        }
+        if (type == EFI_HOB_TYPE_GUID_EXTENSION && len >= 0x18) {
+            uint8_t gh[0x18];
+            if (cpu_memory_rw_debug(cs, cur, gh, sizeof(gh), false) == 0) {
+                uint32_t guid0 = ldl_le_p(&gh[8]);
+                uint16_t guid1 = lduw_le_p(&gh[12]);
+                uint16_t guid2 = lduw_le_p(&gh[14]);
+                const uint8_t *g = &gh[16];
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: efi_hob_dump: GUIDEXT len=%u guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                              len,
+                              guid0, guid1, guid2,
+                              g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
+            }
+        }
+
+        cur += len;
+        if (hob_end && cur >= hob_end) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_dump: reached hob_end cur=%016" PRIx64 "\n",
+                          cur);
+            break;
+        }
+        if (cur - hob_base > (16ULL << 20)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_dump: abort, list too long\n");
+            break;
+        }
+    }
+}
+
+#ifndef CONFIG_USER_ONLY
+static void ia64_fw_dump_gcd_map_candidates(CPUIA64State *env)
+{
+    /*
+     * Best-effort post-mortem helper for early DXE ASSERTs in GCD init.
+     *
+     * The DXE core allocates EFI_GCD_MAP_ENTRY records from the first pool
+     * region carved above PHIT->EfiMemoryTop. Scan that region for the
+     * EFI_GCD_MAP_SIGNATURE ("gcdm") and print any plausible entries so we can
+     * distinguish signature corruption from bad list links/addresses.
+     */
+    CPUState *cs = env_cpu(env);
+    uint64_t mem_bottom = env->fw_phit_mem_bottom;
+    uint64_t mem_top = env->fw_phit_mem_top;
+    uint64_t free_bottom = env->fw_phit_free_bottom;
+    uint64_t free_top = env->fw_phit_free_top;
+    if (!mem_top || mem_top < mem_bottom) {
+        return;
+    }
+
+    /*
+     * Scan from the bottom of RAM up through a small window past EfiMemoryTop.
+     * While DXE pool allocations are expected to come from above EfiMemoryTop,
+     * some builds place early allocations (or temporary copies) below it.
+     */
+    const uint64_t scan_start = mem_bottom;
+    const uint64_t scan_len = 64ULL << 20;
+    uint64_t scan_end = mem_top + (16ULL << 20);
+    if (scan_end < scan_start) {
+        return;
+    }
+    if (scan_end - scan_start > scan_len) {
+        scan_end = scan_start + scan_len;
+    }
+    const uint32_t sig32 = 0x6d646367U; /* EFI_GCD_MAP_SIGNATURE */
+    int found = 0;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: gcd_scan phit mem=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " free=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " scan=[%016" PRIx64 "..%016" PRIx64 "]\n",
+                  mem_bottom, mem_top, free_bottom, free_top,
+                  scan_start, scan_end);
+
+    uint8_t buf[4096];
+    for (uint64_t base = scan_start;
+         base < scan_end && found < 32;
+         base += sizeof(buf) - 3) {
+        if (cpu_memory_rw_debug(cs, base, buf, sizeof(buf), false) != 0) {
+            break;
+        }
+        for (size_t i = 0; i + 4 <= sizeof(buf) && found < 32; i++) {
+            if (ldl_le_p(&buf[i]) != sig32) {
+                continue;
+            }
+            uint64_t addr = base + i;
+            uint8_t rec[64];
+            if (cpu_memory_rw_debug(cs, addr, rec, sizeof(rec), false) != 0) {
+                continue;
+            }
+            uint64_t sig = ldq_le_p(&rec[0]);
+            uint64_t fwd = ldq_le_p(&rec[8]);
+            uint64_t back = ldq_le_p(&rec[16]);
+            uint64_t range_base = ldq_le_p(&rec[24]);
+            uint64_t range_end = ldq_le_p(&rec[32]);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: gcd_map_entry addr=%016" PRIx64
+                          " sig=%016" PRIx64
+                          " link=[%016" PRIx64 ",%016" PRIx64 "]"
+                          " range=[%016" PRIx64 "..%016" PRIx64 "]\n",
+                          addr, sig, fwd, back, range_base, range_end);
+            found++;
+        }
+    }
+
+    if (found == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: gcd_scan: no EFI_GCD_MAP_SIGNATURE matches\n");
+    }
+}
+#endif /* !CONFIG_USER_ONLY */
+
+/*
+ * EDK1-style status code extended data parsing helper.
+ *
+ * Some IA64 firmware stacks pass a small indirection record in the break(0)
+ * buffer (e.g. {line,u64 ptr,u64 ptr}) where the pointers refer to a larger
+ * pool structure that contains one or more EFI_STATUS_CODE_DATA records
+ * (ASSERT/DEBUG/STRING/etc). Scan the pointed-to region for embedded
+ * EFI_STATUS_CODE_DATA records and decode ASSERT records inline so we can
+ * identify the failing source/condition.
+ */
+static void ia64_fw_break0_scan_status_records_impl(CPUState *cpu,
+                                                    uint64_t scan_ptr,
+                                                    size_t scan_window,
+                                                    int depth,
+                                                    bool *out_found_assert,
+                                                    uint64_t *seen_ptrs,
+                                                    size_t *num_seen_ptrs)
+{
+    if (*out_found_assert) {
+        return;
+    }
+    if (depth > 2) {
+        return;
+    }
+    if (*num_seen_ptrs >= 64) {
+        return;
+    }
+    for (size_t i = 0; i < *num_seen_ptrs; i++) {
+        if (seen_ptrs[i] == scan_ptr) {
+            return;
+        }
+    }
+    seen_ptrs[(*num_seen_ptrs)++] = scan_ptr;
+
+    if (scan_ptr < 0x1000 || scan_window < 0x40) {
+        return;
+    }
+    if (scan_window > 65536) {
+        scan_window = 65536;
+    }
+
+    /* EFI_STATUS_CODE_DATA_TYPE_ASSERT_GUID */
+    static const uint8_t assert_guid[16] = {
+        0x95, 0x15, 0x57, 0xda, 0x99, 0x4d, 0x7c, 0x48,
+        0x82, 0x7c, 0x26, 0x22, 0x67, 0x7d, 0x33, 0x07,
+    };
+    /* EFI_STATUS_CODE_DATA_TYPE_DEBUG_GUID */
+    static const uint8_t debug_guid[16] = {
+        0x46, 0x92, 0x4e, 0x9a, 0x53, 0xd5, 0xd5, 0x11,
+        0x87, 0xe2, 0x00, 0x06, 0x29, 0x45, 0xc3, 0xb9,
+    };
+    /* EFI_STATUS_CODE_DATA_TYPE_STRING_GUID */
+    static const uint8_t string_guid[16] = {
+        0x80, 0x10, 0xd1, 0x92, 0x6f, 0x49, 0x95, 0x4d,
+        0xbe, 0x7e, 0x03, 0x74, 0x88, 0x38, 0x2b, 0x0a,
+    };
+    /* EFI_STATUS_CODE_SPECIFIC_DATA_GUID */
+    static const uint8_t specific_guid[16] = {
+        0xbd, 0x84, 0x59, 0x33, 0x05, 0xe8, 0x9a, 0x40,
+        0xb8, 0xf8, 0xd2, 0x7e, 0xce, 0x5f, 0xf7, 0xa6,
+    };
+
+    /* Clamp and align the window; scan around the pointer. */
+    uint64_t start = scan_ptr;
+    if (start > (scan_window / 4)) {
+        start -= (scan_window / 4);
+    } else {
+        start = 0;
+    }
+    start &= ~0x7ULL;
+
+    g_autofree uint8_t *buf = g_malloc0(scan_window);
+    if (!ia64_fw_read_bytes_any(cpu, start, buf, scan_window)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_break0_scan: read failed ptr=%016" PRIx64
+                      " start=%016" PRIx64 " len=%zu\n",
+                      scan_ptr, start, scan_window);
+        return;
+    }
+
+    int printed = 0;
+    for (size_t off = 0; off + 20 <= scan_window && printed < 32; off++) {
+        uint16_t hdr = lduw_le_p(&buf[off + 0]);
+        uint16_t size = lduw_le_p(&buf[off + 2]);
+        size_t total = (size_t)hdr + (size_t)size;
+        if (hdr < 20 || hdr > 64) {
+            continue;
+        }
+        if (total < hdr || total > (scan_window - off)) {
+            continue;
+        }
+
+        const uint8_t *guid = &buf[off + 4];
+        bool is_assert_rec = (memcmp(guid, assert_guid, 16) == 0);
+        bool is_debug_rec = (memcmp(guid, debug_guid, 16) == 0);
+        bool is_string_rec = (memcmp(guid, string_guid, 16) == 0);
+        bool is_specific_rec = (memcmp(guid, specific_guid, 16) == 0);
+        if (!is_assert_rec && !is_debug_rec && !is_string_rec &&
+            !is_specific_rec) {
+            continue;
+        }
+
+        uint64_t rec_addr = start + off;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_break0_scan: rec addr=%016" PRIx64
+                      " hdr=%u size=%u type=%s depth=%d\n",
+                      rec_addr, hdr, size,
+                      is_assert_rec ? "ASSERT" :
+                      is_debug_rec ? "DEBUG" :
+                      is_string_rec ? "STRING" : "SPECIFIC",
+                      depth);
+
+        if (is_assert_rec && total >= hdr + 4 + 2) {
+            size_t base = off + hdr;
+            uint32_t line = ldl_le_p(&buf[base]);
+            const char *file = (const char *)&buf[base + 4];
+            size_t file_max = (off + total) - (base + 4);
+            size_t file_len = strnlen(file, file_max);
+            size_t expr_off = base + 4 + file_len + 1;
+
+            const char *expr = NULL;
+            size_t expr_len = 0;
+            if (file_len < file_max && expr_off < off + total) {
+                expr = (const char *)&buf[expr_off];
+                expr_len = strnlen(expr, (off + total) - expr_off);
+            }
+
+            if (file_len && expr && expr_len) {
+                char fn[256], ex[256];
+                size_t nfn = MIN(file_len, sizeof(fn) - 1);
+                size_t nex = MIN(expr_len, sizeof(ex) - 1);
+                memcpy(fn, file, nfn);
+                fn[nfn] = '\0';
+                memcpy(ex, expr, nex);
+                ex[nex] = '\0';
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_break0_scan: ASSERT line=%u file=\"%s\" expr=\"%s\"\n",
+                              line, fn, ex);
+                *out_found_assert = true;
+                return;
+            }
+        }
+
+        printed++;
+    }
+
+    /* Opportunistically print filename-like ASCII strings in this window. */
+    {
+        int str_printed = 0;
+        for (size_t i = 0; i + 8 < scan_window && str_printed < 6; i++) {
+            unsigned char c = buf[i];
+            if (!(c >= 0x20 && c < 0x7f)) {
+                continue;
+            }
+            size_t j = i;
+            while (j < scan_window) {
+                unsigned char cj = buf[j];
+                if (!(cj >= 0x20 && cj < 0x7f)) {
+                    break;
+                }
+                j++;
+            }
+            size_t len = j - i;
+            if (len < 12) {
+                i = j;
+                continue;
+            }
+            size_t n = MIN(len, 200);
+            char tmp[201];
+            memcpy(tmp, &buf[i], n);
+            tmp[n] = '\0';
+            if (strstr(tmp, ".c") || strstr(tmp, ".h") || strstr(tmp, "ASSERT") ||
+                strstr(tmp, "Dxe") || strstr(tmp, "DXE") ||
+                strstr(tmp, "Sal") || strstr(tmp, "SAL") ||
+                strstr(tmp, "Protocol") || strstr(tmp, "EFI_")) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_break0_scan: str addr=%016" PRIx64 " +0x%zx \"%s\"\n",
+                              start, i, tmp);
+                str_printed++;
+
+                if (strstr(tmp, "ASSERT!Status") || strstr(tmp, "Info")) {
+                    /* Print the next adjacent ASCII string (often carries the "Info:" text). */
+                    size_t k = i + len;
+                    while (k < scan_window && buf[k] != '\0') {
+                        k++;
+                    }
+                    if (k < scan_window) {
+                        k++; /* skip NUL */
+                    }
+                    while (k < scan_window) {
+                        unsigned char ck = buf[k];
+                        if (ck >= 0x20 && ck < 0x7f) {
+                            break;
+                        }
+                        k++;
+                    }
+                    size_t ks = k;
+                    while (k < scan_window) {
+                        unsigned char ck = buf[k];
+                        if (!(ck >= 0x20 && ck < 0x7f)) {
+                            break;
+                        }
+                        k++;
+                    }
+                    size_t klen = k - ks;
+                    if (klen >= 8) {
+                        size_t kn = MIN(klen, 200);
+                        char next[201];
+                        memcpy(next, &buf[ks], kn);
+                        next[kn] = '\0';
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: fw_break0_scan: str2 addr=%016" PRIx64 " +0x%zx \"%s\"\n",
+                                      start, ks, next);
+                    }
+                }
+            }
+            i = j;
+        }
+    }
+
+    if (!*out_found_assert && depth < 2) {
+        const size_t max_qwords = MIN(scan_window / 8, 256);
+        int follow_limit = (depth == 0) ? 16 : 8;
+        int followed = 0;
+        for (size_t qi = 0; qi < max_qwords && !*out_found_assert; qi++) {
+            uint64_t p = ldq_le_p(&buf[qi * 8]);
+            if (p < 0x1000) {
+                continue;
+            }
+            if (p >= (1ULL << 32)) {
+                continue;
+            }
+            /* Skip pointers that fall inside the window we already scanned. */
+            if (p >= start && p < start + scan_window) {
+                continue;
+            }
+            /* Heuristic: prefer pool-ish RAM and firmware windows. */
+            if (!((p >= 0x1e000000ULL && p < 0x30000000ULL) ||
+                  (p >= 0xff000000ULL && p < 0x100000000ULL))) {
+                continue;
+            }
+            if (followed++ >= follow_limit) {
+                break;
+            }
+            if (depth == 0) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_break0_scan: follow ptr=%016" PRIx64
+                              " from=%016" PRIx64 " +0x%zx\n",
+                              p, start, (size_t)qi * 8);
+            }
+            ia64_fw_break0_scan_status_records_impl(cpu, p, 8192, depth + 1,
+                                                    out_found_assert, seen_ptrs,
+                                                    num_seen_ptrs);
+        }
+    }
+}
+
+static void ia64_fw_break0_scan_status_records(CPUState *cs,
+                                               uint64_t ptr,
+                                               size_t window)
+{
+    bool found_assert = false;
+    uint64_t seen_ptrs[64] = { 0 };
+    size_t num_seen_ptrs = 0;
+    ia64_fw_break0_scan_status_records_impl(cs, ptr, window, 0, &found_assert,
+                                            seen_ptrs, &num_seen_ptrs);
+}
+
 uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 {
     /*
@@ -1127,14 +2296,28 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
      * trap/breakpoint. In our bringup environment, a missing handler would
      * otherwise recurse into the empty break vector (0x2c00) and hang.
      *
-     * Heuristic: treat break(0) as a fail-fast call that returns to b0 when
-     * the CPU is currently in a br.call-created frame. Otherwise, just
-     * advance to the next bundle.
+     * Treat break(0) as a firmware call gate (status-code reporting, etc).
+     * Most firmware sequences execute break(0) inside a br.call stub, with
+     * b0 holding the return address. Emulate the hypervisor handling by
+     * returning directly to b0 and unwinding the modeled call frame.
      */
-    uint8_t kind = env->last_b0_write_kind & 0xff;
-    bool in_call = (kind == 1);
     static int dump_enabled = -1;
     static int dump_len = -1;
+    static int abort_assert = -1;
+    static int log_limit = -1;
+    static int log_count;
+    static int gcd_dump_enabled = -1;
+
+    ia64_fw_try_install_sal_systab(env);
+
+    uint32_t code_type = (uint32_t)env->r[32];
+    uint32_t value = (uint32_t)env->r[33];
+    bool is_assert =
+        (code_type & IA64_EFI_STATUS_CODE_TYPE_MASK) == IA64_EFI_ERROR_CODE &&
+        (code_type & IA64_EFI_STATUS_CODE_SEVERITY_MASK) ==
+            IA64_EFI_ERROR_UNRECOVERED &&
+        (value & IA64_EFI_STATUS_CODE_OPERATION_MASK) ==
+            IA64_EFI_SW_EC_ILLEGAL_SOFTWARE_STATE;
 
     if (dump_enabled == -1) {
         const char *s = getenv("QEMU_IA64_FW_BREAK0_DUMP");
@@ -1153,23 +2336,387 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             dump_len = 65536;
         }
     }
+    if (abort_assert == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_ABORT_ASSERT");
+        abort_assert = (s && *s) ? 1 : 0;
+    }
+    if (gcd_dump_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_GCD_DUMP");
+        gcd_dump_enabled = (s && *s) ? 1 : 0;
+    }
 
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+    if (log_limit == -1) {
+        log_limit = 128;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_LOG_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+        (log_limit == 0 || log_count++ < log_limit)) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: fw_break0 pc=%016" PRIx64 " in_call=%d b0=%016" PRIx64
+                      "IA64: fw_break0 ip=%016" PRIx64 " pc=%016" PRIx64
+                      " b0=%016" PRIx64 " assert=%d"
+                      " r8=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64
+                      " r11=%016" PRIx64
                       " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
                       " r35=%016" PRIx64 " r36=%016" PRIx64 "\n",
-                      pc, in_call, env->b[0],
+                      env->ip, pc, env->b[0], is_assert ? 1 : 0,
+                      env->r[8], env->r[9], env->r[10], env->r[11],
                       env->r[32], env->r[33], env->r[34], env->r[35], env->r[36]);
+    }
+
+    if (is_assert) {
+        CPUState *cs = env_cpu(env);
+        static int stack_dump_enabled = -1;
+        static int stack_dump_len = -1;
+        if (stack_dump_enabled == -1) {
+            const char *s = getenv("QEMU_IA64_FW_BREAK0_STACK_DUMP");
+            stack_dump_enabled = (s && *s) ? 1 : 0;
+        }
+        if (stack_dump_len == -1) {
+            stack_dump_len = 4096;
+            const char *s = getenv("QEMU_IA64_FW_BREAK0_STACK_DUMP_LEN");
+            if (s && *s) {
+                stack_dump_len = atoi(s);
+            }
+            if (stack_dump_len < 0) {
+                stack_dump_len = 0;
+            }
+            if (stack_dump_len > 65536) {
+                stack_dump_len = 65536;
+            }
+        }
+        const struct {
+            const char *name;
+            uint64_t val;
+        } probes[] = {
+            { "r9", env->r[9] },
+            { "r10", env->r[10] },
+            { "r11", env->r[11] },
+        };
+
+        for (size_t i = 0; i < ARRAY_SIZE(probes); i++) {
+            uint64_t a = probes[i].val;
+            if (a < 0x1000 || a >= (1ULL << 32)) {
+                continue;
+            }
+            uint8_t tmp[64];
+            if (!ia64_fw_read_bytes_any(cs, a, tmp, sizeof(tmp))) {
+                continue;
+            }
+            uint64_t q0 = ldq_le_p(&tmp[0]);
+            uint64_t q1 = ldq_le_p(&tmp[8]);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_break0_probe %s=%016" PRIx64
+                          " q0=%016" PRIx64 " q1=%016" PRIx64 "\n",
+                          probes[i].name, a, q0, q1);
+            /*
+             * Also scan the pointed buffer for embedded status-code
+             * records/strings. This can be noisy, but is useful to identify
+             * the module that triggered ASSERT_EFI_ERROR().
+             */
+            ia64_fw_break0_scan_status_records(cs, a, 8192);
+        }
+
+        /* Try to recover the failing EFI_STATUS from the current stack frame. */
+        {
+            uint64_t sp = env->r[12];
+            uint64_t base = (sp > 0x400) ? (sp - 0x400) : 0;
+            uint8_t st[2048];
+            if (ia64_fw_read_bytes_any(cs, base, st, sizeof(st))) {
+                int hits = 0;
+                for (size_t off = 0; off + 8 <= sizeof(st) && hits < 16; off += 8) {
+                    uint64_t v = ldq_le_p(&st[off]);
+                    if ((v & (1ULL << 63)) == 0) {
+                        continue;
+                    }
+                    /* Heuristic: EFI_STATUS errors have small low codes. */
+                    if ((v & 0xffffffffULL) > 0x2000) {
+                        continue;
+                    }
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_break0_stack_status sp=%016" PRIx64
+                                  " addr=%016" PRIx64 " val=%016" PRIx64 "\n",
+                                  sp, base + off, v);
+                    hits++;
+                }
+            }
+        }
+
+        if (stack_dump_enabled && stack_dump_len > 0) {
+            uint64_t sp = env->r[12];
+            uint64_t base = (sp > (uint64_t)(stack_dump_len / 2)) ?
+                                (sp - (uint64_t)(stack_dump_len / 2)) : 0;
+            g_autofree uint8_t *st = g_malloc0((size_t)stack_dump_len);
+            if (ia64_fw_read_bytes_any(cs, base, st, (size_t)stack_dump_len)) {
+                g_mkdir_with_parents("scratch/ia64_logs", 0755);
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/fw_break0_stack_%016" PRIx64 ".bin", sp);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    fwrite(st, 1, (size_t)stack_dump_len, fp);
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_break0_stack_dump sp=%016" PRIx64
+                                  " base=%016" PRIx64 " bytes=%d file=%s\n",
+                                  sp, base, stack_dump_len, path);
+                }
+            }
+        }
     }
 
     if (dump_enabled && dump_len > 0 && env->r[36]) {
         CPUState *cs = env_cpu(env);
         g_autofree uint8_t *buf = g_malloc0((size_t)dump_len);
-        if (cpu_memory_rw_debug(cs, env->r[36], buf, (size_t)dump_len, false) == 0) {
+        if (cpu_memory_rw_debug(cs, env->r[36], buf, (size_t)dump_len, false) != 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_break0_dump_read_failed addr=%016" PRIx64 " len=%d\n",
+                          env->r[36], dump_len);
+        } else {
+            size_t scan_len = (size_t)dump_len;
+            bool has_status_header = false;
+            uint16_t status_header_size = 0;
+            static int dump_file_enabled = -1;
+            static int dump_file_count;
+            if (dump_file_enabled == -1) {
+                const char *s = getenv("QEMU_IA64_FW_BREAK0_DUMP_FILE");
+                dump_file_enabled = (s && *s) ? 1 : 0;
+            }
+
+            /*
+             * If the buffer starts with an EFI_STATUS_CODE_DATA header, limit
+             * scanning to the declared size to avoid printing unrelated pool
+             * data. Some builds appear to use a zero GUID, so treat the header
+             * as valid based on size alone.
+             */
+            if (scan_len >= 20) {
+                uint16_t header_size = lduw_le_p(&buf[0]);
+                uint16_t data_size = lduw_le_p(&buf[2]);
+                size_t total = (size_t)header_size + (size_t)data_size;
+                if (header_size >= 20 && header_size <= 64 &&
+                    total >= header_size && total <= scan_len) {
+                    uint32_t d1 = ldl_le_p(&buf[4]);
+                    uint16_t d2 = lduw_le_p(&buf[8]);
+                    uint16_t d3 = lduw_le_p(&buf[10]);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_break0_status_data hdr=%u size=%u guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                  header_size, data_size,
+                                  d1, d2, d3,
+                                  buf[12], buf[13], buf[14], buf[15], buf[16], buf[17], buf[18], buf[19]);
+                    has_status_header = true;
+                    status_header_size = header_size;
+                    scan_len = total;
+                }
+            }
+
+            if (dump_file_enabled && dump_file_count++ < 8) {
+                g_mkdir_with_parents("scratch/ia64_logs", 0755);
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/fw_break0_%016" PRIx64 ".bin",
+                         env->r[36]);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    fwrite(buf, 1, scan_len, fp);
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_break0_dump_file addr=%016" PRIx64 " bytes=%zu file=%s\n",
+                                  env->r[36], scan_len, path);
+                }
+            }
+
+            /*
+             * Attempt to decode an EDK-style ASSERT payload:
+             * - CodeType: EFI_ERROR_UNRECOVERED|EFI_ERROR_CODE (0x90000002)
+             * - Value:    *|EFI_SW_EC_ILLEGAL_SOFTWARE_STATE (op=7)
+             * - Data:     EFI_STATUS_CODE_DATA + EFI_DEBUG_ASSERT_DATA + strings
+             */
+            if ((code_type & IA64_EFI_STATUS_CODE_TYPE_MASK) == IA64_EFI_ERROR_CODE &&
+                (code_type & IA64_EFI_STATUS_CODE_SEVERITY_MASK) == IA64_EFI_ERROR_UNRECOVERED &&
+                (value & IA64_EFI_STATUS_CODE_OPERATION_MASK) == IA64_EFI_SW_EC_ILLEGAL_SOFTWARE_STATE &&
+                has_status_header && scan_len >= (size_t)status_header_size + 5) {
+                size_t base = status_header_size;
+                uint32_t line = ldl_le_p(&buf[base]);
+
+                /*
+                 * Some builds use a compact payload that stores pointers to the
+                 * file/description strings instead of embedding them.
+                 *
+                 * Layout: { u32 line; u64 file_ptr; u64 desc_ptr }.
+                 */
+	                if (scan_len >= base + 4 + 16) {
+	                    uint64_t file_ptr = ldq_le_p(&buf[base + 4]);
+	                    uint64_t desc_ptr = ldq_le_p(&buf[base + 12]);
+
+	                    qemu_log_mask(LOG_GUEST_ERROR,
+	                                  "IA64: fw_break0_assert_ptr line=%u file_ptr=%016" PRIx64
+	                                  " desc_ptr=%016" PRIx64 "\n",
+	                                  line, file_ptr, desc_ptr);
+
+                            /*
+                             * If the payload uses indirection pointers, scan
+                             * the pointed-to region for embedded
+                             * EFI_STATUS_CODE_DATA records (ASSERT/DEBUG/...).
+                             */
+                            if (file_ptr >= 0x1000) {
+                                ia64_fw_break0_scan_status_records(cs, file_ptr, 16384);
+                            }
+                            if (desc_ptr >= 0x1000 && desc_ptr != file_ptr) {
+                                ia64_fw_break0_scan_status_records(cs, desc_ptr, 16384);
+                            }
+
+	                    if (file_ptr >= 0x1000 && desc_ptr >= 0x1000) {
+	                        char fn[256] = { 0 };
+	                        char expr[256] = { 0 };
+	                        const char *fn_enc = NULL;
+	                        const char *expr_enc = NULL;
+
+	                        if (ia64_fw_read_ascii_string(cs, file_ptr, fn, sizeof(fn)) != 0) {
+	                            fn_enc = "ascii";
+	                        } else if (ia64_fw_read_ucs2le_string(cs, file_ptr, fn, sizeof(fn)) != 0) {
+	                            fn_enc = "ucs2";
+	                        }
+
+	                        if (ia64_fw_read_ascii_string(cs, desc_ptr, expr, sizeof(expr)) != 0) {
+	                            expr_enc = "ascii";
+	                        } else if (ia64_fw_read_ucs2le_string(cs, desc_ptr, expr, sizeof(expr)) != 0) {
+	                            expr_enc = "ucs2";
+	                        }
+
+	                        if (fn_enc && expr_enc) {
+	                            qemu_log_mask(LOG_GUEST_ERROR,
+	                                          "IA64: fw_break0_assert line=%u file=\"%s\" expr=\"%s\"\n",
+	                                          line, fn, expr);
+	                            qemu_log_mask(LOG_GUEST_ERROR,
+	                                          "IA64: fw_break0_assert_enc file=%s expr=%s\n",
+	                                          fn_enc, expr_enc);
+	                        } else {
+	                            uint8_t tmp[64] = { 0 };
+	                            if (!fn_enc &&
+	                                cpu_memory_rw_debug(cs, file_ptr, tmp, sizeof(tmp), false) == 0) {
+	                                qemu_log_mask(LOG_GUEST_ERROR,
+	                                              "IA64: fw_break0_assert_file_bytes %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	                                              tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7],
+	                                              tmp[8], tmp[9], tmp[10], tmp[11], tmp[12], tmp[13], tmp[14], tmp[15]);
+	                            }
+	                            if (!expr_enc &&
+	                                cpu_memory_rw_debug(cs, desc_ptr, tmp, sizeof(tmp), false) == 0) {
+	                                qemu_log_mask(LOG_GUEST_ERROR,
+	                                              "IA64: fw_break0_assert_expr_bytes %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	                                              tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7],
+	                                              tmp[8], tmp[9], tmp[10], tmp[11], tmp[12], tmp[13], tmp[14], tmp[15]);
+	                            }
+
+	                            /*
+	                             * Heuristic: some builds pass pointers to
+	                             * structures (or pointer tables) rather than
+	                             * direct strings. If direct decoding failed,
+	                             * try treating the first few qwords as
+	                             * candidate string pointers.
+	                             */
+	                            uint64_t ptrs[8];
+	                            if (!fn_enc &&
+	                                cpu_memory_rw_debug(cs, file_ptr, ptrs, sizeof(ptrs), false) == 0) {
+	                                int printed = 0;
+	                                for (size_t pi = 0; pi < ARRAY_SIZE(ptrs); pi++) {
+	                                    uint64_t p = ptrs[pi];
+	                                    if (p < 0x1000) {
+	                                        continue;
+	                                    }
+	                                    if (ia64_fw_read_ascii_string(cs, p, fn, sizeof(fn)) != 0) {
+	                                        qemu_log_mask(LOG_GUEST_ERROR,
+	                                                      "IA64: fw_break0_assert_file_ptr[%zu]=%016" PRIx64 " \"%s\"\n",
+	                                                      pi, p, fn);
+	                                        if (++printed >= 4) {
+	                                            break;
+	                                        }
+	                                        continue;
+	                                    }
+	                                    if (ia64_fw_read_ucs2le_string(cs, p, fn, sizeof(fn)) != 0) {
+	                                        qemu_log_mask(LOG_GUEST_ERROR,
+	                                                      "IA64: fw_break0_assert_file_ptr[%zu]=%016" PRIx64 " \"%s\" (ucs2)\n",
+	                                                      pi, p, fn);
+	                                        if (++printed >= 4) {
+	                                            break;
+	                                        }
+	                                        continue;
+	                                    }
+	                                }
+	                            }
+	                            if (!expr_enc &&
+	                                cpu_memory_rw_debug(cs, desc_ptr, ptrs, sizeof(ptrs), false) == 0) {
+	                                int printed = 0;
+	                                for (size_t pi = 0; pi < ARRAY_SIZE(ptrs); pi++) {
+	                                    uint64_t p = ptrs[pi];
+	                                    if (p < 0x1000) {
+	                                        continue;
+	                                    }
+	                                    if (ia64_fw_read_ascii_string(cs, p, expr, sizeof(expr)) != 0) {
+	                                        qemu_log_mask(LOG_GUEST_ERROR,
+	                                                      "IA64: fw_break0_assert_expr_ptr[%zu]=%016" PRIx64 " \"%s\"\n",
+	                                                      pi, p, expr);
+	                                        if (++printed >= 4) {
+	                                            break;
+	                                        }
+	                                        continue;
+	                                    }
+	                                    if (ia64_fw_read_ucs2le_string(cs, p, expr, sizeof(expr)) != 0) {
+	                                        qemu_log_mask(LOG_GUEST_ERROR,
+	                                                      "IA64: fw_break0_assert_expr_ptr[%zu]=%016" PRIx64 " \"%s\" (ucs2)\n",
+	                                                      pi, p, expr);
+	                                        if (++printed >= 4) {
+	                                            break;
+	                                        }
+	                                        continue;
+	                                    }
+	                                }
+	                            }
+	                        }
+	                    }
+	                }
+
+	                /*
+	                 * Inline-string payload fallback:
+                 * { u32 line; char file[]; char expr[] }.
+                 */
+                if (scan_len >= base + 5) {
+                    const char *file = (const char *)&buf[base + 4];
+                    size_t file_max = scan_len - (base + 4);
+                    size_t file_len = strnlen(file, file_max);
+                    size_t desc_off = base + 4 + file_len + 1;
+
+                    const char *desc = NULL;
+                    size_t desc_len = 0;
+                    if (file_len < file_max && desc_off < scan_len) {
+                        desc = (const char *)&buf[desc_off];
+                        desc_len = strnlen(desc, scan_len - desc_off);
+                    }
+
+                    if (file_len && desc && desc_len) {
+                        char fn[256], expr[256];
+                        size_t nfn = MIN(file_len, sizeof(fn) - 1);
+                        size_t nexpr = MIN(desc_len, sizeof(expr) - 1);
+                        memcpy(fn, file, nfn);
+                        fn[nfn] = '\0';
+                        memcpy(expr, desc, nexpr);
+                        expr[nexpr] = '\0';
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: fw_break0_assert line=%u file=\"%s\" expr=\"%s\"\n",
+                                      line, fn, expr);
+                    }
+                }
+            }
+
+            /* Fallback: print any longer printable runs inside the buffer. */
             size_t i = 0;
-            while (i < (size_t)dump_len) {
-                while (i < (size_t)dump_len) {
+            while (i < scan_len) {
+                while (i < scan_len) {
                     unsigned char c = buf[i];
                     if (c >= 0x20 && c < 0x7f) {
                         break;
@@ -1177,7 +2724,7 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                     i++;
                 }
                 size_t start = i;
-                while (i < (size_t)dump_len) {
+                while (i < scan_len) {
                     unsigned char c = buf[i];
                     if (!(c >= 0x20 && c < 0x7f)) {
                         break;
@@ -1185,7 +2732,7 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                     i++;
                 }
                 size_t len = i - start;
-                if (len >= 8) {
+                if (len >= 4) {
                     char s[256];
                     size_t n = len < (sizeof(s) - 1) ? len : (sizeof(s) - 1);
                     memcpy(s, &buf[start], n);
@@ -1198,13 +2745,44 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         }
     }
 
-    if (in_call && env->b[0]) {
-        uint64_t ret = env->b[0] & ~0xFULL;
-        HELPER(ret_restore_b0)(env);
-        env->psr &= ~PSR_RI_MASK;
-        return ret;
+    {
+        static int hob_dump_enabled = -1;
+        if (hob_dump_enabled == -1) {
+            const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP");
+            hob_dump_enabled = (s && *s) ? 1 : 0;
+        }
+        if (hob_dump_enabled) {
+            if ((code_type & IA64_EFI_STATUS_CODE_TYPE_MASK) == IA64_EFI_ERROR_CODE &&
+                (code_type & IA64_EFI_STATUS_CODE_SEVERITY_MASK) == IA64_EFI_ERROR_UNRECOVERED &&
+                (value & IA64_EFI_STATUS_CODE_OPERATION_MASK) == IA64_EFI_SW_EC_ILLEGAL_SOFTWARE_STATE) {
+                ia64_fw_dump_efi_hobs(env_cpu(env), env->r[12]);
+            }
+        }
     }
 
+    if (gcd_dump_enabled && is_assert) {
+        ia64_fw_dump_gcd_map_candidates(env);
+    }
+
+    if (abort_assert && is_assert) {
+        CPUState *cs = env_cpu(env);
+        cpu_abort(cs, "IA64: firmware ASSERT via break0 pc=%016" PRIx64, pc);
+    }
+
+    uint64_t b0 = env->b[0] & ~0xFULL;
+    if (b0) {
+        /*
+         * If the call depth indicates that b0 was produced by a br.call,
+         * restore the caller's stacked-register window before returning.
+         */
+        uint8_t kind = env->last_b0_write_kind & 0xff;
+        if (kind == 1) {
+            (void)ia64_rse_pop_window(env);
+        }
+        return b0;
+    }
+
+    /* No return pointer; fall through to the next bundle. */
     return (pc & ~0xFULL) + 16;
 }
 
@@ -1347,6 +2925,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
                   " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
                   " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                  " r41=%016" PRIx64 " r42=%016" PRIx64
                   " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
                   " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
                   " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
@@ -1368,8 +2947,58 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   env->r[16], env->r[17],
                   env->r[32], env->r[33], env->r[34], env->r[35],
                   env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
+                  env->r[41], env->r[42],
                   env->r[47], env->r[48], env->r[49],
                   env->b[0], env->b[6], env->b[7], env->r[45], env->r[46]);
+
+#ifndef CONFIG_USER_ONLY
+    static int dump_r8_len = -1;
+    if (dump_r8_len == -1) {
+        dump_r8_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R8");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r8_len = 64;
+            } else {
+                dump_r8_len = atoi(s);
+                if (dump_r8_len <= 0) {
+                    dump_r8_len = 64;
+                }
+            }
+            if (dump_r8_len > 256) {
+                dump_r8_len = 256;
+            }
+        }
+    }
+    if (dump_r8_len > 0) {
+        hwaddr pa;
+        if (env->psr & IA64_PSR_DT) {
+            pa = helper_tpa(env, env->r[8]);
+        } else {
+            pa = ia64_phys_mode_addr(env->r[8]);
+        }
+
+        uint8_t mem[256];
+        int n = dump_r8_len;
+        cpu_physical_memory_read(pa, mem, (size_t)n);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_probe_r8 pc=%016" PRIx64 " r8=%016" PRIx64
+                      " pa=%016" HWADDR_PRIx " bytes=%d\n",
+                      pc, env->r[8], pa, n);
+        for (int off = 0; off < n; off += 16) {
+            char line[128];
+            int pos = 0;
+            pos += snprintf(line + pos, sizeof(line) - pos,
+                            "  %016" HWADDR_PRIx ":", pa + (hwaddr)off);
+            for (int j = 0; j < 16 && off + j < n; j++) {
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                                " %02x", mem[off + j]);
+            }
+            qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+        }
+    }
+#endif /* !CONFIG_USER_ONLY */
 
     if (dbg_assert_buf_enabled && dbg_assert_buf_len > 0) {
         /*
@@ -1873,7 +3502,7 @@ void HELPER(rotate_grs)(CPUIA64State *env)
     env->r[32] = last;
 }
 
-void HELPER(call)(CPUIA64State *env)
+void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
 {
     /*
      * On a call, the caller's OUT registers become the callee's IN registers.
@@ -1890,6 +3519,538 @@ void HELPER(call)(CPUIA64State *env)
     uint8_t outs = (sof > sol) ? (sof - sol) : 0;
     uint64_t tmp[96] = { 0 };
     uint64_t dbg_pc = ia64_dbg_next_call_pc;
+
+    /*
+     * Heuristic call tracing to catch mis-mapped argument registers during
+     * bringup (e.g. pool allocators being called with a pointer-sized "Size").
+     *
+     * Enable with QEMU_IA64_TRACE_SUSP_CALLS=1.
+     */
+    static int susp_enabled = -1;
+    static int susp_limit = -1;
+    static int susp_count;
+    static uint64_t trace_call_pc = UINT64_MAX;
+    static int trace_call_abort = -1;
+    static uint64_t trace_call_tgt = UINT64_MAX;
+    static uint64_t trace_call_tgt_a1_min = UINT64_MAX;
+    static int trace_call_tgt_abort = -1;
+    static uint64_t trace_call_match_a0 = UINT64_MAX;
+    static uint64_t trace_call_match_a1 = UINT64_MAX;
+    static int trace_call_match_abort = -1;
+    if (susp_enabled == -1) {
+        susp_enabled = getenv("QEMU_IA64_TRACE_SUSP_CALLS") ? 1 : 0;
+    }
+    if (trace_call_pc == UINT64_MAX) {
+        trace_call_pc = 0;
+        const char *s = getenv("QEMU_IA64_TRACE_CALL_PC");
+        if (s && *s) {
+            trace_call_pc = strtoull(s, NULL, 0);
+        }
+    }
+    if (trace_call_tgt == UINT64_MAX) {
+        trace_call_tgt = 0;
+        const char *s = getenv("QEMU_IA64_TRACE_CALL_TGT");
+        if (s && *s) {
+            trace_call_tgt = strtoull(s, NULL, 0) & ~0xFULL;
+        }
+    }
+    if (trace_call_tgt_a1_min == UINT64_MAX) {
+        trace_call_tgt_a1_min = 0;
+        const char *s = getenv("QEMU_IA64_TRACE_CALL_TGT_A1_MIN");
+        if (s && *s) {
+            trace_call_tgt_a1_min = strtoull(s, NULL, 0);
+        }
+    }
+    if (trace_call_abort == -1) {
+        trace_call_abort = getenv("QEMU_IA64_TRACE_CALL_PC_ABORT") ? 1 : 0;
+    }
+    if (trace_call_tgt_abort == -1) {
+        trace_call_tgt_abort = getenv("QEMU_IA64_TRACE_CALL_TGT_ABORT") ? 1 : 0;
+    }
+    if (trace_call_match_a0 == UINT64_MAX) {
+        trace_call_match_a0 = 0;
+        const char *s = getenv("QEMU_IA64_TRACE_CALL_MATCH_A0");
+        if (s && *s) {
+            trace_call_match_a0 = strtoull(s, NULL, 0);
+        }
+    }
+    if (trace_call_match_a1 == UINT64_MAX) {
+        trace_call_match_a1 = 0;
+        const char *s = getenv("QEMU_IA64_TRACE_CALL_MATCH_A1");
+        if (s && *s) {
+            trace_call_match_a1 = strtoull(s, NULL, 0);
+        }
+    }
+    if (trace_call_match_abort == -1) {
+        trace_call_match_abort = getenv("QEMU_IA64_TRACE_CALL_MATCH_ABORT") ? 1 : 0;
+    }
+    if (susp_limit == -1) {
+        susp_limit = 64;
+        const char *s = getenv("QEMU_IA64_TRACE_SUSP_CALLS_LIMIT");
+        if (s && *s) {
+            susp_limit = atoi(s);
+        }
+        if (susp_limit < 0) {
+            susp_limit = 0;
+        }
+    }
+    static int susp_abort = -1;
+    static int susp_dump_bundle = -1;
+    static int susp_dump_code_bundles = -1;
+    if (susp_abort == -1) {
+        susp_abort = getenv("QEMU_IA64_TRACE_SUSP_CALLS_ABORT") ? 1 : 0;
+    }
+    if (susp_dump_bundle == -1) {
+        susp_dump_bundle =
+            getenv("QEMU_IA64_TRACE_SUSP_CALLS_DUMP_BUNDLE") ? 1 : 0;
+    }
+    if (susp_dump_code_bundles == -1) {
+        susp_dump_code_bundles = 0;
+        const char *s = getenv("QEMU_IA64_TRACE_SUSP_CALLS_DUMP_CODE");
+        if (s && *s) {
+            susp_dump_code_bundles = atoi(s);
+        }
+        if (susp_dump_code_bundles < 0) {
+            susp_dump_code_bundles = 0;
+        }
+        if (susp_dump_code_bundles > 2048) {
+            susp_dump_code_bundles = 2048;
+        }
+    }
+
+    uint8_t call_out0 = 32 + sol;
+    uint64_t call_a0 = (call_out0 < 128) ? env->r[call_out0] : 0;
+    uint64_t call_a1 = (call_out0 + 1 < 128) ? env->r[call_out0 + 1] : 0;
+    uint64_t call_a2 = (call_out0 + 2 < 128) ? env->r[call_out0 + 2] : 0;
+    uint64_t call_a3 = (call_out0 + 3 < 128) ? env->r[call_out0 + 3] : 0;
+
+    if (trace_call_match_a0 &&
+        call_a0 == trace_call_match_a0 &&
+        (!trace_call_match_a1 || call_a1 == trace_call_match_a1)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: trace_call_match pc=%016" PRIx64 " tgt=%016" PRIx64
+                      " cfm=%016" PRIx64 " sof=%u sol=%u outs=%u out0=r%u"
+                      " a0=%016" PRIx64 " a1=%016" PRIx64 " a2=%016" PRIx64
+                      " a3=%016" PRIx64 " r1=%016" PRIx64 " r12=%016" PRIx64
+                      " b0=%016" PRIx64 "\n",
+                      pc, tgt, caller_cfm, sof, sol, outs, call_out0,
+                      call_a0, call_a1, call_a2, call_a3,
+                      env->r[1], env->r[12], env->b[0]);
+        if (trace_call_match_abort) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: trace_call_match abort pc=%016" PRIx64 "\n", pc);
+            abort();
+        }
+    }
+
+    if (trace_call_tgt && (tgt & ~0xFULL) == trace_call_tgt) {
+        if (call_a1 >= trace_call_tgt_a1_min) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: trace_call_tgt pc=%016" PRIx64 " tgt=%016" PRIx64
+                          " cfm=%016" PRIx64 " sof=%u sol=%u outs=%u out0=r%u"
+                          " a0=%016" PRIx64 " a1=%016" PRIx64 " a2=%016" PRIx64
+                          " a3=%016" PRIx64 " r1=%016" PRIx64 " r12=%016" PRIx64
+                          " b0=%016" PRIx64 "\n",
+                          pc, tgt, caller_cfm, sof, sol, outs, call_out0,
+                          call_a0, call_a1, call_a2, call_a3,
+                          env->r[1], env->r[12], env->b[0]);
+
+            if (susp_dump_bundle) {
+                CPUState *cs = env_cpu(env);
+                uint64_t base = pc & ~0xFULL;
+                uint8_t bundle[16];
+                if (cpu_memory_rw_debug(cs, base, bundle, sizeof(bundle), false) == 0) {
+                    uint64_t low = 0, high = 0;
+                    memcpy(&low, &bundle[0], sizeof(low));
+                    memcpy(&high, &bundle[8], sizeof(high));
+                    uint8_t tmpl = low & 0x1f;
+                    uint64_t s0 = (low >> 5) & 0x1ffffffffffULL;
+                    uint64_t s1 = ((low >> 46) | (high << 18)) & 0x1ffffffffffULL;
+                    uint64_t s2 = (high >> 23) & 0x1ffffffffffULL;
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: trace_call_tgt_bundle pc=%016" PRIx64
+                                  " low=%016" PRIx64 " high=%016" PRIx64
+                                  " tmpl=%02x s0=%011" PRIx64 " s1=%011" PRIx64
+                                  " s2=%011" PRIx64 "\n",
+                                  base, low, high, tmpl, s0, s1, s2);
+                }
+            }
+
+            if (susp_dump_code_bundles > 0) {
+                CPUState *cs = env_cpu(env);
+                uint64_t base = pc & ~0xFULL;
+                uint64_t start = base;
+                if (susp_dump_code_bundles > 16) {
+                    uint64_t back =
+                        (uint64_t)(susp_dump_code_bundles / 4) * 16ULL;
+                    if (start >= back) {
+                        start -= back;
+                    } else {
+                        start = 0;
+                    }
+                }
+                g_mkdir_with_parents("scratch/ia64_logs", 0755);
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/trace_tgt_call_code_%016" PRIx64 ".bin",
+                         base);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    for (int i = 0; i < susp_dump_code_bundles; i++) {
+                        uint8_t bundle[16];
+                        uint64_t bpc = start + (uint64_t)i * 16;
+                        if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle),
+                                                false) != 0) {
+                            break;
+                        }
+                        fwrite(bundle, 1, sizeof(bundle), fp);
+                    }
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: trace_tgt_call_dump_code pc=%016" PRIx64
+                                  " start=%016" PRIx64 " bundles=%d file=%s\n",
+                                  base, start, susp_dump_code_bundles, path);
+                }
+            }
+
+            if (susp_dump_code_bundles > 0 && tgt) {
+                CPUState *cs = env_cpu(env);
+                uint64_t base = tgt & ~0xFULL;
+                uint64_t start = base;
+                if (susp_dump_code_bundles > 16) {
+                    uint64_t back =
+                        (uint64_t)(susp_dump_code_bundles / 4) * 16ULL;
+                    if (start >= back) {
+                        start -= back;
+                    } else {
+                        start = 0;
+                    }
+                }
+                g_mkdir_with_parents("scratch/ia64_logs", 0755);
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/trace_tgt_call_tgt_code_%016" PRIx64 ".bin",
+                         base);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    for (int i = 0; i < susp_dump_code_bundles; i++) {
+                        uint8_t bundle[16];
+                        uint64_t bpc = start + (uint64_t)i * 16;
+                        if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle),
+                                                false) != 0) {
+                            break;
+                        }
+                        fwrite(bundle, 1, sizeof(bundle), fp);
+                    }
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: trace_tgt_call_dump_tgt_code pc=%016" PRIx64
+                                  " tgt=%016" PRIx64 " start=%016" PRIx64
+                                  " bundles=%d file=%s\n",
+                                  pc, base, start, susp_dump_code_bundles, path);
+                }
+            }
+
+            if (trace_call_tgt_abort) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: trace_call_tgt abort pc=%016" PRIx64 "\n", pc);
+                abort();
+            }
+        }
+    }
+
+    if (trace_call_pc && pc == trace_call_pc) {
+        uint8_t out0 = 32 + sol;
+        uint64_t a0 = (out0 < 128) ? env->r[out0] : 0;
+        uint64_t a1 = (out0 + 1 < 128) ? env->r[out0 + 1] : 0;
+        uint64_t a2 = (out0 + 2 < 128) ? env->r[out0 + 2] : 0;
+        uint64_t a3 = (out0 + 3 < 128) ? env->r[out0 + 3] : 0;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: trace_call pc=%016" PRIx64 " tgt=%016" PRIx64
+                      " cfm=%016" PRIx64 " sof=%u sol=%u outs=%u out0=r%u"
+                      " a0=%016" PRIx64 " a1=%016" PRIx64 " a2=%016" PRIx64
+                      " a3=%016" PRIx64 " r1=%016" PRIx64 " r12=%016" PRIx64
+                      " b0=%016" PRIx64 " r30=%016" PRIx64 " r31=%016" PRIx64
+                      " b7=%016" PRIx64 "\n",
+                      pc, tgt, caller_cfm, sof, sol, outs, out0,
+                      a0, a1, a2, a3, env->r[1], env->r[12], env->b[0],
+                      env->r[30], env->r[31], env->b[7]);
+
+        if (a0) {
+            CPUState *cs = env_cpu(env);
+            uint8_t raw_obj[32];
+            if (cpu_memory_rw_debug(cs, a0, raw_obj, sizeof(raw_obj), false) ==
+                0) {
+                uint64_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                memcpy(&w0, &raw_obj[0], sizeof(w0));
+                memcpy(&w1, &raw_obj[8], sizeof(w1));
+                memcpy(&w2, &raw_obj[16], sizeof(w2));
+                memcpy(&w3, &raw_obj[24], sizeof(w3));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: trace_call a0_mem %016" PRIx64
+                              " %016" PRIx64 " %016" PRIx64 " %016" PRIx64
+                              "\n",
+                              w0, w1, w2, w3);
+            }
+        }
+
+        /*
+         * ABI note: indirect calls typically use IA-64 function descriptors:
+         *  - [fd+0] entry point
+         *  - [fd+8] GP value (r1)
+         *
+         * The common sequence is:
+         *   ld8 rX=[fd],8; ld8 r1=[fd]; mov bY=rX; br.call b0=bY
+         * so at call time r31 often points at (fd+8).
+         */
+        if (env->r[31] >= 8) {
+            CPUState *cs = env_cpu(env);
+            uint64_t fd = env->r[31] - 8;
+            uint8_t raw[16];
+            if (cpu_memory_rw_debug(cs, fd, raw, sizeof(raw), false) == 0) {
+                uint64_t entry = 0, gp = 0;
+                memcpy(&entry, &raw[0], sizeof(entry));
+                memcpy(&gp, &raw[8], sizeof(gp));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: trace_call fd=%016" PRIx64
+                              " entry=%016" PRIx64 " gp=%016" PRIx64 "\n",
+                              fd, entry, gp);
+            }
+        }
+
+        if (susp_dump_bundle) {
+            CPUState *cs = env_cpu(env);
+            uint64_t base = pc & ~0xFULL;
+            uint8_t bundle[16];
+            if (cpu_memory_rw_debug(cs, base, bundle, sizeof(bundle), false) == 0) {
+                uint64_t low = 0, high = 0;
+                memcpy(&low, &bundle[0], sizeof(low));
+                memcpy(&high, &bundle[8], sizeof(high));
+                uint8_t tmpl = low & 0x1f;
+                uint64_t s0 = (low >> 5) & 0x1ffffffffffULL;
+                uint64_t s1 = ((low >> 46) | (high << 18)) & 0x1ffffffffffULL;
+                uint64_t s2 = (high >> 23) & 0x1ffffffffffULL;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: trace_call_bundle pc=%016" PRIx64
+                              " low=%016" PRIx64 " high=%016" PRIx64
+                              " tmpl=%02x s0=%011" PRIx64 " s1=%011" PRIx64
+                              " s2=%011" PRIx64 "\n",
+                              base, low, high, tmpl, s0, s1, s2);
+            }
+        }
+
+        if (susp_dump_code_bundles > 0) {
+            CPUState *cs = env_cpu(env);
+            uint64_t base = pc & ~0xFULL;
+            uint64_t start = base;
+            if (susp_dump_code_bundles > 16) {
+                uint64_t back =
+                    (uint64_t)(susp_dump_code_bundles / 4) * 16ULL;
+                if (start >= back) {
+                    start -= back;
+                } else {
+                    start = 0;
+                }
+            }
+            g_mkdir_with_parents("scratch/ia64_logs", 0755);
+            char path[256];
+            snprintf(path, sizeof(path),
+                     "scratch/ia64_logs/trace_call_code_%016" PRIx64 ".bin",
+                     base);
+            FILE *fp = fopen(path, "wb");
+            if (fp) {
+                for (int i = 0; i < susp_dump_code_bundles; i++) {
+                    uint8_t bundle[16];
+                    uint64_t bpc = start + (uint64_t)i * 16;
+                    if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle),
+                                            false) != 0) {
+                        break;
+                    }
+                    fwrite(bundle, 1, sizeof(bundle), fp);
+                }
+                fclose(fp);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: trace_call_dump_code pc=%016" PRIx64
+                              " start=%016" PRIx64 " bundles=%d file=%s\n",
+                              base, start, susp_dump_code_bundles, path);
+            }
+        }
+
+        if (susp_dump_code_bundles > 0 && tgt) {
+            CPUState *cs = env_cpu(env);
+            uint64_t base = tgt & ~0xFULL;
+            uint64_t start = base;
+            if (susp_dump_code_bundles > 16) {
+                uint64_t back =
+                    (uint64_t)(susp_dump_code_bundles / 4) * 16ULL;
+                if (start >= back) {
+                    start -= back;
+                } else {
+                    start = 0;
+                }
+            }
+            g_mkdir_with_parents("scratch/ia64_logs", 0755);
+            char path[256];
+            snprintf(path, sizeof(path),
+                     "scratch/ia64_logs/trace_call_tgt_code_%016" PRIx64 ".bin",
+                     base);
+            FILE *fp = fopen(path, "wb");
+            if (fp) {
+                for (int i = 0; i < susp_dump_code_bundles; i++) {
+                    uint8_t bundle[16];
+                    uint64_t bpc = start + (uint64_t)i * 16;
+                    if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle),
+                                            false) != 0) {
+                        break;
+                    }
+                    fwrite(bundle, 1, sizeof(bundle), fp);
+                }
+                fclose(fp);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: trace_call_dump_tgt_code pc=%016" PRIx64
+                              " tgt=%016" PRIx64 " start=%016" PRIx64
+                              " bundles=%d file=%s\n",
+                              pc, base, start, susp_dump_code_bundles, path);
+            }
+        }
+
+        if (trace_call_abort) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: trace_call abort pc=%016" PRIx64 "\n", pc);
+            abort();
+        }
+    }
+
+    if (susp_enabled && susp_count < susp_limit) {
+        uint8_t out0 = 32 + sol;
+        uint64_t a0 = (out0 < 128) ? env->r[out0] : 0;
+        uint64_t a1 = (out0 + 1 < 128) ? env->r[out0 + 1] : 0;
+        uint64_t a2 = (out0 + 2 < 128) ? env->r[out0 + 2] : 0;
+        bool a1_code = (a1 >= 0x20730000ULL && a1 < 0x20740000ULL);
+        bool a2_code = (a2 >= 0x20730000ULL && a2 < 0x20740000ULL);
+        uint64_t sp = env->r[12];
+        uint64_t spdiff = (a2 > sp) ? (a2 - sp) : (sp - a2);
+        bool suspect =
+            (a0 <= 0x20 &&
+             a1_code &&
+             !a2_code &&
+             (a2 & 7) == 0 &&
+             spdiff < (128ULL << 10));
+        if (suspect) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: susp_call pc=%016" PRIx64 " tgt=%016" PRIx64
+                          " cfm=%016" PRIx64 " sof=%u sol=%u outs=%u out0=r%u"
+                          " a0=%016" PRIx64 " a1=%016" PRIx64 " a2=%016" PRIx64
+                          " r1=%016" PRIx64 " r12=%016" PRIx64 " b0=%016" PRIx64 "\n",
+                          pc, tgt, caller_cfm, sof, sol, outs, out0,
+                          a0, a1, a2, env->r[1], env->r[12], env->b[0]);
+
+            if (susp_dump_bundle) {
+                CPUState *cs = env_cpu(env);
+                uint64_t base = pc & ~0xFULL;
+                uint8_t bundle[16];
+                if (cpu_memory_rw_debug(cs, base, bundle, sizeof(bundle),
+                                        false) == 0) {
+                    uint64_t low = 0, high = 0;
+                    memcpy(&low, &bundle[0], sizeof(low));
+                    memcpy(&high, &bundle[8], sizeof(high));
+                    uint8_t tmpl = low & 0x1f;
+                    uint64_t s0 = (low >> 5) & 0x1ffffffffffULL;
+                    uint64_t s1 = ((low >> 46) | (high << 18)) & 0x1ffffffffffULL;
+                    uint64_t s2 = (high >> 23) & 0x1ffffffffffULL;
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: susp_call_bundle pc=%016" PRIx64
+                                  " low=%016" PRIx64 " high=%016" PRIx64
+                                  " tmpl=%02x s0=%011" PRIx64 " s1=%011" PRIx64
+                                  " s2=%011" PRIx64 "\n",
+                                  base, low, high, tmpl, s0, s1, s2);
+                }
+            }
+
+            if (susp_dump_code_bundles > 0) {
+                CPUState *cs = env_cpu(env);
+                uint64_t base = pc & ~0xFULL;
+                uint64_t start = base;
+                if (susp_dump_code_bundles > 16) {
+                    uint64_t back =
+                        (uint64_t)(susp_dump_code_bundles / 4) * 16ULL;
+                    if (start >= back) {
+                        start -= back;
+                    } else {
+                        start = 0;
+                    }
+                }
+                g_mkdir_with_parents("scratch/ia64_logs", 0755);
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/susp_call_code_%016" PRIx64 ".bin",
+                         base);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    for (int i = 0; i < susp_dump_code_bundles; i++) {
+                        uint8_t bundle[16];
+                        uint64_t bpc = start + (uint64_t)i * 16;
+                        if (cpu_memory_rw_debug(cs, bpc, bundle,
+                                                sizeof(bundle), false) != 0) {
+                            break;
+                        }
+                        fwrite(bundle, 1, sizeof(bundle), fp);
+                    }
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: susp_call_dump_code pc=%016" PRIx64
+                                  " start=%016" PRIx64 " bundles=%d file=%s\n",
+                                  base, start, susp_dump_code_bundles, path);
+                }
+            }
+
+            if (susp_dump_code_bundles > 0 && tgt) {
+                CPUState *cs = env_cpu(env);
+                uint64_t base = tgt & ~0xFULL;
+                uint64_t start = base;
+                if (susp_dump_code_bundles > 16) {
+                    uint64_t back =
+                        (uint64_t)(susp_dump_code_bundles / 4) * 16ULL;
+                    if (start >= back) {
+                        start -= back;
+                    } else {
+                        start = 0;
+                    }
+                }
+                g_mkdir_with_parents("scratch/ia64_logs", 0755);
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/susp_call_tgt_code_%016" PRIx64 ".bin",
+                         base);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    for (int i = 0; i < susp_dump_code_bundles; i++) {
+                        uint8_t bundle[16];
+                        uint64_t bpc = start + (uint64_t)i * 16;
+                        if (cpu_memory_rw_debug(cs, bpc, bundle,
+                                                sizeof(bundle), false) != 0) {
+                            break;
+                        }
+                        fwrite(bundle, 1, sizeof(bundle), fp);
+                    }
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: susp_call_dump_tgt_code pc=%016" PRIx64
+                                  " tgt=%016" PRIx64 " start=%016" PRIx64
+                                  " bundles=%d file=%s\n",
+                                  pc, base, start, susp_dump_code_bundles, path);
+                }
+            }
+
+            susp_count++;
+            if (susp_abort) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: susp_call abort pc=%016" PRIx64 "\n", pc);
+                abort();
+            }
+        }
+    }
+
     if (dbg_pc) {
         uint8_t out0 = 32 + sol;
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -1900,7 +4061,7 @@ void HELPER(call)(CPUIA64State *env)
                       env->r[out0 + 3], env->r[out0 + 4]);
     }
 
-    ia64_rse_push_window(env);
+    ia64_rse_push_window(env, pc + 16);
 
     outs = MIN(outs, (uint8_t)96);
     if (sol < 96) {
@@ -1917,8 +4078,12 @@ void HELPER(call)(CPUIA64State *env)
         ia64_dbg_next_call_pc = 0;
     }
 
-    /* Pre-alloc CFM for callee: treat all IN regs as locals. */
-    env->cfm = (outs & 0x7f) | ((outs & 0x7f) << 7);
+    /*
+     * Pre-alloc CFM for callee: on procedure entry the input registers are
+     * also the outgoing registers (SOL=0) until the callee executes alloc to
+     * create locals/out slots.
+     */
+    env->cfm = outs & 0x7f;
 
     /* ar.pfs is updated by the callee's alloc. */
 }
@@ -1945,7 +4110,15 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
      * written by br.call/brl.call.
      */
     uint8_t kind = env->last_b0_write_kind & 0xff;
-    bool do_pop = (kind == 1);
+    uint64_t tgt = env->b[0] & ~0xFULL;
+    bool do_pop = false;
+    if (env->rse_depth > 0) {
+        const struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth - 1];
+        do_pop = (frame->ret_addr != 0 && frame->ret_addr == tgt);
+    }
+    if (!do_pop) {
+        do_pop = (kind == 1);
+    }
     static int log_count;
 
     if (log_count < 64) {
@@ -2070,6 +4243,478 @@ void HELPER(fw_enter_kernel)(CPUIA64State *env)
 }
 
 #ifndef CONFIG_USER_ONLY
+static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
+{
+    static int enabled = -1;
+    static bool fixed_sysmem_rdesc;
+    static bool fixed_attr;
+    static bool fixed_pei_span;
+    static bool fixed_free_bottom;
+    static bool fixed_free_top;
+    static bool fixed_gp_alloc;
+    static int attempts;
+    static uint32_t throttle;
+    static bool logged_phit;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_EFI_HOB_PATCH");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    if (fixed_sysmem_rdesc &&
+        (!enabled || (fixed_attr && fixed_free_bottom && fixed_free_top))) {
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    hwaddr stack_phys = ia64_phys_mode_addr(env->r[12]);
+    if (stack_phys < (64ULL << 20)) {
+        return;
+    }
+    hwaddr ip_phys = ia64_phys_mode_addr(env->ip);
+    if (ip_phys >= 0xff000000ULL) {
+        /* Wait until the firmware has relocated into RAM. */
+        return;
+    }
+    if ((throttle++ & 0x7f) != 0) {
+        return;
+    }
+    if (attempts++ > 256) {
+        return;
+    }
+    if (attempts == 1) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: hob_patch: scan ip=%016" PRIx64 " sp=%016" PRIx64 "\n",
+                      (uint64_t)ip_phys, (uint64_t)stack_phys);
+    }
+
+    enum {
+        EFI_HOB_TYPE_HANDOFF = 0x0001,
+        EFI_HOB_TYPE_MEMORY_ALLOCATION = 0x0002,
+        EFI_HOB_TYPE_RESOURCE_DESCRIPTOR = 0x0003,
+        EFI_HOB_TYPE_END_OF_HOB_LIST = 0xffff,
+    };
+    enum {
+        EFI_RESOURCE_ATTRIBUTE_PRESENT = 0x00000001u,
+        EFI_RESOURCE_ATTRIBUTE_INITIALIZED = 0x00000002u,
+        EFI_RESOURCE_ATTRIBUTE_TESTED = 0x00000004u,
+        EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE = 0x00000400u,
+        EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE = 0x00002000u,
+    };
+
+    /*
+     * Scan for the active EFI HOB list near the current firmware stack. Some
+     * xenipf builds produce a PEI memory descriptor with both UC and WB set;
+     * clear UC to match typical system-memory capabilities and avoid DXE init
+     * asserts in the memory/GCD setup.
+     */
+    const uint8_t phit_magic[8] = { 0x01, 0x00, 0x38, 0x00, 0, 0, 0, 0 };
+    uint64_t scan_base = (stack_phys > (8ULL << 20)) ? (stack_phys - (8ULL << 20)) : 0;
+    uint64_t scan_len = 16ULL << 20;
+    const size_t chunk = 64 * 1024;
+    g_autofree uint8_t *buf = g_malloc(chunk);
+
+    uint64_t hob_base = 0;
+    uint64_t hob_end = 0;
+    uint64_t hob_best_span = 0;
+    for (uint64_t off = 0; off < scan_len; off += chunk - 8) {
+        uint64_t addr = scan_base + off;
+        if (cpu_memory_rw_debug(cs, addr, buf, chunk, false) != 0) {
+            continue;
+        }
+        for (size_t j = 0; j + sizeof(phit_magic) <= chunk; j++) {
+            if (buf[j] != 0x01) {
+                continue;
+            }
+            if (memcmp(&buf[j], phit_magic, sizeof(phit_magic)) != 0) {
+                continue;
+            }
+            uint64_t cand = addr + j;
+            uint64_t end;
+            int count;
+            if (!ia64_fw_validate_efi_hob_list(cs, cand, &end, &count)) {
+                continue;
+            }
+            uint64_t span = end - cand;
+            if (span > hob_best_span) {
+                hob_best_span = span;
+                hob_base = cand;
+                hob_end = end;
+            }
+        }
+    }
+    if (!hob_base) {
+        return;
+    }
+
+    uint8_t phit[0x38];
+    cpu_physical_memory_read(hob_base, phit, sizeof(phit));
+    uint64_t mem_bottom = ldq_le_p(&phit[24]);
+    uint64_t mem_top = ldq_le_p(&phit[16]);
+    uint64_t free_top = ldq_le_p(&phit[32]);
+    uint64_t free_bottom = ldq_le_p(&phit[40]);
+    uint64_t orig_mem_top = mem_top;
+    uint64_t end_hob = ldq_le_p(&phit[48]);
+    uint64_t slack_size = 0;
+
+    /*
+     * Detect the mapped slack window above the original EfiMemoryTop.
+     * This is QEMU-provided RAM used to satisfy xenipf/EDK firmware
+     * relocations that stray slightly beyond the RAM size reported to the OS.
+     */
+    {
+        uint8_t probe;
+        if (orig_mem_top &&
+            cpu_memory_rw_debug(cs, orig_mem_top, &probe, 1, false) == 0) {
+            const uint64_t max_slack = 256ULL << 20;
+            for (uint64_t try = max_slack; try >= (1ULL << 20); try >>= 1) {
+                if (cpu_memory_rw_debug(cs, orig_mem_top + try - 1, &probe, 1, false) == 0) {
+                    slack_size = try;
+                    break;
+                }
+            }
+        }
+    }
+
+    env->fw_phit_mem_bottom = mem_bottom;
+    env->fw_phit_mem_top = mem_top;
+    env->fw_phit_free_bottom = free_bottom;
+    env->fw_phit_free_top = free_top;
+
+    if (!logged_phit) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: hob_patch: phit hob=%016" PRIx64 "-%016" PRIx64
+                      " mem=%016" PRIx64 "-%016" PRIx64
+                      " free=%016" PRIx64 "-%016" PRIx64 "\n",
+                      hob_base, hob_end, mem_bottom, mem_top,
+                      free_bottom, free_top);
+        logged_phit = true;
+    }
+
+    /*
+     * Some xenipf/EDK builds relocate PEI/DXE images so that the current
+     * module's small-data/GOT (GP-relative) window extends into the slack RAM
+     * mapped immediately above PHIT->EfiMemoryTop. DXE memory services then
+     * carve the initial pool starting at EfiMemoryTop and may clear it,
+     * corrupting the executing module and leading to early ASSERTs.
+     *
+     * If GP sits above EfiMemoryTop, advance EfiMemoryTop past GP (plus a small
+     * safety margin) so the initial pool begins above the active GP window.
+     */
+    {
+        uint64_t gp_phys = ia64_phys_mode_addr(env->r[1]);
+        /*
+         * IA-64 ABI GP-relative addressing can span a fairly large window.
+         * Keep a conservative margin above GP before allowing DXE pool
+         * allocations to start.
+         */
+        const uint64_t gp_safety = 2ULL << 20;
+        if (slack_size &&
+            gp_phys > mem_top &&
+            gp_phys < mem_top + slack_size &&
+            gp_phys + gp_safety < mem_top + slack_size) {
+            uint64_t new_mem_top = (gp_phys + gp_safety + 0xfffULL) & ~0xfffULL;
+            if (new_mem_top > mem_top &&
+                new_mem_top < mem_bottom + (256ULL << 20) &&
+                new_mem_top <= mem_top + slack_size) {
+                /*
+                 * Reserve the GP window region in the HOB list so DXE doesn't
+                 * later treat it as free conventional memory.
+                 */
+                if (!fixed_gp_alloc && end_hob) {
+                    uint64_t reserve_base = orig_mem_top;
+                    uint64_t reserve_len = new_mem_top - orig_mem_top;
+                    uint64_t add_bytes = 0x30ULL;
+                    uint64_t new_end_hob = end_hob + add_bytes;
+                    uint64_t new_free_bottom = free_bottom + add_bytes;
+
+                    if (reserve_len &&
+                        reserve_base >= mem_bottom &&
+                        reserve_base + reserve_len <= mem_top + slack_size &&
+                        new_free_bottom < free_top &&
+                        new_free_bottom > free_bottom) {
+                        uint8_t mh[0x30] = { 0 };
+                        stw_le_p(&mh[0], EFI_HOB_TYPE_MEMORY_ALLOCATION);
+                        stw_le_p(&mh[2], 0x30);
+                        /* Name GUID left zero. */
+                        stq_le_p(&mh[24], reserve_base);
+                        stq_le_p(&mh[32], reserve_len);
+                        stl_le_p(&mh[40], 6 /* EfiRuntimeServicesData */);
+                        cpu_physical_memory_write(end_hob, mh, sizeof(mh));
+
+                        uint8_t endhdr[8] = { 0 };
+                        stw_le_p(&endhdr[0], EFI_HOB_TYPE_END_OF_HOB_LIST);
+                        stw_le_p(&endhdr[2], sizeof(endhdr));
+                        cpu_physical_memory_write(new_end_hob, endhdr, sizeof(endhdr));
+
+                        end_hob = new_end_hob;
+                        free_bottom = new_free_bottom;
+                        hob_end += add_bytes;
+                        stq_le_p(&phit[48], end_hob);
+                        stq_le_p(&phit[40], free_bottom);
+                        fixed_gp_alloc = true;
+
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: hob_patch: reserved gp window base=%016" PRIx64
+                                      " len=%016" PRIx64 " end_hob=%016" PRIx64
+                                      " free_bottom=%016" PRIx64 "\n",
+                                      reserve_base, reserve_len, end_hob, free_bottom);
+                    }
+                }
+
+                stq_le_p(&phit[16], new_mem_top);
+                cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: mem_top %016" PRIx64
+                              " -> %016" PRIx64 " (gp=%016" PRIx64 " slack=%" PRIu64 ")\n",
+                              mem_top, new_mem_top, gp_phys, slack_size);
+                mem_top = new_mem_top;
+                env->fw_phit_mem_top = mem_top;
+            }
+        }
+    }
+
+    if (!fixed_sysmem_rdesc) {
+        /*
+         * Some xenipf firmware builds forget to publish EFI resource
+         * descriptors for system memory and only report firmware device
+         * ranges. DXE GCD initialization requires a tested system-memory
+         * resource descriptor that covers EfiFreeMemoryBottom..Top.
+         *
+         * Materialize minimal EFI_RESOURCE_SYSTEM_MEMORY HOB(s) that describe
+         * the guest RAM layout around the legacy VGA hole.
+         */
+        bool has_sysmem = false;
+        bool inserted = false;
+        uint64_t cur = hob_base;
+        for (int iter = 0; iter < 4096 && cur < hob_end; iter++) {
+            uint8_t h[8];
+            if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+                break;
+            }
+            uint16_t type = lduw_le_p(&h[0]);
+            uint16_t len = lduw_le_p(&h[2]);
+            if (len < sizeof(h)) {
+                break;
+            }
+            if (type == EFI_HOB_TYPE_END_OF_HOB_LIST) {
+                break;
+            }
+            if (type == EFI_HOB_TYPE_RESOURCE_DESCRIPTOR && len >= 0x30) {
+                uint8_t rh[0x30];
+                if (cpu_memory_rw_debug(cs, cur, rh, sizeof(rh), false) != 0) {
+                    break;
+                }
+                uint32_t rtype = ldl_le_p(&rh[24]);
+                if (rtype == 0 /* EFI_RESOURCE_SYSTEM_MEMORY */) {
+                    has_sysmem = true;
+                    break;
+                }
+            }
+            cur += len;
+        }
+
+        if (!has_sysmem && mem_top > mem_bottom) {
+            /*
+             * DXE memory services bootstrap expects the tested system-memory
+             * resource descriptor to extend above PHIT's EfiMemoryTop so it can
+             * carve out an initial pool from the "headroom" region.
+             *
+             * The IPF machine maps a small slack RAM window immediately above
+             * EfiMemoryTop (see IPF_FW_SLACK_SIZE). If present, include it in
+             * the synthetic system-memory resource descriptor so DXE can
+             * allocate without trampling the PEI workspace.
+             */
+            uint64_t sysmem_len = mem_top - mem_bottom;
+            uint8_t probe;
+            if (slack_size &&
+                cpu_memory_rw_debug(cs, orig_mem_top, &probe, 1, false) == 0 &&
+                cpu_memory_rw_debug(cs, orig_mem_top + slack_size - 1, &probe, 1, false) == 0) {
+                sysmem_len += slack_size;
+            }
+
+            struct {
+                uint64_t start;
+                uint64_t len;
+            } segs[2];
+            int nsegs = 0;
+            segs[nsegs++] = (typeof(segs[0])){ .start = mem_bottom, .len = sysmem_len };
+
+            uint64_t add_bytes = (uint64_t)nsegs * 0x30ULL;
+            uint64_t new_end_hob = end_hob + add_bytes;
+            uint64_t new_free_bottom = free_bottom + add_bytes;
+            if (end_hob != (hob_end - 8)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: unexpected end_hob %016" PRIx64 " hob_end %016" PRIx64 "\n",
+                              end_hob, hob_end);
+            }
+
+            if (new_free_bottom < free_top && new_free_bottom > free_bottom) {
+                uint64_t attr = EFI_RESOURCE_ATTRIBUTE_PRESENT |
+                                EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+                                EFI_RESOURCE_ATTRIBUTE_TESTED |
+                                EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE;
+
+                for (int i = 0; i < nsegs; i++) {
+                    uint8_t rh[0x30] = { 0 };
+                    stw_le_p(&rh[0], EFI_HOB_TYPE_RESOURCE_DESCRIPTOR);
+                    stw_le_p(&rh[2], 0x30);
+                    stl_le_p(&rh[24], 0 /* EFI_RESOURCE_SYSTEM_MEMORY */);
+                    stl_le_p(&rh[28], (uint32_t)attr);
+                    stq_le_p(&rh[32], segs[i].start);
+                    stq_le_p(&rh[40], segs[i].len);
+                    cpu_physical_memory_write(end_hob + (uint64_t)i * 0x30ULL, rh, sizeof(rh));
+                }
+
+                uint8_t endhdr[8] = { 0 };
+                stw_le_p(&endhdr[0], EFI_HOB_TYPE_END_OF_HOB_LIST);
+                stw_le_p(&endhdr[2], sizeof(endhdr));
+                cpu_physical_memory_write(new_end_hob, endhdr, sizeof(endhdr));
+
+                stq_le_p(&phit[48], new_end_hob);
+                stq_le_p(&phit[40], new_free_bottom);
+                cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+
+                hob_end += add_bytes;
+                end_hob = new_end_hob;
+                free_bottom = new_free_bottom;
+                inserted = true;
+
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: inserted %d sysmem resource HOB(s)"
+                              " end_hob %016" PRIx64 " free_bottom %016" PRIx64 "\n",
+                              nsegs, end_hob, free_bottom);
+            }
+        }
+        fixed_sysmem_rdesc = has_sysmem || inserted;
+        env->fw_phit_mem_bottom = mem_bottom;
+        env->fw_phit_mem_top = mem_top;
+        env->fw_phit_free_bottom = free_bottom;
+        env->fw_phit_free_top = free_top;
+    }
+
+    if (enabled && !fixed_free_bottom) {
+        /*
+         * Some xenipf firmware builds leave EfiFreeMemoryBottom unset (0),
+         * which later causes DXE pool sizing code to treat EfiFreeMemoryTop
+         * (an address) as a byte size and attempt multi-hundred-megabyte
+         * allocations. Default the free bottom to the end of the active HOB
+         * list when it is missing.
+         */
+        if (free_bottom == 0) {
+            uint64_t new_free_bottom = (hob_end + 7) & ~0x7ULL;
+            if (new_free_bottom > mem_bottom &&
+                new_free_bottom < free_top &&
+                new_free_bottom <= mem_top) {
+                stq_le_p(&phit[40], new_free_bottom);
+                cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: free_bottom %016" PRIx64
+                              " -> %016" PRIx64 "\n",
+                              free_bottom, new_free_bottom);
+                free_bottom = new_free_bottom;
+            }
+        }
+        fixed_free_bottom = (free_bottom != 0);
+    }
+
+    if (attempts == 1) {
+        ia64_fw_dump_efi_hobs(cs, stack_phys);
+    }
+
+    uint64_t cur = hob_base;
+    for (int iter = 0; iter < 4096 && cur < hob_end; iter++) {
+        uint8_t h[8];
+        if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+            break;
+        }
+        uint16_t type = lduw_le_p(&h[0]);
+        uint16_t len = lduw_le_p(&h[2]);
+        if (len < sizeof(h)) {
+            break;
+        }
+        if (type == EFI_HOB_TYPE_END_OF_HOB_LIST) {
+            break;
+        }
+        if (type == EFI_HOB_TYPE_RESOURCE_DESCRIPTOR && len >= 0x30) {
+            uint8_t rh[0x30];
+            if (cpu_memory_rw_debug(cs, cur, rh, sizeof(rh), false) != 0) {
+                break;
+            }
+            uint64_t start = ldq_le_p(&rh[32]);
+            uint64_t rlen = ldq_le_p(&rh[40]);
+            uint32_t rattr = ldl_le_p(&rh[28]);
+
+            if (!fixed_pei_span &&
+                start == mem_bottom &&
+                (orig_mem_top > mem_bottom) &&
+                rlen == (orig_mem_top - mem_bottom)) {
+                uint64_t extra = slack_size ? slack_size : (8ULL << 20);
+                uint64_t new_len = rlen + extra;
+                stq_le_p(&rh[40], new_len);
+                cpu_physical_memory_write(cur, rh, sizeof(rh));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: PEI mem len %016" PRIx64 " -> %016" PRIx64
+                              " at hob=%016" PRIx64 "\n",
+                              rlen, new_len, cur);
+                fixed_pei_span = true;
+                /* Refresh rlen for subsequent matches in this iteration. */
+                rlen = new_len;
+            }
+
+            if (start == mem_bottom &&
+                (rattr & (EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE |
+                          EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE)) ==
+                    (EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE |
+                     EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE)) {
+                uint32_t new_attr = rattr & ~EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE;
+                stl_le_p(&rh[28], new_attr);
+                cpu_physical_memory_write(cur, rh, sizeof(rh));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: PEI mem attr 0x%08x -> 0x%08x at hob=%016" PRIx64 "\n",
+                              rattr, new_attr, cur);
+                fixed_attr = true;
+            }
+        }
+        cur += len;
+        if (cur - hob_base > (16ULL << 20)) {
+            break;
+        }
+    }
+
+    if (!fixed_free_top) {
+        /*
+         * The xenipf EDK firmware relocates some modules very close to the top
+         * of PEI memory. With incorrect/absent memory allocation HOBs, DXE can
+         * later treat parts of the relocated image's small-data/GOT area as
+         * free pool space and zero it, leading to early ASSERTs.
+         *
+         * Clamp EfiFreeMemoryTop below the beginning of the current module's
+         * GP-relative window (GP-2MiB, 4KiB aligned) when that window sits
+         * near the reported free_top.
+         */
+        uint64_t gp_phys = ia64_phys_mode_addr(env->r[1]);
+        uint64_t gp_low = 0;
+        if (gp_phys >= (2ULL << 20)) {
+            gp_low = (gp_phys - (2ULL << 20)) & ~0xfffULL;
+        }
+
+        if (gp_low &&
+            gp_phys > free_top &&
+            gp_low < free_top &&
+            gp_low < mem_top &&
+            gp_low > free_bottom &&
+            (free_top - gp_low) <= (256ULL << 10)) {
+            stq_le_p(&phit[32], gp_low);
+            cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: free_top %016" PRIx64 " -> %016" PRIx64
+                          " (gp=%016" PRIx64 ")\n",
+                          free_top, gp_low, gp_phys);
+            fixed_free_top = true;
+        }
+    }
+}
+
 static bool ia64_fw_fastpath_copy(uint64_t dst, uint64_t src, uint64_t len)
 {
     while (len) {
@@ -2133,11 +4778,82 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
      * The patterns below were identified by disassembling the hot loops
      * surfaced by the ia64 hang detector (see QEMU_IA64_HANG_ABORT).
      */
+    /*
+     * Use this frequently-invoked helper as a hook to install missing EFI
+     * configuration table entries before DXE drivers assert. Throttle probing
+     * to avoid scanning memory repeatedly during early PEI.
+     */
+    static uint64_t fp_calls;
+    if (!env->fw_sal_systab_installed && ((++fp_calls & 0xfff) == 0)) {
+        ia64_fw_try_install_sal_systab(env);
+    }
+
     static int trace_enabled = -1;
     static int trace_count;
+    static int trace_limit = -1;
+    static uint64_t trace_match_len = UINT64_MAX;
+    static uint64_t trace_match_src = UINT64_MAX;
+    static uint64_t trace_match_dst_lo = UINT64_MAX;
+    static uint64_t trace_match_dst_hi = UINT64_MAX;
     if (trace_enabled == -1) {
         const char *s = getenv("QEMU_IA64_FW_FASTPATH_TRACE");
         trace_enabled = (s && *s) ? 1 : 0;
+    }
+    if (trace_limit == -1) {
+        trace_limit = 64;
+        const char *s = getenv("QEMU_IA64_FW_FASTPATH_TRACE_LIMIT");
+        if (s && *s) {
+            trace_limit = atoi(s);
+        }
+        if (trace_limit < 0) {
+            trace_limit = 0;
+        }
+        if (trace_limit > 1000000) {
+            trace_limit = 1000000;
+        }
+    }
+    if (trace_match_len == UINT64_MAX) {
+        trace_match_len = 0;
+        const char *s = getenv("QEMU_IA64_FW_FASTPATH_TRACE_MATCH_LEN");
+        if (s && *s) {
+            trace_match_len = strtoull(s, NULL, 0);
+        }
+    }
+    if (trace_match_src == UINT64_MAX) {
+        trace_match_src = 0;
+        const char *s = getenv("QEMU_IA64_FW_FASTPATH_TRACE_MATCH_SRC");
+        if (s && *s) {
+            trace_match_src = ia64_phys_mode_addr(strtoull(s, NULL, 0));
+        }
+    }
+    if (trace_match_dst_lo == UINT64_MAX) {
+        trace_match_dst_lo = 0;
+        trace_match_dst_hi = 0;
+        const char *s = getenv("QEMU_IA64_FW_FASTPATH_TRACE_MATCH_DST_RANGE");
+        if (s && *s) {
+            char *endp = NULL;
+            uint64_t lo = strtoull(s, &endp, 0);
+            if (endp && endp != s) {
+                while (*endp && (isspace((unsigned char)*endp) || *endp == ',')) {
+                    endp++;
+                }
+                if (*endp == ':' || *endp == '-') {
+                    endp++;
+                } else if (*endp == '.' && endp[1] == '.') {
+                    endp += 2;
+                }
+                while (*endp && isspace((unsigned char)*endp)) {
+                    endp++;
+                }
+                if (*endp) {
+                    uint64_t hi = strtoull(endp, NULL, 0);
+                    if (hi > lo) {
+                        trace_match_dst_lo = ia64_phys_mode_addr(lo);
+                        trace_match_dst_hi = ia64_phys_mode_addr(hi);
+                    }
+                }
+            }
+        }
     }
     if (ri != 0) {
         return 0;
@@ -2146,6 +4862,8 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         /* Only handle physical-mode loops. */
         return 0;
     }
+
+    ia64_fw_try_patch_efi_hobs(env);
 
     hwaddr phys_pc = ia64_phys_mode_addr(pc);
 
@@ -2185,7 +4903,12 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
             return 0;
         }
 
-        if (trace_enabled && trace_count++ < 64) {
+        bool match = (trace_match_len && count == trace_match_len) ||
+                     (trace_match_src && src_phys == trace_match_src) ||
+                     (trace_match_dst_hi > trace_match_dst_lo &&
+                      dst_phys >= trace_match_dst_lo &&
+                      dst_phys < trace_match_dst_hi);
+        if (trace_enabled && (match || trace_count++ < trace_limit)) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "fw_fastpath memcpy pc=%016" PRIx64
                           " dst=%016" PRIx64 " src=%016" PRIx64
@@ -2210,6 +4933,95 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 
         /* Mirror the loop's (p15) mov r8=r0 success return. */
         env->r[8] = 0;
+        env->ip = pc + 0xc0;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
+    /*
+     * Bytewise memcpy loop (forward), variant used by PEI memory services:
+     *   struct { dst, src, ..., count } at r12 offsets 0,8,32.
+     *   exit at pc + 0xc0.
+     *
+     * This loop decrements count before the copy and stores -1 on exit, just
+     * like the main memcpy loop above.
+     */
+    if (low0 == 0x01e021001880f811ULL &&
+        high0 == 0x2000000000420031ULL &&
+        low1 == 0x00f010183e00f80bULL &&
+        high1 == 0x84006203e070007cULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t tmp[8];
+        cpu_physical_memory_read(frame + 0, tmp, sizeof(tmp));
+        uint64_t dst_raw = ldq_le_p(tmp);
+        cpu_physical_memory_read(frame + 8, tmp, sizeof(tmp));
+        uint64_t src_raw = ldq_le_p(tmp);
+        cpu_physical_memory_read(frame + 32, tmp, sizeof(tmp));
+        uint64_t count = ldq_le_p(tmp);
+
+        hwaddr dst_phys = ia64_phys_mode_addr(dst_raw);
+        hwaddr src_phys = ia64_phys_mode_addr(src_raw);
+
+        /*
+         * This loop head is also used by EDK's CopyMem() backward-copy path.
+         * In that case the frame holds end pointers (dst_end/src_end) and the
+         * original (start) pointers remain in the incoming argument registers.
+         *
+         * Detect that case by checking:
+         *   dst_end == dst_arg + (count - 1)
+         *   src_end == src_arg + (count - 1)
+         *
+         * When true, accelerate the remaining bytes by copying from the start
+         * pointers and then update the end pointers the way the loop would
+         * leave them (dst/src decremented by count, count stored as -1).
+         */
+        bool backward = false;
+        hwaddr copy_dst = dst_phys;
+        hwaddr copy_src = src_phys;
+        if (count) {
+            hwaddr arg_dst = ia64_phys_mode_addr(env->r[32]);
+            hwaddr arg_src = ia64_phys_mode_addr(env->r[33]);
+            if (dst_phys == arg_dst + (count - 1) &&
+                src_phys == arg_src + (count - 1)) {
+                backward = true;
+                copy_dst = arg_dst;
+                copy_src = arg_src;
+            }
+        }
+
+        if (count && !ia64_fw_fastpath_copy(copy_dst, copy_src, count)) {
+            return 0;
+        }
+
+        bool match = (trace_match_len && count == trace_match_len) ||
+                     (trace_match_src && (backward ? copy_src : src_phys) == trace_match_src) ||
+                     (trace_match_dst_hi > trace_match_dst_lo &&
+                      (backward ? copy_dst : dst_phys) >= trace_match_dst_lo &&
+                      (backward ? copy_dst : dst_phys) < trace_match_dst_hi);
+        if (trace_enabled && (match || trace_count++ < trace_limit)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath memcpy(v2%s) pc=%016" PRIx64
+                          " dst=%016" PRIx64 " src=%016" PRIx64
+                          " len=%" PRIu64 "\n",
+                          backward ? ",back" : "", pc, dst_raw, src_raw, count);
+        }
+
+        if (backward) {
+            dst_raw -= count;
+            src_raw -= count;
+        } else {
+            dst_raw += count;
+            src_raw += count;
+        }
+        count = UINT64_MAX;
+
+        stq_le_p(tmp, dst_raw);
+        cpu_physical_memory_write(frame + 0, tmp, sizeof(tmp));
+        stq_le_p(tmp, src_raw);
+        cpu_physical_memory_write(frame + 8, tmp, sizeof(tmp));
+        stq_le_p(tmp, count);
+        cpu_physical_memory_write(frame + 32, tmp, sizeof(tmp));
+
         env->ip = pc + 0xc0;
         env->psr &= ~PSR_RI_MASK;
         return 1;
@@ -2280,7 +5092,11 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                 return 0;
             }
 
-            if (trace_enabled && trace_count++ < 64) {
+            bool match = (trace_match_len && count == trace_match_len) ||
+                         (trace_match_dst_hi > trace_match_dst_lo &&
+                          dst_phys >= trace_match_dst_lo &&
+                          dst_phys < trace_match_dst_hi);
+            if (trace_enabled && (match || trace_count++ < trace_limit)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "fw_fastpath fill pc=%016" PRIx64
                               " dst=%016" PRIx64
@@ -2307,6 +5123,57 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 #endif
 }
 
+void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    /*
+     * xenipf/EDK firmware MP buffer bringup.
+     *
+     * IpfEarlyMpInit elects the BSP by comparing a per-CPU signature against
+     * the literal " __BSP__". If the MP buffer base is NULL, the firmware
+     * mis-identifies CPU0 as an AP and calls through a NULL rendezvous
+     * function pointer, crashing early in PEI.
+     *
+     * Provide a minimal MP buffer in the ia64 firmware work RAM and point the
+     * scratch stack slots at it so CPU0 takes the BSP path.
+     */
+    static bool logged;
+    if (env->psr & IA64_PSR_DT) {
+        return;
+    }
+
+    hwaddr sp = ia64_phys_mode_addr(env->r[12]);
+    uint8_t tmp[8];
+    cpu_physical_memory_read(sp + 336, tmp, sizeof(tmp));
+    uint64_t cur = ldq_le_p(tmp);
+    if (cur != 0) {
+        return;
+    }
+
+    const hwaddr mp_base = 0x0000000100ffe000ULL; /* within ipf.fw-workram */
+    const uint64_t bsp_sig = 0x5f5f5053425f5f20ULL; /* " __BSP__" */
+
+    stq_le_p(tmp, bsp_sig);
+    cpu_physical_memory_write(mp_base + 0x188, tmp, sizeof(tmp));
+
+    stq_le_p(tmp, (uint64_t)mp_base);
+    cpu_physical_memory_write(sp + 336, tmp, sizeof(tmp));
+    cpu_physical_memory_write(sp + 344, tmp, sizeof(tmp));
+
+    if (!logged) {
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: xenipf mpbuffer: pc=%016" PRIx64
+                      " sp=%016" HWADDR_PRIx " mp_base=%016" HWADDR_PRIx "\n",
+                      pc, sp, mp_base);
+    }
+#endif
+}
+
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,
@@ -2323,6 +5190,10 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     /* IA64CPU *cpu = IA64_CPU(cs); */
     CPUIA64State *env = cpu_env(cs);
     bool is_fetch = (access_type == MMU_INST_FETCH);
+
+#ifndef CONFIG_USER_ONLY
+    ia64_fw_try_patch_efi_hobs(env);
+#endif
 
     /*
      * Canonical per-cpu region mapping.
@@ -2743,11 +5614,34 @@ void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                         uint64_t threshold)
 {
+    static int log_every_inited;
+    static uint64_t log_every;
+
+    if (!log_every_inited) {
+        log_every_inited = 1;
+        const char *s = getenv("QEMU_IA64_HANG_LOG_EVERY");
+        if (s && *s) {
+            log_every = (uint64_t)strtoull(s, NULL, 0);
+        }
+    }
+
     if (threshold == 0) {
         return;
     }
 
     env->dbg_tb_total++;
+
+    if (log_every && (env->dbg_tb_total % log_every) == 0 &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64 hang_heartbeat total=%" PRIu64 " tbpc=%016" PRIx64
+                      " ri=%u ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                      " last_branch from=%016" PRIx64 " to=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
+                      env->dbg_tb_total, pc, ri, env->ip, env->psr, env->cfm,
+                      env->last_branch_from, env->last_branch_to,
+                      env->last_branch_kind, env->last_branch_insn);
+    }
 
     uint64_t lc = env->ar[65];
     uint64_t ec = env->ar[66];
@@ -3305,6 +6199,8 @@ void HELPER(fw_pal)(CPUIA64State *env)
 
 void HELPER(fw_sal)(CPUIA64State *env)
 {
+    ia64_fw_try_install_sal_systab(env);
+
     uint64_t func_raw = env->r[32];
     /*
      * Some IA-64 guest firmware uses the low 24-bit SAL function numbers
@@ -3329,14 +6225,17 @@ void HELPER(fw_sal)(CPUIA64State *env)
         break;
     case IA64_SAL_GET_STATE_INFO:
         /*
-         * Match SKI/Xen firmware expectations: report no state info available
-         * (SAL_STATUS_NO_ENTRY == -5 in common implementations).
+         * Match SKI's SAL emulation: return success with no state-info.
+         *
+         * Some firmware stacks (notably xenipf/EDK) treat failures from
+         * SAL_GET_STATE_INFO as fatal during early DXE init.
          */
-        status = -5;
+        status = 0;
         break;
     case IA64_SAL_GET_STATE_INFO_SIZE:
+        /* SKI returns success and size 0. */
         status = 0;
-        v0 = 1;
+        v0 = 0;
         break;
     case IA64_SAL_CLEAR_STATE_INFO:
     case IA64_SAL_MC_RENDEZ:
@@ -3482,8 +6381,20 @@ void HELPER(fw_sal)(CPUIA64State *env)
         }
         break;
     }
-    case IA64_SAL_PHYSICAL_ID_INFO:
     case IA64_SAL_UPDATE_PAL:
+        /* SKI returns success; firmware stacks may treat failure as fatal. */
+        status = 0;
+        v0 = 0;
+        v1 = 0;
+        v2 = 0;
+        break;
+    case IA64_SAL_PHYSICAL_ID_INFO:
+        /* Minimal single-socket/single-core answer. */
+        status = 0;
+        v0 = 0;
+        v1 = 0;
+        v2 = 0;
+        break;
     default:
         status = -1;
         break;
