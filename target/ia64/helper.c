@@ -537,8 +537,12 @@ void HELPER(fc)(CPUIA64State *env, uint64_t va)
         pa = helper_tpa(env, va);
     }
 
-    pa &= ~0x1fULL;
-    tb_invalidate_phys_range(env_cpu(env), pa, pa + 31);
+    pa &= TARGET_PAGE_MASK;
+    if (pa == env->fc_last_page) {
+        return;
+    }
+    env->fc_last_page = pa;
+    tb_invalidate_phys_range(env_cpu(env), pa, pa + TARGET_PAGE_SIZE - 1);
 }
 
 static void ia64_rse_ensure(CPUIA64State *env, uint32_t need)

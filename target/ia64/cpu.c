@@ -197,6 +197,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     env->last_branch_to = 0;
     env->last_branch_insn = 0;
     env->last_branch_kind = 0;
+    env->fc_last_page = ~0ULL;
 
     /* Disable VHPT until firmware/guest enables it. */
     env->cr[8] = 0; /* PTA.ve = 0 */

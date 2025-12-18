@@ -185,6 +185,9 @@ typedef struct CPUArchState {
 
     /* Firmware bringup: one-way SAL systab config-table install guard. */
     uint64_t fw_sal_systab_installed;
+
+    /* Cache flush throttle: last page invalidated by fc/fc.i. */
+    uint64_t fc_last_page;
 } CPUIA64State;
 
 struct ArchCPU {
