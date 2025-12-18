@@ -2786,6 +2786,188 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     return (pc & ~0xFULL) + 16;
 }
 
+#ifndef CONFIG_USER_ONLY
+static void ia64_dbg_probe_dump_mem(CPUIA64State *env, uint64_t pc,
+                                    const char *tag, uint64_t addr, int nbytes)
+{
+    if (nbytes <= 0) {
+        return;
+    }
+    if (nbytes > 256) {
+        nbytes = 256;
+    }
+    if (addr == 0) {
+        return;
+    }
+
+    hwaddr pa;
+    if (env->psr & IA64_PSR_DT) {
+        pa = helper_tpa(env, addr);
+    } else {
+        pa = ia64_phys_mode_addr(addr);
+    }
+
+    uint8_t mem[256];
+    cpu_physical_memory_read(pa, mem, (size_t)nbytes);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_probe_%s pc=%016" PRIx64 " va=%016" PRIx64
+                  " pa=%016" HWADDR_PRIx " bytes=%d\n",
+                  tag, pc, addr, pa, nbytes);
+    for (int off = 0; off < nbytes; off += 16) {
+        char line[128];
+        int pos = 0;
+        pos += snprintf(line + pos, sizeof(line) - pos,
+                        "  %016" HWADDR_PRIx ":", pa + (hwaddr)off);
+        for (int j = 0; j < 16 && off + j < nbytes; j++) {
+            pos += snprintf(line + pos, sizeof(line) - pos,
+                            " %02x", mem[off + j]);
+        }
+        qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+    }
+}
+
+static void ia64_dbg_peimage_probe(CPUIA64State *env, uint64_t pc)
+{
+    static int enabled = -1;
+    static uint64_t last_pc;
+    static int dump_enabled = -1;
+    static uint64_t last_dump_base;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_PEIMAGE");
+        enabled = (s && *s) ? 1 : 0;
+        last_pc = UINT64_MAX;
+        dump_enabled = getenv("QEMU_IA64_DBG_PEIMAGE_DUMP") ? 1 : 0;
+        last_dump_base = UINT64_MAX;
+    }
+    if (!enabled || pc == last_pc) {
+        return;
+    }
+    last_pc = pc;
+
+    if (env->psr & IA64_PSR_DT) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_peimage pc=%016" PRIx64 " skip (DT=1)\n", pc);
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    hwaddr phys_pc = ia64_phys_mode_addr(pc);
+    hwaddr base = phys_pc & ~0xfffULL;
+    hwaddr min = (phys_pc > (2ULL << 20)) ? (phys_pc - (2ULL << 20)) : 0;
+
+    uint8_t hdr[0x200];
+    for (hwaddr probe = base; probe >= min; probe -= 0x1000) {
+        if (cpu_memory_rw_debug(cs, probe, hdr, sizeof(hdr), false) != 0) {
+            if (probe == min) {
+                break;
+            }
+            continue;
+        }
+        if (hdr[0] != 'M' || hdr[1] != 'Z') {
+            if (probe == min) {
+                break;
+            }
+            continue;
+        }
+        uint32_t pe_off = ldl_le_p(&hdr[0x3c]);
+        if (pe_off + 0x40 > sizeof(hdr)) {
+            continue;
+        }
+        if (ldl_le_p(&hdr[pe_off]) != 0x00004550) { /* "PE\0\0" */
+            continue;
+        }
+
+        uint16_t machine = lduw_le_p(&hdr[pe_off + 4]);
+        uint16_t opt_size = lduw_le_p(&hdr[pe_off + 20]);
+        uint32_t opt_off = pe_off + 24;
+        if (opt_off + opt_size > sizeof(hdr)) {
+            continue;
+        }
+        uint16_t magic = lduw_le_p(&hdr[opt_off]);
+        uint64_t image_base = 0;
+        uint32_t entry = 0;
+        uint32_t size_of_image = 0;
+        uint32_t debug_rva = 0;
+        uint32_t debug_size = 0;
+
+        if (magic == 0x20b) {
+            entry = ldl_le_p(&hdr[opt_off + 0x10]);
+            image_base = ldq_le_p(&hdr[opt_off + 0x18]);
+            size_of_image = ldl_le_p(&hdr[opt_off + 0x38]);
+            debug_rva = ldl_le_p(&hdr[opt_off + 0x70 + 6 * 8]);
+            debug_size = ldl_le_p(&hdr[opt_off + 0x70 + 6 * 8 + 4]);
+        } else if (magic == 0x10b) {
+            entry = ldl_le_p(&hdr[opt_off + 0x10]);
+            image_base = ldl_le_p(&hdr[opt_off + 0x1c]);
+            size_of_image = ldl_le_p(&hdr[opt_off + 0x38]);
+            debug_rva = ldl_le_p(&hdr[opt_off + 0x60 + 6 * 8]);
+            debug_size = ldl_le_p(&hdr[opt_off + 0x60 + 6 * 8 + 4]);
+        } else {
+            continue;
+        }
+
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_peimage pc=%016" PRIx64 " base=%016" PRIx64
+                      " image_base=%016" PRIx64 " size=0x%x entry=0x%x machine=0x%x\n",
+                      pc, (uint64_t)probe, image_base, size_of_image, entry, machine);
+
+        if (dump_enabled && size_of_image > 0 && probe != last_dump_base) {
+            g_mkdir_with_parents("scratch/ia64_logs", 0755);
+            g_autofree uint8_t *img = g_malloc(size_of_image);
+            if (cpu_memory_rw_debug(cs, probe, img, size_of_image, false) == 0) {
+                char path[256];
+                snprintf(path, sizeof(path),
+                         "scratch/ia64_logs/peimage_%016" PRIx64 ".bin",
+                         (uint64_t)probe);
+                FILE *fp = fopen(path, "wb");
+                if (fp) {
+                    fwrite(img, 1, size_of_image, fp);
+                    fclose(fp);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "dbg_peimage_dump pc=%016" PRIx64
+                                  " base=%016" PRIx64 " size=0x%x file=%s\n",
+                                  pc, (uint64_t)probe, size_of_image, path);
+                    last_dump_base = probe;
+                }
+            }
+        }
+
+        if (debug_rva && debug_size && debug_rva < size_of_image) {
+            uint8_t dbghdr[0x1c];
+            hwaddr dbg_va = probe + debug_rva;
+            if (cpu_memory_rw_debug(cs, dbg_va, dbghdr, sizeof(dbghdr), false) == 0) {
+                uint32_t dbg_type = ldl_le_p(&dbghdr[12]);
+                uint32_t dbg_rva = ldl_le_p(&dbghdr[20]);
+                if (dbg_type == 2) { /* IMAGE_DEBUG_TYPE_CODEVIEW */
+                    uint8_t cvhdr[256];
+                    hwaddr cv_va = probe + dbg_rva;
+                    if (cpu_memory_rw_debug(cs, cv_va, cvhdr, sizeof(cvhdr), false) == 0 &&
+                        memcmp(cvhdr, "RSDS", 4) == 0) {
+                        char pdb[128];
+                        size_t max = sizeof(pdb) - 1;
+                        size_t i;
+                        for (i = 24; i < sizeof(cvhdr) && i - 24 < max; i++) {
+                            if (cvhdr[i] == '\0') {
+                                break;
+                            }
+                            pdb[i - 24] = (char)cvhdr[i];
+                        }
+                        pdb[i - 24] = '\0';
+                        if (pdb[0]) {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "dbg_peimage pc=%016" PRIx64 " pdb=%s\n",
+                                          pc, pdb);
+                        }
+                    }
+                }
+            }
+        }
+        break;
+    }
+}
+#endif /* !CONFIG_USER_ONLY */
+
 void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
 {
     typedef struct {
@@ -2803,6 +2985,10 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     static int dbg_assert_buf_enabled = -1;
     static int dbg_assert_buf_len = -1;
     static int dbg_assert_buf_dump = -1;
+    static int dbg_loop_trace = -1;
+    static int dbg_loop_limit = -1;
+    static uint32_t loop_hits_11ac0;
+    static uint32_t loop_hits_12180;
 
     bool abort_panic = false;
     uint32_t idx;
@@ -2818,6 +3004,57 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         probes[idx].pc = pc;
         probes[idx].count = 0;
         nprobes++;
+    }
+
+    if (dbg_loop_trace == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_LOOP_TRACE");
+        dbg_loop_trace = (s && *s) ? 1 : 0;
+    }
+    if (dbg_loop_limit == -1) {
+        dbg_loop_limit = 256;
+        const char *s = getenv("QEMU_IA64_DBG_LOOP_LIMIT");
+        if (s && *s) {
+            dbg_loop_limit = atoi(s);
+        }
+        if (dbg_loop_limit < 0) {
+            dbg_loop_limit = 0;
+        }
+    }
+
+    if (dbg_loop_trace) {
+        if (pc == 0x10011ac0ULL || pc == 0x20011ac0ULL) {
+            if (loop_hits_11ac0++ < (uint32_t)dbg_loop_limit) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "dbg_loop pc=%016" PRIx64 " hit=%u"
+                              " r30=%016" PRIx64 " r31=%016" PRIx64
+                              " r32=%016" PRIx64 " r33=%016" PRIx64
+                              " r34=%016" PRIx64 " r35=%016" PRIx64
+                              " ar.lc=%016" PRIx64 " pr=%016" PRIx64
+                              " p14=%u p15=%u\n",
+                              pc, loop_hits_11ac0,
+                              env->r[30], env->r[31], env->r[32], env->r[33],
+                              env->r[34], env->r[35],
+                              env->ar[65], env->pr,
+                              (unsigned)((env->pr >> 14) & 1),
+                              (unsigned)((env->pr >> 15) & 1));
+            }
+        } else if (pc == 0x10012180ULL || pc == 0x20012180ULL) {
+            if (loop_hits_12180++ < (uint32_t)dbg_loop_limit) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "dbg_loop pc=%016" PRIx64 " hit=%u"
+                              " r30=%016" PRIx64 " r31=%016" PRIx64
+                              " r32=%016" PRIx64 " r33=%016" PRIx64
+                              " r34=%016" PRIx64 " r35=%016" PRIx64
+                              " ar.lc=%016" PRIx64 " pr=%016" PRIx64
+                              " p14=%u p15=%u\n",
+                              pc, loop_hits_12180,
+                              env->r[30], env->r[31], env->r[32], env->r[33],
+                              env->r[34], env->r[35],
+                              env->ar[65], env->pr,
+                              (unsigned)((env->pr >> 14) & 1),
+                              (unsigned)((env->pr >> 15) & 1));
+            }
+        }
     }
 
     if (dbg_probe_limit == -1) {
@@ -2904,6 +3141,8 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     qemu_log_mask(LOG_GUEST_ERROR,
                   "dbg_probe pc=%016" PRIx64 " ri=%u"
                   " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64 " depth=%u"
+                  " last_br from=%016" PRIx64 " to=%016" PRIx64
+                  " kind=%" PRIu64 " insn=%011" PRIx64
                   " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
                   " pta=%016" PRIx64 " itir=%016" PRIx64
                   " ar.rsc=%016" PRIx64 " ar.bsp=%016" PRIx64 " ar.bspstore=%016" PRIx64
@@ -2931,6 +3170,8 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
                   pc, ri,
                   env->psr, env->cfm, env->pr, env->rse_depth,
+                  env->last_branch_from, env->last_branch_to,
+                  env->last_branch_kind, env->last_branch_insn,
                   env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
                   env->ar[IA64_AR_RSC], env->ar[IA64_AR_BSP],
                   env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RNAT],
@@ -2966,38 +3207,133 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                     dump_r8_len = 64;
                 }
             }
-            if (dump_r8_len > 256) {
-                dump_r8_len = 256;
-            }
         }
     }
     if (dump_r8_len > 0) {
-        hwaddr pa;
-        if (env->psr & IA64_PSR_DT) {
-            pa = helper_tpa(env, env->r[8]);
-        } else {
-            pa = ia64_phys_mode_addr(env->r[8]);
-        }
+        ia64_dbg_probe_dump_mem(env, pc, "r8", env->r[8], dump_r8_len);
+    }
 
-        uint8_t mem[256];
-        int n = dump_r8_len;
-        cpu_physical_memory_read(pa, mem, (size_t)n);
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "dbg_probe_r8 pc=%016" PRIx64 " r8=%016" PRIx64
-                      " pa=%016" HWADDR_PRIx " bytes=%d\n",
-                      pc, env->r[8], pa, n);
-        for (int off = 0; off < n; off += 16) {
-            char line[128];
-            int pos = 0;
-            pos += snprintf(line + pos, sizeof(line) - pos,
-                            "  %016" HWADDR_PRIx ":", pa + (hwaddr)off);
-            for (int j = 0; j < 16 && off + j < n; j++) {
-                pos += snprintf(line + pos, sizeof(line) - pos,
-                                " %02x", mem[off + j]);
+    static int dump_r2_len = -1;
+    if (dump_r2_len == -1) {
+        dump_r2_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R2");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r2_len = 64;
+            } else {
+                dump_r2_len = atoi(s);
+                if (dump_r2_len <= 0) {
+                    dump_r2_len = 64;
+                }
             }
-            qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
         }
     }
+    if (dump_r2_len > 0) {
+        ia64_dbg_probe_dump_mem(env, pc, "r2", env->r[2], dump_r2_len);
+    }
+
+    static int dump_r34_len = -1;
+    if (dump_r34_len == -1) {
+        dump_r34_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R34");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r34_len = 64;
+            } else {
+                dump_r34_len = atoi(s);
+                if (dump_r34_len <= 0) {
+                    dump_r34_len = 64;
+                }
+            }
+        }
+    }
+    if (dump_r34_len > 0) {
+        ia64_dbg_probe_dump_mem(env, pc, "r34", env->r[34], dump_r34_len);
+    }
+
+    static int dump_r36_len = -1;
+    if (dump_r36_len == -1) {
+        dump_r36_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R36");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r36_len = 64;
+            } else {
+                dump_r36_len = atoi(s);
+                if (dump_r36_len <= 0) {
+                    dump_r36_len = 64;
+                }
+            }
+        }
+    }
+    if (dump_r36_len > 0) {
+        ia64_dbg_probe_dump_mem(env, pc, "r36", env->r[36], dump_r36_len);
+    }
+
+    static int dump_r12_len = -1;
+    if (dump_r12_len == -1) {
+        dump_r12_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R12");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r12_len = 256;
+            } else {
+                dump_r12_len = atoi(s);
+                if (dump_r12_len <= 0) {
+                    dump_r12_len = 256;
+                }
+            }
+        }
+    }
+    if (dump_r12_len > 0) {
+        ia64_dbg_probe_dump_mem(env, pc, "r12", env->r[12], dump_r12_len);
+    }
+
+    static int dump_r30_len = -1;
+    if (dump_r30_len == -1) {
+        dump_r30_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R30");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r30_len = 64;
+            } else {
+                dump_r30_len = atoi(s);
+                if (dump_r30_len <= 0) {
+                    dump_r30_len = 64;
+                }
+            }
+        }
+    }
+    if (dump_r30_len > 0) {
+        ia64_dbg_probe_dump_mem(env, pc, "r30", env->r[30], dump_r30_len);
+    }
+
+    static int dump_r31_len = -1;
+    if (dump_r31_len == -1) {
+        dump_r31_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R31");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r31_len = 64;
+            } else {
+                dump_r31_len = atoi(s);
+                if (dump_r31_len <= 0) {
+                    dump_r31_len = 64;
+                }
+            }
+        }
+    }
+    if (dump_r31_len > 0) {
+        ia64_dbg_probe_dump_mem(env, pc, "r31", env->r[31], dump_r31_len);
+    }
+
+    ia64_dbg_peimage_probe(env, pc);
 #endif /* !CONFIG_USER_ONLY */
 
     if (dbg_assert_buf_enabled && dbg_assert_buf_len > 0) {
@@ -3295,6 +3631,25 @@ void HELPER(dbg_cmp)(CPUIA64State *env, uint64_t pc, uint64_t lhs, uint64_t rhs,
                   pc, p1, p2, lhs, rhs, env->pr, env->cfm);
 }
 
+void HELPER(dbg_cmp_post)(CPUIA64State *env, uint64_t pc, uint64_t lhs, uint64_t rhs,
+                          uint32_t p1, uint32_t p2)
+{
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_cmp_post pc=%016" PRIx64 " p1=%u p2=%u lhs=%016" PRIx64
+                  " rhs=%016" PRIx64 " pr=%016" PRIx64 " cfm=%016" PRIx64 "\n",
+                  pc, p1, p2, lhs, rhs, env->pr, env->cfm);
+}
+
+void HELPER(dbg_bunit_pred)(CPUIA64State *env, uint64_t pc, uint32_t qp)
+{
+    uint64_t pr = env->pr;
+    uint64_t qp_val = (qp == 0) ? 1ULL : ((pr >> qp) & 1ULL);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_bpred pc=%016" PRIx64 " qp=%u qp_val=%" PRIu64
+                  " pr=%016" PRIx64 "\n",
+                  pc, qp, qp_val, pr);
+}
+
 void HELPER(record_b0_trace)(CPUIA64State *env, uint64_t pc, uint64_t insn,
                              uint64_t kind, uint64_t val)
 {
@@ -3450,15 +3805,24 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
      * register numbers as a window (r32..r127) and rely on helper_call() to
      * move caller OUT registers into callee IN registers.
      *
-     * alloc changes CFM and updates ar.pfs to the previous CFM; the previous
-     * ar.pfs value is returned in the destination register.
+     * alloc returns the current ar.pfs value in the destination register and
+     * updates CFM. ar.pfs itself is set up by br.call/brl.call and must not
+     * be overwritten here (see SKI's allocEx + cfmWrt sequencing).
      */
     uint64_t old_pfs = env->ar[64]; /* ar.pfs */
     uint64_t old_cfm = env->cfm;
     uint8_t old_sof = old_cfm & 0x7f;
 
-    env->cfm = (sof & 0x7f) | ((sol & 0x7f) << 7) | ((sor & 0xf) << 14);
-    env->ar[64] = old_cfm;
+    /*
+     * Preserve the rotating-base fields (RRB*) and only update SOF/SOL/SOR.
+     * (SOF/SOL/SOR live in bits 0..17 in our CFM layout.)
+     */
+    uint64_t keep = old_cfm & ~((1ULL << 18) - 1);
+
+    env->cfm = keep |
+               (sof & 0x7f) |
+               ((sol & 0x7f) << 7) |
+               ((sor & 0xf) << 14);
 
     /* Clear newly allocated stacked regs (beyond previous SOF). */
     if (sof > old_sof) {
@@ -4061,7 +4425,28 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                       env->r[out0 + 3], env->r[out0 + 4]);
     }
 
+    /*
+     * Save the caller frame and then install a fresh ar.pfs for the callee.
+     *
+     * See SKI brCallEx/callWrt:
+     *  - ar.pfs carries the caller's CPL and EC count, plus the caller's
+     *    current frame marker (SOF/SOL/SOR/RRB*).
+     *  - on return, the caller's ar.pfs must be restored, so keep it in our
+     *    shadow stack (ia64_rse_push_window()).
+     *
+     * Note: SKI numbers bitfields from the MSB; our env->cfm layout already
+     * matches the extracted CFM (SOF at bits 6:0, ... RRB* at 45:18), so we
+     * can reuse caller_cfm directly here.
+     */
     ia64_rse_push_window(env, pc + 16);
+    {
+        uint64_t ppl = (env->psr >> 32) & 3; /* PSR.CPL */
+        uint64_t pec = env->ar[66] & 0x3f;   /* ar.ec low 6 bits */
+        uint64_t new_pfs = caller_cfm |
+                           (ppl << 62) |
+                           (pec << 52);
+        env->ar[IA64_AR_PFS] = new_pfs;
+    }
 
     outs = MIN(outs, (uint8_t)96);
     if (sol < 96) {
@@ -4085,7 +4470,7 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
      */
     env->cfm = outs & 0x7f;
 
-    /* ar.pfs is updated by the callee's alloc. */
+    /* Restore to the caller's ar.pfs on return (via ia64_rse_pop_window()). */
 }
 
 void HELPER(ret_restore)(CPUIA64State *env)
@@ -4258,7 +4643,24 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
 
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_PATCH");
-        enabled = (s && *s) ? 1 : 0;
+        /*
+         * Default to enabled: xenipf/EDK firmware can relocate PEI/DXE images
+         * so that GP-relative accesses land just above the firmware-reported
+         * EfiMemoryTop (particularly when QEMU maps a small slack window above
+         * guest RAM). DXE memory services can then clobber the executing
+         * module, leading to early asserts (e.g. Pool.c "CR has Bad
+         * Signature").
+         *
+         * Allow opting out via QEMU_IA64_EFI_HOB_PATCH=0/off/no/false.
+         */
+        if (!s || !*s) {
+            enabled = 1;
+        } else if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
+                   !strcmp(s, "no")) {
+            enabled = 0;
+        } else {
+            enabled = 1;
+        }
     }
     if (fixed_sysmem_rdesc &&
         (!enabled || (fixed_attr && fixed_free_bottom && fixed_free_top))) {
@@ -5554,12 +5956,22 @@ void HELPER(check_null_branch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                                uint64_t insn, uint64_t to)
 {
     static int enabled = -1;
+    static uint64_t abort_to = UINT64_MAX;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_ABORT_NULL_BRANCH");
         enabled = (s && *s) ? 1 : 0;
     }
+    if (abort_to == UINT64_MAX) {
+        abort_to = 0;
+        const char *s = getenv("QEMU_IA64_ABORT_BRANCH_TO");
+        if (s && *s) {
+            abort_to = strtoull(s, NULL, 0) & ~0xFULL;
+        }
+    }
     if (!enabled) {
-        return;
+        if (!abort_to) {
+            return;
+        }
     }
     if (to == 0) {
         CPUState *cs = env_cpu(env);
@@ -5580,6 +5992,29 @@ void HELPER(check_null_branch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
         cpu_abort(cs,
                   "IA64: null branch target pc=%016" PRIx64 " ri=%u insn=%011" PRIx64,
                   pc, ri, insn);
+    }
+
+    if (abort_to && (to & ~0xFULL) == abort_to) {
+        CPUState *cs = env_cpu(env);
+        cpu_restore_state(cs, GETPC());
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: branch_to pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                      " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                      " to=%016" PRIx64
+                      " b0=%016" PRIx64 " b6=%016" PRIx64
+                      " r1=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
+                      " r14=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                      " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64 "\n",
+                      pc, ri, insn,
+                      env->ip, env->psr, env->cfm, to,
+                      env->b[0], env->b[6],
+                      env->r[1], env->r[12], env->r[13], env->r[14],
+                      env->r[32], env->r[33], env->r[34], env->r[35],
+                      env->r[36], env->r[37]);
+        cpu_abort(cs,
+                  "IA64: branch_to hit pc=%016" PRIx64 " ri=%u to=%016" PRIx64,
+                  pc, ri, to);
     }
 }
 

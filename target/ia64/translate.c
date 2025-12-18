@@ -53,7 +53,11 @@ static void ia64_init_bcall_log(void)
 
     ia64_bcall_log_min_pc = 0;
     ia64_bcall_log_max_pc = UINT64_MAX;
-    ia64_bcall_log_limit = 64;
+    /*
+     * Logging br.call/brl.call is extremely noisy and slows down firmware bringup
+     * under TCG. Default to disabled; enable explicitly via QEMU_IA64_BCALL_LOG_*.
+     */
+    ia64_bcall_log_limit = 0;
 
     const char *s = getenv("QEMU_IA64_BCALL_LOG_MIN_PC");
     if (s && *s) {
@@ -111,8 +115,15 @@ static bool ia64_get_fw_fastpath_enabled(void)
 
     const char *s = getenv("QEMU_IA64_FW_FASTPATH");
     if (!s || !*s) {
-        ia64_fw_fastpath_enabled = false;
-        return false;
+        /*
+         * Firmware (and EDK in particular) can do huge bytewise memset/memcpy
+         * loops that are extremely slow under TCG. We have a helper that can
+         * recognize and accelerate a few well-known sequences.
+         *
+         * Default to enabled and allow opting out via QEMU_IA64_FW_FASTPATH=0.
+         */
+        ia64_fw_fastpath_enabled = true;
+        return true;
     }
 
     if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
@@ -202,6 +213,155 @@ typedef struct IA64DbgProbePoint {
 static bool ia64_dbg_probe_inited;
 static IA64DbgProbePoint ia64_dbg_probes[IA64_MAX_DBG_PROBES];
 static size_t ia64_dbg_probe_count;
+
+static int ia64_dbg_cmp_enabled = -1;
+static uint64_t ia64_dbg_cmp_pc;
+static bool ia64_dbg_cmp_pc_set;
+
+static int ia64_dbg_sxt_enabled = -1;
+static uint64_t ia64_dbg_sxt_pc;
+static bool ia64_dbg_sxt_pc_set;
+
+static int ia64_dbg_iunit_enabled = -1;
+static uint64_t ia64_dbg_iunit_pc;
+static bool ia64_dbg_iunit_pc_set;
+
+static int ia64_dbg_bunit_enabled = -1;
+static uint64_t ia64_dbg_bunit_pc;
+static bool ia64_dbg_bunit_pc_set;
+static int ia64_dbg_munit_enabled = -1;
+static uint64_t ia64_dbg_munit_pc;
+static bool ia64_dbg_munit_pc_set;
+
+static bool ia64_dbg_cmp_match(uint64_t pc)
+{
+    if (ia64_dbg_cmp_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_CMP");
+        ia64_dbg_cmp_enabled = (s && *s) ? 1 : 0;
+        ia64_dbg_cmp_pc_set = false;
+        ia64_dbg_cmp_pc = 0;
+        const char *p = getenv("QEMU_IA64_DBG_CMP_PC");
+        if (p && *p) {
+            char *endp = NULL;
+            uint64_t v = strtoull(p, &endp, 0);
+            if (endp && endp != p) {
+                ia64_dbg_cmp_pc_set = true;
+                ia64_dbg_cmp_pc = v;
+            }
+        }
+    }
+    if (!ia64_dbg_cmp_enabled) {
+        return false;
+    }
+    if (!ia64_dbg_cmp_pc_set) {
+        return true;
+    }
+    return pc == ia64_dbg_cmp_pc;
+}
+
+static bool ia64_dbg_sxt_match(uint64_t pc)
+{
+    if (ia64_dbg_sxt_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_SXT");
+        ia64_dbg_sxt_enabled = (s && *s) ? 1 : 0;
+        ia64_dbg_sxt_pc_set = false;
+        ia64_dbg_sxt_pc = 0;
+        const char *p = getenv("QEMU_IA64_DBG_SXT_PC");
+        if (p && *p) {
+            char *endp = NULL;
+            uint64_t v = strtoull(p, &endp, 0);
+            if (endp && endp != p) {
+                ia64_dbg_sxt_pc_set = true;
+                ia64_dbg_sxt_pc = v;
+            }
+        }
+    }
+    if (!ia64_dbg_sxt_enabled) {
+        return false;
+    }
+    if (!ia64_dbg_sxt_pc_set) {
+        return true;
+    }
+    return pc == ia64_dbg_sxt_pc;
+}
+
+static bool ia64_dbg_iunit_match(uint64_t pc)
+{
+    if (ia64_dbg_iunit_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_IUNIT");
+        ia64_dbg_iunit_enabled = (s && *s) ? 1 : 0;
+        ia64_dbg_iunit_pc_set = false;
+        ia64_dbg_iunit_pc = 0;
+        const char *p = getenv("QEMU_IA64_DBG_IUNIT_PC");
+        if (p && *p) {
+            char *endp = NULL;
+            uint64_t v = strtoull(p, &endp, 0);
+            if (endp && endp != p) {
+                ia64_dbg_iunit_pc_set = true;
+                ia64_dbg_iunit_pc = v;
+            }
+        }
+    }
+    if (!ia64_dbg_iunit_enabled) {
+        return false;
+    }
+    if (!ia64_dbg_iunit_pc_set) {
+        return true;
+    }
+    return pc == ia64_dbg_iunit_pc;
+}
+
+static bool ia64_dbg_bunit_match(uint64_t pc)
+{
+    if (ia64_dbg_bunit_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_BUNIT");
+        ia64_dbg_bunit_enabled = (s && *s) ? 1 : 0;
+        ia64_dbg_bunit_pc_set = false;
+        ia64_dbg_bunit_pc = 0;
+        const char *p = getenv("QEMU_IA64_DBG_BUNIT_PC");
+        if (p && *p) {
+            char *endp = NULL;
+            uint64_t v = strtoull(p, &endp, 0);
+            if (endp && endp != p) {
+                ia64_dbg_bunit_pc_set = true;
+                ia64_dbg_bunit_pc = v;
+            }
+        }
+    }
+    if (!ia64_dbg_bunit_enabled) {
+        return false;
+    }
+    if (!ia64_dbg_bunit_pc_set) {
+        return true;
+    }
+    return pc == ia64_dbg_bunit_pc;
+}
+
+static bool ia64_dbg_munit_match(uint64_t pc)
+{
+    if (ia64_dbg_munit_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_MUNIT");
+        ia64_dbg_munit_enabled = (s && *s) ? 1 : 0;
+        ia64_dbg_munit_pc_set = false;
+        ia64_dbg_munit_pc = 0;
+        const char *p = getenv("QEMU_IA64_DBG_MUNIT_PC");
+        if (p && *p) {
+            char *endp = NULL;
+            uint64_t v = strtoull(p, &endp, 0);
+            if (endp && endp != p) {
+                ia64_dbg_munit_pc_set = true;
+                ia64_dbg_munit_pc = v;
+            }
+        }
+    }
+    if (!ia64_dbg_munit_enabled) {
+        return false;
+    }
+    if (!ia64_dbg_munit_pc_set) {
+        return true;
+    }
+    return pc == ia64_dbg_munit_pc;
+}
 
 static void ia64_init_dbg_probes(void)
 {
@@ -1254,6 +1414,15 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
         if (!is_imm) {
             tb = (insn >> 36) & 1;
         }
+        if (ia64_dbg_cmp_match(ctx->base.pc_next)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "dbg_cmp pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                          " qp=%u p1=%u p2=%u r2=%u r3=%u"
+                          " major=%u is32=%u imm=%u ta=%u c=%u tb=%u\n",
+                          ctx->base.pc_next, ctx->ri, insn,
+                          qp, p1, p2, r2, r3,
+                          major, is_32, is_imm, ta, c, tb);
+        }
 
         TCGv_i64 op1 = tcg_temp_new_i64();
         TCGv_i64 op2 = tcg_temp_new_i64();
@@ -1357,6 +1526,12 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
                     tcg_gen_ext32s_i64(lhs, lhs);
                     tcg_gen_ext32s_i64(rhs, rhs);
                 }
+                if (ia64_dbg_cmp_match(ctx->base.pc_next)) {
+                    gen_helper_dbg_cmp(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                                       lhs, rhs,
+                                       tcg_constant_i32(p1),
+                                       tcg_constant_i32(p2));
+                }
                 tcg_gen_setcond_i64(TCG_COND_LT, cond, lhs, rhs);
                 break;
             case 0xD: /* ltu / ltu.unc */
@@ -1364,12 +1539,24 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
                     tcg_gen_ext32u_i64(lhs, lhs);
                     tcg_gen_ext32u_i64(rhs, rhs);
                 }
+                if (ia64_dbg_cmp_match(ctx->base.pc_next)) {
+                    gen_helper_dbg_cmp(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                                       lhs, rhs,
+                                       tcg_constant_i32(p1),
+                                       tcg_constant_i32(p2));
+                }
                 tcg_gen_setcond_i64(TCG_COND_LTU, cond, lhs, rhs);
                 break;
             case 0xE: /* eq / eq.unc */
                 if (is_32) {
                     tcg_gen_ext32u_i64(lhs, lhs);
                     tcg_gen_ext32u_i64(rhs, rhs);
+                }
+                if (ia64_dbg_cmp_match(ctx->base.pc_next)) {
+                    gen_helper_dbg_cmp(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                                       lhs, rhs,
+                                       tcg_constant_i32(p1),
+                                       tcg_constant_i32(p2));
                 }
                 tcg_gen_setcond_i64(TCG_COND_EQ, cond, lhs, rhs);
                 break;
@@ -1390,8 +1577,20 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
 
                 gen_pr_write_bit(p1, p1v);
                 gen_pr_write_bit(p2, p2v);
+                if (ia64_dbg_cmp_match(ctx->base.pc_next)) {
+                    gen_helper_dbg_cmp_post(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                                             lhs, rhs,
+                                             tcg_constant_i32(p1),
+                                             tcg_constant_i32(p2));
+                }
             } else {
                 gen_set_predicates(p1, p2, cond);
+                if (ia64_dbg_cmp_match(ctx->base.pc_next)) {
+                    gen_helper_dbg_cmp_post(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                                             lhs, rhs,
+                                             tcg_constant_i32(p1),
+                                             tcg_constant_i32(p2));
+                }
             }
 
             handled = true;
@@ -1480,6 +1679,18 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
     uint8_t qp = insn & 0x3f;
     uint8_t major = (insn >> 37) & 0xf;
     uint8_t x6 = (insn >> 27) & 0x3f;
+
+    if (ia64_dbg_bunit_match(ctx->base.pc_next)) {
+        uint8_t btype = extract64(insn, 6, 3);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_bunit pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                      " qp=%u major=%u x6=0x%x btype=%u\n",
+                      ctx->base.pc_next, ctx->ri, insn,
+                      qp, major, x6, btype);
+        gen_helper_dbg_bunit_pred(tcg_env,
+                                  tcg_constant_i64(ctx->base.pc_next),
+                                  tcg_constant_i32(qp));
+    }
 
     TCGLabel *skip_label = gen_qp_skip(qp);
 
@@ -1732,6 +1943,11 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
             /* Conditional branch on cond. */
             TCGLabel *not_taken = gen_new_label();
             tcg_gen_brcondi_i64(TCG_COND_EQ, cond, 0, not_taken);
+            gen_helper_check_null_branch(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next),
+                                         tcg_constant_i32(ctx->ri),
+                                         tcg_constant_i64(insn),
+                                         tcg_constant_i64(ctx->base.pc_next + disp));
             gen_record_branch(ctx, insn, 4,
                               tcg_constant_i64(ctx->base.pc_next + disp));
             tcg_gen_movi_i64(cpu_pc, ctx->base.pc_next + disp);
@@ -1759,6 +1975,11 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         }
         gen_helper_call(tcg_env, tcg_constant_i64(ctx->base.pc_next),
                         tcg_constant_i64(tgt));
+        gen_helper_check_null_branch(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(ctx->ri),
+                                     tcg_constant_i64(insn),
+                                     tcg_constant_i64(tgt));
         tcg_gen_movi_i64(cpu_b[b1], ctx->base.pc_next + 16);
         if (b1 == 0) {
             gen_record_b0_write(ctx, insn, 1,
@@ -2513,6 +2734,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             int64_t imm9 = 0;
             bool handled = false;
 
+            if (ia64_dbg_munit_match(ctx->base.pc_next)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "dbg_munit pc=%016" PRIx64 " ri=%u insn=%011"
+                              PRIx64 " qp=%u major=%u x6=0x%x x=%u m=%u"
+                              " r1=%u r2=%u r3=%u imm=%u\n",
+                              ctx->base.pc_next, ctx->ri, insn,
+                              qp, major, x6, x, m, r1, r2, r3, is_imm);
+            }
+
             /* M19: getf.sig r1 = f2 (op=4 m=0 x=1 x6=0x1c) */
             if (!is_imm && m == 0 && x == 1 && x6 == 0x1c) {
                 uint8_t f2 = r2;
@@ -3218,6 +3448,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         break;
     case SLOT_I:
         /* I-unit instructions */
+        if (ia64_dbg_iunit_match(ctx->base.pc_next)) {
+            uint8_t dbg_x3 = extract64(insn, 33, 3);
+            uint8_t dbg_x6 = extract64(insn, 27, 6);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "dbg_iunit pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                          " major=%u x3=%u x6=0x%x qp=%u\n",
+                          ctx->base.pc_next, ctx->ri, insn,
+                          major, dbg_x3, dbg_x6, (unsigned)(insn & 0x3f));
+        }
         switch (major) {
         case 0x0: {
             /* break / nop.i / hint.i / mov / mov pr */
@@ -3230,6 +3469,13 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 TCGLabel *skip = gen_qp_skip(qp);
                 uint8_t r1 = extract64(insn, 6, 7);
                 uint8_t r3 = extract64(insn, 20, 7);
+
+                if (ia64_dbg_sxt_match(ctx->base.pc_next)) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "dbg_sxt pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                                  " qp=%u r1=%u r3=%u x6=0x%x\n",
+                                  ctx->base.pc_next, ctx->ri, insn, qp, r1, r3, x6);
+                }
 
                 if (r1 != 0) {
                     TCGv_i64 src = tcg_temp_new_i64();
@@ -3415,11 +3661,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             if (x3 == 7) {
                 /* I21: mov{,.ret} b1 = r2, tag13 (we ignore tag/ih/hints for now) */
                 static int movb_log_count;
+                static int movb_log_enabled = -1;
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
                 uint8_t b = extract64(insn, 6, 3);
                 uint8_t r2 = extract64(insn, 13, 7);
-                if (movb_log_count < 64) {
+                if (movb_log_enabled == -1) {
+                    movb_log_enabled = getenv("QEMU_IA64_MOVB_LOG") ? 1 : 0;
+                }
+                if (movb_log_enabled && movb_log_count < 64) {
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "mov.b pc=%016" PRIx64 " insn=%011" PRIx64
                                   " b=%u r2=%u\n",
@@ -3444,11 +3694,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             if (x3 == 0 && x6 == 0x31) {
                 /* mov r1 = b2 (I22) */
                 static int movrb_log_count;
+                static int movrb_log_enabled = -1;
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip = gen_qp_skip(qp);
                 uint8_t r1 = extract64(insn, 6, 7);
                 uint8_t b2 = extract64(insn, 13, 3);
-                if (movrb_log_count < 64) {
+                if (movrb_log_enabled == -1) {
+                    movrb_log_enabled = getenv("QEMU_IA64_MOVRB_LOG") ? 1 : 0;
+                }
+                if (movrb_log_enabled && movrb_log_count < 64) {
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "mov.r=br pc=%016" PRIx64 " insn=%011" PRIx64
                                   " r1=%u b2=%u\n",
@@ -4653,6 +4907,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         } else if (major == 0xC || major == 0xD) {
             /* X3/X4: brl.cond / brl.call target64, uses prior L-slot extra_bits */
             static int brl_log_count;
+            static int brl_log_enabled = -1;
             uint8_t qp = insn & 0x3f;
             TCGLabel *skip_label = gen_qp_skip(qp);
             uint64_t i = extract64(insn, 36, 1);
@@ -4663,7 +4918,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             uint64_t tgt = ctx->base.pc_next + disp;
             if (major == 0xD) {
                 uint8_t b1 = extract64(insn, 6, 3);
-                if (brl_log_count < 32) {
+                if (brl_log_enabled == -1) {
+                    brl_log_enabled = getenv("QEMU_IA64_BRL_LOG") ? 1 : 0;
+                }
+                if (brl_log_enabled && brl_log_count < 32) {
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "brl.call pc=%016" PRIx64 " insn=%011" PRIx64
                                   " L=%011" PRIx64 " b1=%u tgt=%016" PRIx64 "\n",
@@ -4675,6 +4933,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 gen_helper_call(tcg_env, tcg_constant_i64(ctx->base.pc_next),
                                 tcg_constant_i64(tgt));
+                gen_helper_check_null_branch(tcg_env,
+                                             tcg_constant_i64(ctx->base.pc_next),
+                                             tcg_constant_i32(ctx->ri),
+                                             tcg_constant_i64(insn),
+                                             tcg_constant_i64(tgt));
                 tcg_gen_movi_i64(cpu_b[b1], ctx->base.pc_next + 16);
                 if (b1 == 0) {
                     gen_record_b0_write(ctx, insn, 1,
@@ -4688,6 +4951,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 tcg_gen_exit_tb(NULL, 0);
             } else {
+                gen_helper_check_null_branch(tcg_env,
+                                             tcg_constant_i64(ctx->base.pc_next),
+                                             tcg_constant_i32(ctx->ri),
+                                             tcg_constant_i64(insn),
+                                             tcg_constant_i64(tgt));
                 gen_record_branch(ctx, insn, 6, tcg_constant_i64(tgt));
                 tcg_gen_movi_i64(cpu_pc, tgt);
                 gen_set_ri_const(0);
