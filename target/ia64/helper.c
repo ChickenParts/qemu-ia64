@@ -1336,10 +1336,34 @@ static const IA64EfiGuid ia64_efi_guid_sal_systab = {
     .data4 = { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d },
 };
 
+static const IA64EfiGuid ia64_efi_guid_esal_pci = {
+    .data1 = 0xa46b1a31,
+    .data2 = 0xad66,
+    .data3 = 0x4905,
+    .data4 = { 0x92, 0xf6, 0x2b, 0x46, 0x59, 0xdc, 0x30, 0x63 },
+};
+
 static bool ia64_fw_guid_equal(const IA64EfiGuid *a, const IA64EfiGuid *b)
 {
     return a->data1 == b->data1 && a->data2 == b->data2 && a->data3 == b->data3 &&
            memcmp(a->data4, b->data4, sizeof(a->data4)) == 0;
+}
+
+static bool ia64_fw_read_guid(CPUIA64State *env, uint64_t va, IA64EfiGuid *out)
+{
+    CPUState *cs = env_cpu(env);
+    return cpu_memory_rw_debug(cs, va, out, sizeof(*out), false) == 0;
+}
+
+static bool ia64_fw_decode_pci_addr(uint64_t addr, uint16_t *seg,
+                                    uint8_t *bus, uint8_t *devfn,
+                                    uint16_t *reg)
+{
+    *reg = addr & 0xff;
+    *devfn = (((addr >> 11) & 0x1f) << 3) | ((addr >> 8) & 0x7);
+    *bus = (addr >> 16) & 0xff;
+    *seg = (addr >> 24) & 0xff;
+    return true;
 }
 
 static uint64_t ia64_fw_addr_with_same_region(uint64_t exemplar, hwaddr pa)
@@ -6641,6 +6665,65 @@ void HELPER(fw_sal)(CPUIA64State *env)
     ia64_fw_try_install_sal_systab(env);
 
     uint64_t func_raw = env->r[32];
+    IA64EfiGuid guid;
+    if (ia64_fw_read_guid(env, func_raw, &guid) &&
+        ia64_fw_guid_equal(&guid, &ia64_efi_guid_esal_pci)) {
+        uint64_t func_id = env->r[33];
+        uint64_t pci_addr = env->r[34];
+        uint64_t size = env->r[35];
+        uint64_t value = env->r[36];
+        int64_t status = 0;
+        uint64_t v0 = 0, v1 = 0, v2 = 0;
+
+        uint16_t seg;
+        uint8_t bus, devfn;
+        uint16_t reg;
+        ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+
+        if (seg != 0 || reg > 0xff) {
+            status = -1;
+        } else if (func_id == 0) {
+            uint32_t cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
+                               ((uint32_t)devfn << 8) | (reg & ~3U);
+            cpu_outl(0xcf8, cfgaddr);
+            if (size == 1) {
+                v0 = cpu_inb(0xcfc + (reg & 3));
+            } else if (size == 2) {
+                v0 = cpu_inw(0xcfc + (reg & 2));
+            } else {
+                v0 = cpu_inl(0xcfc);
+            }
+        } else if (func_id == 1) {
+            uint32_t cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
+                               ((uint32_t)devfn << 8) | (reg & ~3U);
+            cpu_outl(0xcf8, cfgaddr);
+            if (size == 1) {
+                cpu_outb(0xcfc + (reg & 3), (uint8_t)value);
+            } else if (size == 2) {
+                cpu_outw(0xcfc + (reg & 2), (uint16_t)value);
+            } else {
+                cpu_outl(0xcfc, (uint32_t)value);
+            }
+        } else {
+            status = -1;
+        }
+
+        if (ia64_fw_log_enabled()) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: ESAL_PCI func=%" PRIu64
+                          " seg=%u bus=%u devfn=%u reg=0x%x size=%" PRIu64
+                          " value=%016" PRIx64 " -> status=%" PRId64
+                          " v0=%016" PRIx64 "\n",
+                          func_id, seg, bus, devfn, reg, size, value,
+                          status, v0);
+        }
+
+        env->r[8] = (uint64_t)status;
+        env->r[9] = v0;
+        env->r[10] = v1;
+        env->r[11] = v2;
+        return;
+    }
     /*
      * Some IA-64 guest firmware uses the low 24-bit SAL function numbers
      * without the 0x01000000 prefix that Linux uses (e.g. 0x10 instead of
@@ -6750,8 +6833,12 @@ void HELPER(fw_sal)(CPUIA64State *env)
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: SAL_PCI_CONFIG_READ mode=%" PRIu64
                           " seg=%u bus=%u devfn=%u reg=0x%x size=%" PRIu64
+                          " raw_in1=%016" PRIx64 " raw_in2=%016" PRIx64
+                          " raw_in3=%016" PRIx64 " raw_in4=%016" PRIx64
                           " -> status=%" PRId64 " v0=%016" PRIx64 "\n",
-                          mode, seg, bus, devfn, reg, size, status, v0);
+                          mode, seg, bus, devfn, reg, size,
+                          pci_addr, env->r[34], env->r[35], env->r[36],
+                          status, v0);
         }
         break;
     }
@@ -6815,8 +6902,13 @@ void HELPER(fw_sal)(CPUIA64State *env)
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: SAL_PCI_CONFIG_WRITE mode=%" PRIu64
                           " seg=%u bus=%u devfn=%u reg=0x%x size=%" PRIu64
-                          " value=%016" PRIx64 " -> status=%" PRId64 "\n",
-                          mode, seg, bus, devfn, reg, size, value, status);
+                          " value=%016" PRIx64 " raw_in1=%016" PRIx64
+                          " raw_in2=%016" PRIx64 " raw_in3=%016" PRIx64
+                          " raw_in4=%016" PRIx64 " raw_in5=%016" PRIx64
+                          " -> status=%" PRId64 "\n",
+                          mode, seg, bus, devfn, reg, size, value,
+                          pci_addr, env->r[34], env->r[35], env->r[36], env->r[37],
+                          status);
         }
         break;
     }
