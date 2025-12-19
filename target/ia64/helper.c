@@ -6662,6 +6662,62 @@ void HELPER(fw_pal)(CPUIA64State *env)
 
 void HELPER(fw_sal)(CPUIA64State *env)
 {
+    {
+        static int trace_enabled = -1;
+        static uint32_t trace_limit;
+        static uint32_t trace_count;
+        if (trace_enabled == -1) {
+            trace_enabled = getenv("QEMU_IA64_FW_SAL_TRACE") ? 1 : 0;
+            trace_limit = 16;
+            const char *s = getenv("QEMU_IA64_FW_SAL_TRACE_LIMIT");
+            if (s && *s) {
+                trace_limit = (uint32_t)atoi(s);
+            }
+        }
+        if (trace_enabled && trace_count < trace_limit) {
+            uint8_t sof = env->cfm & 0x7f;
+            uint8_t sol = (env->cfm >> 7) & 0x7f;
+            uint8_t sor = (env->cfm >> 14) & 0xf;
+            uint8_t out0 = 32 + sol;
+            uint64_t out0v = (out0 < 128) ? env->r[out0] : 0;
+            uint64_t out1v = (out0 + 1 < 128) ? env->r[out0 + 1] : 0;
+            uint64_t out2v = (out0 + 2 < 128) ? env->r[out0 + 2] : 0;
+            uint64_t out3v = (out0 + 3 < 128) ? env->r[out0 + 3] : 0;
+            uint8_t lb_kind = env->last_branch_kind & 0xff;
+            uint8_t lb_ri = (env->last_branch_kind >> 8) & 0xff;
+
+            trace_count++;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: SAL_CALL ip=%016" PRIx64 " b0=%016" PRIx64
+                          " psr=%016" PRIx64 " cfm=%016" PRIx64
+                          " r1=%016" PRIx64 " r9=%016" PRIx64
+                          " r12=%016" PRIx64
+                          " r28=%016" PRIx64 " r29=%016" PRIx64
+                          " r30=%016" PRIx64 " r31=%016" PRIx64
+                          " r32=%016" PRIx64 " r33=%016" PRIx64
+                          " r34=%016" PRIx64 " r35=%016" PRIx64
+                          " r36=%016" PRIx64 " r37=%016" PRIx64
+                          " r38=%016" PRIx64 " r39=%016" PRIx64
+                          " r40=%016" PRIx64 " r41=%016" PRIx64 "\n",
+                          env->ip, env->b[0], env->psr, env->cfm,
+                          env->r[1], env->r[9], env->r[12],
+                          env->r[28], env->r[29], env->r[30], env->r[31],
+                          env->r[32], env->r[33], env->r[34], env->r[35],
+                          env->r[36], env->r[37], env->r[38], env->r[39],
+                          env->r[40], env->r[41]);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: SAL_CALL_CTX last_branch from=%016" PRIx64
+                          " to=%016" PRIx64 " kind=%u ri=%u insn=%011" PRIx64
+                          " cfm=%016" PRIx64 " sof=%u sol=%u sor=%u out0=r%u"
+                          " out0..3=%016" PRIx64 " %016" PRIx64
+                          " %016" PRIx64 " %016" PRIx64 "\n",
+                          env->last_branch_from, env->last_branch_to,
+                          lb_kind, lb_ri, env->last_branch_insn,
+                          env->cfm, sof, sol, sor, out0,
+                          out0v, out1v, out2v, out3v);
+        }
+    }
+
     ia64_fw_try_install_sal_systab(env);
 
     uint64_t func_raw = env->r[32];
@@ -6784,29 +6840,40 @@ void HELPER(fw_sal)(CPUIA64State *env)
          */
         uint64_t pci_addr = env->r[33];
         uint64_t size = env->r[34];
-        uint64_t mode = env->r[35];
-
+        bool use_break_abi = false;
+        bool size_clamped = false;
+        if (size != 1 && size != 2 && size != 4) {
+            uint64_t alt_size = env->r[30];
+            if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
+                pci_addr = env->r[29];
+                size = alt_size;
+                use_break_abi = true;
+            } else {
+                size = 4;
+                size_clamped = true;
+            }
+        }
         uint16_t seg;
         uint8_t bus, devfn;
         uint16_t reg;
-
-        if (mode == 0) {
-            seg = (pci_addr >> 24) & 0xff;
-            bus = (pci_addr >> 16) & 0xff;
-            devfn = (pci_addr >> 8) & 0xff;
-            reg = pci_addr & 0xff;
-        } else if (mode == 1) {
-            seg = (pci_addr >> 28) & 0xffff;
-            bus = (pci_addr >> 20) & 0xff;
-            devfn = (pci_addr >> 12) & 0xff;
-            reg = pci_addr & 0xfff;
-        } else {
-            status = -1;
-            break;
-        }
+        ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
 
         if (seg != 0 || reg > 0xff) {
-            status = -1;
+            if (size_clamped) {
+                status = 0;
+                v0 = 0xffffffffU;
+            } else {
+                status = -2;
+            }
+            if (ia64_fw_log_enabled()) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: SAL_PCI_CONFIG_READ seg=%u bus=%u devfn=%u"
+                              " reg=0x%x size=%" PRIu64 " abi=%s"
+                              " clamped=%d -> status=%" PRId64 " v0=%016" PRIx64 "\n",
+                              seg, bus, devfn, reg, size,
+                              use_break_abi ? "break" : "sal",
+                              size_clamped ? 1 : 0, status, v0);
+            }
             break;
         }
 
@@ -6814,10 +6881,6 @@ void HELPER(fw_sal)(CPUIA64State *env)
                            ((uint32_t)devfn << 8) | (reg & ~3U);
         cpu_outl(0xcf8, cfgaddr);
 
-        /*
-         * Match SKI/Xen firmware expectations: size==1/2 selects byte/word,
-         * anything else reads a dword.
-         */
         if (size == 1) {
             v0 = cpu_inb(0xcfc + (reg & 3));
             status = 0;
@@ -6831,13 +6894,12 @@ void HELPER(fw_sal)(CPUIA64State *env)
 
         if (ia64_fw_log_enabled()) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: SAL_PCI_CONFIG_READ mode=%" PRIu64
-                          " seg=%u bus=%u devfn=%u reg=0x%x size=%" PRIu64
-                          " raw_in1=%016" PRIx64 " raw_in2=%016" PRIx64
-                          " raw_in3=%016" PRIx64 " raw_in4=%016" PRIx64
+                          "IA64: SAL_PCI_CONFIG_READ seg=%u bus=%u devfn=%u"
+                          " reg=0x%x size=%" PRIu64 " abi=%s clamped=%d"
                           " -> status=%" PRId64 " v0=%016" PRIx64 "\n",
-                          mode, seg, bus, devfn, reg, size,
-                          pci_addr, env->r[34], env->r[35], env->r[36],
+                          seg, bus, devfn, reg, size,
+                          use_break_abi ? "break" : "sal",
+                          size_clamped ? 1 : 0,
                           status, v0);
         }
         break;
@@ -6853,29 +6915,36 @@ void HELPER(fw_sal)(CPUIA64State *env)
         uint64_t pci_addr = env->r[33];
         uint64_t size = env->r[34];
         uint64_t value = env->r[35];
-        uint64_t mode = env->r[36];
-
+        bool use_break_abi = false;
+        bool size_clamped = false;
+        if (size != 1 && size != 2 && size != 4) {
+            uint64_t alt_size = env->r[30];
+            if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
+                pci_addr = env->r[29];
+                size = alt_size;
+                value = env->r[31];
+                use_break_abi = true;
+            } else {
+                size = 4;
+                size_clamped = true;
+            }
+        }
         uint16_t seg;
         uint8_t bus, devfn;
         uint16_t reg;
-
-        if (mode == 0) {
-            seg = (pci_addr >> 24) & 0xff;
-            bus = (pci_addr >> 16) & 0xff;
-            devfn = (pci_addr >> 8) & 0xff;
-            reg = pci_addr & 0xff;
-        } else if (mode == 1) {
-            seg = (pci_addr >> 28) & 0xffff;
-            bus = (pci_addr >> 20) & 0xff;
-            devfn = (pci_addr >> 12) & 0xff;
-            reg = pci_addr & 0xfff;
-        } else {
-            status = -1;
-            break;
-        }
+        ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
 
         if (seg != 0 || reg > 0xff) {
-            status = -1;
+            status = size_clamped ? 0 : -2;
+            if (ia64_fw_log_enabled()) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: SAL_PCI_CONFIG_WRITE seg=%u bus=%u devfn=%u"
+                              " reg=0x%x size=%" PRIu64 " value=%016" PRIx64
+                              " abi=%s clamped=%d -> status=%" PRId64 "\n",
+                              seg, bus, devfn, reg, size, value,
+                              use_break_abi ? "break" : "sal",
+                              size_clamped ? 1 : 0, status);
+            }
             break;
         }
 
@@ -6883,10 +6952,6 @@ void HELPER(fw_sal)(CPUIA64State *env)
                            ((uint32_t)devfn << 8) | (reg & ~3U);
         cpu_outl(0xcf8, cfgaddr);
 
-        /*
-         * Match SKI/Xen firmware expectations: size==1/2 selects byte/word,
-         * anything else writes a dword.
-         */
         if (size == 1) {
             cpu_outb(0xcfc + (reg & 3), (uint8_t)value);
             status = 0;
@@ -6900,14 +6965,13 @@ void HELPER(fw_sal)(CPUIA64State *env)
 
         if (ia64_fw_log_enabled()) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: SAL_PCI_CONFIG_WRITE mode=%" PRIu64
-                          " seg=%u bus=%u devfn=%u reg=0x%x size=%" PRIu64
-                          " value=%016" PRIx64 " raw_in1=%016" PRIx64
-                          " raw_in2=%016" PRIx64 " raw_in3=%016" PRIx64
-                          " raw_in4=%016" PRIx64 " raw_in5=%016" PRIx64
+                          "IA64: SAL_PCI_CONFIG_WRITE seg=%u bus=%u devfn=%u"
+                          " reg=0x%x size=%" PRIu64 " value=%016" PRIx64
+                          " abi=%s clamped=%d"
                           " -> status=%" PRId64 "\n",
-                          mode, seg, bus, devfn, reg, size, value,
-                          pci_addr, env->r[34], env->r[35], env->r[36], env->r[37],
+                          seg, bus, devfn, reg, size, value,
+                          use_break_abi ? "break" : "sal",
+                          size_clamped ? 1 : 0,
                           status);
         }
         break;
