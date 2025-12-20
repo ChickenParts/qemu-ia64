@@ -4312,6 +4312,50 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         ia64_dbg_probe_dump_mem(env, pc, "addr", dump_addr, dump_addr_len);
     }
 
+    static int hob_failfast = -1;
+    if (hob_failfast == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_HOB_FAILFAST");
+        hob_failfast = (s && *s) ? 1 : 0;
+    }
+    if (hob_failfast) {
+        CPUState *cs = env_cpu(env);
+        uint64_t hob_ptr = env->r[33];
+        if (!hob_ptr && env->r[12]) {
+            hwaddr pa = (env->psr & IA64_PSR_DT) ?
+                helper_tpa(env, env->r[12]) : ia64_phys_mode_addr(env->r[12]);
+            uint8_t buf[8];
+            if (cpu_memory_rw_debug(cs, pa, buf, sizeof(buf), false) == 0) {
+                hob_ptr = ldq_le_p(buf);
+            }
+        }
+        if (hob_ptr) {
+            uint64_t cur = hob_ptr;
+            for (int iter = 0; iter < 256; iter++) {
+                hwaddr pa = (env->psr & IA64_PSR_DT) ?
+                    helper_tpa(env, cur) : ia64_phys_mode_addr(cur);
+                uint8_t h[8];
+                if (cpu_memory_rw_debug(cs, pa, h, sizeof(h), false) != 0) {
+                    break;
+                }
+                uint16_t type = lduw_le_p(&h[0]);
+                uint16_t len = lduw_le_p(&h[2]);
+                if (len < 8 || (len & 7)) {
+                    cpu_abort(cs,
+                              "IA64: HOB failfast pc=%016" PRIx64
+                              " hob=%016" PRIx64 " type=%04x len=%04x",
+                              pc, cur, type, len);
+                }
+                if (type == 0xffff) {
+                    break;
+                }
+                cur += len;
+                if (cur - hob_ptr > (1U << 20)) {
+                    break;
+                }
+            }
+        }
+    }
+
     ia64_dbg_peimage_probe(env, pc);
 #endif /* !CONFIG_USER_ONLY */
 
