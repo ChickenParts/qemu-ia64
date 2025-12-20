@@ -33,6 +33,7 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/southbridge/piix.h"
+#include "qemu/cutils.h"
 #include "hw/block/block.h"
 #include "qemu/typedefs.h"
 #include "hw/sysbus.h"
@@ -405,6 +406,204 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_FW_WORKRAM_SIZE (16ULL << 20)
 
 #define IPF_IOSAPIC_VERSION_REG 0x1
+
+typedef struct QEMU_PACKED {
+    uint64_t signature;
+    uint32_t type;
+    uint32_t length;
+} IPFGfwHobHeader;
+
+typedef struct QEMU_PACKED {
+    IPFGfwHobHeader header;
+    uint64_t length;
+    uint64_t cur_pos;
+    uint64_t buf_size;
+} IPFGfwHobInfo;
+
+typedef struct QEMU_PACKED {
+    uint64_t start;
+    uint64_t size;
+} IPFGfwHobMem;
+
+enum {
+    IPF_HOB_TYPE_INFO = 0,
+    IPF_HOB_TYPE_TERMINAL,
+    IPF_HOB_TYPE_MEM,
+    IPF_HOB_TYPE_PAL_BUS_GET_FEATURES_DATA,
+    IPF_HOB_TYPE_PAL_CACHE_SUMMARY,
+    IPF_HOB_TYPE_PAL_MEM_ATTRIB,
+    IPF_HOB_TYPE_PAL_CACHE_INFO,
+    IPF_HOB_TYPE_PAL_CACHE_PROT_INFO,
+    IPF_HOB_TYPE_PAL_DEBUG_INFO,
+    IPF_HOB_TYPE_PAL_FIXED_ADDR,
+    IPF_HOB_TYPE_PAL_FREQ_BASE,
+    IPF_HOB_TYPE_PAL_FREQ_RATIOS,
+    IPF_HOB_TYPE_PAL_HALT_INFO,
+    IPF_HOB_TYPE_PAL_PERF_MON_INFO,
+    IPF_HOB_TYPE_PAL_PROC_GET_FEATURES,
+    IPF_HOB_TYPE_PAL_PTCE_INFO,
+    IPF_HOB_TYPE_PAL_REGISTER_INFO,
+    IPF_HOB_TYPE_PAL_RSE_INFO,
+    IPF_HOB_TYPE_PAL_TEST_INFO,
+    IPF_HOB_TYPE_PAL_VM_SUMMARY,
+    IPF_HOB_TYPE_PAL_VM_INFO,
+    IPF_HOB_TYPE_PAL_VM_PAGE_SIZE,
+    IPF_HOB_TYPE_NR_VCPU,
+    IPF_HOB_TYPE_NR_NVRAM,
+    IPF_HOB_TYPE_MAX
+};
+
+static const char *ipf_gfw_hob_type_name(uint32_t type)
+{
+    switch (type) {
+    case IPF_HOB_TYPE_INFO: return "INFO";
+    case IPF_HOB_TYPE_TERMINAL: return "TERMINAL";
+    case IPF_HOB_TYPE_MEM: return "MEM";
+    case IPF_HOB_TYPE_PAL_BUS_GET_FEATURES_DATA: return "PAL_BUS_FEATURES";
+    case IPF_HOB_TYPE_PAL_CACHE_SUMMARY: return "PAL_CACHE_SUMMARY";
+    case IPF_HOB_TYPE_PAL_MEM_ATTRIB: return "PAL_MEM_ATTRIB";
+    case IPF_HOB_TYPE_PAL_CACHE_INFO: return "PAL_CACHE_INFO";
+    case IPF_HOB_TYPE_PAL_CACHE_PROT_INFO: return "PAL_CACHE_PROT_INFO";
+    case IPF_HOB_TYPE_PAL_DEBUG_INFO: return "PAL_DEBUG_INFO";
+    case IPF_HOB_TYPE_PAL_FIXED_ADDR: return "PAL_FIXED_ADDR";
+    case IPF_HOB_TYPE_PAL_FREQ_BASE: return "PAL_FREQ_BASE";
+    case IPF_HOB_TYPE_PAL_FREQ_RATIOS: return "PAL_FREQ_RATIOS";
+    case IPF_HOB_TYPE_PAL_HALT_INFO: return "PAL_HALT_INFO";
+    case IPF_HOB_TYPE_PAL_PERF_MON_INFO: return "PAL_PERF_MON_INFO";
+    case IPF_HOB_TYPE_PAL_PROC_GET_FEATURES: return "PAL_PROC_FEATURES";
+    case IPF_HOB_TYPE_PAL_PTCE_INFO: return "PAL_PTCE_INFO";
+    case IPF_HOB_TYPE_PAL_REGISTER_INFO: return "PAL_REGISTER_INFO";
+    case IPF_HOB_TYPE_PAL_RSE_INFO: return "PAL_RSE_INFO";
+    case IPF_HOB_TYPE_PAL_TEST_INFO: return "PAL_TEST_INFO";
+    case IPF_HOB_TYPE_PAL_VM_SUMMARY: return "PAL_VM_SUMMARY";
+    case IPF_HOB_TYPE_PAL_VM_INFO: return "PAL_VM_INFO";
+    case IPF_HOB_TYPE_PAL_VM_PAGE_SIZE: return "PAL_VM_PAGE_SIZE";
+    case IPF_HOB_TYPE_NR_VCPU: return "NR_VCPU";
+    case IPF_HOB_TYPE_NR_NVRAM: return "NR_NVRAM";
+    case IPF_HOB_TYPE_MAX: return "MAX";
+    default: return "UNKNOWN";
+    }
+}
+
+static void ipf_dump_gfw_hob(const char *tag)
+{
+    const char *dump_env = getenv("QEMU_IPF_DUMP_HOB");
+    if (!dump_env || !*dump_env) {
+        return;
+    }
+
+    IPFGfwHobInfo info;
+    if (address_space_read(&address_space_memory, GFW_HOB_START,
+                           MEMTXATTRS_UNSPECIFIED, &info,
+                           sizeof(info)) != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: HOB dump: read failed at 0x%016" PRIx64 "\n",
+                      (uint64_t)GFW_HOB_START);
+        return;
+    }
+
+    uint64_t sig = le64_to_cpu(info.header.signature);
+    uint32_t type = le32_to_cpu(info.header.type);
+    uint32_t hdr_len = le32_to_cpu(info.header.length);
+    uint64_t hob_len = le64_to_cpu(info.length);
+    uint64_t hob_buf_size = le64_to_cpu(info.buf_size);
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IPF: HOB dump(%s): sig=%016" PRIx64 " type=%u len=%" PRIu64
+                  " hdr_len=%u buf_size=%" PRIu64 " base=0x%016" PRIx64 "\n",
+                  tag ? tag : "boot", sig, type, hob_len, hdr_len, hob_buf_size,
+                  (uint64_t)GFW_HOB_START);
+
+    if (sig != HOB_SIGNATURE || hob_len == 0 || hob_len > GFW_HOB_SIZE) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: HOB dump: invalid header (sig/len)\n");
+        return;
+    }
+
+    g_autofree uint8_t *buf = g_malloc((size_t)hob_len);
+    if (address_space_read(&address_space_memory, GFW_HOB_START,
+                           MEMTXATTRS_UNSPECIFIED, buf,
+                           (size_t)hob_len) != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: HOB dump: bulk read failed\n");
+        return;
+    }
+
+    g_mkdir_with_parents("scratch/ia64_logs", 0755);
+    char path[256];
+    snprintf(path, sizeof(path),
+             "scratch/ia64_logs/gfw_hob_%s.bin",
+             tag ? tag : "boot");
+    FILE *fp = fopen(path, "wb");
+    if (fp) {
+        fwrite(buf, 1, (size_t)hob_len, fp);
+        fclose(fp);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: HOB dump: wrote %s (%" PRIu64 " bytes)\n",
+                      path, hob_len);
+    }
+
+    uint64_t off = 0;
+    while (off + sizeof(IPFGfwHobHeader) <= hob_len) {
+        const IPFGfwHobHeader *hdr = (const IPFGfwHobHeader *)(buf + off);
+        uint64_t hs = le64_to_cpu(hdr->signature);
+        uint32_t ht = le32_to_cpu(hdr->type);
+        uint32_t hl = le32_to_cpu(hdr->length);
+        if (hs != HOB_SIGNATURE || hl < sizeof(IPFGfwHobHeader)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: HOB dump: bad entry off=0x%04" PRIx64
+                          " sig=%016" PRIx64 " type=%u len=%u\n",
+                          off, hs, ht, hl);
+            break;
+        }
+
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: HOB[%02" PRIu64 "] type=%u (%s) len=%u\n",
+                      off, ht, ipf_gfw_hob_type_name(ht), hl);
+
+        if (ht == IPF_HOB_TYPE_MEM && hl >= sizeof(IPFGfwHobHeader) +
+                                         sizeof(IPFGfwHobMem)) {
+            const IPFGfwHobMem *mem = (const IPFGfwHobMem *)(buf + off +
+                                                            sizeof(IPFGfwHobHeader));
+            uint64_t start = le64_to_cpu(mem->start);
+            uint64_t size = le64_to_cpu(mem->size);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: HOB MEM start=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+                          start, size);
+        } else if (ht == IPF_HOB_TYPE_NR_VCPU ||
+                   ht == IPF_HOB_TYPE_NR_NVRAM ||
+                   ht == IPF_HOB_TYPE_MAX) {
+            if (hl >= sizeof(IPFGfwHobHeader) + sizeof(uint64_t)) {
+                uint64_t val = ldq_le_p(buf + off + sizeof(IPFGfwHobHeader));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IPF: HOB %s value=0x%016" PRIx64 "\n",
+                              ipf_gfw_hob_type_name(ht), val);
+            }
+        }
+
+        off += hl;
+        if (ht == IPF_HOB_TYPE_TERMINAL) {
+            break;
+        }
+    }
+}
+
+static void ipf_log_dxe_status(IPFMachineState *m, const char *tag)
+{
+    if (!m || !m->cpu || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    CPUIA64State *env = &m->cpu->env;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IPF: DXE_STATUS(%s) ip=%016" PRIx64 " psr=%016" PRIx64
+                  " r8=%016" PRIx64 " r9=%016" PRIx64
+                  " r10=%016" PRIx64 " r11=%016" PRIx64
+                  " r28=%016" PRIx64 " r29=%016" PRIx64 "\n",
+                  tag ? tag : "line",
+                  env->ip, env->psr,
+                  env->r[8], env->r[9], env->r[10], env->r[11],
+                  env->r[28], env->r[29]);
+}
 
 /*
  * Firmware call-gates / stubs.
@@ -1686,6 +1885,8 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
     IPFMachineState *m = opaque;
     uint8_t ch = data & 0xff;
     static int log_to_qemu_log = -1;
+    static int dxe_trace_enabled = -1;
+    static int hob_on_assert_enabled = -1;
 
     if (size != 1) {
         return;
@@ -1693,6 +1894,12 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
 
     if (log_to_qemu_log == -1) {
         log_to_qemu_log = getenv("QEMU_IPF_DEBUGCON_QEMU_LOG") ? 1 : 0;
+    }
+    if (dxe_trace_enabled == -1) {
+        dxe_trace_enabled = getenv("QEMU_IPF_DXE_TRACE") ? 1 : 0;
+    }
+    if (hob_on_assert_enabled == -1) {
+        hob_on_assert_enabled = getenv("QEMU_IPF_DUMP_HOB_ON_ASSERT") ? 1 : 0;
     }
 
     if (m->debugcon_line_mode) {
@@ -1731,11 +1938,22 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
                           " %s\n",
                           ip, psr, b0, m->debugcon_line);
 
+            if (dxe_trace_enabled &&
+                (strstr(m->debugcon_line, "DXE") ||
+                 strstr(m->debugcon_line, "Dxe") ||
+                 strstr(m->debugcon_line, "Status") ||
+                 strstr(m->debugcon_line, "ASSERT"))) {
+                ipf_log_dxe_status(m, m->debugcon_line);
+            }
+
             if (!m->debugcon_trace_once &&
                 (strstr(m->debugcon_line, "AllocatePoolPages: failed") ||
                  strstr(m->debugcon_line, "AllocatePool: failed") ||
                  strstr(m->debugcon_line, "ASSERT!Status"))) {
                 m->debugcon_trace_once = true;
+                if (hob_on_assert_enabled) {
+                    ipf_dump_gfw_hob("assert");
+                }
                 if (m->cpu) {
                     CPUIA64State *env = &m->cpu->env;
                     qemu_log_mask(LOG_GUEST_ERROR,
@@ -2602,6 +2820,9 @@ static void ipf_init(MachineState *machine)
                               NVRAM_START) < 0) {
             error_report("Unable to build GFW HOB list");
             exit(1);
+        }
+        if (run_firmware) {
+            ipf_dump_gfw_hob("boot");
         }
 
         /*
