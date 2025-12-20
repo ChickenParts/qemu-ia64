@@ -120,6 +120,7 @@ struct IPFMachineState {
     size_t debugcon_line_len;
     char debugcon_line[512];
     bool debugcon_trace_once;
+    bool debugcon_line_traced;
 
     MemoryRegion rom;
     MemoryRegion ram_low;
@@ -1879,6 +1880,70 @@ static uint64_t ipf_debugcon_read(void *opaque, hwaddr addr, unsigned size)
     return 0;
 }
 
+static bool ipf_debugcon_line_accum(IPFMachineState *m, uint8_t ch)
+{
+    if (ch == '\r') {
+        return false;
+    }
+    if (ch != '\n' && m->debugcon_line_len + 1 < sizeof(m->debugcon_line)) {
+        m->debugcon_line[m->debugcon_line_len++] = ch;
+        m->debugcon_line[m->debugcon_line_len] = '\0';
+        return false;
+    }
+    return true;
+}
+
+static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
+                                    int log_to_qemu_log, int dxe_trace_enabled,
+                                    int hob_on_assert_enabled)
+{
+    if (!log_to_qemu_log || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    if (dxe_trace_enabled &&
+        (strstr(line, "DXE") ||
+         strstr(line, "Dxe") ||
+         strstr(line, "Status") ||
+         strstr(line, "ASSERT"))) {
+        ipf_log_dxe_status(m, line);
+    }
+
+    if (!m->debugcon_trace_once &&
+        (strstr(line, "AllocatePoolPages: failed") ||
+         strstr(line, "AllocatePool: failed") ||
+         strstr(line, "ASSERT"))) {
+        m->debugcon_trace_once = true;
+        if (hob_on_assert_enabled) {
+            ipf_dump_gfw_hob("assert");
+        }
+        if (m->cpu) {
+            CPUIA64State *env = &m->cpu->env;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "FWDBG_CTX last_br from=%016" PRIx64 " to=%016" PRIx64
+                          " kind=%" PRIu64 " insn=%011" PRIx64
+                          " last_b0 pc=%016" PRIx64 " val=%016" PRIx64 " kind=%" PRIu64 "\n",
+                          env->last_branch_from, env->last_branch_to,
+                          env->last_branch_kind, env->last_branch_insn,
+                          env->last_b0_write_pc, env->last_b0_write_val,
+                          env->last_b0_write_kind & 0xff);
+            for (int i = 0; i < 16; i++) {
+                int idx = (env->b0_trace_idx + i) & 0xf;
+                if (!env->b0_trace_pc[idx]) {
+                    continue;
+                }
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "FWDBG_CTX b0_trace[%02d] pc=%016" PRIx64
+                              " val=%016" PRIx64 " kind=%" PRIu64
+                              " insn=%011" PRIx64 "\n",
+                              i, env->b0_trace_pc[idx], env->b0_trace_val[idx],
+                              env->b0_trace_kind[idx] & 0xff,
+                              env->b0_trace_insn[idx]);
+            }
+        }
+    }
+}
+
 static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
                                unsigned size)
 {
@@ -1902,13 +1967,20 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
         hob_on_assert_enabled = getenv("QEMU_IPF_DUMP_HOB_ON_ASSERT") ? 1 : 0;
     }
 
-    if (m->debugcon_line_mode) {
-        if (ch == '\r') {
-            return;
+    bool line_complete = ipf_debugcon_line_accum(m, ch);
+    if (!line_complete && !m->debugcon_line_traced) {
+        if (strstr(m->debugcon_line, "DXE") ||
+            strstr(m->debugcon_line, "Dxe") ||
+            strstr(m->debugcon_line, "Status") ||
+            strstr(m->debugcon_line, "ASSERT")) {
+            ipf_debugcon_trace_line(m, m->debugcon_line, log_to_qemu_log,
+                                    dxe_trace_enabled, hob_on_assert_enabled);
+            m->debugcon_line_traced = true;
         }
-        if (ch != '\n' && m->debugcon_line_len + 1 < sizeof(m->debugcon_line)) {
-            m->debugcon_line[m->debugcon_line_len++] = ch;
-            m->debugcon_line[m->debugcon_line_len] = '\0';
+    }
+
+    if (m->debugcon_line_mode) {
+        if (!line_complete) {
             return;
         }
 
@@ -1937,52 +2009,21 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
                           "FWDBG ip=%016" PRIx64 " psr=%016" PRIx64 " b0=%016" PRIx64
                           " %s\n",
                           ip, psr, b0, m->debugcon_line);
-
-            if (dxe_trace_enabled &&
-                (strstr(m->debugcon_line, "DXE") ||
-                 strstr(m->debugcon_line, "Dxe") ||
-                 strstr(m->debugcon_line, "Status") ||
-                 strstr(m->debugcon_line, "ASSERT"))) {
-                ipf_log_dxe_status(m, m->debugcon_line);
-            }
-
-            if (!m->debugcon_trace_once &&
-                (strstr(m->debugcon_line, "AllocatePoolPages: failed") ||
-                 strstr(m->debugcon_line, "AllocatePool: failed") ||
-                 strstr(m->debugcon_line, "ASSERT!Status"))) {
-                m->debugcon_trace_once = true;
-                if (hob_on_assert_enabled) {
-                    ipf_dump_gfw_hob("assert");
-                }
-                if (m->cpu) {
-                    CPUIA64State *env = &m->cpu->env;
-                    qemu_log_mask(LOG_GUEST_ERROR,
-                                  "FWDBG_CTX last_br from=%016" PRIx64 " to=%016" PRIx64
-                                  " kind=%" PRIu64 " insn=%011" PRIx64
-                                  " last_b0 pc=%016" PRIx64 " val=%016" PRIx64 " kind=%" PRIu64 "\n",
-                                  env->last_branch_from, env->last_branch_to,
-                                  env->last_branch_kind, env->last_branch_insn,
-                                  env->last_b0_write_pc, env->last_b0_write_val,
-                                  env->last_b0_write_kind & 0xff);
-                    for (int i = 0; i < 16; i++) {
-                        int idx = (env->b0_trace_idx + i) & 0xf;
-                        if (!env->b0_trace_pc[idx]) {
-                            continue;
-                        }
-                        qemu_log_mask(LOG_GUEST_ERROR,
-                                      "FWDBG_CTX b0_trace[%02d] pc=%016" PRIx64
-                                      " val=%016" PRIx64 " kind=%" PRIu64
-                                      " insn=%011" PRIx64 "\n",
-                                      i, env->b0_trace_pc[idx], env->b0_trace_val[idx],
-                                      env->b0_trace_kind[idx] & 0xff,
-                                      env->b0_trace_insn[idx]);
-                    }
-                }
-            }
         }
+        ipf_debugcon_trace_line(m, m->debugcon_line, log_to_qemu_log,
+                                dxe_trace_enabled, hob_on_assert_enabled);
         m->debugcon_line_len = 0;
         m->debugcon_line[0] = '\0';
+        m->debugcon_line_traced = false;
         return;
+    }
+
+    if (line_complete) {
+        ipf_debugcon_trace_line(m, m->debugcon_line, log_to_qemu_log,
+                                dxe_trace_enabled, hob_on_assert_enabled);
+        m->debugcon_line_len = 0;
+        m->debugcon_line[0] = '\0';
+        m->debugcon_line_traced = false;
     }
 
     if (m->debugcon_chr) {
@@ -2034,6 +2075,7 @@ static void ipf_init_debugcon(IPFMachineState *m)
     m->debugcon_line[0] = '\0';
     m->debugcon_line_mode = getenv("QEMU_IPF_DEBUGCON_LINE") ? true : false;
     m->debugcon_trace_once = false;
+    m->debugcon_line_traced = false;
     m->debugcon_chr = serial_hd(0);
 }
 
