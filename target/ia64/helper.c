@@ -6678,7 +6678,7 @@ static uint64_t ia64_fw_arg(CPUIA64State *env, uint8_t out0, uint8_t idx)
 
 static uint64_t ia64_fw_arg_break(CPUIA64State *env, uint8_t idx)
 {
-    uint8_t reg = 29 + idx;
+    uint8_t reg = 28 + idx;
     return (reg < 128) ? env->r[reg] : 0;
 }
 
@@ -6908,6 +6908,7 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         static int sal_pci_failfast = -1;
         static int sal_pci_dump = -1;
         static int sal_pci_dump_bundles = -1;
+        static int sal_pci_compat_cf8 = -1;
         if (sal_pci_failfast == -1) {
             const char *s = getenv("QEMU_IA64_SAL_PCI_FAILFAST");
             sal_pci_failfast = (s && *s) ? 1 : 0;
@@ -6926,6 +6927,10 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 }
             }
         }
+        if (sal_pci_compat_cf8 == -1) {
+            const char *s = getenv("QEMU_IA64_SAL_PCI_COMPAT_CF8");
+            sal_pci_compat_cf8 = (s && *s) ? 1 : 0;
+        }
 
         bool use_break_abi = break_abi;
         uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
@@ -6934,6 +6939,8 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                   : ia64_fw_arg(env, out0, 2);
         bool size_clamped = false;
         bool size_valid = (size == 1 || size == 2 || size == 4);
+        bool compat_cf8 = false;
+        uint64_t compat_cf8_addr = 0;
         if (size != 1 && size != 2 && size != 4) {
             uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
                                           : ia64_fw_arg_break(env, 2);
@@ -6948,26 +6955,50 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 size_clamped = true;
             }
         }
+        if (sal_pci_compat_cf8 && !size_valid && break_abi && pci_addr == 0 &&
+            (env->r[30] & 0x80000000ULL)) {
+            compat_cf8 = true;
+            compat_cf8_addr = env->r[30];
+            size = 4;
+            size_valid = true;
+            size_clamped = false;
+        }
         if (sal_pci_failfast && (!size_valid || size_clamped)) {
             if (sal_pci_dump) {
                 ia64_fw_dump_code(env, "caller", env->last_branch_from,
                                   sal_pci_dump_bundles);
                 ia64_fw_dump_code(env, "callee", env->last_branch_to,
                                   sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "b0", env->b[0],
+                                  sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "b0w", env->last_b0_write_pc,
+                                  sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "b0wprev", env->prev_b0_write_pc,
+                                  sal_pci_dump_bundles);
             }
             cpu_abort(env_cpu(env),
                       "IA64: SAL_PCI_CONFIG_READ invalid size=%" PRIu64
-                      " pci_addr=%016" PRIx64 " break_abi=%d clamped=%d",
+                      " pci_addr=%016" PRIx64 " break_abi=%d clamped=%d"
+                      " lb_from=%016" PRIx64 " lb_to=%016" PRIx64
+                      " b0=%016" PRIx64,
                       size_valid ? size : (break_abi ? ia64_fw_arg_break(env, 2)
                                                      : ia64_fw_arg(env, out0, 2)),
-                      pci_addr, break_abi ? 1 : 0, size_clamped ? 1 : 0);
+                      pci_addr, break_abi ? 1 : 0, size_clamped ? 1 : 0,
+                      env->last_branch_from, env->last_branch_to, env->b[0]);
         }
-        uint16_t seg;
-        uint8_t bus, devfn;
-        uint16_t reg;
-        ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+        uint16_t seg = 0;
+        uint8_t bus = 0, devfn = 0;
+        uint16_t reg = 0;
+        if (compat_cf8) {
+            uint64_t addr = compat_cf8_addr;
+            bus = (addr >> 16) & 0xff;
+            devfn = (addr >> 8) & 0xff;
+            reg = addr & 0xff;
+        } else {
+            ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+        }
 
-        if (seg != 0 || reg > 0xff) {
+        if (!compat_cf8 && (seg != 0 || reg > 0xff)) {
             if (size_clamped) {
                 status = 0;
                 v0 = 0xffffffffU;
@@ -7024,6 +7055,7 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         static int sal_pci_failfast = -1;
         static int sal_pci_dump = -1;
         static int sal_pci_dump_bundles = -1;
+        static int sal_pci_compat_cf8 = -1;
         if (sal_pci_failfast == -1) {
             const char *s = getenv("QEMU_IA64_SAL_PCI_FAILFAST");
             sal_pci_failfast = (s && *s) ? 1 : 0;
@@ -7042,6 +7074,10 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 }
             }
         }
+        if (sal_pci_compat_cf8 == -1) {
+            const char *s = getenv("QEMU_IA64_SAL_PCI_COMPAT_CF8");
+            sal_pci_compat_cf8 = (s && *s) ? 1 : 0;
+        }
 
         bool use_break_abi = break_abi;
         uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
@@ -7052,6 +7088,8 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                    : ia64_fw_arg(env, out0, 3);
         bool size_clamped = false;
         bool size_valid = (size == 1 || size == 2 || size == 4);
+        bool compat_cf8 = false;
+        uint64_t compat_cf8_addr = 0;
         if (size != 1 && size != 2 && size != 4) {
             uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
                                           : ia64_fw_arg_break(env, 2);
@@ -7069,26 +7107,50 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 size_clamped = true;
             }
         }
+        if (sal_pci_compat_cf8 && !size_valid && break_abi && pci_addr == 0 &&
+            (env->r[30] & 0x80000000ULL)) {
+            compat_cf8 = true;
+            compat_cf8_addr = env->r[30];
+            size = 4;
+            size_valid = true;
+            size_clamped = false;
+        }
         if (sal_pci_failfast && (!size_valid || size_clamped)) {
             if (sal_pci_dump) {
                 ia64_fw_dump_code(env, "caller", env->last_branch_from,
                                   sal_pci_dump_bundles);
                 ia64_fw_dump_code(env, "callee", env->last_branch_to,
                                   sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "b0", env->b[0],
+                                  sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "b0w", env->last_b0_write_pc,
+                                  sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "b0wprev", env->prev_b0_write_pc,
+                                  sal_pci_dump_bundles);
             }
             cpu_abort(env_cpu(env),
                       "IA64: SAL_PCI_CONFIG_WRITE invalid size=%" PRIu64
-                      " pci_addr=%016" PRIx64 " break_abi=%d clamped=%d",
+                      " pci_addr=%016" PRIx64 " break_abi=%d clamped=%d"
+                      " lb_from=%016" PRIx64 " lb_to=%016" PRIx64
+                      " b0=%016" PRIx64,
                       size_valid ? size : (break_abi ? ia64_fw_arg_break(env, 2)
                                                      : ia64_fw_arg(env, out0, 2)),
-                      pci_addr, break_abi ? 1 : 0, size_clamped ? 1 : 0);
+                      pci_addr, break_abi ? 1 : 0, size_clamped ? 1 : 0,
+                      env->last_branch_from, env->last_branch_to, env->b[0]);
         }
-        uint16_t seg;
-        uint8_t bus, devfn;
-        uint16_t reg;
-        ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+        uint16_t seg = 0;
+        uint8_t bus = 0, devfn = 0;
+        uint16_t reg = 0;
+        if (compat_cf8) {
+            uint64_t addr = compat_cf8_addr;
+            bus = (addr >> 16) & 0xff;
+            devfn = (addr >> 8) & 0xff;
+            reg = addr & 0xff;
+        } else {
+            ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+        }
 
-        if (seg != 0 || reg > 0xff) {
+        if (!compat_cf8 && (seg != 0 || reg > 0xff)) {
             status = size_clamped ? 0 : -2;
             if (ia64_fw_log_enabled()) {
                 qemu_log_mask(LOG_GUEST_ERROR,
