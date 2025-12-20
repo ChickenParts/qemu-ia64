@@ -32,6 +32,7 @@
 /* #include "fdc.h" */
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
+#include "hw/southbridge/piix.h"
 #include "hw/block/block.h"
 #include "qemu/typedefs.h"
 #include "hw/sysbus.h"
@@ -2270,6 +2271,16 @@ static void ipf_init_pci(IPFMachineState *m)
     pci_create_simple(m->pcibus, PCI_DEVFN(0, 0), TYPE_IPF_PCI_ROOT_DEVICE);
 }
 
+static void ipf_init_southbridge(IPFMachineState *m)
+{
+    /*
+     * Original IPF hardware used an Intel PCI-to-ISA southbridge.
+     * Provide a PIIX3-compatible device so firmware can discover it.
+     */
+    PCIDevice *piix = pci_new_multifunction(PCI_DEVFN(1, 0), TYPE_PIIX3_DEVICE);
+    pci_realize_and_unref(piix, m->pcibus, &error_fatal);
+}
+
 static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
 {
     IPFMachineState *m = opaque;
@@ -2596,11 +2607,12 @@ static void ipf_init(MachineState *machine)
         /*
          * Provide a minimal SAL system table at a fixed low physical address.
          *
-         * xenipf/EDK firmware's ExtendedSal DXE driver expects to discover an
-         * SST_ via EFI configuration tables. The IA-64 backend emulates the
-         * PAL/SAL procedure entry points referenced by this table.
+         * Only do this for direct -kernel boots; real firmware should supply
+         * its own SAL table and EFI configuration entries.
          */
-        ipf_write_sal_systab();
+        if (!run_firmware) {
+            ipf_write_sal_systab();
+        }
 
         if (run_firmware) {
             ipf_patch_firmware_statuscode_callgate();
@@ -2609,6 +2621,7 @@ static void ipf_init(MachineState *machine)
 
     if (run_firmware) {
         ipf_init_pci(m);
+        ipf_init_southbridge(m);
         /*
          * Attach a PCI VGA device so the guest firmware can present a UI.
          * This honors the user's -vga selection (e.g. std/cirrus/virtio).
@@ -2623,7 +2636,7 @@ static void ipf_init(MachineState *machine)
         }
         /* Firmware-only boot: enter Xen/KVM guest firmware entry point. */
         ipf_boot_ip = IPF_GFW_ENTRY;
-        ipf_boot_r28 = 0;
+        ipf_boot_r28 = GFW_HOB_START;
         qemu_register_reset(main_cpu_reset, cpu);
         return;
     }
@@ -3339,7 +3352,7 @@ static void ipf_init(MachineState *machine)
         env->fw_preboot_ip = kernel_entry;
         env->fw_preboot_r28 = ipf_boot_r28;
         env->fw_preboot_kernel_low = kernel_low;
-        ipf_boot_r28 = 0;
+        ipf_boot_r28 = GFW_HOB_START;
         ipf_boot_ip = IPF_GFW_ENTRY;
         DPRINTF("Firmware-preboot enabled: will hand off to kernel entry 0x%" PRIx64 "\n",
                 kernel_entry);

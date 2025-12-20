@@ -7,3 +7,4 @@ CONFIG_SERIAL_MM=y
 # PCI + VGA for guest firmware (Flash.fd) UI and device enumeration.
 CONFIG_PCI=y
 CONFIG_PCI_DEVICES=y
+CONFIG_PIIX=y

@@ -1131,6 +1131,7 @@ static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
         tcg_gen_exit_tb(NULL, 0);
         gen_set_label(skip);
     }
+
 #endif
 
     uint64_t hang_threshold = ia64_get_hang_abort_threshold();
@@ -2238,6 +2239,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 tcg_gen_movi_i64(t, simm8);
                 if (ar == 18) {
                     gen_helper_set_bspstore(tcg_env, t);
+                } else if (ar == 66) {
+                    TCGv_i64 ec = tcg_temp_new_i64();
+                    tcg_gen_andi_i64(ec, t, 0x3f);
+                    tcg_gen_shli_i64(ec, ec, 58);
+                    gen_store_ar(ar, ec);
                 } else {
                     gen_store_ar(ar, t);
                 }
@@ -2755,6 +2761,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 if (ar == 18) {
                     gen_helper_set_bspstore(tcg_env, t);
+                } else if (ar == 66) {
+                    TCGv_i64 ec = tcg_temp_new_i64();
+                    tcg_gen_andi_i64(ec, t, 0x3f);
+                    tcg_gen_shli_i64(ec, ec, 58);
+                    gen_store_ar(ar, ec);
                 } else {
                     gen_store_ar(ar, t);
                 }

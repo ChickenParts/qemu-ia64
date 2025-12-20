@@ -1760,7 +1760,16 @@ static bool ia64_fw_read_bytes_any(CPUState *cs, uint64_t addr,
     }
     MemTxResult r = address_space_read(&address_space_memory, (hwaddr)addr,
                                        MEMTXATTRS_UNSPECIFIED, buf, len);
-    return (r == MEMTX_OK);
+    if (r == MEMTX_OK) {
+        return true;
+    }
+    uint64_t phys = addr & ((1ULL << 61) - 1);
+    if (phys != addr) {
+        r = address_space_read(&address_space_memory, (hwaddr)phys,
+                               MEMTXATTRS_UNSPECIFIED, buf, len);
+        return (r == MEMTX_OK);
+    }
+    return false;
 }
 
 static bool ia64_fw_write_bytes_any(CPUState *cs, uint64_t addr,
@@ -1774,7 +1783,16 @@ static bool ia64_fw_write_bytes_any(CPUState *cs, uint64_t addr,
     }
     MemTxResult r = address_space_write(&address_space_memory, (hwaddr)addr,
                                         MEMTXATTRS_UNSPECIFIED, buf, len);
-    return (r == MEMTX_OK);
+    if (r == MEMTX_OK) {
+        return true;
+    }
+    uint64_t phys = addr & ((1ULL << 61) - 1);
+    if (phys != addr) {
+        r = address_space_write(&address_space_memory, (hwaddr)phys,
+                                MEMTXATTRS_UNSPECIFIED, buf, len);
+        return (r == MEMTX_OK);
+    }
+    return false;
 }
 
 static size_t ia64_fw_read_ascii_string(CPUState *cs, uint64_t addr,
@@ -1930,7 +1948,7 @@ static void ia64_fw_guid_from_bytes(const uint8_t *buf, IA64EfiGuid *out)
 static bool ia64_fw_read_guid(CPUIA64State *env, uint64_t va, IA64EfiGuid *out)
 {
     CPUState *cs = env_cpu(env);
-    return cpu_memory_rw_debug(cs, va, out, sizeof(*out), false) == 0;
+    return ia64_fw_read_bytes_any(cs, va, (uint8_t *)out, sizeof(*out));
 }
 
 static bool ia64_fw_decode_pci_addr(uint64_t addr, uint16_t *seg,
@@ -2045,6 +2063,9 @@ static bool ia64_fw_find_efi_system_table(CPUState *cs,
 
 static void ia64_fw_try_install_sal_systab(CPUIA64State *env)
 {
+    if (!env->fw_preboot_active) {
+        return;
+    }
     if (env->fw_sal_systab_installed) {
         return;
     }
@@ -5230,7 +5251,7 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
     ia64_rse_push_window(env, pc + 16);
     {
         uint64_t ppl = (env->psr >> 32) & 3; /* PSR.CPL */
-        uint64_t pec = env->ar[66] & 0x3f;   /* ar.ec low 6 bits */
+        uint64_t pec = (env->ar[66] >> 58) & 0x3f; /* EC_CNT bits 63..58 */
         uint64_t new_pfs = caller_cfm |
                            (ppl << 62) |
                            (pec << 52);
@@ -7089,6 +7110,14 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
 #ifndef CONFIG_USER_ONLY
     ia64_fw_try_patch_efi_hobs(env);
+    /*
+     * Keep attempting to install the SAL systab entry while firmware is
+     * running, even before the first SAL call. Throttle to avoid heavy scans.
+     */
+    static uint64_t tlb_calls;
+    if (!env->fw_sal_systab_installed && ((++tlb_calls & 0xfff) == 0)) {
+        ia64_fw_try_install_sal_systab(env);
+    }
 #endif
 
     /*
