@@ -5549,6 +5549,107 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         }
     }
 
+    /*
+     * Zero-byte loop seen in PEI:
+     *   counter32 at [r12+16], base ptr at [r12+56], limit = 0x3440.
+     *   increments counter and stores zero byte to base+counter.
+     * Exit target is pc + 0xa0.
+     */
+    if (low0 == 0x81e021001840f811ULL &&
+        high0 == 0x2000000000420030ULL &&
+        low1 == 0x09f010103e00f80bULL &&
+        high1 == 0x000400000042007cULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t tmp[8];
+        cpu_physical_memory_read(frame + 16, tmp, 4);
+        uint32_t count = ldl_le_p(tmp);
+        const uint32_t limit = 0x3440;
+        if (count < limit) {
+            cpu_physical_memory_read(frame + 56, tmp, sizeof(tmp));
+            hwaddr base_raw = ldq_le_p(tmp);
+            hwaddr base = ia64_phys_mode_addr(base_raw);
+            uint64_t start = base + (uint64_t)count + 1;
+            uint64_t len = (uint64_t)limit - count - 1;
+
+            if (len && !ia64_fw_fastpath_fill(start, len, 0)) {
+                return 0;
+            }
+
+            stl_le_p(tmp, limit);
+            cpu_physical_memory_write(frame + 16, tmp, 4);
+
+            if (trace_enabled && trace_count++ < trace_limit) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "fw_fastpath zero-loop pc=%016" PRIx64
+                              " base=%016" PRIx64 " count=%u len=%" PRIu64 "\n",
+                              pc, base_raw, count, len);
+            }
+
+            env->ip = pc + 0xa0;
+            env->psr &= ~PSR_RI_MASK;
+            return 1;
+        }
+    }
+
+    /*
+     * Table copy loop seen in DXE:
+     *   counter64 at [r12+160], src base at [r12+152], dst base at [r12+176].
+     *   limit entries at [r12+432] (already scaled to 8-byte entries).
+     *   increments counter, copies src[count] -> dst[count] until count >= limit.
+     * Exit target is pc + 0xd0.
+     */
+    if (low0 == 0x01e021011880f811ULL &&
+        high0 == 0x2000000000420231ULL &&
+        low1 == 0x09f010183e00f80bULL &&
+        high1 == 0x000400000042007cULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t tmp[8];
+        cpu_physical_memory_read(frame + 160, tmp, sizeof(tmp));
+        uint64_t count = ldq_le_p(tmp);
+        cpu_physical_memory_read(frame + 432, tmp, sizeof(tmp));
+        uint64_t limit = ldq_le_p(tmp);
+
+        uint64_t next = count + 1;
+        if (next >= limit) {
+            stq_le_p(tmp, next);
+            cpu_physical_memory_write(frame + 160, tmp, sizeof(tmp));
+            env->ip = pc + 0xd0;
+            env->psr &= ~PSR_RI_MASK;
+            return 1;
+        }
+
+        cpu_physical_memory_read(frame + 152, tmp, sizeof(tmp));
+        uint64_t src_raw = ldq_le_p(tmp);
+        cpu_physical_memory_read(frame + 176, tmp, sizeof(tmp));
+        uint64_t dst_raw = ldq_le_p(tmp);
+        hwaddr src_phys = ia64_phys_mode_addr(src_raw);
+        hwaddr dst_phys = ia64_phys_mode_addr(dst_raw);
+
+        uint64_t entries = limit - next;
+        uint64_t offset = next << 3;
+        uint64_t bytes = entries << 3;
+        if (bytes && !ia64_fw_fastpath_copy(dst_phys + offset,
+                                            src_phys + offset,
+                                            bytes)) {
+            return 0;
+        }
+
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath table-copy pc=%016" PRIx64
+                          " src=%016" PRIx64 " dst=%016" PRIx64
+                          " next=%" PRIu64 " limit=%" PRIu64 "\n",
+                          pc, src_raw, dst_raw, next, limit);
+        }
+
+        stq_le_p(tmp, limit);
+        cpu_physical_memory_write(frame + 160, tmp, sizeof(tmp));
+
+        env->ip = pc + 0xd0;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
     return 0;
 #endif
 }
@@ -6989,13 +7090,17 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         uint16_t seg = 0;
         uint8_t bus = 0, devfn = 0;
         uint16_t reg = 0;
+        uint32_t cfgaddr = 0;
         if (compat_cf8) {
             uint64_t addr = compat_cf8_addr;
             bus = (addr >> 16) & 0xff;
             devfn = (addr >> 8) & 0xff;
             reg = addr & 0xff;
+            cfgaddr = (uint32_t)(addr & ~3ULL);
         } else {
             ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+            cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
+                      ((uint32_t)devfn << 8) | (reg & ~3U);
         }
 
         if (!compat_cf8 && (seg != 0 || reg > 0xff)) {
@@ -7017,8 +7122,6 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             break;
         }
 
-        uint32_t cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
-                           ((uint32_t)devfn << 8) | (reg & ~3U);
         cpu_outl(0xcf8, cfgaddr);
 
         if (size == 1) {
@@ -7141,13 +7244,17 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         uint16_t seg = 0;
         uint8_t bus = 0, devfn = 0;
         uint16_t reg = 0;
+        uint32_t cfgaddr = 0;
         if (compat_cf8) {
             uint64_t addr = compat_cf8_addr;
             bus = (addr >> 16) & 0xff;
             devfn = (addr >> 8) & 0xff;
             reg = addr & 0xff;
+            cfgaddr = (uint32_t)(addr & ~3ULL);
         } else {
             ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+            cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
+                      ((uint32_t)devfn << 8) | (reg & ~3U);
         }
 
         if (!compat_cf8 && (seg != 0 || reg > 0xff)) {
@@ -7164,8 +7271,6 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             break;
         }
 
-        uint32_t cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
-                           ((uint32_t)devfn << 8) | (reg & ~3U);
         cpu_outl(0xcf8, cfgaddr);
 
         if (size == 1) {
