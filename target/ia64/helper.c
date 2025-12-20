@@ -6682,6 +6682,46 @@ static uint64_t ia64_fw_arg_break(CPUIA64State *env, uint8_t idx)
     return (reg < 128) ? env->r[reg] : 0;
 }
 
+static void ia64_fw_dump_code(CPUIA64State *env, const char *tag,
+                              uint64_t pc, int bundles)
+{
+    if (!pc || bundles <= 0) {
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    uint64_t base = pc & ~0xFULL;
+    uint64_t start = base;
+    if (bundles > 16) {
+        uint64_t back = (uint64_t)(bundles / 4) * 16ULL;
+        start = (start >= back) ? (start - back) : 0;
+    }
+
+    g_mkdir_with_parents("scratch/ia64_logs", 0755);
+    char path[256];
+    snprintf(path, sizeof(path),
+             "scratch/ia64_logs/sal_pci_%s_%016" PRIx64 ".bin",
+             tag ? tag : "caller", base);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        return;
+    }
+
+    for (int i = 0; i < bundles; i++) {
+        uint8_t bundle[16];
+        uint64_t bpc = start + (uint64_t)i * 16;
+        if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle), false) != 0) {
+            break;
+        }
+        fwrite(bundle, 1, sizeof(bundle), fp);
+    }
+    fclose(fp);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: SAL_PCI dump pc=%016" PRIx64 " start=%016" PRIx64
+                  " bundles=%d file=%s\n",
+                  base, start, bundles, path);
+}
+
 static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
 {
     uint8_t out0 = ia64_fw_out_base(env);
@@ -6865,12 +6905,35 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
          *   arg2: access size (1/2/4[/8])
          *   arg3: type/mode (0 = legacy, 1 = extended)
          */
+        static int sal_pci_failfast = -1;
+        static int sal_pci_dump = -1;
+        static int sal_pci_dump_bundles = -1;
+        if (sal_pci_failfast == -1) {
+            const char *s = getenv("QEMU_IA64_SAL_PCI_FAILFAST");
+            sal_pci_failfast = (s && *s) ? 1 : 0;
+        }
+        if (sal_pci_dump == -1) {
+            const char *s = getenv("QEMU_IA64_SAL_PCI_DUMP");
+            sal_pci_dump = (s && *s) ? 1 : 0;
+        }
+        if (sal_pci_dump_bundles == -1) {
+            sal_pci_dump_bundles = 64;
+            const char *s = getenv("QEMU_IA64_SAL_PCI_DUMP_BUNDLES");
+            if (s && *s) {
+                sal_pci_dump_bundles = atoi(s);
+                if (sal_pci_dump_bundles <= 0) {
+                    sal_pci_dump_bundles = 64;
+                }
+            }
+        }
+
         bool use_break_abi = break_abi;
         uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
                                       : ia64_fw_arg(env, out0, 1);
         uint64_t size = break_abi ? ia64_fw_arg_break(env, 2)
                                   : ia64_fw_arg(env, out0, 2);
         bool size_clamped = false;
+        bool size_valid = (size == 1 || size == 2 || size == 4);
         if (size != 1 && size != 2 && size != 4) {
             uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
                                           : ia64_fw_arg_break(env, 2);
@@ -6884,6 +6947,20 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 size = 4;
                 size_clamped = true;
             }
+        }
+        if (sal_pci_failfast && (!size_valid || size_clamped)) {
+            if (sal_pci_dump) {
+                ia64_fw_dump_code(env, "caller", env->last_branch_from,
+                                  sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "callee", env->last_branch_to,
+                                  sal_pci_dump_bundles);
+            }
+            cpu_abort(env_cpu(env),
+                      "IA64: SAL_PCI_CONFIG_READ invalid size=%" PRIu64
+                      " pci_addr=%016" PRIx64 " break_abi=%d clamped=%d",
+                      size_valid ? size : (break_abi ? ia64_fw_arg_break(env, 2)
+                                                     : ia64_fw_arg(env, out0, 2)),
+                      pci_addr, break_abi ? 1 : 0, size_clamped ? 1 : 0);
         }
         uint16_t seg;
         uint8_t bus, devfn;
@@ -6944,6 +7021,28 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
          *   arg3: value
          *   arg4: type/mode (0 = legacy, 1 = extended)
          */
+        static int sal_pci_failfast = -1;
+        static int sal_pci_dump = -1;
+        static int sal_pci_dump_bundles = -1;
+        if (sal_pci_failfast == -1) {
+            const char *s = getenv("QEMU_IA64_SAL_PCI_FAILFAST");
+            sal_pci_failfast = (s && *s) ? 1 : 0;
+        }
+        if (sal_pci_dump == -1) {
+            const char *s = getenv("QEMU_IA64_SAL_PCI_DUMP");
+            sal_pci_dump = (s && *s) ? 1 : 0;
+        }
+        if (sal_pci_dump_bundles == -1) {
+            sal_pci_dump_bundles = 64;
+            const char *s = getenv("QEMU_IA64_SAL_PCI_DUMP_BUNDLES");
+            if (s && *s) {
+                sal_pci_dump_bundles = atoi(s);
+                if (sal_pci_dump_bundles <= 0) {
+                    sal_pci_dump_bundles = 64;
+                }
+            }
+        }
+
         bool use_break_abi = break_abi;
         uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
                                       : ia64_fw_arg(env, out0, 1);
@@ -6952,6 +7051,7 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         uint64_t value = break_abi ? ia64_fw_arg_break(env, 3)
                                    : ia64_fw_arg(env, out0, 3);
         bool size_clamped = false;
+        bool size_valid = (size == 1 || size == 2 || size == 4);
         if (size != 1 && size != 2 && size != 4) {
             uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
                                           : ia64_fw_arg_break(env, 2);
@@ -6968,6 +7068,20 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 size = 4;
                 size_clamped = true;
             }
+        }
+        if (sal_pci_failfast && (!size_valid || size_clamped)) {
+            if (sal_pci_dump) {
+                ia64_fw_dump_code(env, "caller", env->last_branch_from,
+                                  sal_pci_dump_bundles);
+                ia64_fw_dump_code(env, "callee", env->last_branch_to,
+                                  sal_pci_dump_bundles);
+            }
+            cpu_abort(env_cpu(env),
+                      "IA64: SAL_PCI_CONFIG_WRITE invalid size=%" PRIu64
+                      " pci_addr=%016" PRIx64 " break_abi=%d clamped=%d",
+                      size_valid ? size : (break_abi ? ia64_fw_arg_break(env, 2)
+                                                     : ia64_fw_arg(env, out0, 2)),
+                      pci_addr, break_abi ? 1 : 0, size_clamped ? 1 : 0);
         }
         uint16_t seg;
         uint8_t bus, devfn;
