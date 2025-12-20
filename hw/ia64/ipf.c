@@ -58,6 +58,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "chardev/char.h"
+#include <ctype.h>
 
 #define DEBUG_IPF
 #ifdef DEBUG_IPF
@@ -1901,21 +1902,76 @@ static uint32_t ipf_to_legacy_io(hwaddr addr)
     return (uint32_t)(((addr & 0x3ffffff) >> 12 << 2) | (addr & 0x3));
 }
 
+static bool ipf_parse_range(const char *s, uint64_t *out_lo, uint64_t *out_hi)
+{
+    if (!s || !*s) {
+        return false;
+    }
+    char *endp = NULL;
+    uint64_t lo = strtoull(s, &endp, 0);
+    if (!endp || endp == s) {
+        return false;
+    }
+
+    while (*endp && (isspace((unsigned char)*endp) || *endp == ',')) {
+        endp++;
+    }
+    uint64_t hi = lo;
+    if (*endp) {
+        if (*endp == '-' || *endp == ':') {
+            endp++;
+        } else if (endp[0] == '.' && endp[1] == '.') {
+            endp += 2;
+        }
+        while (*endp && isspace((unsigned char)*endp)) {
+            endp++;
+        }
+        if (*endp) {
+            uint64_t tmp = strtoull(endp, NULL, 0);
+            if (tmp < lo) {
+                hi = lo;
+                lo = tmp;
+            } else {
+                hi = tmp;
+            }
+        }
+    }
+
+    *out_lo = lo;
+    *out_hi = hi;
+    return true;
+}
+
 static void ipf_trace_ioport(IPFMachineState *m, bool is_write,
                              uint32_t port, unsigned size, uint32_t val)
 {
     static int trace_pci = -1;
     static int trace_vga = -1;
+    static int trace_post = -1;
+    static int trace_ports = -1;
+    static uint16_t trace_port_lo;
+    static uint16_t trace_port_hi;
     static int trace_limit = -1;
     static int trace_count;
 
     if (trace_pci == -1) {
         trace_pci = getenv("QEMU_IPF_TRACE_PCI") ? 1 : 0;
         trace_vga = getenv("QEMU_IPF_TRACE_VGA") ? 1 : 0;
-        trace_limit = 256;
-        const char *s = getenv("QEMU_IPF_TRACE_LIMIT");
+        trace_post = getenv("QEMU_IPF_TRACE_POST") ? 1 : 0;
+        trace_ports = 0;
+        const char *s = getenv("QEMU_IPF_TRACE_IOPORTS");
         if (s && *s) {
-            trace_limit = atoi(s);
+            uint64_t lo = 0, hi = 0;
+            if (ipf_parse_range(s, &lo, &hi)) {
+                trace_ports = 1;
+                trace_port_lo = (uint16_t)(lo & 0xffff);
+                trace_port_hi = (uint16_t)(hi & 0xffff);
+            }
+        }
+        trace_limit = 256;
+        const char *limit = getenv("QEMU_IPF_TRACE_LIMIT");
+        if (limit && *limit) {
+            trace_limit = atoi(limit);
         }
         if (trace_limit < 0) {
             trace_limit = 0;
@@ -1954,6 +2010,78 @@ static void ipf_trace_ioport(IPFMachineState *m, bool is_write,
                       is_write ? "wr" : "rd", port, size, val);
         return;
     }
+
+    if (trace_post && (port == 0x80 || port == 0x84)) {
+        trace_count++;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ipf post ioport %s port=0x%04x size=%u val=%08x\n",
+                      is_write ? "wr" : "rd", port, size, val);
+        return;
+    }
+
+    if (trace_ports && port >= trace_port_lo && port <= trace_port_hi) {
+        trace_count++;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ipf ioport %s port=0x%04x size=%u val=%08x\n",
+                      is_write ? "wr" : "rd", port, size, val);
+        return;
+    }
+}
+
+static void ipf_trace_mmio(const char *dev, hwaddr addr, unsigned size,
+                           uint64_t data)
+{
+    static int trace_mmio = -1;
+    static bool trace_mmio_all;
+    static uint64_t trace_mmio_lo;
+    static uint64_t trace_mmio_hi;
+    static int trace_mmio_limit = -1;
+    static int trace_mmio_count;
+
+    if (trace_mmio == -1) {
+        trace_mmio = 0;
+        trace_mmio_all = false;
+        const char *s = getenv("QEMU_IPF_TRACE_MMIO");
+        if (s && *s) {
+            if (!strcmp(s, "0") || !strcmp(s, "off") ||
+                !strcmp(s, "false") || !strcmp(s, "no")) {
+                trace_mmio = 0;
+            } else {
+                trace_mmio = 1;
+                trace_mmio_all = true;
+                uint64_t lo = 0, hi = 0;
+                if (ipf_parse_range(s, &lo, &hi)) {
+                    trace_mmio_all = false;
+                    trace_mmio_lo = lo;
+                    trace_mmio_hi = hi;
+                }
+            }
+        }
+        trace_mmio_limit = 256;
+        const char *l = getenv("QEMU_IPF_TRACE_MMIO_LIMIT");
+        if (l && *l) {
+            trace_mmio_limit = atoi(l);
+        }
+        if (trace_mmio_limit < 0) {
+            trace_mmio_limit = 0;
+        }
+    }
+
+    if (!trace_mmio) {
+        return;
+    }
+    if (!trace_mmio_all &&
+        (addr < trace_mmio_lo || addr > trace_mmio_hi)) {
+        return;
+    }
+    if (trace_mmio_limit != 0 && trace_mmio_count >= trace_mmio_limit) {
+        return;
+    }
+    trace_mmio_count++;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "ipf mmio wr dev=%s addr=0x%016" PRIx64
+                  " size=%u val=0x%08" PRIx64 "\n",
+                  dev ? dev : "unknown", (uint64_t)addr, size, data);
 }
 
 static uint64_t ipf_legacy_io_read(void *opaque, hwaddr addr, unsigned size)
@@ -1987,6 +2115,7 @@ static void ipf_legacy_io_write(void *opaque, hwaddr addr, uint64_t data,
     uint32_t port = ipf_to_legacy_io(addr);
 
     ipf_trace_ioport(m, true, port, size, (uint32_t)data);
+    ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, data);
     switch (size) {
     case 1:
         cpu_outb(port, data);
@@ -2187,6 +2316,7 @@ static void ipf_acpi_pm_write(void *opaque, hwaddr addr, uint64_t data,
     uint64_t mask = (size >= 8) ? UINT64_MAX : ((1ULL << (size * 8)) - 1);
     uint64_t val = data & mask;
 
+    ipf_trace_mmio("acpi-pm", IPF_ACPI_PM_BASE + addr, size, data);
     switch (addr) {
     case 0x00:
     case 0x01: {
@@ -2280,6 +2410,7 @@ static void ipf_iosapic_write(void *opaque, hwaddr addr, uint64_t data,
     IPFMachineState *m = opaque;
     uint32_t val = (uint32_t)data;
 
+    ipf_trace_mmio("iosapic", IPF_IOSAPIC_BASE + addr, size, data);
     switch (addr) {
     case IPF_IOSAPIC_REG_SELECT:
         m->iosapic_reg_select = val;

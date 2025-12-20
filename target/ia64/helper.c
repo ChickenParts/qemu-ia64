@@ -1221,6 +1221,52 @@ static bool ia64_fw_status_is_assert(uint32_t code_type, uint32_t value)
                IA64_EFI_SW_EC_ILLEGAL_SOFTWARE_STATE;
 }
 
+static const char *ia64_fw_decode_sala_post_code(uint16_t code)
+{
+    switch (code) {
+    case 0x8FE0: return "Reset Condition";
+    case 0x8FD0: return "Node BSP selection";
+    case 0x8FC0: return "Early node init (SNCPEIM)";
+    case 0x8FB0: return "Processor health/setup (CVDR PEIM)";
+    case 0x8FA0: return "PAL/FW health status";
+    case 0x8F70: return "Memory Initialization Entry";
+    case 0x8F71: return "RAC Initialization (Mem_DoRacInitialization)";
+    case 0x8F72: return "Validate DIMMs (Mem_ValidateInstalledConfiguration)";
+    case 0x8F73: return "Program MIRs/MITs (Mem_DoMirMitProgram)";
+    case 0x8F74: return "Calculate CAS (Mem_CalcSysCas)";
+    case 0xCF74: return "Calculate CAS Error Loop";
+    case 0x8F75: return "Program CAS (Mem_SetMrhdCasLatency)";
+    case 0x8F76: return "Set Mrhd DIMM Geometry (Mem_SetMrhdDimmGeometry)";
+    case 0x8F77: return "SLEW rate calibration (Mem_DoSlewRateCalibration)";
+    case 0x8F78: return "Mem_InitDimmAndSetCasLatencyAndBurst";
+    case 0x8F79: return "DDR delay Calibration (Mem_DoDdrDelayCalibration)";
+    case 0x8F80: return "DIMM path latency Calibration";
+    case 0x8F81: return "DIMM Strobe Delay Calibration";
+    case 0x8F82: return "Configure SNC timing";
+    case 0x8F83: return "Set timings for write pattern";
+    case 0x8F90: return "Levelization";
+    case 0x8F98: return "Reconfigure memory";
+    case 0xCF9F: return "Levelization failed: no memory found";
+    case 0x8F60: return "Memory Test";
+    case 0x8F50: return "Platform Discovery/Init";
+    case 0x8F40: return "SBSP selection";
+    case 0x8F20: return "Memory Autoscan entry";
+    case 0x8F21: return "Process Auto Scan Input";
+    case 0x8F22: return "Process Auto Scan Output";
+    case 0x8F10: return "Recovery code entry";
+    case 0x8ED0: return "Recovery C-Code Entry";
+    case 0x8ED1: return "Recovery Reading media";
+    case 0xCEDF: return "Recovery Reading error";
+    case 0x8EC0: return "Recovery program start";
+    case 0x8EC1: return "Recovery program success";
+    case 0xCECF: return "Recovery programming error";
+    case 0x8E80: return "PEIM Handoff block entry";
+    case 0x8C00: return "SALA to SALB/DXE handoff";
+    default:
+        return NULL;
+    }
+}
+
 static bool ia64_fw_is_printable_ascii(uint8_t b)
 {
     return b == '\t' || b == '\r' || b == '\n' || (b >= 0x20 && b < 0x7f);
@@ -2535,6 +2581,13 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         }
     }
 
+    uint16_t post_code = (uint16_t)value;
+    uint16_t post_code_alt = (uint16_t)alt_value;
+    const char *post_desc = ia64_fw_decode_sala_post_code(post_code);
+    const char *post_desc_alt = (post_code_alt != post_code) ?
+                                ia64_fw_decode_sala_post_code(post_code_alt) :
+                                NULL;
+
     if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
         (log_limit == 0 || log_count++ < log_limit)) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -2547,6 +2600,16 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                       env->ip, pc, env->b[0], is_assert ? 1 : 0,
                       env->r[8], env->r[9], env->r[10], env->r[11],
                       env->r[32], env->r[33], env->r[34], env->r[35], env->r[36]);
+        if (post_desc) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_post r33=0x%04x %s\n",
+                          post_code, post_desc);
+        }
+        if (post_desc_alt) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_post r9=0x%04x %s\n",
+                          post_code_alt, post_desc_alt);
+        }
     }
 
     if (is_assert) {
