@@ -57,6 +57,7 @@
 #include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "chardev/char.h"
 
 #define DEBUG_IPF
 #ifdef DEBUG_IPF
@@ -111,6 +112,7 @@ struct IPFMachineState {
     MemoryRegion uart_ioport;
     MemoryRegion debugcon_e9;
     MemoryRegion debugcon_402;
+    Chardev *debugcon_chr;
     bool debugcon_line_mode;
     size_t debugcon_line_len;
     char debugcon_line[512];
@@ -1681,9 +1683,14 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
 {
     IPFMachineState *m = opaque;
     uint8_t ch = data & 0xff;
+    static int log_to_qemu_log = -1;
 
     if (size != 1) {
         return;
+    }
+
+    if (log_to_qemu_log == -1) {
+        log_to_qemu_log = getenv("QEMU_IPF_DEBUGCON_QEMU_LOG") ? 1 : 0;
     }
 
     if (m->debugcon_line_mode) {
@@ -1704,7 +1711,19 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
             b0 = env->b[0];
         }
 
-        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        if (m->debugcon_chr) {
+            char line[1024];
+            int n = snprintf(line, sizeof(line),
+                             "FWDBG ip=%016" PRIx64 " psr=%016" PRIx64
+                             " b0=%016" PRIx64 " %s\n",
+                             ip, psr, b0, m->debugcon_line);
+            if (n > 0) {
+                qemu_chr_write_all(m->debugcon_chr, (const uint8_t *)line,
+                                   MIN(n, (int)sizeof(line)));
+            }
+        }
+
+        if (log_to_qemu_log && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "FWDBG ip=%016" PRIx64 " psr=%016" PRIx64 " b0=%016" PRIx64
                           " %s\n",
@@ -1746,10 +1765,13 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
         return;
     }
 
-    /*
-     * Prefer logging into -D/-d guest_errors so scripts can capture output.
-     * Fall back to stderr when guest-error logging is disabled.
-     */
+    if (m->debugcon_chr) {
+        qemu_chr_write_all(m->debugcon_chr, &ch, 1);
+        if (!log_to_qemu_log) {
+            return;
+        }
+    }
+
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         qemu_log_mask(LOG_GUEST_ERROR, "%c", ch);
         return;
@@ -1792,6 +1814,7 @@ static void ipf_init_debugcon(IPFMachineState *m)
     m->debugcon_line[0] = '\0';
     m->debugcon_line_mode = getenv("QEMU_IPF_DEBUGCON_LINE") ? true : false;
     m->debugcon_trace_once = false;
+    m->debugcon_chr = serial_hd(0);
 }
 
 static uint64_t ipf_uart_ioport_read(void *opaque, hwaddr addr, unsigned size)
@@ -2410,9 +2433,14 @@ static void ipf_init(MachineState *machine)
     ipf_init_debugcon(m);
     ipf_init_legacy_io(m, sysmem);
     ipf_init_iosapic(m, sysmem);
-    if (!run_firmware) {
-        ipf_init_acpi_pm(m, sysmem);
-    }
+    /*
+     * Provide the ACPI PM1/PMTMR register block for both firmware and direct
+     * -kernel boots.
+     *
+     * xenipf/EDK uses the ACPI PM timer for delays very early; leaving it
+     * unmapped can stall firmware progress under TCG.
+     */
+    ipf_init_acpi_pm(m, sysmem);
 
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
