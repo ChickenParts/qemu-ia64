@@ -5650,6 +5650,116 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         return 1;
     }
 
+    /*
+     * Cache flush loop used after code relocation:
+     *   fc r32; r32 += 32; cmp.ltu p14,p15=r32,r31; (p14) br back.
+     * Exit target is pc + 0x20.
+     */
+    if (low0 == 0x0200043040000002ULL &&
+        high0 == 0xd03cfa01c0420081ULL &&
+        low1 == 0x000000010000001dULL &&
+        high1 == 0x4afffff007000200ULL) {
+        uint64_t start_raw = env->r[32];
+        uint64_t end_raw = env->r[31];
+
+        uint64_t final_raw;
+        if (start_raw >= end_raw) {
+            final_raw = start_raw + 32;
+        } else {
+            uint64_t diff = end_raw - start_raw;
+            uint64_t iters = (diff + 31) >> 5;
+            final_raw = start_raw + (iters << 5);
+        }
+
+        hwaddr start_phys = ia64_phys_mode_addr(start_raw);
+        hwaddr end_phys = ia64_phys_mode_addr(end_raw);
+        hwaddr last_phys = (start_phys >= end_phys) ? start_phys : end_phys - 1;
+        hwaddr start_page = start_phys & TARGET_PAGE_MASK;
+        hwaddr end_page = last_phys & TARGET_PAGE_MASK;
+        if (end_page >= start_page) {
+            CPUState *cs = env_cpu(env);
+            tb_invalidate_phys_range(cs, start_page,
+                                     end_page + TARGET_PAGE_SIZE - 1);
+            env->fc_last_page = end_page;
+        }
+
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath fc-loop pc=%016" PRIx64
+                          " start=%016" PRIx64 " end=%016" PRIx64
+                          " final=%016" PRIx64 "\n",
+                          pc, start_raw, end_raw, final_raw);
+        }
+
+        env->r[32] = final_raw;
+        env->ip = pc + 0x20;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
+    /*
+     * Byte histogram loop used during PEI:
+     *   count16 at [r12+46], limit16 at [r12+152], src base at [r12+160].
+     *   table base at [r12+48] (512 bytes of 16-bit counters).
+     *   increments count, then for each src byte increments table[val].
+     * Exit target is pc + 0x100.
+     */
+    if (low0 == 0x71e0210018b8f811ULL &&
+        high0 == 0x2000000000420031ULL &&
+        low1 == 0x09f010083e00f80bULL &&
+        high1 == 0x000400000042007cULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t tmp[8];
+
+        cpu_physical_memory_read(frame + 46, tmp, 2);
+        uint32_t count = lduw_le_p(tmp);
+        cpu_physical_memory_read(frame + 152, tmp, 2);
+        uint32_t limit = lduw_le_p(tmp);
+
+        uint32_t start = count + 1;
+        if (start >= limit) {
+            uint16_t new_count = (uint16_t)start;
+            stw_le_p(tmp, new_count);
+            cpu_physical_memory_write(frame + 46, tmp, 2);
+            env->ip = pc + 0x100;
+            env->psr &= ~PSR_RI_MASK;
+            return 1;
+        }
+
+        cpu_physical_memory_read(frame + 160, tmp, sizeof(tmp));
+        uint64_t src_raw = ldq_le_p(tmp);
+        hwaddr src_phys = ia64_phys_mode_addr(src_raw);
+        hwaddr table_base = frame + 48;
+
+        uint32_t len = limit - start;
+        g_autofree uint8_t *src_buf = g_malloc(len);
+        cpu_physical_memory_read(src_phys + start, src_buf, len);
+
+        uint8_t table[512];
+        cpu_physical_memory_read(table_base, table, sizeof(table));
+        for (uint32_t i = 0; i < len; i++) {
+            uint8_t val = src_buf[i];
+            uint16_t entry = lduw_le_p(table + (val << 1));
+            entry++;
+            stw_le_p(table + (val << 1), entry);
+        }
+        cpu_physical_memory_write(table_base, table, sizeof(table));
+
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath hist-loop pc=%016" PRIx64
+                          " src=%016" PRIx64 " start=%u limit=%u\n",
+                          pc, src_raw, start, limit);
+        }
+
+        stw_le_p(tmp, (uint16_t)limit);
+        cpu_physical_memory_write(frame + 46, tmp, 2);
+
+        env->ip = pc + 0x100;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
     return 0;
 #endif
 }
