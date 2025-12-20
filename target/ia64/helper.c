@@ -5930,6 +5930,54 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         return 1;
     }
 
+    /*
+     * Table copy loop:
+     *   counter8 at [r12+0], src base ptr at [r12+24],
+     *   dst base ptr at [r12+8], copies entries 1..63 from src+56 to dst+56.
+     * Exit target is pc + 0x30.
+     */
+    if (low0 == 0x01f010183c00f019ULL &&
+        high0 == 0x200000000020307cULL &&
+        low1 == 0xf1e021003ce0f00bULL &&
+        high1 == 0x0004000000400074ULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t count = 0;
+        cpu_physical_memory_read(frame + 0, &count, 1);
+
+        uint32_t start = (uint32_t)count + 1;
+        uint8_t final_count = (uint8_t)start;
+        if (start <= 63) {
+            uint8_t tmp[8];
+            cpu_physical_memory_read(frame + 24, tmp, sizeof(tmp));
+            uint64_t src_raw = ldq_le_p(tmp);
+            hwaddr src = ia64_phys_mode_addr(src_raw) + 56 + ((uint64_t)start << 3);
+
+            cpu_physical_memory_read(frame + 8, tmp, sizeof(tmp));
+            uint64_t dst_raw = ldq_le_p(tmp);
+            hwaddr dst = ia64_phys_mode_addr(dst_raw) + 56 + ((uint64_t)start << 3);
+
+            uint64_t entries = 64 - start;
+            uint64_t len = entries << 3;
+            if (len && !ia64_fw_fastpath_copy(dst, src, len)) {
+                return 0;
+            }
+            final_count = 64;
+        }
+
+        cpu_physical_memory_write(frame + 0, &final_count, 1);
+
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath tblcpy pc=%016" PRIx64
+                          " count=%u final=%u\n",
+                          pc, count, final_count);
+        }
+
+        env->ip = pc + 0x30;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
     return 0;
 #endif
 }
