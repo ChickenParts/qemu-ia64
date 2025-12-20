@@ -2215,7 +2215,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         return;
                     } else if (nr == 0x1100) {
                         /* FW_HYPERCALL_SAL_CALL */
-                        gen_helper_fw_sal(tcg_env);
+                        gen_helper_fw_sal_break(tcg_env);
                     } else if (nr == 0x1000) {
                         /* FW_HYPERCALL_PAL_CALL */
                         gen_helper_fw_pal(tcg_env);

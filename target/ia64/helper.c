@@ -6660,8 +6660,32 @@ void HELPER(fw_pal)(CPUIA64State *env)
 #define IA64_SAL_PHYSICAL_ID_INFO     0x01000013ULL
 #define IA64_SAL_UPDATE_PAL           0x01000020ULL
 
-void HELPER(fw_sal)(CPUIA64State *env)
+static uint8_t ia64_fw_out_base(CPUIA64State *env)
 {
+    uint8_t sol = (env->cfm >> 7) & 0x7f;
+    uint8_t out0 = 32 + sol;
+    if (out0 >= 128) {
+        out0 = 32;
+    }
+    return out0;
+}
+
+static uint64_t ia64_fw_arg(CPUIA64State *env, uint8_t out0, uint8_t idx)
+{
+    uint8_t reg = out0 + idx;
+    return (reg < 128) ? env->r[reg] : 0;
+}
+
+static uint64_t ia64_fw_arg_break(CPUIA64State *env, uint8_t idx)
+{
+    uint8_t reg = 29 + idx;
+    return (reg < 128) ? env->r[reg] : 0;
+}
+
+static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
+{
+    uint8_t out0 = ia64_fw_out_base(env);
+
     {
         static int trace_enabled = -1;
         static uint32_t trace_limit;
@@ -6678,11 +6702,10 @@ void HELPER(fw_sal)(CPUIA64State *env)
             uint8_t sof = env->cfm & 0x7f;
             uint8_t sol = (env->cfm >> 7) & 0x7f;
             uint8_t sor = (env->cfm >> 14) & 0xf;
-            uint8_t out0 = 32 + sol;
-            uint64_t out0v = (out0 < 128) ? env->r[out0] : 0;
-            uint64_t out1v = (out0 + 1 < 128) ? env->r[out0 + 1] : 0;
-            uint64_t out2v = (out0 + 2 < 128) ? env->r[out0 + 2] : 0;
-            uint64_t out3v = (out0 + 3 < 128) ? env->r[out0 + 3] : 0;
+            uint64_t out0v = ia64_fw_arg(env, out0, 0);
+            uint64_t out1v = ia64_fw_arg(env, out0, 1);
+            uint64_t out2v = ia64_fw_arg(env, out0, 2);
+            uint64_t out3v = ia64_fw_arg(env, out0, 3);
             uint8_t lb_kind = env->last_branch_kind & 0xff;
             uint8_t lb_ri = (env->last_branch_kind >> 8) & 0xff;
 
@@ -6720,14 +6743,18 @@ void HELPER(fw_sal)(CPUIA64State *env)
 
     ia64_fw_try_install_sal_systab(env);
 
-    uint64_t func_raw = env->r[32];
+    uint64_t func_raw = break_abi ? env->r[28] : ia64_fw_arg(env, out0, 0);
     IA64EfiGuid guid;
     if (ia64_fw_read_guid(env, func_raw, &guid) &&
         ia64_fw_guid_equal(&guid, &ia64_efi_guid_esal_pci)) {
-        uint64_t func_id = env->r[33];
-        uint64_t pci_addr = env->r[34];
-        uint64_t size = env->r[35];
-        uint64_t value = env->r[36];
+        uint64_t func_id = break_abi ? ia64_fw_arg_break(env, 1)
+                                     : ia64_fw_arg(env, out0, 1);
+        uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 2)
+                                      : ia64_fw_arg(env, out0, 2);
+        uint64_t size = break_abi ? ia64_fw_arg_break(env, 3)
+                                  : ia64_fw_arg(env, out0, 3);
+        uint64_t value = break_abi ? ia64_fw_arg_break(env, 4)
+                                   : ia64_fw_arg(env, out0, 4);
         int64_t status = 0;
         uint64_t v0 = 0, v1 = 0, v2 = 0;
 
@@ -6834,20 +6861,25 @@ void HELPER(fw_sal)(CPUIA64State *env)
          * the IPF machine.
          *
          * Arguments:
-         *   r33: encoded pci_config_addr
-         *   r34: access size (1/2/4[/8])
-         *   r35: type/mode (0 = legacy, 1 = extended)
+         *   arg1: encoded pci_config_addr
+         *   arg2: access size (1/2/4[/8])
+         *   arg3: type/mode (0 = legacy, 1 = extended)
          */
-        uint64_t pci_addr = env->r[33];
-        uint64_t size = env->r[34];
-        bool use_break_abi = false;
+        bool use_break_abi = break_abi;
+        uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
+                                      : ia64_fw_arg(env, out0, 1);
+        uint64_t size = break_abi ? ia64_fw_arg_break(env, 2)
+                                  : ia64_fw_arg(env, out0, 2);
         bool size_clamped = false;
         if (size != 1 && size != 2 && size != 4) {
-            uint64_t alt_size = env->r[30];
+            uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
+                                          : ia64_fw_arg_break(env, 2);
+            uint64_t alt_addr = break_abi ? ia64_fw_arg(env, out0, 1)
+                                          : ia64_fw_arg_break(env, 1);
             if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
-                pci_addr = env->r[29];
+                pci_addr = alt_addr;
                 size = alt_size;
-                use_break_abi = true;
+                use_break_abi = !break_abi;
             } else {
                 size = 4;
                 size_clamped = true;
@@ -6907,23 +6939,31 @@ void HELPER(fw_sal)(CPUIA64State *env)
     case IA64_SAL_PCI_CONFIG_WRITE: {
         /*
          * Arguments:
-         *   r33: encoded pci_config_addr
-         *   r34: access size (1/2/4[/8])
-         *   r35: value
-         *   r36: type/mode (0 = legacy, 1 = extended)
+         *   arg1: encoded pci_config_addr
+         *   arg2: access size (1/2/4[/8])
+         *   arg3: value
+         *   arg4: type/mode (0 = legacy, 1 = extended)
          */
-        uint64_t pci_addr = env->r[33];
-        uint64_t size = env->r[34];
-        uint64_t value = env->r[35];
-        bool use_break_abi = false;
+        bool use_break_abi = break_abi;
+        uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
+                                      : ia64_fw_arg(env, out0, 1);
+        uint64_t size = break_abi ? ia64_fw_arg_break(env, 2)
+                                  : ia64_fw_arg(env, out0, 2);
+        uint64_t value = break_abi ? ia64_fw_arg_break(env, 3)
+                                   : ia64_fw_arg(env, out0, 3);
         bool size_clamped = false;
         if (size != 1 && size != 2 && size != 4) {
-            uint64_t alt_size = env->r[30];
+            uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
+                                          : ia64_fw_arg_break(env, 2);
+            uint64_t alt_addr = break_abi ? ia64_fw_arg(env, out0, 1)
+                                          : ia64_fw_arg_break(env, 1);
+            uint64_t alt_value = break_abi ? ia64_fw_arg(env, out0, 3)
+                                           : ia64_fw_arg_break(env, 3);
             if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
-                pci_addr = env->r[29];
+                pci_addr = alt_addr;
                 size = alt_size;
-                value = env->r[31];
-                use_break_abi = true;
+                value = alt_value;
+                use_break_abi = !break_abi;
             } else {
                 size = 4;
                 size_clamped = true;
@@ -7006,6 +7046,16 @@ void HELPER(fw_sal)(CPUIA64State *env)
     env->r[9] = v0;
     env->r[10] = v1;
     env->r[11] = v2;
+}
+
+void HELPER(fw_sal)(CPUIA64State *env)
+{
+    ia64_fw_sal_common(env, false);
+}
+
+void HELPER(fw_sal_break)(CPUIA64State *env)
+{
+    ia64_fw_sal_common(env, true);
 }
 
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
