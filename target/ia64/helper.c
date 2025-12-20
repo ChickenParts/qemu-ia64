@@ -2799,6 +2799,13 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 
     uint64_t b0 = env->b[0] & ~0xFULL;
     if (b0) {
+        if (b0 == (pc & ~0xFULL)) {
+            /*
+             * Avoid break(0) spin when the return address points back at the
+             * break bundle itself.
+             */
+            return (pc & ~0xFULL) + 16;
+        }
         /*
          * If the call depth indicates that b0 was produced by a br.call,
          * restore the caller's stacked-register window before returning.
@@ -5974,6 +5981,26 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         }
 
         env->ip = pc + 0x30;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
+    /*
+     * Spin loop with constant compare:
+     *   mov r31=3328; cmp4.eq p15,p0=r0,r31; (p15) br exit; br back.
+     * Exit target is pc + 0x20.
+     */
+    if (low0 == 0x00f0241a0000f80aULL &&
+        high0 == 0x000400000071007cULL &&
+        low1 == 0x0c03c00100000013ULL &&
+        high1 == 0x48fffff800210000ULL) {
+        env->r[31] = 3328;
+        env->pr &= ~(1ULL << 15);
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath spin-skip pc=%016" PRIx64 "\n", pc);
+        }
+        env->ip = pc + 0x20;
         env->psr &= ~PSR_RI_MASK;
         return 1;
     }
