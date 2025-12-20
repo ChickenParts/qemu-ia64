@@ -20,6 +20,7 @@
 #include "system/memory.h"
 #include "system/address-spaces.h"
 #include "system/ioport.h"
+#include "hw/boards.h"
 #include <math.h>
 #include <zlib.h>
 
@@ -2271,7 +2272,7 @@ static bool ia64_fw_validate_efi_hob_list(CPUState *cs, uint64_t base,
     return false;
 }
 
-static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
+static bool ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
 {
     /*
      * Best-effort EFI HOB list dump to diagnose early DXE ASSERTs.
@@ -2293,21 +2294,22 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
     };
     static bool dumped;
     if (dumped) {
-        return;
+        return true;
     }
-    dumped = true;
 
     const uint8_t phit_magic[8] = { 0x01, 0x00, 0x38, 0x00, 0, 0, 0, 0 };
     uint64_t candidates[] = {
         0x0000000002000000ULL, /* common xenipf PEI workspace */
         0x0000000000100000ULL,
         0x0000000001000000ULL,
+        IA64_IPF_FW_FLASH_BASE,
         stack_hint ? (stack_hint & ~0x00ffffffULL) : 0,
     };
 
     uint64_t hob_base = 0;
     uint64_t hob_end = 0;
     uint64_t hob_best_span = 0;
+    bool hob_best_end_ok = false;
     int hob_best_count = 0;
     uint8_t hdr[8];
     for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
@@ -2336,17 +2338,24 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
             continue;
         }
         uint64_t span = end - addr;
-        if (span > hob_best_span) {
+        uint64_t phit_end = ia64_phys_mode_addr(ldq_le_p(&phit[48]));
+        bool end_ok = (phit_end >= addr && phit_end <= end);
+        if (!hob_base ||
+            (end_ok && !hob_best_end_ok) ||
+            (end_ok == hob_best_end_ok && span > hob_best_span)) {
             hob_best_span = span;
             hob_best_count = count;
             hob_base = addr;
             hob_end = end;
+            hob_best_end_ok = end_ok;
         }
     }
 
-    if (!hob_base) {
+    if (!hob_base || !hob_best_end_ok) {
         uint64_t scan_ranges[][2] = {
             { 0, 64ULL << 20 },
+            { 0xff000000ULL, 16ULL << 20 },
+            { IA64_IPF_FW_FLASH_BASE, IA64_IPF_FW_FLASH_SIZE },
             { 0, 0 },
         };
         if (stack_hint > (32ULL << 20)) {
@@ -2391,11 +2400,16 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
                         continue;
                     }
                     uint64_t span = end - cand;
-                    if (span > hob_best_span) {
+                    uint64_t phit_end = ia64_phys_mode_addr(ldq_le_p(&phit[48]));
+                    bool end_ok = (phit_end >= cand && phit_end <= end);
+                    if (!hob_base ||
+                        (end_ok && !hob_best_end_ok) ||
+                        (end_ok == hob_best_end_ok && span > hob_best_span)) {
                         hob_best_span = span;
                         hob_best_count = count;
                         hob_base = cand;
                         hob_end = end;
+                        hob_best_end_ok = end_ok;
                     }
                 }
             }
@@ -2405,7 +2419,7 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
     if (!hob_base) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: efi_hob_dump: PHIT HOB not found\n");
-        return;
+        return false;
     }
 
     uint8_t phit[0x38];
@@ -2413,17 +2427,18 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: efi_hob_dump: PHIT read failed addr=%016" PRIx64 "\n",
                       hob_base);
-        return;
+        return false;
     }
 
     uint64_t mem_bottom = ldq_le_p(&phit[24]);
-    if (mem_bottom && mem_bottom != hob_base) {
+    uint64_t mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
+    if (mem_bottom_phys && mem_bottom_phys != hob_base) {
         uint64_t alt_end;
         int alt_count;
-        if (ia64_fw_validate_efi_hob_list(cs, mem_bottom, &alt_end, &alt_count)) {
-            uint64_t alt_span = alt_end - mem_bottom;
+        if (ia64_fw_validate_efi_hob_list(cs, mem_bottom_phys, &alt_end, &alt_count)) {
+            uint64_t alt_span = alt_end - mem_bottom_phys;
             if (alt_span > hob_best_span) {
-                hob_base = mem_bottom;
+                hob_base = mem_bottom_phys;
                 hob_end = alt_end;
                 hob_best_span = alt_span;
                 hob_best_count = alt_count;
@@ -2431,7 +2446,7 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "IA64: efi_hob_dump: PHIT read failed addr=%016" PRIx64 "\n",
                                   hob_base);
-                    return;
+                    return false;
                 }
             }
         }
@@ -2444,15 +2459,17 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
     uint64_t free_top = ldq_le_p(&phit[32]);
     uint64_t free_bottom = ldq_le_p(&phit[40]);
     uint64_t end_hob = ldq_le_p(&phit[48]);
+    uint64_t end_hob_phys = ia64_phys_mode_addr(end_hob);
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64: efi_hob_dump: base=%016" PRIx64
                   " version=%u boot_mode=%u"
                   " mem=[%016" PRIx64 "..%016" PRIx64 "]"
                   " free=[%016" PRIx64 "..%016" PRIx64 "]"
-                  " end=%016" PRIx64 " span=0x%" PRIx64 " hobs=%d\n",
+                  " end=%016" PRIx64 " list_end=%016" PRIx64
+                  " span=0x%" PRIx64 " hobs=%d\n",
                   hob_base, version, boot_mode,
                   mem_bottom, mem_top, free_bottom, free_top,
-                  end_hob, hob_best_span, hob_best_count);
+                  end_hob_phys, hob_end, hob_best_span, hob_best_count);
 
     uint64_t cur = hob_base;
     for (int iter = 0; iter < 4096; iter++) {
@@ -2564,6 +2581,11 @@ static void ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
             break;
         }
     }
+    if (hob_best_end_ok) {
+        dumped = true;
+        return true;
+    }
+    return false;
 }
 
 #ifndef CONFIG_USER_ONLY
@@ -3540,7 +3562,7 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             hob_dump_enabled = (s && *s) ? 1 : 0;
         }
         if (hob_dump_enabled) {
-            ia64_fw_dump_efi_hobs(env_cpu(env), env->r[12]);
+            (void)ia64_fw_dump_efi_hobs(env_cpu(env), env->r[12]);
         }
     }
 
@@ -5459,6 +5481,7 @@ void HELPER(fw_enter_kernel)(CPUIA64State *env)
 static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
 {
     static int enabled = -1;
+    static int dump_enabled = -1;
     static bool fixed_sysmem_rdesc;
     static bool fixed_fv_hobs;
     static bool fixed_attr;
@@ -5470,8 +5493,11 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static int attempts;
     static uint32_t throttle;
     static bool logged_phit;
+    static bool logged_end_mismatch;
     static bool logged_fv_scan;
     static bool logged_fv_state;
+    static bool dumped_hobs;
+    static uint32_t dump_throttle;
 
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_PATCH");
@@ -5503,6 +5529,17 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     hwaddr stack_phys = ia64_phys_mode_addr(env->r[12]);
     if (stack_phys < (64ULL << 20)) {
         return;
+    }
+    if (dump_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP");
+        dump_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dump_enabled && !dumped_hobs) {
+        if ((dump_throttle++ & 0xff) == 0) {
+            if (ia64_fw_dump_efi_hobs(cs, stack_phys)) {
+                dumped_hobs = true;
+            }
+        }
     }
     hwaddr ip_phys = ia64_phys_mode_addr(env->ip);
     bool in_flash = (ip_phys >= 0xff000000ULL);
@@ -5540,7 +5577,6 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     uint64_t hob_base = 0;
     uint64_t hob_end = 0;
     uint64_t hob_best_span = 0;
-    bool hob_best_low = false;
     uint8_t hdr[8];
     uint64_t candidates[] = {
         0x0000000002000000ULL,
@@ -5566,18 +5602,14 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         if (mem_top <= mem_bottom) {
             continue;
         }
-        bool cand_low = addr < IA64_IPF_FW_FLASH_BASE;
-
         uint64_t end;
         int count;
         if (!ia64_fw_validate_efi_hob_list(cs, addr, &end, &count)) {
             continue;
         }
         uint64_t span = end - addr;
-        if (!hob_base || (cand_low && !hob_best_low) ||
-            (cand_low == hob_best_low && span > hob_best_span)) {
+        if (!hob_base || span > hob_best_span) {
             hob_best_span = span;
-            hob_best_low = cand_low;
             hob_base = addr;
             hob_end = end;
         }
@@ -5604,24 +5636,20 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             if (mem_top <= mem_bottom) {
                 continue;
             }
-            bool cand_low = cand < IA64_IPF_FW_FLASH_BASE;
-
             uint64_t end;
             int count;
             if (!ia64_fw_validate_efi_hob_list(cs, cand, &end, &count)) {
                 continue;
             }
             uint64_t span = end - cand;
-            if (!hob_base || (cand_low && !hob_best_low) ||
-                (cand_low == hob_best_low && span > hob_best_span)) {
+            if (!hob_base || span > hob_best_span) {
                 hob_best_span = span;
-                hob_best_low = cand_low;
                 hob_base = cand;
                 hob_end = end;
             }
         }
     }
-    if (!hob_best_low) {
+    {
         uint64_t low_scan_base = 0;
         uint64_t low_scan_len = 64ULL << 20;
         for (uint64_t off = 0; off < low_scan_len; off += chunk - 8) {
@@ -5646,7 +5674,45 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 if (mem_top <= mem_bottom) {
                     continue;
                 }
-                bool cand_low = cand < IA64_IPF_FW_FLASH_BASE;
+                uint64_t end;
+                int count;
+                if (!ia64_fw_validate_efi_hob_list(cs, cand, &end, &count)) {
+                    continue;
+                }
+                uint64_t span = end - cand;
+                if (!hob_base || span > hob_best_span) {
+                    hob_best_span = span;
+                    hob_base = cand;
+                    hob_end = end;
+                }
+            }
+        }
+    }
+    {
+        uint64_t hi_scan_base = 0xff000000ULL;
+        uint64_t hi_scan_len = 16ULL << 20;
+        for (uint64_t off = 0; off < hi_scan_len; off += chunk - 8) {
+            uint64_t addr = hi_scan_base + off;
+            if (cpu_memory_rw_debug(cs, addr, buf, chunk, false) != 0) {
+                continue;
+            }
+            for (size_t j = 0; j + sizeof(phit_magic) <= chunk; j++) {
+                if (buf[j] != 0x01) {
+                    continue;
+                }
+                if (memcmp(&buf[j], phit_magic, sizeof(phit_magic)) != 0) {
+                    continue;
+                }
+                uint64_t cand = addr + j;
+                uint8_t phit[0x38];
+                if (cpu_memory_rw_debug(cs, cand, phit, sizeof(phit), false) != 0) {
+                    continue;
+                }
+                uint64_t mem_top = ldq_le_p(&phit[16]);
+                uint64_t mem_bottom = ldq_le_p(&phit[24]);
+                if (mem_top <= mem_bottom) {
+                    continue;
+                }
 
                 uint64_t end;
                 int count;
@@ -5654,10 +5720,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                     continue;
                 }
                 uint64_t span = end - cand;
-                if (!hob_base || (cand_low && !hob_best_low) ||
-                    (cand_low == hob_best_low && span > hob_best_span)) {
+                if (!hob_base || span > hob_best_span) {
                     hob_best_span = span;
-                    hob_best_low = cand_low;
                     hob_base = cand;
                     hob_end = end;
                 }
@@ -5688,7 +5752,19 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     uint64_t free_top = ldq_le_p(&phit[32]);
     uint64_t free_bottom = ldq_le_p(&phit[40]);
     uint64_t orig_mem_top = mem_top;
-    uint64_t end_hob = ldq_le_p(&phit[48]);
+    uint64_t end_hob_raw = ldq_le_p(&phit[48]);
+    uint64_t end_hob = ia64_phys_mode_addr(end_hob_raw);
+    if (!end_hob || end_hob < hob_base || end_hob > hob_end) {
+        if (!logged_end_mismatch) {
+            logged_end_mismatch = true;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: PHIT end_hob=%016" PRIx64
+                          " (phys=%016" PRIx64 ") outside list [%016" PRIx64 "..%016" PRIx64 "],"
+                          " using list_end\n",
+                          end_hob_raw, end_hob, hob_base, hob_end);
+        }
+        end_hob = hob_end;
+    }
     uint64_t slack_size = 0;
 
     /*
@@ -5706,6 +5782,58 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                     slack_size = try;
                     break;
                 }
+            }
+        }
+    }
+
+    {
+        uint64_t ram_size = current_machine ? current_machine->ram_size : 0;
+        uint64_t mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
+        uint64_t mem_top_phys = ia64_phys_mode_addr(mem_top);
+        uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
+        uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
+        bool mem_bad = mem_top_phys <= mem_bottom_phys ||
+                       (mem_top_phys - mem_bottom_phys) < (1ULL << 20);
+
+        if (ram_size && (mem_bad || mem_top_phys > ram_size)) {
+            uint64_t new_mem_bottom = 0;
+            uint64_t new_mem_top = ram_size;
+            uint64_t new_free_bottom = (end_hob + 0x1fULL) & ~0x1fULL;
+            if (new_free_bottom < new_mem_bottom) {
+                new_free_bottom = new_mem_bottom;
+            }
+            uint64_t new_free_top = new_mem_top;
+
+            if (new_free_bottom < new_free_top) {
+                mem_bottom = new_mem_bottom;
+                mem_top = new_mem_top;
+                free_bottom = new_free_bottom;
+                free_top = new_free_top;
+
+                stq_le_p(&phit[16], mem_top);
+                stq_le_p(&phit[24], mem_bottom);
+                stq_le_p(&phit[32], free_top);
+                stq_le_p(&phit[40], free_bottom);
+                cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: reset PHIT mem/free to mem=%016" PRIx64
+                              "-%016" PRIx64 " free=%016" PRIx64 "-%016" PRIx64 "\n",
+                              mem_bottom, mem_top, free_bottom, free_top);
+            }
+        } else {
+            if (free_bottom_phys < mem_bottom_phys || free_bottom_phys > mem_top_phys) {
+                free_bottom_phys = (end_hob + 0x1fULL) & ~0x1fULL;
+            }
+            if (free_top_phys <= free_bottom_phys || free_top_phys > mem_top_phys) {
+                free_top_phys = mem_top_phys;
+            }
+            if (free_bottom != free_bottom_phys || free_top != free_top_phys) {
+                free_bottom = free_bottom_phys;
+                free_top = free_top_phys;
+                stq_le_p(&phit[32], free_top);
+                stq_le_p(&phit[40], free_bottom);
+                cpu_physical_memory_write(hob_base, phit, sizeof(phit));
             }
         }
     }
@@ -5826,9 +5954,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 hob_end += add_bytes;
                 end_hob = new_end_hob;
                 free_bottom = new_free_bottom;
-                if (hob_low) {
-                    fixed_fv_hobs = true;
-                }
+                fixed_fv_hobs = true;
 
                 env->fw_phit_free_bottom = free_bottom;
                 env->fw_phit_free_top = free_top;
@@ -5838,7 +5964,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                               " end_hob %016" PRIx64 " free_bottom %016" PRIx64 "\n",
                               fv_add_count, end_hob, free_bottom);
             }
-        } else if (hob_low && (fv_hob_count > 0 || fv_flash_count == 0)) {
+        } else if (fv_hob_count > 0 || fv_flash_count == 0) {
             fixed_fv_hobs = true;
         }
     }
@@ -6086,7 +6212,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     }
 
     if (attempts == 1) {
-        ia64_fw_dump_efi_hobs(cs, stack_phys);
+        (void)ia64_fw_dump_efi_hobs(cs, stack_phys);
     }
 
     uint64_t cur = hob_base;
