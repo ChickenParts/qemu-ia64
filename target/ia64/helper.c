@@ -84,6 +84,11 @@ static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
 /* CFM fields */
 #define IA64_CFM_SOR_SHIFT 14
 #define IA64_CFM_SOR_MASK  0xfULL
+#define IA64_CFM_RRBF_SHIFT 25
+#define IA64_CFM_RRBF_MASK  0x7fULL
+
+#define IA64_FR_ROT_BASE 32
+#define IA64_FR_ROT_SIZE 96
 
 /* ar.rsc loadrs field: bits 16..29, in bytes (see SKI ssDSym.c). */
 #define IA64_RSC_LOADRS_SHIFT 16
@@ -132,6 +137,159 @@ static inline uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
         delta -= 0x3e;
     }
     return addr + ((uint64_t)(num_regs + delta / 0x3f) << 3);
+}
+
+static inline bool ia64_gr_nat_get(const CPUIA64State *env, uint32_t gr)
+{
+    if (gr == 0 || gr >= 128) {
+        return false;
+    }
+    return env->nat[gr] != 0;
+}
+
+static inline void ia64_gr_nat_set(CPUIA64State *env, uint32_t gr, bool nat)
+{
+    if (gr == 0 || gr >= 128) {
+        return;
+    }
+    env->nat[gr] = nat ? 1 : 0;
+}
+
+static inline uint64_t ia64_rse_get_bsp(const CPUIA64State *env)
+{
+    uint64_t bsp = env->ar[IA64_AR_BSP];
+    if (bsp == 0) {
+        bsp = env->ar[IA64_AR_BSPSTORE];
+    }
+    return bsp & ~0x7ULL;
+}
+
+static inline void ia64_rse_update_loadrs(CPUIA64State *env, uint64_t bsp)
+{
+    uint64_t bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
+    uint64_t bytes = (bsp > bspstore) ? (bsp - bspstore) : 0;
+    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], bytes);
+}
+
+static void ia64_rse_write_mem(CPUIA64State *env, uint64_t addr, uint64_t val)
+{
+    CPUState *cs = env_cpu(env);
+    uint8_t buf[8];
+    stq_le_p(buf, val);
+    if (cpu_memory_rw_debug(cs, addr, buf, sizeof(buf), true) != 0) {
+        cpu_abort(cs,
+                  "IA64: RSE backing store write failed addr=%016" PRIx64
+                  " ip=%016" PRIx64 "\n",
+                  addr, env->ip);
+    }
+}
+
+static uint64_t ia64_rse_read_mem(CPUIA64State *env, uint64_t addr)
+{
+    CPUState *cs = env_cpu(env);
+    uint8_t buf[8];
+    if (cpu_memory_rw_debug(cs, addr, buf, sizeof(buf), false) != 0) {
+        cpu_abort(cs,
+                  "IA64: RSE backing store read failed addr=%016" PRIx64
+                  " ip=%016" PRIx64 "\n",
+                  addr, env->ip);
+    }
+    return ldq_le_p(buf);
+}
+
+static void ia64_rse_store_frame(CPUIA64State *env, uint64_t bsp, uint8_t sof)
+{
+    uint8_t count = MIN(sof, (uint8_t)96);
+    if (count == 0) {
+        env->ar[IA64_AR_RNAT] = 0;
+        return;
+    }
+
+    bsp &= ~0x7ULL;
+    uint64_t addr = ia64_rse_skip_regs(bsp, -(int64_t)count);
+    uint32_t reg_idx = 0;
+    uint64_t rnat = 0;
+    uint32_t rnat_bit = 0;
+
+    while (reg_idx < count) {
+        if (ia64_rse_slot_num(addr) == 0x3f) {
+            ia64_rse_write_mem(env, addr, rnat);
+            rnat = 0;
+            rnat_bit = 0;
+            addr += 8;
+            continue;
+        }
+
+        uint64_t val = env->r[32 + reg_idx];
+        ia64_rse_write_mem(env, addr, val);
+        if (ia64_gr_nat_get(env, 32 + reg_idx)) {
+            rnat |= (1ULL << rnat_bit);
+        }
+        rnat_bit++;
+        reg_idx++;
+        addr += 8;
+    }
+
+    env->ar[IA64_AR_RNAT] = rnat;
+}
+
+static void ia64_rse_load_frame(CPUIA64State *env, uint64_t bsp, uint8_t sof)
+{
+    uint8_t count = MIN(sof, (uint8_t)96);
+    if (count == 0) {
+        return;
+    }
+
+    bsp &= ~0x7ULL;
+    uint64_t addr = ia64_rse_skip_regs(bsp, -(int64_t)count);
+    uint32_t reg_idx = 0;
+    uint32_t group_start = 0;
+    uint32_t group_count = 0;
+
+    while (reg_idx < count) {
+        if (ia64_rse_slot_num(addr) == 0x3f) {
+            uint64_t rnat = ia64_rse_read_mem(env, addr);
+            for (uint32_t i = 0; i < group_count; i++) {
+                ia64_gr_nat_set(env, 32 + group_start + i,
+                                (rnat >> i) & 1);
+            }
+            group_start = reg_idx;
+            group_count = 0;
+            addr += 8;
+            continue;
+        }
+
+        uint64_t val = ia64_rse_read_mem(env, addr);
+        env->r[32 + reg_idx] = val;
+        group_count++;
+        reg_idx++;
+        addr += 8;
+    }
+
+    if (group_count) {
+        uint64_t rnat = env->ar[IA64_AR_RNAT];
+        for (uint32_t i = 0; i < group_count; i++) {
+            ia64_gr_nat_set(env, 32 + group_start + i, (rnat >> i) & 1);
+        }
+    }
+
+    for (uint32_t i = count; i < 96; i++) {
+        env->nat[32 + i] = 0;
+    }
+}
+
+static inline uint32_t ia64_fr_phys(const CPUIA64State *env, uint32_t f)
+{
+    f &= 0x7f;
+    if (f < IA64_FR_ROT_BASE) {
+        return f;
+    }
+    uint32_t rrbf = (env->cfm >> IA64_CFM_RRBF_SHIFT) & IA64_CFM_RRBF_MASK;
+    uint32_t off = (f - IA64_FR_ROT_BASE) + rrbf;
+    if (off >= IA64_FR_ROT_SIZE) {
+        off -= IA64_FR_ROT_SIZE;
+    }
+    return IA64_FR_ROT_BASE + off;
 }
 
 static void ia64_rse_push_window(CPUIA64State *env, uint64_t ret_addr);
@@ -184,6 +342,10 @@ static void ia64_switch_banks(CPUIA64State *env)
         uint64_t tmp = env->banked_r[i];
         env->banked_r[i] = env->r[16 + i];
         env->r[16 + i] = tmp;
+
+        uint8_t tmp_nat = env->banked_nat[i];
+        env->banked_nat[i] = env->nat[16 + i];
+        env->nat[16 + i] = tmp_nat;
     }
 }
 
@@ -588,6 +750,7 @@ void ia64_intr_push_window(CPUIA64State *env)
     ia64_intr_ensure(env, env->intr_depth + 1);
     struct IA64IntrFrame *frame = &env->intr_frames[env->intr_depth++];
     memcpy(frame->r, &env->r[32], sizeof(frame->r));
+    memcpy(frame->nat, &env->nat[32], sizeof(frame->nat));
     frame->ar_pfs = env->ar[64]; /* ar.pfs */
 }
 
@@ -598,6 +761,7 @@ static bool ia64_intr_pop_window(CPUIA64State *env)
     }
     struct IA64IntrFrame *frame = &env->intr_frames[--env->intr_depth];
     memcpy(&env->r[32], frame->r, sizeof(frame->r));
+    memcpy(&env->nat[32], frame->nat, sizeof(frame->nat));
     env->ar[64] = frame->ar_pfs;
     return true;
 }
@@ -607,6 +771,7 @@ static void ia64_rse_push_window(CPUIA64State *env, uint64_t ret_addr)
     ia64_rse_ensure(env, env->rse_depth + 1);
     struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth++];
     memcpy(frame->r, &env->r[32], sizeof(frame->r));
+    memcpy(frame->nat, &env->nat[32], sizeof(frame->nat));
     frame->ar_pfs = env->ar[64]; /* ar.pfs */
     frame->cfm = env->cfm;
     frame->ret_addr = ret_addr & ~0xFULL;
@@ -630,16 +795,19 @@ static bool ia64_rse_pop_window(CPUIA64State *env)
      * caller frame, and then copy them back into the caller's OUT window.
      */
     uint64_t outvals[96] = { 0 };
+    uint8_t outnats[96] = { 0 };
     uint8_t caller_sof = frame->cfm & 0x7f;
     uint8_t caller_sol = (frame->cfm >> 7) & 0x7f;
     uint8_t caller_outs = (caller_sof > caller_sol) ? (caller_sof - caller_sol) : 0;
     caller_outs = MIN(caller_outs, (uint8_t)96);
     for (uint8_t i = 0; i < caller_outs; i++) {
         outvals[i] = env->r[32 + i];
+        outnats[i] = env->nat[32 + i];
     }
 
     frame = &env->rse_frames[--env->rse_depth];
     memcpy(&env->r[32], frame->r, sizeof(frame->r));
+    memcpy(&env->nat[32], frame->nat, sizeof(frame->nat));
     env->ar[64] = frame->ar_pfs;
     env->cfm = frame->cfm;
 
@@ -648,6 +816,7 @@ static bool ia64_rse_pop_window(CPUIA64State *env)
         uint8_t out0 = 32 + caller_sol;
         for (uint8_t i = 0; i < max_copy; i++) {
             env->r[out0 + i] = outvals[i];
+            env->nat[out0 + i] = outnats[i];
         }
     }
     return true;
@@ -819,81 +988,389 @@ void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
     log_count++;
 }
 
-void HELPER(setf_sig)(CPUIA64State *env, uint32_t f1, uint64_t val)
+uint64_t HELPER(fr_get_lo)(CPUIA64State *env, uint32_t f)
 {
-    f1 &= 0x7f;
-    if (f1 <= 1) {
+    uint32_t pf = ia64_fr_phys(env, f);
+    return env->f[pf][0];
+}
+
+uint64_t HELPER(fr_get_hi)(CPUIA64State *env, uint32_t f)
+{
+    uint32_t pf = ia64_fr_phys(env, f);
+    return env->f[pf][1];
+}
+
+void HELPER(fr_set_lo)(CPUIA64State *env, uint32_t f, uint64_t val)
+{
+    uint32_t pf = ia64_fr_phys(env, f);
+    if (pf <= 1) {
         return;
     }
-    env->f[f1][0] = val;
+    env->f[pf][0] = val;
+}
+
+void HELPER(fr_set_hi)(CPUIA64State *env, uint32_t f, uint64_t val)
+{
+    uint32_t pf = ia64_fr_phys(env, f);
+    if (pf <= 1) {
+        return;
+    }
+    env->f[pf][1] = val;
+}
+
+uint64_t HELPER(gr_nat)(CPUIA64State *env, uint32_t gr)
+{
+    return ia64_gr_nat_get(env, gr) ? 1 : 0;
+}
+
+void HELPER(gr_nat_set)(CPUIA64State *env, uint32_t gr, uint64_t nat)
+{
+    ia64_gr_nat_set(env, gr, nat != 0);
+}
+
+static inline uint8_t ia64_sat_u8(long long v)
+{
+    if (v < 0) {
+        return 0;
+    }
+    if (v > 0xff) {
+        return 0xff;
+    }
+    return (uint8_t)v;
+}
+
+static inline uint8_t ia64_sat_s8(long long v)
+{
+    if (v < -128) {
+        return 0x80;
+    }
+    if (v > 127) {
+        return 0x7f;
+    }
+    return (uint8_t)(int8_t)v;
+}
+
+static inline uint16_t ia64_sat_u16(long long v)
+{
+    if (v < 0) {
+        return 0;
+    }
+    if (v > 0xffff) {
+        return 0xffff;
+    }
+    return (uint16_t)v;
+}
+
+static inline uint16_t ia64_sat_s16(long long v)
+{
+    if (v < -32768) {
+        return 0x8000;
+    }
+    if (v > 32767) {
+        return 0x7fff;
+    }
+    return (uint16_t)(int16_t)v;
+}
+
+uint64_t HELPER(padd1)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t av = (a >> (i * 8)) & 0xff;
+        uint8_t bv = (b >> (i * 8)) & 0xff;
+        uint8_t rv = av + bv;
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd1_sss)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        int8_t av = (int8_t)((a >> (i * 8)) & 0xff);
+        int8_t bv = (int8_t)((b >> (i * 8)) & 0xff);
+        uint8_t rv = ia64_sat_s8((long long)av + (long long)bv);
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd1_uuu)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t av = (a >> (i * 8)) & 0xff;
+        uint8_t bv = (b >> (i * 8)) & 0xff;
+        uint8_t rv = ia64_sat_u8((long long)av + (long long)bv);
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd1_uus)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t av = (a >> (i * 8)) & 0xff;
+        int8_t bv = (int8_t)((b >> (i * 8)) & 0xff);
+        uint8_t rv = ia64_sat_u8((long long)av + (long long)bv);
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd2)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        uint16_t bv = (b >> (i * 16)) & 0xffff;
+        uint16_t rv = av + bv;
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd2_sss)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        int16_t av = (int16_t)((a >> (i * 16)) & 0xffff);
+        int16_t bv = (int16_t)((b >> (i * 16)) & 0xffff);
+        uint16_t rv = ia64_sat_s16((long long)av + (long long)bv);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd2_uuu)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        uint16_t bv = (b >> (i * 16)) & 0xffff;
+        uint16_t rv = ia64_sat_u16((long long)av + (long long)bv);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd2_uus)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        int16_t bv = (int16_t)((b >> (i * 16)) & 0xffff);
+        uint16_t rv = ia64_sat_u16((long long)av + (long long)bv);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(padd4)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint32_t lo = (uint32_t)a + (uint32_t)b;
+    uint32_t hi = (uint32_t)(a >> 32) + (uint32_t)(b >> 32);
+    return ((uint64_t)hi << 32) | lo;
+}
+
+uint64_t HELPER(psub1)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t av = (a >> (i * 8)) & 0xff;
+        uint8_t bv = (b >> (i * 8)) & 0xff;
+        uint8_t rv = av - bv;
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub1_sss)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        int8_t av = (int8_t)((a >> (i * 8)) & 0xff);
+        int8_t bv = (int8_t)((b >> (i * 8)) & 0xff);
+        uint8_t rv = ia64_sat_s8((long long)av - (long long)bv);
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub1_uuu)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t av = (a >> (i * 8)) & 0xff;
+        uint8_t bv = (b >> (i * 8)) & 0xff;
+        uint8_t rv = ia64_sat_u8((long long)av - (long long)bv);
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub1_uus)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t av = (a >> (i * 8)) & 0xff;
+        int8_t bv = (int8_t)((b >> (i * 8)) & 0xff);
+        uint8_t rv = ia64_sat_u8((long long)av - (long long)bv);
+        res |= (uint64_t)rv << (i * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub2)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        uint16_t bv = (b >> (i * 16)) & 0xffff;
+        uint16_t rv = av - bv;
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub2_sss)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        int16_t av = (int16_t)((a >> (i * 16)) & 0xffff);
+        int16_t bv = (int16_t)((b >> (i * 16)) & 0xffff);
+        uint16_t rv = ia64_sat_s16((long long)av - (long long)bv);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub2_uuu)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        uint16_t bv = (b >> (i * 16)) & 0xffff;
+        uint16_t rv = ia64_sat_u16((long long)av - (long long)bv);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub2_uus)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        int16_t bv = (int16_t)((b >> (i * 16)) & 0xffff);
+        uint16_t rv = ia64_sat_u16((long long)av - (long long)bv);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(psub4)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint32_t lo = (uint32_t)a - (uint32_t)b;
+    uint32_t hi = (uint32_t)(a >> 32) - (uint32_t)(b >> 32);
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void HELPER(setf_sig)(CPUIA64State *env, uint32_t f1, uint64_t val)
+{
+    uint32_t pf = ia64_fr_phys(env, f1);
+    if (pf <= 1) {
+        return;
+    }
+    env->f[pf][0] = val;
     /*
      * Match SKI's dword2freg(): treat the 64-bit payload as an unnormalized
      * significand with an initial exponent of bias+63.
      *
      * fnorm + getf.exp then yields bias+msb_index, which Linux uses for fls().
      */
-    env->f[f1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER);
+    env->f[pf][1] = IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER);
 }
 
 uint64_t HELPER(getf_sig)(CPUIA64State *env, uint32_t f2)
 {
-    f2 &= 0x7f;
-    return env->f[f2][0];
+    uint32_t pf = ia64_fr_phys(env, f2);
+    return env->f[pf][0];
 }
 
 void HELPER(xma_l)(CPUIA64State *env, uint32_t f1, uint32_t f3,
                    uint32_t f4, uint32_t f2)
 {
-    f1 &= 0x7f;
-    f2 &= 0x7f;
-    f3 &= 0x7f;
-    f4 &= 0x7f;
-    if (f1 <= 1) {
+    uint32_t pf1 = ia64_fr_phys(env, f1);
+    uint32_t pf2 = ia64_fr_phys(env, f2);
+    uint32_t pf3 = ia64_fr_phys(env, f3);
+    uint32_t pf4 = ia64_fr_phys(env, f4);
+    if (pf1 <= 1) {
         return;
     }
-    __uint128_t prod = (__uint128_t)env->f[f3][0] * (__uint128_t)env->f[f4][0];
-    __uint128_t sum = prod + (__uint128_t)env->f[f2][0];
-    env->f[f1][0] = (uint64_t)sum;
-    env->f[f1][1] = 0;
+    __uint128_t prod = (__uint128_t)env->f[pf3][0] * (__uint128_t)env->f[pf4][0];
+    __uint128_t sum = prod + (__uint128_t)env->f[pf2][0];
+    env->f[pf1][0] = (uint64_t)sum;
+    env->f[pf1][1] = 0;
 }
 
 void HELPER(xma_h)(CPUIA64State *env, uint32_t f1, uint32_t f3,
                    uint32_t f4, uint32_t f2)
 {
-    f1 &= 0x7f;
-    f2 &= 0x7f;
-    f3 &= 0x7f;
-    f4 &= 0x7f;
-    if (f1 <= 1) {
+    uint32_t pf1 = ia64_fr_phys(env, f1);
+    uint32_t pf2 = ia64_fr_phys(env, f2);
+    uint32_t pf3 = ia64_fr_phys(env, f3);
+    uint32_t pf4 = ia64_fr_phys(env, f4);
+    if (pf1 <= 1) {
         return;
     }
-    __int128 prod = (__int128)(int64_t)env->f[f3][0] * (__int128)(int64_t)env->f[f4][0];
-    __int128 sum = prod + (__int128)(int64_t)env->f[f2][0];
-    env->f[f1][0] = (uint64_t)(sum >> 64);
-    env->f[f1][1] = 0;
+    __int128 prod = (__int128)(int64_t)env->f[pf3][0] * (__int128)(int64_t)env->f[pf4][0];
+    __int128 sum = prod + (__int128)(int64_t)env->f[pf2][0];
+    env->f[pf1][0] = (uint64_t)(sum >> 64);
+    env->f[pf1][1] = 0;
 }
 
 void HELPER(xma_hu)(CPUIA64State *env, uint32_t f1, uint32_t f3,
                     uint32_t f4, uint32_t f2)
 {
-    f1 &= 0x7f;
-    f2 &= 0x7f;
-    f3 &= 0x7f;
-    f4 &= 0x7f;
-    if (f1 <= 1) {
+    uint32_t pf1 = ia64_fr_phys(env, f1);
+    uint32_t pf2 = ia64_fr_phys(env, f2);
+    uint32_t pf3 = ia64_fr_phys(env, f3);
+    uint32_t pf4 = ia64_fr_phys(env, f4);
+    if (pf1 <= 1) {
         return;
     }
-    __uint128_t prod = (__uint128_t)env->f[f3][0] * (__uint128_t)env->f[f4][0];
-    __uint128_t sum = prod + (__uint128_t)env->f[f2][0];
-    env->f[f1][0] = (uint64_t)(sum >> 64);
-    env->f[f1][1] = 0;
+    __uint128_t prod = (__uint128_t)env->f[pf3][0] * (__uint128_t)env->f[pf4][0];
+    __uint128_t sum = prod + (__uint128_t)env->f[pf2][0];
+    env->f[pf1][0] = (uint64_t)(sum >> 64);
+    env->f[pf1][1] = 0;
 }
 
 static long double ia64_fp_to_ld(const CPUIA64State *env, uint32_t f)
 {
-    f &= 0x7f;
-    uint64_t mant = env->f[f][0];
-    uint64_t expw = env->f[f][1];
+    uint32_t pf = ia64_fr_phys(env, f);
+    uint64_t mant = env->f[pf][0];
+    uint64_t expw = env->f[pf][1];
 
     if (mant == 0) {
         return 0.0L;
@@ -913,14 +1390,14 @@ static long double ia64_fp_to_ld(const CPUIA64State *env, uint32_t f)
 
 static void ia64_ld_to_fp(CPUIA64State *env, uint32_t f, long double val)
 {
-    f &= 0x7f;
-    if (f <= 1) {
+    uint32_t pf = ia64_fr_phys(env, f);
+    if (pf <= 1) {
         return;
     }
 
     if (val == 0.0L || isnan(val) || isinf(val)) {
-        env->f[f][0] = 0;
-        env->f[f][1] = 0;
+        env->f[pf][0] = 0;
+        env->f[pf][1] = 0;
         return;
     }
 
@@ -939,8 +1416,8 @@ static void ia64_ld_to_fp(CPUIA64State *env, uint32_t f, long double val)
     exp &= 0x1ffffULL;
     uint64_t expw = (sign ? 0x20000ULL : 0) | exp;
 
-    env->f[f][0] = mant;
-    env->f[f][1] = expw;
+    env->f[pf][0] = mant;
+    env->f[pf][1] = expw;
 }
 
 void HELPER(frcpa_s1)(CPUIA64State *env, uint32_t f1, uint32_t p2,
@@ -1010,14 +1487,14 @@ static void ia64_fcvt_invalid(CPUIA64State *env, const char *op,
 
 void HELPER(fcvt_fxu_trunc_s1)(CPUIA64State *env, uint32_t f1, uint32_t f2)
 {
-    f1 &= 0x7f;
-    f2 &= 0x7f;
-    if (f1 <= 1) {
+    uint32_t pf1 = ia64_fr_phys(env, f1);
+    uint32_t pf2 = ia64_fr_phys(env, f2);
+    if (pf1 <= 1) {
         return;
     }
 
-    uint64_t mant = env->f[f2][0];
-    uint64_t expw = env->f[f2][1];
+    uint64_t mant = env->f[pf2][0];
+    uint64_t expw = env->f[pf2][1];
     uint64_t res = 0;
 
     if (mant != 0) {
@@ -1051,8 +1528,8 @@ void HELPER(fcvt_fxu_trunc_s1)(CPUIA64State *env, uint32_t f1, uint32_t f2)
         }
     }
 
-    env->f[f1][0] = res;
-    env->f[f1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER);
+    env->f[pf1][0] = res;
+    env->f[pf1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER);
 }
 
 /*
@@ -4122,7 +4599,16 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
         uint8_t n = MIN((uint8_t)sof, (uint8_t)96);
         for (uint8_t i = old_sof; i < n; i++) {
             env->r[32 + i] = 0;
+            env->nat[32 + i] = 0;
         }
+    }
+
+    int64_t growth = (int64_t)(sof & 0x7f) - (int64_t)old_sof;
+    if (growth != 0) {
+        uint64_t bsp = ia64_rse_get_bsp(env);
+        bsp = ia64_rse_skip_regs(bsp, growth);
+        env->ar[IA64_AR_BSP] = bsp;
+        ia64_rse_update_loadrs(env, bsp);
     }
 
     return old_pfs;
@@ -4153,10 +4639,13 @@ void HELPER(rotate_grs)(CPUIA64State *env)
     }
 
     uint64_t last = env->r[32 + sor_regs - 1];
+    uint8_t last_nat = env->nat[32 + sor_regs - 1];
     for (uint32_t i = sor_regs - 1; i > 0; i--) {
         env->r[32 + i] = env->r[32 + i - 1];
+        env->nat[32 + i] = env->nat[32 + i - 1];
     }
     env->r[32] = last;
+    env->nat[32] = last_nat;
 }
 
 void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
@@ -4175,6 +4664,8 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
     uint8_t sol = (caller_cfm >> 7) & 0x7f;
     uint8_t outs = (sof > sol) ? (sof - sol) : 0;
     uint64_t tmp[96] = { 0 };
+    uint8_t tmp_nat[96] = { 0 };
+    uint64_t bsp = ia64_rse_get_bsp(env);
     uint64_t dbg_pc = ia64_dbg_next_call_pc;
 
     /*
@@ -4731,6 +5222,11 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
      * matches the extracted CFM (SOF at bits 6:0, ... RRB* at 45:18), so we
      * can reuse caller_cfm directly here.
      */
+    ia64_rse_store_frame(env, bsp, sof);
+    bsp = ia64_rse_skip_regs(bsp, sol);
+    env->ar[IA64_AR_BSP] = bsp;
+    ia64_rse_update_loadrs(env, bsp);
+
     ia64_rse_push_window(env, pc + 16);
     {
         uint64_t ppl = (env->psr >> 32) & 3; /* PSR.CPL */
@@ -4746,9 +5242,11 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
         uint8_t max_copy = MIN(outs, (uint8_t)(96 - sol));
         for (uint8_t i = 0; i < max_copy; i++) {
             tmp[i] = env->r[32 + sol + i];
+            tmp_nat[i] = env->nat[32 + sol + i];
         }
     }
     memcpy(&env->r[32], tmp, sizeof(tmp));
+    memcpy(&env->nat[32], tmp_nat, sizeof(tmp_nat));
     if (dbg_pc) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "call_map pc=%016" PRIx64 " mapped in0..4=%016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 "\n",
@@ -4776,7 +5274,15 @@ void HELPER(ret_restore)(CPUIA64State *env)
                       env->ip, env->b[0], env->cfm, env->rse_depth);
         log_count++;
     }
-    (void)ia64_rse_pop_window(env);
+    uint64_t bsp = ia64_rse_get_bsp(env);
+    uint8_t sof = env->cfm & 0x7f;
+    ia64_rse_store_frame(env, bsp, sof);
+    if (ia64_rse_pop_window(env)) {
+        uint8_t sol = (env->cfm >> 7) & 0x7f;
+        bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
+        env->ar[IA64_AR_BSP] = bsp;
+        ia64_rse_update_loadrs(env, bsp);
+    }
 }
 
 void HELPER(ret_restore_b0)(CPUIA64State *env)
@@ -4808,7 +5314,15 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
     }
 
     if (do_pop) {
-        (void)ia64_rse_pop_window(env);
+        uint64_t bsp = ia64_rse_get_bsp(env);
+        uint8_t sof = env->cfm & 0x7f;
+        ia64_rse_store_frame(env, bsp, sof);
+        if (ia64_rse_pop_window(env)) {
+            uint8_t sol = (env->cfm >> 7) & 0x7f;
+            bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
+            env->ar[IA64_AR_BSP] = bsp;
+            ia64_rse_update_loadrs(env, bsp);
+        }
     }
 }
 
@@ -8790,7 +9304,11 @@ void HELPER(flushrs)(CPUIA64State *env)
      * Linux uses enforced-lazy + flushrs when switching stacks/modes and
      * expects the loadrs field to report the dirty-partition size.
      */
-    env->ar[IA64_AR_BSPSTORE] = env->ar[IA64_AR_BSP] & ~0x7ULL;
+    uint64_t bsp = ia64_rse_get_bsp(env);
+    uint8_t sof = env->cfm & 0x7f;
+    ia64_rse_store_frame(env, bsp, sof);
+    env->ar[IA64_AR_BSP] = bsp;
+    env->ar[IA64_AR_BSPSTORE] = bsp;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);
 }
 
@@ -8806,7 +9324,10 @@ void HELPER(loadrs)(CPUIA64State *env)
      */
     uint64_t rsc = env->ar[IA64_AR_RSC];
     (void)ia64_rsc_get_loadrs(rsc);
-    env->ar[IA64_AR_BSPSTORE] = env->ar[IA64_AR_BSP] & ~0x7ULL;
+    uint64_t bsp = ia64_rse_get_bsp(env);
+    uint8_t sof = env->cfm & 0x7f;
+    ia64_rse_load_frame(env, bsp, sof);
+    env->ar[IA64_AR_BSP] = bsp;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, 0);
 }
 
@@ -8815,12 +9336,7 @@ void HELPER(cover)(CPUIA64State *env)
     static int log_count;
     uint64_t old_cfm = env->cfm;
     uint8_t sof = old_cfm & 0x7f;
-    uint64_t bsp = env->ar[IA64_AR_BSP];
-
-    if (bsp == 0) {
-        bsp = env->ar[IA64_AR_BSPSTORE];
-    }
-    bsp &= ~0x7ULL;
+    uint64_t bsp = ia64_rse_get_bsp(env);
 
     uint64_t new_bsp = ia64_rse_skip_regs(bsp, sof);
     uint64_t cover_bytes = new_bsp - bsp;
@@ -8841,12 +9357,9 @@ void HELPER(cover)(CPUIA64State *env)
      */
     env->cr_ifs = old_cfm | (1ULL << 63);
 
-    /* Extend the dirty-partition size reported by ar.rsc.loadrs. */
-    uint64_t rsc = env->ar[IA64_AR_RSC];
-    uint64_t loadrs_bytes = ia64_rsc_get_loadrs(rsc);
-    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, loadrs_bytes + cover_bytes);
-
+    ia64_rse_store_frame(env, bsp, sof);
     env->ar[IA64_AR_BSP] = new_bsp;
+    ia64_rse_update_loadrs(env, new_bsp);
 
     /* Create the covering frame: no stacked regs/rotations. */
     env->cfm = 0;
@@ -8872,6 +9385,7 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
     env->ar[IA64_AR_BSP] = bspstore;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);
     env->ar[IA64_AR_RNAT] = 0;
+    memset(&env->nat[32], 0, 96);
 }
 
 uint64_t HELPER(get_itc)(CPUIA64State *env)

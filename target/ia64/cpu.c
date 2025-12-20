@@ -521,6 +521,10 @@ static void ia64_switch_banks_local(CPUIA64State *env)
         uint64_t tmp = env->banked_r[i];
         env->banked_r[i] = env->r[16 + i];
         env->r[16 + i] = tmp;
+
+        uint8_t tmp_nat = env->banked_nat[i];
+        env->banked_nat[i] = env->nat[16 + i];
+        env->nat[16 + i] = tmp_nat;
     }
 }
 

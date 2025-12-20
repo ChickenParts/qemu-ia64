@@ -16,7 +16,9 @@ typedef struct QEMUTimer QEMUTimer;
 
 typedef struct CPUArchState {
     uint64_t r[128];     /* General Registers */
+    uint8_t nat[128];    /* NaT bits for general registers */
     uint64_t banked_r[16]; /* Banked GRs r16..r31 (PSR.BN selects bank) */
+    uint8_t banked_nat[16];
     uint64_t f[128][2];  /* Floating Point Registers (82-bit, stored as 2x64 for now) */
     uint64_t pr;         /* Predicate Registers (64 bits) */
     uint64_t b[8];       /* Branch Registers */
@@ -82,6 +84,7 @@ typedef struct CPUArchState {
 
     struct IA64RSEFrame {
         uint64_t r[96];     /* r32..r127 */
+        uint8_t nat[96];
         uint64_t ar_pfs;
         uint64_t cfm;
         uint64_t ret_addr;  /* caller return address (bundle PC) */
@@ -98,6 +101,7 @@ typedef struct CPUArchState {
      */
     struct IA64IntrFrame {
         uint64_t r[96];     /* r32..r127 */
+        uint8_t nat[96];
         uint64_t ar_pfs;
     } *intr_frames;
     uint32_t intr_depth;

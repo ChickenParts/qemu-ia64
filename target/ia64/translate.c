@@ -900,6 +900,26 @@ static void gen_store_ar(uint8_t idx, TCGv_i64 v)
     tcg_gen_st_i64(v, tcg_env, offsetof(CPUIA64State, ar) + idx * 8);
 }
 
+static void gen_fr_load_lo(TCGv_i64 dst, uint8_t f)
+{
+    gen_helper_fr_get_lo(dst, tcg_env, tcg_constant_i32(f));
+}
+
+static void gen_fr_load_hi(TCGv_i64 dst, uint8_t f)
+{
+    gen_helper_fr_get_hi(dst, tcg_env, tcg_constant_i32(f));
+}
+
+static void gen_fr_store_lo(uint8_t f, TCGv_i64 val)
+{
+    gen_helper_fr_set_lo(tcg_env, tcg_constant_i32(f), val);
+}
+
+static void gen_fr_store_hi(uint8_t f, TCGv_i64 val)
+{
+    gen_helper_fr_set_hi(tcg_env, tcg_constant_i32(f), val);
+}
+
 static void gen_rotate_regs(void)
 {
     /*
@@ -1597,15 +1617,23 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
         }
     }
 
-    /* A9 psub4: r1 = r2, r3 (SKI encoding.opcode). */
+    /* A9: packed add/sub (padd/psub) in byte/halfword/word lanes. */
     if (!handled && major == 0x8 && x2a == 1) {
         uint8_t za = extract64(insn, 36, 1);
         uint8_t zb = ve; /* bit 33 in A9 encodings */
+        uint8_t size = 0;
 
-        if (za == 1 && zb == 0 && x4 == 0x1 && x2b == 0) {
+        if (za == 1 && zb == 0) {
+            size = 4;
+        } else if (za == 0 && zb == 1) {
+            size = 2;
+        } else if (za == 0 && zb == 0) {
+            size = 1;
+        }
+
+        if (size) {
             TCGv_i64 a = tcg_temp_new_i64();
             TCGv_i64 b = tcg_temp_new_i64();
-
             if (r2 == 0) {
                 tcg_gen_movi_i64(a, 0);
             } else {
@@ -1617,28 +1645,64 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
                 tcg_gen_mov_i64(b, cpu_r[r3]);
             }
 
-            if (r1 != 0) {
-                TCGv_i64 lo = tcg_temp_new_i64();
-                TCGv_i64 hi = tcg_temp_new_i64();
-                TCGv_i64 t1 = tcg_temp_new_i64();
-                TCGv_i64 t2 = tcg_temp_new_i64();
+            TCGv_i64 res = tcg_temp_new_i64();
+            bool op_ok = false;
 
-                tcg_gen_andi_i64(t1, a, 0xffffffffULL);
-                tcg_gen_andi_i64(t2, b, 0xffffffffULL);
-                tcg_gen_sub_i64(lo, t1, t2);
-                tcg_gen_andi_i64(lo, lo, 0xffffffffULL);
-
-                tcg_gen_shri_i64(t1, a, 32);
-                tcg_gen_shri_i64(t2, b, 32);
-                tcg_gen_andi_i64(t1, t1, 0xffffffffULL);
-                tcg_gen_andi_i64(t2, t2, 0xffffffffULL);
-                tcg_gen_sub_i64(hi, t1, t2);
-                tcg_gen_andi_i64(hi, hi, 0xffffffffULL);
-                tcg_gen_shli_i64(hi, hi, 32);
-
-                tcg_gen_or_i64(cpu_r[r1], hi, lo);
+            if (x4 == 0x0) {
+                /* padd{1,2,4}[.sss/.uuu/.uus] */
+                if (size == 1) {
+                    switch (x2b) {
+                    case 0: gen_helper_padd1(res, tcg_env, a, b); op_ok = true; break;
+                    case 1: gen_helper_padd1_sss(res, tcg_env, a, b); op_ok = true; break;
+                    case 2: gen_helper_padd1_uuu(res, tcg_env, a, b); op_ok = true; break;
+                    case 3: gen_helper_padd1_uus(res, tcg_env, a, b); op_ok = true; break;
+                    }
+                } else if (size == 2) {
+                    switch (x2b) {
+                    case 0: gen_helper_padd2(res, tcg_env, a, b); op_ok = true; break;
+                    case 1: gen_helper_padd2_sss(res, tcg_env, a, b); op_ok = true; break;
+                    case 2: gen_helper_padd2_uuu(res, tcg_env, a, b); op_ok = true; break;
+                    case 3: gen_helper_padd2_uus(res, tcg_env, a, b); op_ok = true; break;
+                    }
+                } else if (size == 4 && x2b == 0) {
+                    gen_helper_padd4(res, tcg_env, a, b);
+                    op_ok = true;
+                }
+            } else if (x4 == 0x1) {
+                /* psub{1,2,4}[.sss/.uuu/.uus] */
+                if (size == 1) {
+                    switch (x2b) {
+                    case 0: gen_helper_psub1(res, tcg_env, a, b); op_ok = true; break;
+                    case 1: gen_helper_psub1_sss(res, tcg_env, a, b); op_ok = true; break;
+                    case 2: gen_helper_psub1_uuu(res, tcg_env, a, b); op_ok = true; break;
+                    case 3: gen_helper_psub1_uus(res, tcg_env, a, b); op_ok = true; break;
+                    }
+                } else if (size == 2) {
+                    switch (x2b) {
+                    case 0: gen_helper_psub2(res, tcg_env, a, b); op_ok = true; break;
+                    case 1: gen_helper_psub2_sss(res, tcg_env, a, b); op_ok = true; break;
+                    case 2: gen_helper_psub2_uuu(res, tcg_env, a, b); op_ok = true; break;
+                    case 3: gen_helper_psub2_uus(res, tcg_env, a, b); op_ok = true; break;
+                    }
+                } else if (size == 4 && x2b == 0) {
+                    gen_helper_psub4(res, tcg_env, a, b);
+                    op_ok = true;
+                }
             }
-            handled = true;
+
+            if (op_ok) {
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                    TCGv_i64 nat_a = tcg_temp_new_i64();
+                    TCGv_i64 nat_b = tcg_temp_new_i64();
+                    gen_helper_gr_nat(nat_a, tcg_env, tcg_constant_i32(r2));
+                    gen_helper_gr_nat(nat_b, tcg_env, tcg_constant_i32(r3));
+                    TCGv_i64 nat = tcg_temp_new_i64();
+                    tcg_gen_or_i64(nat, nat_a, nat_b);
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1), nat);
+                }
+                handled = true;
+            }
         }
     }
 
@@ -1674,6 +1738,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
 static void decode_b_unit(DisasContext *ctx, uint64_t insn)
 {
     if (insn == 0) {
+        gen_unimpl(ctx, insn, "B-slot zero");
         return;
     }
     uint8_t qp = insn & 0x3f;
@@ -2757,8 +2822,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             if (!handled && !is_imm && m == 0 && x == 1 && x6 == 0x1d) {
                 uint8_t f2 = r2 & 0x7f;
                 TCGv_i64 t = tcg_temp_new_i64();
-                tcg_gen_ld_i64(t, tcg_env,
-                               offsetof(CPUIA64State, f) + (f2 * 16) + 8);
+                gen_fr_load_hi(t, f2);
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t);
                 }
@@ -3243,10 +3307,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
 
                     if (f1 > 1) {
-                        tcg_gen_st_i64(mant, tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
-                        tcg_gen_st_i64(expw, tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                        gen_fr_store_lo(f1, mant);
+                        gen_fr_store_hi(f1, expw);
                     }
 
                     if (major == 0x6 && m == 1) {
@@ -3290,8 +3352,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
 
                 TCGv_i64 lo = tcg_temp_new_i64();
-                tcg_gen_ld_i64(lo, tcg_env,
-                               offsetof(CPUIA64State, f) + (f2 * 16) + 0);
+                gen_fr_load_lo(lo, f2);
                 tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
                 gen_helper_alat_invalidate(tcg_env, addr,
                                            tcg_constant_i32(8));
@@ -3336,10 +3397,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 tcg_gen_qemu_ld_i64(hi, addr2, ctx->mem_idx, MO_TE | MO_64);
 
                 if (f1 > 1) {
-                    tcg_gen_st_i64(lo, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f1 * 16) + 0);
-                    tcg_gen_st_i64(hi, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                    gen_fr_store_lo(f1, lo);
+                    gen_fr_store_hi(f1, hi);
                 }
 
                 if (r3 != 0 && simm8 != 0) {
@@ -3379,10 +3438,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
 
                 TCGv_i64 lo = tcg_temp_new_i64();
                 TCGv_i64 hi = tcg_temp_new_i64();
-                tcg_gen_ld_i64(lo, tcg_env,
-                               offsetof(CPUIA64State, f) + (f2 * 16) + 0);
-                tcg_gen_ld_i64(hi, tcg_env,
-                               offsetof(CPUIA64State, f) + (f2 * 16) + 8);
+                gen_fr_load_lo(lo, f2);
+                gen_fr_load_hi(hi, f2);
 
                 tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
                 TCGv_i64 addr2 = tcg_temp_new_i64();
@@ -3421,10 +3478,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 tcg_gen_andi_i64(expw, expw, 0x3ffffULL);
                 if (f1 > 1) {
-                    tcg_gen_st_i64(tcg_constant_i64(1ULL << 63), tcg_env,
-                                   offsetof(CPUIA64State, f) + (f1 * 16) + 0);
-                    tcg_gen_st_i64(expw, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                    gen_fr_store_lo(f1, tcg_constant_i64(1ULL << 63));
+                    gen_fr_store_hi(f1, expw);
                 }
                 handled = true;
             }
@@ -4222,7 +4277,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                  *   and the test is always the ".z" form (no base ".nz" opcode).
                  * - In the non-base modes, c selects z vs nz (0 => z, 1 => nz).
                  *
-                 * Note: We do not model NaT bits yet; assume NaT(r3)=0 for tnat.
+                 * NaT bits are tracked for the stacked GRs; use the helper for tnat.
                  */
                 enum {
                     TEST_BASE = 0,
@@ -4255,8 +4310,14 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 /* Compute CMPRES1 (0/1), CMPRES2 is implied as ~CMPRES1. */
                 TCGv_i64 cmpres1 = tcg_temp_new_i64();
                 if (bit13) {
-                    /* tnat.* p1,p2 = r3; NaT(r3)=0 => z=>1, nz=>0 */
-                    tcg_gen_movi_i64(cmpres1, is_z ? 1 : 0);
+                    /* tnat.* p1,p2 = r3 */
+                    TCGv_i64 nat = tcg_temp_new_i64();
+                    gen_helper_gr_nat(nat, tcg_env, tcg_constant_i32(r3));
+                    if (is_z) {
+                        tcg_gen_xori_i64(cmpres1, nat, 1);
+                    } else {
+                        tcg_gen_mov_i64(cmpres1, nat);
+                    }
                 } else {
                     /* tbit.* p1,p2 = r3, pos6 */
                     TCGv_i64 src = tcg_temp_new_i64();
@@ -4598,10 +4659,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
 
                     TCGv_i64 a = tcg_temp_new_i64();
                     TCGv_i64 b = tcg_temp_new_i64();
-                    tcg_gen_ld_i64(a, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f2 * 16) + 0);
-                    tcg_gen_ld_i64(b, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f3 * 16) + 0);
+                    gen_fr_load_lo(a, f2);
+                    gen_fr_load_lo(b, f3);
 
                     /* Bit-level approximation of SKI's spill merge. */
                     const uint64_t SIGN_MASK = 0x8000000000000000ULL;
@@ -4634,10 +4693,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
 
                     if (f1 > 1) {
-                        tcg_gen_st_i64(res, tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
-                        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                        gen_fr_store_lo(f1, res);
+                        gen_fr_store_hi(f1, tcg_constant_i64(0));
                     }
                     handled = true;
                 }
@@ -4666,10 +4723,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
 
                     TCGv_i64 a = tcg_temp_new_i64();
                     TCGv_i64 b = tcg_temp_new_i64();
-                    tcg_gen_ld_i64(a, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f2 * 16) + 0);
-                    tcg_gen_ld_i64(b, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f3 * 16) + 0);
+                    gen_fr_load_lo(a, f2);
+                    gen_fr_load_lo(b, f3);
 
                     TCGv_i64 sign = tcg_temp_new_i64();
                     TCGv_i64 ext = tcg_temp_new_i64();
@@ -4695,10 +4750,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_or_i64(res, ext, low);
 
                     if (f1 > 1) {
-                        tcg_gen_st_i64(res, tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
-                        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                        gen_fr_store_lo(f1, res);
+                        gen_fr_store_hi(f1, tcg_constant_i64(0));
                     }
                     handled = true;
                 }
@@ -4721,10 +4774,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 if (x == 0 && f4 == 1 && f2 == 0) {
                     TCGv_i64 mant = tcg_temp_new_i64();
                     TCGv_i64 expw = tcg_temp_new_i64();
-                    tcg_gen_ld_i64(mant, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f3 * 16) + 0);
-                    tcg_gen_ld_i64(expw, tcg_env,
-                                   offsetof(CPUIA64State, f) + (f3 * 16) + 8);
+                    gen_fr_load_lo(mant, f3);
+                    gen_fr_load_hi(expw, f3);
 
                     TCGv_i64 sign = tcg_temp_new_i64();
                     TCGv_i64 exp = tcg_temp_new_i64();
@@ -4756,19 +4807,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_or_i64(expw_norm, sign, exp_norm);
 
                     if (f1 > 1) {
-                        tcg_gen_st_i64(mant_norm, tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
-                        tcg_gen_st_i64(expw_norm, tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                        gen_fr_store_lo(f1, mant_norm);
+                        gen_fr_store_hi(f1, expw_norm);
                     }
                     tcg_gen_br(done);
 
                     gen_set_label(zero);
                     if (f1 > 1) {
-                        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 0);
-                        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
-                                       offsetof(CPUIA64State, f) + (f1 * 16) + 8);
+                        gen_fr_store_lo(f1, tcg_constant_i64(0));
+                        gen_fr_store_hi(f1, tcg_constant_i64(0));
                     }
                     gen_set_label(done);
                     handled = true;
@@ -5090,6 +5137,10 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
             tcg_gen_exit_tb(NULL, 0);
             return;
         }
+    }
+
+    if (ctx->ri == 2 && template_table[template][1] == SLOT_L) {
+        ctx->extra_bits = slot1;
     }
 
     enum SlotType type = template_table[template][ctx->ri];
