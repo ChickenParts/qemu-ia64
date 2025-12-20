@@ -5760,6 +5760,176 @@ uint32_t HELPER(fw_fastpath)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         return 1;
     }
 
+    /*
+     * Byte-indexed table clear loop:
+     *   counter8 at [r12+0], table base ptr at [r12+8].
+     *   increments counter, then zeros table[(counter) * 8] in the block
+     *   starting at base+56 until counter > 63.
+     * Exit target is pc + 0x90.
+     */
+    if (low0 == 0x01e021001800f811ULL &&
+        high0 == 0x2000000000420030ULL &&
+        low1 == 0x09f010003e00f80bULL &&
+        high1 == 0x000400000042007cULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t count = 0;
+        cpu_physical_memory_read(frame + 0, &count, 1);
+
+        uint32_t start = (uint32_t)count + 1;
+        uint8_t final_count = (uint8_t)start;
+        if (start <= 63) {
+            uint8_t tmp[8];
+            cpu_physical_memory_read(frame + 8, tmp, sizeof(tmp));
+            uint64_t base_raw = ldq_le_p(tmp);
+            hwaddr base = ia64_phys_mode_addr(base_raw) + 56;
+
+            uint32_t entries = 64 - start;
+            uint64_t len = (uint64_t)entries << 3;
+            if (len && !ia64_fw_fastpath_fill(base + ((uint64_t)start << 3),
+                                              len, 0)) {
+                return 0;
+            }
+            final_count = 64;
+        }
+
+        cpu_physical_memory_write(frame + 0, &final_count, 1);
+
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath tblclr pc=%016" PRIx64
+                          " count=%u final=%u\n",
+                          pc, count, final_count);
+        }
+
+        env->ip = pc + 0x90;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
+    /*
+     * ASCII to UTF-16 copy loop:
+     *   src ptr at [r12+2616], dest base at [r12+24],
+     *   count at [r12+536], copies bytes until NUL or count >= 254.
+     * Exit target is pc + 0xF0.
+     */
+    if (low0 == 0x01f0211418e0f80bULL &&
+        high0 == 0x000400000020307cULL &&
+        low1 == 0x00f010003e00f80aULL &&
+        high1 == 0x000400000071007cULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t tmp[8];
+
+        cpu_physical_memory_read(frame + 536, tmp, sizeof(tmp));
+        uint64_t count = ldq_le_p(tmp);
+
+        cpu_physical_memory_read(frame + 2616, tmp, sizeof(tmp));
+        uint64_t src_raw = ldq_le_p(tmp);
+        hwaddr src_phys = ia64_phys_mode_addr(src_raw);
+
+        hwaddr dst_phys = frame + 24 + (count << 1);
+        uint64_t max = (count < 254) ? (254 - count) : 0;
+        uint64_t len = 0;
+
+        if (max) {
+            g_autofree uint8_t *src_buf = g_malloc(max);
+            cpu_physical_memory_read(src_phys, src_buf, max);
+            while (len < max && src_buf[len] != 0) {
+                len++;
+            }
+
+            if (len) {
+                g_autofree uint8_t *dst_buf = g_malloc(len * 2);
+                for (uint64_t i = 0; i < len; i++) {
+                    stw_le_p(dst_buf + (i << 1), (uint16_t)src_buf[i]);
+                }
+                cpu_physical_memory_write(dst_phys, dst_buf, len * 2);
+            }
+
+            count += len;
+            src_raw += len;
+        }
+
+        stq_le_p(tmp, count);
+        cpu_physical_memory_write(frame + 536, tmp, sizeof(tmp));
+        stq_le_p(tmp, src_raw);
+        cpu_physical_memory_write(frame + 2616, tmp, sizeof(tmp));
+
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath ascii2utf16 pc=%016" PRIx64
+                          " count=%" PRIu64 " len=%" PRIu64 "\n",
+                          pc, count, len);
+        }
+
+        env->ip = pc + 0xF0;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
+    /*
+     * Table adjust loop:
+     *   counter8 at [r12+0], table base ptr at [r12+8],
+     *   base ptr at [r12+24], adjust ptr at [r12+32].
+     *   For each index 1..63:
+     *     if entry < *(base+40), entry -= (base - adjust).
+     * Exit target is pc + 0x130.
+     */
+    if (low0 == 0x41e010183e00f80bULL &&
+        high0 == 0x0004000000420079ULL &&
+        low1 == 0xf80010183c00f00aULL &&
+        high1 == 0x84006083e0681c78ULL) {
+        hwaddr frame = ia64_phys_mode_addr(env->r[12]);
+        uint8_t count = 0;
+        cpu_physical_memory_read(frame + 0, &count, 1);
+
+        uint32_t start = (uint32_t)count + 1;
+        uint8_t final_count = (uint8_t)start;
+        if (start <= 63) {
+            uint8_t tmp[8];
+            cpu_physical_memory_read(frame + 8, tmp, sizeof(tmp));
+            uint64_t table_raw = ldq_le_p(tmp);
+            hwaddr table_phys = ia64_phys_mode_addr(table_raw);
+
+            cpu_physical_memory_read(frame + 24, tmp, sizeof(tmp));
+            uint64_t base_raw = ldq_le_p(tmp);
+            hwaddr base_phys = ia64_phys_mode_addr(base_raw);
+
+            cpu_physical_memory_read(frame + 32, tmp, sizeof(tmp));
+            uint64_t adjust_raw = ldq_le_p(tmp);
+
+            uint8_t limit_buf[8];
+            cpu_physical_memory_read(base_phys + 40, limit_buf, sizeof(limit_buf));
+            uint64_t limit = ldq_le_p(limit_buf);
+            uint64_t delta = base_raw - adjust_raw;
+
+            for (uint32_t idx = start; idx <= 63; idx++) {
+                hwaddr entry_addr = table_phys + 56 + ((hwaddr)idx << 3);
+                uint8_t entry_buf[8];
+                cpu_physical_memory_read(entry_addr, entry_buf, sizeof(entry_buf));
+                uint64_t entry = ldq_le_p(entry_buf);
+                if (entry < limit) {
+                    entry -= delta;
+                    stq_le_p(entry_buf, entry);
+                    cpu_physical_memory_write(entry_addr, entry_buf, sizeof(entry_buf));
+                }
+            }
+            final_count = 64;
+        }
+
+        cpu_physical_memory_write(frame + 0, &final_count, 1);
+
+        if (trace_enabled && trace_count++ < trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "fw_fastpath tbladj pc=%016" PRIx64
+                          " count=%u final=%u\n",
+                          pc, count, final_count);
+        }
+
+        env->ip = pc + 0x130;
+        env->psr &= ~PSR_RI_MASK;
+        return 1;
+    }
+
     return 0;
 #endif
 }
