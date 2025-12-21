@@ -42,6 +42,7 @@ static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
     return (hwaddr)(addr & ((1ULL << 61) - 1));
 }
 
+
 static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 {
     uint64_t hi32 = template & 0xffffffff00000000ULL;
@@ -642,6 +643,56 @@ static uint64_t ia64_translate_tlb(CPUIA64State *env, bool is_data, uint64_t va,
     return 0;
 }
 
+static bool ia64_try_translate(CPUIA64State *env, uint64_t va, hwaddr *pa)
+{
+    uint8_t rr_idx = extract64(va, 61, 3);
+
+    if (rr_idx == 7 && extract64(va, 60, 1) == 0) {
+        *pa = va & ((1ULL << 61) - 1);
+        return true;
+    }
+    if (rr_idx == 6 && extract64(va, 60, 1) == 0) {
+        *pa = va & ((1ULL << 61) - 1);
+        return true;
+    }
+
+    if (!(env->psr & IA64_PSR_DT)) {
+        *pa = ia64_phys_mode_addr(va);
+        return true;
+    }
+
+    uint64_t rr = env->rr[rr_idx];
+    uint32_t rid = RR_RID(rr);
+    bool hit = false;
+    uint64_t tpa = ia64_translate_tlb(env, true, va, rid, &hit);
+    if (hit) {
+        *pa = tpa;
+        return true;
+    }
+
+    uint64_t pta = env->cr[8];
+    if (PTA_VE(pta) && RR_VE(rr)) {
+        env->cr_ifa = va;
+        uint64_t vhpt_addr = helper_thash(env);
+        uint64_t pte = cpu_ldq_data(env, vhpt_addr);
+        uint64_t tar = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 8)
+                                   : ((uint64_t)rid << 8) |
+                                     ((uint64_t)RR_PS(rr) << 2);
+        uint64_t tag = PTA_VF(pta) ? cpu_ldq_data(env, vhpt_addr + 16) : 0;
+        uint64_t expected = helper_ttag(env);
+        if (!PTA_VF(pta) || tag == expected) {
+            uint8_t trans_ps = TAR_PS(tar);
+            hwaddr pbase = (PTE_PPN(pte) << 12);
+            if (PTE_P(pte) && TAR_P(tar)) {
+                *pa = pbase | (va & ((1ULL << trans_ps) - 1));
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 uint64_t HELPER(tpa)(CPUIA64State *env, uint64_t va)
 {
     uint8_t rr_idx = extract64(va, 61, 3);
@@ -705,6 +756,77 @@ uint64_t HELPER(tpa)(CPUIA64State *env, uint64_t va)
                                            : IA64_VEC_ALT_DATA_TLB;
     ia64_fault(cs, env, true, false, vec, 0, retaddr);
     return 0;
+}
+
+uint64_t HELPER(ld_s)(CPUIA64State *env, uint64_t addr, uint32_t size,
+                      uint32_t reg, uint32_t advanced)
+{
+    uint64_t val = 0;
+    bool ok = true;
+
+    if (size == 0 || size > 8) {
+        ok = false;
+    }
+
+    hwaddr pa = 0;
+    if (ok && !ia64_try_translate(env, addr, &pa)) {
+        ok = false;
+    }
+
+    if (ok) {
+        uint8_t buf[8] = { 0 };
+        MemTxResult res = address_space_read(&address_space_memory, pa,
+                                             MEMTXATTRS_UNSPECIFIED,
+                                             buf, size);
+        if (res != MEMTX_OK) {
+            ok = false;
+        } else {
+            for (uint32_t i = 0; i < size; i++) {
+                val |= (uint64_t)buf[i] << (i * 8);
+            }
+        }
+    }
+
+    if (reg != 0) {
+        ia64_gr_nat_set(env, reg, !ok);
+        if (advanced) {
+            uint32_t r = reg & 0x7f;
+            struct IA64ALATEntry *e = &env->alat_gr[r];
+            if (!ok) {
+                if (e->valid) {
+                    e->valid = 0;
+                    if (env->alat_gr_valid) {
+                        env->alat_gr_valid--;
+                    }
+                }
+            } else {
+                if (!e->valid) {
+                    env->alat_gr_valid++;
+                }
+                e->addr = addr;
+                e->size = size;
+                e->valid = 1;
+            }
+        }
+    }
+
+    return ok ? val : 0;
+}
+
+void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                    uint64_t insn, uint64_t msg_ptr)
+{
+    const char *msg = (const char *)(uintptr_t)msg_ptr;
+    uint64_t last_kind = env->last_branch_kind;
+    uint32_t last_ri = last_kind >> 8;
+    uint32_t last_kind_id = last_kind & 0xff;
+    cpu_abort(env_cpu(env),
+              "IA64 UNIMPL: pc=%016" PRIx64 " ri=%u insn=%011" PRIx64 " %s"
+              " last_branch from=%016" PRIx64 " to=%016" PRIx64
+              " kind=%u ri=%u insn=%011" PRIx64,
+              pc, ri, insn, msg ? msg : "",
+              env->last_branch_from, env->last_branch_to,
+              last_kind_id, last_ri, env->last_branch_insn);
 }
 
 void HELPER(fc)(CPUIA64State *env, uint64_t va)
@@ -3229,17 +3351,15 @@ static int ia64_fw_scan_flash_fvs(CPUState *cs, IA64FwFvInfo *out, int max)
 }
 #endif
 
-uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
+void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 {
     /*
      * Xenipf firmware and some EDK components use break(0) as a last-resort
      * trap/breakpoint. In our bringup environment, a missing handler would
      * otherwise recurse into the empty break vector (0x2c00) and hang.
      *
-     * Treat break(0) as a firmware call gate (status-code reporting, etc).
-     * Most firmware sequences execute break(0) inside a br.call stub, with
-     * b0 holding the return address. Emulate the hypervisor handling by
-     * returning directly to b0 and unwinding the modeled call frame.
+     * Treat break(0) as a firmware status/debug hook and resume normal
+     * execution after recording the status information.
      */
     static int dump_enabled = -1;
     static int dump_len = -1;
@@ -3775,28 +3895,7 @@ uint64_t HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         cpu_abort(cs, "IA64: firmware ASSERT via break0 pc=%016" PRIx64, pc);
     }
 
-    uint64_t b0 = env->b[0] & ~0xFULL;
-    if (b0) {
-        if (b0 == (pc & ~0xFULL)) {
-            /*
-             * Avoid break(0) spin when the return address points back at the
-             * break bundle itself.
-             */
-            return (pc & ~0xFULL) + 16;
-        }
-        /*
-         * If the call depth indicates that b0 was produced by a br.call,
-         * restore the caller's stacked-register window before returning.
-         */
-        uint8_t kind = env->last_b0_write_kind & 0xff;
-        if (kind == 1) {
-            (void)ia64_rse_pop_window(env);
-        }
-        return b0;
-    }
-
-    /* No return pointer; fall through to the next bundle. */
-    return (pc & ~0xFULL) + 16;
+    return;
 }
 
 #ifndef CONFIG_USER_ONLY
