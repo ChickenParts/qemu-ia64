@@ -1739,7 +1739,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
 static void decode_b_unit(DisasContext *ctx, uint64_t insn)
 {
     if (insn == 0) {
-        gen_unimpl(ctx, insn, "B-slot zero");
+        /* nop.b 0 */
         return;
     }
     uint8_t qp = insn & 0x3f;

@@ -2292,13 +2292,20 @@ static bool ia64_fw_find_pei_hob_list(CPUState *cs, uint64_t stack_phys,
     static uint32_t attempts;
 
     if (cached_hob_base) {
-        if (hob_base_out) {
-            *hob_base_out = cached_hob_base;
+        uint64_t end = 0;
+        int count = 0;
+        if (ia64_fw_validate_efi_hob_list(cs, cached_hob_base, &end, &count)) {
+            cached_hob_end = end;
+            if (hob_base_out) {
+                *hob_base_out = cached_hob_base;
+            }
+            if (hob_end_out) {
+                *hob_end_out = cached_hob_end;
+            }
+            return true;
         }
-        if (hob_end_out) {
-            *hob_end_out = cached_hob_end;
-        }
-        return true;
+        cached_hob_base = 0;
+        cached_hob_end = 0;
     }
     if (attempts++ > 64) {
         return false;
@@ -2373,6 +2380,96 @@ static bool ia64_fw_find_pei_hob_list(CPUState *cs, uint64_t stack_phys,
         }
     }
     return false;
+}
+
+static bool ia64_fw_clone_hob_list_ram(CPUState *cs,
+                                       uint64_t src_base, uint64_t src_end,
+                                       uint64_t dst_base,
+                                       uint64_t mem_bottom_phys,
+                                       uint64_t mem_top_phys,
+                                       uint64_t stack_phys)
+{
+    if (src_end <= src_base || dst_base == 0) {
+        return false;
+    }
+    uint64_t list_len = src_end - src_base;
+    if (list_len < 0x40 || list_len > (1ULL << 20)) {
+        return false;
+    }
+
+    g_autofree uint8_t *buf = g_malloc((size_t)list_len);
+    if (cpu_memory_rw_debug(cs, src_base, buf, (size_t)list_len, false) != 0) {
+        return false;
+    }
+    if (lduw_le_p(&buf[0]) != 0x0001 || lduw_le_p(&buf[2]) != 0x0038) {
+        return false;
+    }
+
+    uint8_t phit[0x38];
+    memcpy(phit, buf, sizeof(phit));
+
+    uint64_t new_end_hob = dst_base + list_len;
+    uint64_t new_free_bottom = (new_end_hob + 0x1fULL) & ~0x1fULL;
+    uint64_t new_free_top = mem_top_phys;
+
+    if (stack_phys > mem_bottom_phys && stack_phys < mem_top_phys) {
+        const uint64_t stack_guard = 1ULL << 20;
+        if (stack_phys > mem_bottom_phys + stack_guard) {
+            uint64_t stack_top = (stack_phys - stack_guard) & ~0xfffULL;
+            if (stack_top < new_free_top) {
+                new_free_top = stack_top;
+            }
+        }
+    }
+    if (new_free_bottom >= new_free_top) {
+        new_free_bottom = mem_bottom_phys;
+        new_free_top = mem_top_phys;
+    }
+
+    stq_le_p(&phit[16], mem_top_phys);
+    stq_le_p(&phit[24], mem_bottom_phys);
+    stq_le_p(&phit[32], new_free_top);
+    stq_le_p(&phit[40], new_free_bottom);
+    stq_le_p(&phit[48], new_end_hob);
+
+    cpu_physical_memory_write(dst_base, phit, sizeof(phit));
+    cpu_physical_memory_write(dst_base + sizeof(phit),
+                              buf + sizeof(phit),
+                              (size_t)(list_len - sizeof(phit)));
+    {
+        uint8_t hdr[8];
+        if (cpu_memory_rw_debug(cs, dst_base, hdr, sizeof(hdr), false) == 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: cloned HOB hdr @%016" PRIx64
+                          " = %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                          dst_base,
+                          hdr[0], hdr[1], hdr[2], hdr[3],
+                          hdr[4], hdr[5], hdr[6], hdr[7]);
+        }
+    }
+    {
+        uint64_t cur = dst_base;
+        for (int i = 0; i < 8; i++) {
+            uint8_t h[8];
+            if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+                break;
+            }
+            uint16_t type = lduw_le_p(&h[0]);
+            uint16_t len = lduw_le_p(&h[2]);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: cloned HOB[%d] %016" PRIx64
+                          " type=%04x len=%04x\n",
+                          i, cur, type, len);
+            if (len < sizeof(h)) {
+                break;
+            }
+            cur += len;
+            if (type == 0xffff) {
+                break;
+            }
+        }
+    }
+    return true;
 }
 
 static bool ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
@@ -5708,6 +5805,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static bool logged_fv_state;
     static bool dumped_hobs;
     static uint32_t dump_throttle;
+    static uint64_t reloc_hob_base;
+    static bool dumped_reloc_hob;
     static int hob_patch_trace = -1;
 
     if (enabled == -1) {
@@ -5973,6 +6072,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     uint64_t mem_top = ldq_le_p(&phit[16]);
     uint64_t free_top = ldq_le_p(&phit[32]);
     uint64_t free_bottom = ldq_le_p(&phit[40]);
+    uint64_t mem_bottom_phys = 0;
+    uint64_t mem_top_phys = 0;
     uint64_t orig_mem_top = mem_top;
     uint64_t end_hob_raw = ldq_le_p(&phit[48]);
     uint64_t end_hob = ia64_phys_mode_addr(end_hob_raw);
@@ -6013,14 +6114,14 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         uint64_t ram_size = current_machine ? current_machine->ram_size : 0;
         uint64_t ram_base = 0;
         uint64_t ram_limit = ram_size;
-        uint64_t mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
-        uint64_t mem_top_phys = ia64_phys_mode_addr(mem_top);
+        uint64_t mem_bottom_phys_local = ia64_phys_mode_addr(mem_bottom);
+        uint64_t mem_top_phys_local = ia64_phys_mode_addr(mem_top);
         uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
         uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
-        bool mem_bad = mem_top_phys <= mem_bottom_phys ||
-                       (mem_top_phys - mem_bottom_phys) < (1ULL << 20);
+        bool mem_bad = mem_top_phys_local <= mem_bottom_phys_local ||
+                       (mem_top_phys_local - mem_bottom_phys_local) < (1ULL << 20);
 
-        if (!ram_limit && (mem_bad || mem_top_phys)) {
+        if (!ram_limit && (mem_bad || mem_top_phys_local)) {
             uint64_t sysmem_min = UINT64_MAX;
             uint64_t sysmem_max = 0;
             uint64_t cur = hob_base;
@@ -6072,12 +6173,12 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                           "IA64: hob_patch: mem_phys=%016" PRIx64 "-%016" PRIx64
                           " free_phys=%016" PRIx64 "-%016" PRIx64
                           " mem_bad=%d ram_size=%" PRIu64 " ram_limit=%" PRIu64 "\n",
-                          mem_bottom_phys, mem_top_phys,
+                          mem_bottom_phys_local, mem_top_phys_local,
                           free_bottom_phys, free_top_phys,
                           mem_bad ? 1 : 0, ram_size, ram_limit);
         }
 
-        if (ram_limit && (mem_bad || mem_top_phys > ram_limit)) {
+        if (ram_limit && (mem_bad || mem_top_phys_local > ram_limit)) {
             uint64_t new_mem_bottom = ram_base;
             uint64_t new_mem_top = ram_limit;
             uint64_t new_free_bottom = new_mem_bottom;
@@ -6120,11 +6221,12 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                               mem_bottom, mem_top, free_bottom, free_top);
             }
         } else {
-            if (free_bottom_phys < mem_bottom_phys || free_bottom_phys > mem_top_phys) {
+            if (free_bottom_phys < mem_bottom_phys_local ||
+                free_bottom_phys > mem_top_phys_local) {
                 free_bottom_phys = (end_hob + 0x1fULL) & ~0x1fULL;
             }
-            if (free_top_phys <= free_bottom_phys || free_top_phys > mem_top_phys) {
-                free_top_phys = mem_top_phys;
+            if (free_top_phys <= free_bottom_phys || free_top_phys > mem_top_phys_local) {
+                free_top_phys = mem_top_phys_local;
             }
             if (free_bottom != free_bottom_phys || free_top != free_top_phys) {
                 free_bottom = ia64_fw_encode_addr(addr_tag, free_bottom_phys);
@@ -6140,6 +6242,9 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     env->fw_phit_mem_top = mem_top;
     env->fw_phit_free_bottom = free_bottom;
     env->fw_phit_free_top = free_top;
+
+    mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
+    mem_top_phys = ia64_phys_mode_addr(mem_top);
 
     if (!fixed_boot_mode && boot_mode == 0x20) {
         uint8_t out[4];
@@ -6249,8 +6354,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 stq_le_p(&phit[40], new_free_bottom);
                 cpu_physical_memory_write(hob_base, phit, sizeof(phit));
 
-                hob_end += add_bytes;
                 end_hob = new_end_hob;
+                hob_end = new_end_hob + sizeof(endhdr);
                 free_bottom = new_free_bottom;
                 fixed_fv_hobs = true;
 
@@ -6340,7 +6445,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
 
                         end_hob = new_end_hob;
                         free_bottom = new_free_bottom;
-                        hob_end += add_bytes;
+                        hob_end = new_end_hob + sizeof(endhdr);
                         stq_le_p(&phit[48], end_hob);
                         stq_le_p(&phit[40], free_bottom);
                         fixed_gp_alloc = true;
@@ -6466,8 +6571,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 stq_le_p(&phit[40], new_free_bottom);
                 cpu_physical_memory_write(hob_base, phit, sizeof(phit));
 
-                hob_end += add_bytes;
                 end_hob = new_end_hob;
+                hob_end = new_end_hob + sizeof(endhdr);
                 free_bottom = new_free_bottom;
                 inserted = true;
 
@@ -6603,6 +6708,101 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                           " (gp=%016" PRIx64 ")\n",
                           free_top, gp_low, gp_phys);
             fixed_free_top = true;
+        }
+    }
+
+    if (stack_phys && hob_base && hob_end > hob_base &&
+        mem_top_phys > mem_bottom_phys) {
+        uint8_t scan[0x400];
+        uint64_t stack_page = stack_phys & ~0xfffULL;
+        uint64_t best_cand = 0;
+        uint64_t best_cand_raw = 0;
+        if (env->ip >= 0x11b80 && env->ip < 0x11d80) {
+            uint64_t cand_raw = env->r[33];
+            uint64_t cand = ia64_phys_mode_addr(cand_raw);
+            if (cand && cand < IA64_IPF_FW_FLASH_BASE &&
+                (cand & 0xfffULL) == 0 &&
+                cand != reloc_hob_base) {
+                uint64_t cand_end = 0;
+                int cand_count = 0;
+                if (!ia64_fw_validate_efi_hob_list(cs, cand, &cand_end, &cand_count)) {
+                    best_cand = cand;
+                    best_cand_raw = cand_raw;
+                }
+            }
+        }
+        if (!best_cand &&
+            cpu_memory_rw_debug(cs, stack_page, scan, sizeof(scan), false) == 0) {
+            for (size_t off = 0; off + 8 <= sizeof(scan); off += 8) {
+                uint64_t cand_raw = ldq_le_p(&scan[off]);
+                uint64_t cand = ia64_phys_mode_addr(cand_raw);
+                if (!cand || cand >= IA64_IPF_FW_FLASH_BASE) {
+                    continue;
+                }
+                if ((cand & 0xfffULL) != 0) {
+                    continue;
+                }
+                if (cand == reloc_hob_base) {
+                    continue;
+                }
+
+                uint64_t cand_end = 0;
+                int cand_count = 0;
+                if (ia64_fw_validate_efi_hob_list(cs, cand, &cand_end, &cand_count)) {
+                    continue;
+                }
+                if (!best_cand || cand < best_cand) {
+                    best_cand = cand;
+                    best_cand_raw = cand_raw;
+                }
+            }
+        }
+
+        if (best_cand) {
+            if (!dumped_reloc_hob) {
+                uint8_t raw[64];
+                if (cpu_memory_rw_debug(cs, best_cand, raw, sizeof(raw), false) == 0) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: hob_patch: candidate HOB list %016" PRIx64
+                                  " (raw=%016" PRIx64 ") invalid, hexdump:\n",
+                                  best_cand, best_cand_raw);
+                    for (int i = 0; i < (int)sizeof(raw); i += 16) {
+                        char line[128];
+                        int pos = 0;
+                        pos += snprintf(line + pos, sizeof(line) - pos,
+                                        "  %016" PRIx64 ":", best_cand + i);
+                        for (int j = 0; j < 16; j++) {
+                            pos += snprintf(line + pos, sizeof(line) - pos,
+                                            " %02x", raw[i + j]);
+                        }
+                        qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+                    }
+                }
+                dumped_reloc_hob = true;
+            }
+
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: clone list_len=%" PRIu64
+                          " hob_base=%016" PRIx64 " hob_end=%016" PRIx64 "\n",
+                          hob_end - hob_base, hob_base, hob_end);
+            if (ia64_fw_clone_hob_list_ram(cs, hob_base, hob_end, best_cand,
+                                           mem_bottom_phys, mem_top_phys,
+                                           stack_phys)) {
+                reloc_hob_base = best_cand;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: cloned HOB list %016" PRIx64
+                              " -> %016" PRIx64 "\n",
+                              hob_base, best_cand);
+                if (env->ip >= 0x11b80 && env->ip < 0x11d80) {
+                    uint8_t val[8];
+                    stq_le_p(val, best_cand);
+                    cpu_physical_memory_write(stack_phys, val, sizeof(val));
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: hob_patch: reset hob_ptr @%016" PRIx64
+                                  " -> %016" PRIx64 "\n",
+                                  (uint64_t)stack_phys, best_cand);
+                }
+            }
         }
     }
 }
