@@ -829,6 +829,66 @@ void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
               last_kind_id, last_ri, env->last_branch_insn);
 }
 
+void HELPER(dbg_movb)(CPUIA64State *env, uint64_t pc, uint32_t b,
+                      uint32_t r2, uint64_t val)
+{
+    static int log_limit = -1;
+    static int log_count;
+    static int filter_b = -2;
+    static int dump_bundle = -1;
+    if (log_limit == -1) {
+        log_limit = 64;
+        const char *s = getenv("QEMU_IA64_MOVB_LOG_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+    if (filter_b == -2) {
+        filter_b = -1;
+        const char *s = getenv("QEMU_IA64_MOVB_LOG_B");
+        if (s && *s) {
+            filter_b = atoi(s);
+        }
+    }
+    if (dump_bundle == -1) {
+        dump_bundle = 0;
+        const char *s = getenv("QEMU_IA64_MOVB_LOG_DUMP");
+        if (s && *s) {
+            dump_bundle = atoi(s) ? 1 : 0;
+        }
+    }
+    if (log_limit == 0 || log_count >= log_limit) {
+        return;
+    }
+    if (filter_b >= 0 && (int)b != filter_b) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "mov.b pc=%016" PRIx64 " b=%u r2=%u val=%016" PRIx64
+                  " cfm=%016" PRIx64 " bsp=%016" PRIx64 "\n",
+                  pc, b, r2, val, env->cfm, env->ar[IA64_AR_BSP]);
+    if (dump_bundle) {
+        CPUState *cs = env_cpu(env);
+        uint8_t bundle[16];
+        uint64_t base = pc & ~0xFULL;
+        if (cpu_memory_rw_debug(cs, base, bundle, sizeof(bundle), false) == 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "mov.b bundle pc=%016" PRIx64
+                          " %02x %02x %02x %02x %02x %02x %02x %02x"
+                          " %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                          base,
+                          bundle[0], bundle[1], bundle[2], bundle[3],
+                          bundle[4], bundle[5], bundle[6], bundle[7],
+                          bundle[8], bundle[9], bundle[10], bundle[11],
+                          bundle[12], bundle[13], bundle[14], bundle[15]);
+        }
+    }
+    log_count++;
+}
+
 void HELPER(fc)(CPUIA64State *env, uint64_t va)
 {
     /*
@@ -1121,6 +1181,40 @@ void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
                       env->r[out0 + 3], env->r[out0 + 4]);
     }
     log_count++;
+}
+
+void HELPER(dbg_r12)(CPUIA64State *env, uint64_t pc, uint64_t new_val)
+{
+    static int enabled = -1;
+    static int log_limit = -1;
+    static int log_count;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_R12");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    if (!enabled) {
+        return;
+    }
+    if (log_limit == -1) {
+        log_limit = 64;
+        const char *s = getenv("QEMU_IA64_DBG_R12_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+    if (log_count++ >= log_limit) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_r12 pc=%016" PRIx64
+                  " old=%016" PRIx64 " new=%016" PRIx64
+                  " psr=%016" PRIx64 " cfm=%016" PRIx64 "\n",
+                  pc, env->r[12], new_val, env->psr, env->cfm);
 }
 
 uint64_t HELPER(fr_get_lo)(CPUIA64State *env, uint32_t f)

@@ -1386,6 +1386,11 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             if (!a1_handled) {
                 handled = false;
             } else {
+                if (r1 == 12) {
+                    gen_helper_dbg_r12(tcg_env,
+                                       tcg_constant_i64(ctx->base.pc_next),
+                                       t1);
+                }
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t1);
                 }
@@ -1406,6 +1411,11 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             tcg_gen_addi_i64(t, cpu_r[r3], simm);
         }
         if (r1 != 0) {
+            if (r1 == 12) {
+                gen_helper_dbg_r12(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   t);
+            }
             tcg_gen_mov_i64(cpu_r[r1], t);
         }
         handled = true;
@@ -1455,6 +1465,11 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             tcg_gen_addi_i64(t, cpu_r[r3_a5], simm);
         }
         if (r1_a5 != 0) {
+            if (r1_a5 == 12) {
+                gen_helper_dbg_r12(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   t);
+            }
             tcg_gen_mov_i64(cpu_r[r1_a5], t);
         }
         handled = true;
@@ -1859,6 +1874,9 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                           "br.call(reg) pc=%016" PRIx64 " insn=%011" PRIx64
                           " b1=%u b2=%u\n",
                           ctx->base.pc_next, insn, b1, b2);
+        }
+        if (ia64_dbg_call_pc_match(ctx->base.pc_next)) {
+            gen_helper_dbg_call(tcg_env, tcg_constant_i64(ctx->base.pc_next));
         }
         gen_helper_call(tcg_env, tcg_constant_i64(ctx->base.pc_next), tgt);
         gen_helper_check_null_branch(tcg_env,
@@ -2310,8 +2328,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         gen_helper_fw_pal(tcg_env);
                     } else {
                         if (ia64_pc_in_fw(ctx->base.pc_next)) {
-                            gen_helper_fw_break0(tcg_env,
-                                                 tcg_constant_i64(ctx->base.pc_next));
+                            gen_unimpl(ctx, insn, "break.m hypercall");
                         } else {
                             gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
                             if (qp == 0) {
@@ -2322,8 +2339,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                 } else {
                     if (ia64_pc_in_fw(ctx->base.pc_next)) {
-                        gen_helper_fw_break0(tcg_env,
-                                             tcg_constant_i64(ctx->base.pc_next));
+                        gen_unimpl(ctx, insn, "break.m imm");
                     } else {
                         gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
                         if (qp == 0) {
@@ -3843,6 +3859,13 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_movi_i64(src, 0);
                 } else {
                     tcg_gen_mov_i64(src, cpu_r[r2]);
+                }
+                if (movb_log_enabled) {
+                    gen_helper_dbg_movb(tcg_env,
+                                        tcg_constant_i64(ctx->base.pc_next),
+                                        tcg_constant_i32(b),
+                                        tcg_constant_i32(r2),
+                                        src);
                 }
                 tcg_gen_mov_i64(cpu_b[b], src);
                 if (b == 0) {
