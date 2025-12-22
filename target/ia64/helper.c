@@ -9773,10 +9773,33 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
          * Some firmware stacks (notably xenipf/EDK) treat failures from
          * SAL_GET_STATE_INFO as fatal during early DXE init.
          */
+        if (ia64_fw_log_enabled()) {
+            uint64_t a1 = break_abi ? ia64_fw_arg_break(env, 1)
+                                    : ia64_fw_arg(env, out0, 1);
+            uint64_t a2 = break_abi ? ia64_fw_arg_break(env, 2)
+                                    : ia64_fw_arg(env, out0, 2);
+            uint64_t a3 = break_abi ? ia64_fw_arg_break(env, 3)
+                                    : ia64_fw_arg(env, out0, 3);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: SAL_GET_STATE_INFO a1=%016" PRIx64
+                          " a2=%016" PRIx64 " a3=%016" PRIx64
+                          " -> status=0 v0=0 v1=0 v2=0\n",
+                          a1, a2, a3);
+        }
         status = 0;
         break;
     case IA64_SAL_GET_STATE_INFO_SIZE:
         /* SKI returns success and size 0. */
+        if (ia64_fw_log_enabled()) {
+            uint64_t a1 = break_abi ? ia64_fw_arg_break(env, 1)
+                                    : ia64_fw_arg(env, out0, 1);
+            uint64_t a2 = break_abi ? ia64_fw_arg_break(env, 2)
+                                    : ia64_fw_arg(env, out0, 2);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: SAL_GET_STATE_INFO_SIZE a1=%016" PRIx64
+                          " a2=%016" PRIx64 " -> status=0 v0=0 v1=0 v2=0\n",
+                          a1, a2);
+        }
         status = 0;
         v0 = 0;
         break;
