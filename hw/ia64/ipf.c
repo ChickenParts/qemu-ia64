@@ -606,6 +606,18 @@ static void ipf_log_dxe_status(IPFMachineState *m, const char *tag)
                   env->r[28], env->r[29]);
 }
 
+static void ipf_fill_fw_window_erased(void)
+{
+    g_autofree uint8_t *buf = g_malloc(64 * 1024);
+    memset(buf, 0xff, 64 * 1024);
+
+    for (hwaddr off = 0; off < GFW_SIZE; off += 64 * 1024) {
+        size_t len = MIN((size_t)(GFW_SIZE - off), (size_t)(64 * 1024));
+        address_space_write(&address_space_memory, GFW_START + off,
+                            MEMTXATTRS_UNSPECIFIED, buf, len);
+    }
+}
+
 /*
  * Firmware call-gates / stubs.
  *
@@ -3114,6 +3126,7 @@ static void ipf_init(MachineState *machine)
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
     if (image_size > 0) {
+        ipf_fill_fw_window_erased();
         hwaddr fw_offset = GFW_START + GFW_SIZE - image_size;
         g_autofree uint8_t *buf = g_malloc((size_t)image_size);
         if (load_image_size(bios_name, buf, (size_t)image_size) != image_size) {
