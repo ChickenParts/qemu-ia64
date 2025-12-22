@@ -2541,9 +2541,10 @@ static void ipf_trace_ioport(IPFMachineState *m, bool is_write,
 }
 
 static void ipf_trace_mmio(const char *dev, hwaddr addr, unsigned size,
-                           uint64_t data)
+                           uint64_t data, bool is_write)
 {
     static int trace_mmio = -1;
+    static int trace_mmio_reads = -1;
     static bool trace_mmio_all;
     static uint64_t trace_mmio_lo;
     static uint64_t trace_mmio_hi;
@@ -2553,6 +2554,7 @@ static void ipf_trace_mmio(const char *dev, hwaddr addr, unsigned size,
     if (trace_mmio == -1) {
         trace_mmio = 0;
         trace_mmio_all = false;
+        trace_mmio_reads = getenv("QEMU_IPF_TRACE_MMIO_READ") ? 1 : 0;
         const char *s = getenv("QEMU_IPF_TRACE_MMIO");
         if (s && *s) {
             if (!strcmp(s, "0") || !strcmp(s, "off") ||
@@ -2582,6 +2584,9 @@ static void ipf_trace_mmio(const char *dev, hwaddr addr, unsigned size,
     if (!trace_mmio) {
         return;
     }
+    if (!is_write && !trace_mmio_reads) {
+        return;
+    }
     if (!trace_mmio_all &&
         (addr < trace_mmio_lo || addr > trace_mmio_hi)) {
         return;
@@ -2591,8 +2596,9 @@ static void ipf_trace_mmio(const char *dev, hwaddr addr, unsigned size,
     }
     trace_mmio_count++;
     qemu_log_mask(LOG_GUEST_ERROR,
-                  "ipf mmio wr dev=%s addr=0x%016" PRIx64
+                  "ipf mmio %s dev=%s addr=0x%016" PRIx64
                   " size=%u val=0x%08" PRIx64 "\n",
+                  is_write ? "wr" : "rd",
                   dev ? dev : "unknown", (uint64_t)addr, size, data);
 }
 
@@ -2617,6 +2623,7 @@ static uint64_t ipf_legacy_io_read(void *opaque, hwaddr addr, unsigned size)
         break;
     }
     ipf_trace_ioport(m, false, port, size, val);
+    ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, val, false);
     return val;
 }
 
@@ -2627,7 +2634,7 @@ static void ipf_legacy_io_write(void *opaque, hwaddr addr, uint64_t data,
     uint32_t port = ipf_to_legacy_io(addr);
 
     ipf_trace_ioport(m, true, port, size, (uint32_t)data);
-    ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, data);
+    ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, data, true);
     switch (size) {
     case 1:
         cpu_outb(port, data);
@@ -2795,22 +2802,26 @@ static void ipf_init_southbridge(IPFMachineState *m)
 static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
 {
     IPFMachineState *m = opaque;
+    uint64_t val = 0;
 
     switch (addr) {
     case 0x00:
     case 0x01: {
         uint16_t v = m->acpi_pm1_evt_sts;
-        return (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+        val = (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+        break;
     }
     case 0x02:
     case 0x03: {
         uint16_t v = m->acpi_pm1_evt_en;
-        return (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+        val = (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+        break;
     }
     case 0x04:
     case 0x05: {
         uint16_t v = m->acpi_pm1_cnt;
-        return (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+        val = (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
+        break;
     }
     case 0x08:
     case 0x09:
@@ -2824,11 +2835,15 @@ static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
         uint32_t ticks = (uint32_t)muldiv64(ns, 3579545, NANOSECONDS_PER_SECOND);
         uint32_t v = ticks & 0x00ffffffU;
         unsigned shift = (addr & 3) * 8;
-        return (v >> shift) & ((1ULL << (size * 8)) - 1);
+        val = (v >> shift) & ((1ULL << (size * 8)) - 1);
+        break;
     }
     default:
-        return 0;
+        val = 0;
+        break;
     }
+    ipf_trace_mmio("acpi-pm", IPF_ACPI_PM_BASE + addr, size, val, false);
+    return val;
 }
 
 static void ipf_acpi_pm_write(void *opaque, hwaddr addr, uint64_t data,
@@ -2838,7 +2853,7 @@ static void ipf_acpi_pm_write(void *opaque, hwaddr addr, uint64_t data,
     uint64_t mask = (size >= 8) ? UINT64_MAX : ((1ULL << (size * 8)) - 1);
     uint64_t val = data & mask;
 
-    ipf_trace_mmio("acpi-pm", IPF_ACPI_PM_BASE + addr, size, data);
+    ipf_trace_mmio("acpi-pm", IPF_ACPI_PM_BASE + addr, size, data, true);
     switch (addr) {
     case 0x00:
     case 0x01: {
@@ -2923,6 +2938,7 @@ static uint64_t ipf_iosapic_read(void *opaque, hwaddr addr, unsigned size)
         break;
     }
 
+    ipf_trace_mmio("iosapic", IPF_IOSAPIC_BASE + addr, size, val, false);
     return val;
 }
 
@@ -2932,7 +2948,7 @@ static void ipf_iosapic_write(void *opaque, hwaddr addr, uint64_t data,
     IPFMachineState *m = opaque;
     uint32_t val = (uint32_t)data;
 
-    ipf_trace_mmio("iosapic", IPF_IOSAPIC_BASE + addr, size, data);
+    ipf_trace_mmio("iosapic", IPF_IOSAPIC_BASE + addr, size, data, true);
     switch (addr) {
     case IPF_IOSAPIC_REG_SELECT:
         m->iosapic_reg_select = val;
