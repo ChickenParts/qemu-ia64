@@ -2191,6 +2191,23 @@ static bool ia64_fw_decode_pci_addr(uint64_t addr, uint16_t *seg,
     return true;
 }
 
+static bool ia64_fw_pci_width_to_bytes(uint64_t width, uint64_t *bytes)
+{
+    switch (width) {
+    case 0: /* EFI PCI width: byte */
+        *bytes = 1;
+        return true;
+    case 1: /* EFI PCI width: word */
+        *bytes = 2;
+        return true;
+    case 2: /* EFI PCI width: dword */
+        *bytes = 4;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static uint64_t ia64_fw_addr_with_same_region(uint64_t exemplar, hwaddr pa)
 {
     uint64_t hi32 = exemplar & 0xffffffff00000000ULL;
@@ -9526,7 +9543,20 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
                                       : ia64_fw_arg_break(env, 2);
         if (!size_valid) {
-            if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
+            uint64_t width_bytes;
+            if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
+                size = width_bytes;
+                size_valid = true;
+            }
+        }
+        if (!size_valid) {
+            uint64_t width_bytes;
+            if (ia64_fw_pci_width_to_bytes(alt_size, &width_bytes)) {
+                pci_addr = alt_addr;
+                size = width_bytes;
+                size_valid = true;
+                use_break_abi = !break_abi;
+            } else if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
                 pci_addr = alt_addr;
                 size = alt_size;
                 size_valid = true;
@@ -9534,18 +9564,29 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             }
         }
         if (!size_valid && break_abi && (env->r[30] & 0x80000000ULL)) {
+            uint64_t width_bytes;
             gfw_cf8 = true;
             compat_cf8 = true;
             compat_cf8_addr = env->r[30];
             pci_addr = compat_cf8_addr;
-            size = (env->r[29] == 1 || env->r[29] == 2 || env->r[29] == 4)
-                   ? env->r[29] : 4;
+            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
+                size = width_bytes;
+            } else if (env->r[29] == 1 || env->r[29] == 2 || env->r[29] == 4) {
+                size = env->r[29];
+            } else {
+                size = 4;
+            }
             size_valid = true;
         } else if (sal_pci_compat_cf8 && !size_valid && break_abi && pci_addr == 0 &&
                    (env->r[30] & 0x80000000ULL)) {
+            uint64_t width_bytes;
             compat_cf8 = true;
             compat_cf8_addr = env->r[30];
-            size = 4;
+            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
+                size = width_bytes;
+            } else {
+                size = 4;
+            }
             size_valid = true;
         }
         if (!size_valid) {
@@ -9700,7 +9741,21 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         uint64_t alt_value = break_abi ? ia64_fw_arg(env, out0, 3)
                                        : ia64_fw_arg_break(env, 3);
         if (!size_valid) {
-            if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
+            uint64_t width_bytes;
+            if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
+                size = width_bytes;
+                size_valid = true;
+            }
+        }
+        if (!size_valid) {
+            uint64_t width_bytes;
+            if (ia64_fw_pci_width_to_bytes(alt_size, &width_bytes)) {
+                pci_addr = alt_addr;
+                size = width_bytes;
+                value = alt_value;
+                size_valid = true;
+                use_break_abi = !break_abi;
+            } else if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
                 pci_addr = alt_addr;
                 size = alt_size;
                 value = alt_value;
@@ -9709,19 +9764,30 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             }
         }
         if (!size_valid && break_abi && (env->r[30] & 0x80000000ULL)) {
+            uint64_t width_bytes;
             gfw_cf8 = true;
             compat_cf8 = true;
             compat_cf8_addr = env->r[30];
             pci_addr = compat_cf8_addr;
             value = env->r[31];
-            size = (env->r[29] == 1 || env->r[29] == 2 || env->r[29] == 4)
-                   ? env->r[29] : 4;
+            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
+                size = width_bytes;
+            } else if (env->r[29] == 1 || env->r[29] == 2 || env->r[29] == 4) {
+                size = env->r[29];
+            } else {
+                size = 4;
+            }
             size_valid = true;
         } else if (sal_pci_compat_cf8 && !size_valid && break_abi && pci_addr == 0 &&
                    (env->r[30] & 0x80000000ULL)) {
+            uint64_t width_bytes;
             compat_cf8 = true;
             compat_cf8_addr = env->r[30];
-            size = 4;
+            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
+                size = width_bytes;
+            } else {
+                size = 4;
+            }
             size_valid = true;
         }
         if (!size_valid) {
