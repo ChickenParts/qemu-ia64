@@ -6297,6 +6297,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static bool dumped_after_patch;
     static uint32_t dump_throttle;
     static uint64_t reloc_hob_base;
+    static uint64_t reloc_hob_end;
     static bool dumped_reloc_hob;
     static uint64_t hob_ptr_stack_page;
     static int hob_patch_trace = -1;
@@ -6353,7 +6354,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     }
     hwaddr ip_phys = ia64_phys_mode_addr(env->ip);
     bool in_flash = (ip_phys >= 0xff000000ULL);
-    if ((throttle++ & 0x7f) != 0) {
+    bool in_hob_loop = (env->ip >= 0x11b80 && env->ip < 0x11d80);
+    if ((throttle++ & 0x7f) != 0 && !in_hob_loop) {
         return;
     }
 
@@ -7294,7 +7296,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         uint64_t best_cand_raw = 0;
         uint64_t best_cand_loc = 0;
         bool best_cand_from_reg = false;
-        if (env->ip >= 0x11b80 && env->ip < 0x11d80) {
+        if (in_hob_loop) {
             uint64_t cand_raw = env->r[33];
             uint64_t cand = ia64_phys_mode_addr(cand_raw);
             if (cand && cand < IA64_IPF_FW_FLASH_BASE &&
@@ -7342,6 +7344,22 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         }
 
         if (best_cand) {
+            bool reloc_valid = false;
+            if (reloc_hob_base) {
+                uint64_t reloc_end = 0;
+                int reloc_count = 0;
+                reloc_valid = ia64_fw_validate_efi_hob_list(cs, reloc_hob_base,
+                                                           &reloc_end,
+                                                           &reloc_count);
+                if (!reloc_valid) {
+                    reloc_hob_base = 0;
+                    env->fw_hob_reloc_base = 0;
+                    reloc_hob_end = 0;
+                } else {
+                    reloc_hob_end = reloc_end;
+                }
+            }
+
             if (!dumped_reloc_hob) {
                 uint8_t raw[64];
                 if (cpu_memory_rw_debug(cs, best_cand, raw, sizeof(raw), false) == 0) {
@@ -7364,51 +7382,96 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 dumped_reloc_hob = true;
             }
 
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: hob_patch: clone list_len=%" PRIu64
-                          " hob_base=%016" PRIx64 " hob_end=%016" PRIx64 "\n",
-                          hob_end - hob_base, hob_base, hob_end);
-            if (ia64_fw_clone_hob_list_ram(cs, hob_base, hob_end, best_cand,
-                                           mem_bottom_phys, mem_top_phys,
-                                           stack_phys)) {
-                reloc_hob_base = best_cand;
-                env->fw_hob_reloc_base = reloc_hob_base;
-                qemu_log_mask(LOG_GUEST_ERROR,
-                              "IA64: hob_patch: cloned HOB list %016" PRIx64
-                              " -> %016" PRIx64 "\n",
-                              hob_base, best_cand);
-                uint64_t enc = ia64_fw_encode_addr(best_cand_raw, best_cand);
+            if (reloc_hob_base && reloc_valid) {
+                uint64_t enc = ia64_fw_encode_addr(best_cand_raw, reloc_hob_base);
                 if (best_cand_from_reg) {
                     env->r[33] = enc;
                     qemu_log_mask(LOG_GUEST_ERROR,
-                                  "IA64: hob_patch: reset hob_ptr r33 -> %016" PRIx64 "\n",
-                                  best_cand);
+                                  "IA64: hob_patch: redirect hob_ptr r33 -> %016" PRIx64 "\n",
+                                  reloc_hob_base);
                 } else if (best_cand_loc) {
                     uint8_t val[8];
                     stq_le_p(val, enc);
                     cpu_physical_memory_write(best_cand_loc, val, sizeof(val));
                     qemu_log_mask(LOG_GUEST_ERROR,
-                                  "IA64: hob_patch: reset hob_ptr @%016" PRIx64
+                                  "IA64: hob_patch: redirect hob_ptr @%016" PRIx64
                                   " -> %016" PRIx64 "\n",
-                                  best_cand_loc, best_cand);
+                                  best_cand_loc, reloc_hob_base);
                 }
                 if (stack_phys) {
                     uint8_t val[8];
                     if (cpu_memory_rw_debug(cs, stack_phys, val, sizeof(val), false) == 0) {
                         uint64_t sp_raw = ldq_le_p(val);
                         uint64_t sp_phys = ia64_phys_mode_addr(sp_raw);
-                        if (!sp_raw ||
+                        bool sp_in_reloc = reloc_hob_end &&
+                            sp_phys >= reloc_hob_base && sp_phys < reloc_hob_end;
+                        bool sp_valid = sp_in_reloc;
+                        if (!sp_valid && sp_raw) {
+                            sp_valid = ia64_fw_validate_efi_hob_list(cs, sp_phys, NULL, NULL);
+                        }
+                        if (!sp_valid ||
                             sp_phys == hob_base ||
                             sp_phys == best_cand ||
                             (sp_phys < IA64_IPF_FW_FLASH_BASE &&
                              (sp_phys & 0xfffULL) == 0)) {
                             uint64_t sp_tmpl = sp_raw ? sp_raw : best_cand_raw;
-                            stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, best_cand));
+                            stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, reloc_hob_base));
                             cpu_physical_memory_write(stack_phys, val, sizeof(val));
                             qemu_log_mask(LOG_GUEST_ERROR,
-                                          "IA64: hob_patch: reset hob_ptr sp @%016" PRIx64
+                                          "IA64: hob_patch: redirect hob_ptr sp @%016" PRIx64
                                           " -> %016" PRIx64 "\n",
-                                          (uint64_t)stack_phys, best_cand);
+                                          (uint64_t)stack_phys, reloc_hob_base);
+                        }
+                    }
+                }
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: clone list_len=%" PRIu64
+                              " hob_base=%016" PRIx64 " hob_end=%016" PRIx64 "\n",
+                              hob_end - hob_base, hob_base, hob_end);
+                if (ia64_fw_clone_hob_list_ram(cs, hob_base, hob_end, best_cand,
+                                               mem_bottom_phys, mem_top_phys,
+                                               stack_phys)) {
+                    reloc_hob_base = best_cand;
+                    env->fw_hob_reloc_base = reloc_hob_base;
+                    reloc_hob_end = best_cand + (hob_end - hob_base);
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: hob_patch: cloned HOB list %016" PRIx64
+                                  " -> %016" PRIx64 "\n",
+                                  hob_base, best_cand);
+                    uint64_t enc = ia64_fw_encode_addr(best_cand_raw, best_cand);
+                    if (best_cand_from_reg) {
+                        env->r[33] = enc;
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: hob_patch: reset hob_ptr r33 -> %016" PRIx64 "\n",
+                                      best_cand);
+                    } else if (best_cand_loc) {
+                        uint8_t val[8];
+                        stq_le_p(val, enc);
+                        cpu_physical_memory_write(best_cand_loc, val, sizeof(val));
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: hob_patch: reset hob_ptr @%016" PRIx64
+                                      " -> %016" PRIx64 "\n",
+                                      best_cand_loc, best_cand);
+                    }
+                    if (stack_phys) {
+                        uint8_t val[8];
+                        if (cpu_memory_rw_debug(cs, stack_phys, val, sizeof(val), false) == 0) {
+                            uint64_t sp_raw = ldq_le_p(val);
+                            uint64_t sp_phys = ia64_phys_mode_addr(sp_raw);
+                            if (!sp_raw ||
+                                sp_phys == hob_base ||
+                                sp_phys == best_cand ||
+                                (sp_phys < IA64_IPF_FW_FLASH_BASE &&
+                                 (sp_phys & 0xfffULL) == 0)) {
+                                uint64_t sp_tmpl = sp_raw ? sp_raw : best_cand_raw;
+                                stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, best_cand));
+                                cpu_physical_memory_write(stack_phys, val, sizeof(val));
+                                qemu_log_mask(LOG_GUEST_ERROR,
+                                              "IA64: hob_patch: reset hob_ptr sp @%016" PRIx64
+                                              " -> %016" PRIx64 "\n",
+                                              (uint64_t)stack_phys, best_cand);
+                            }
                         }
                     }
                 }
@@ -7432,6 +7495,28 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                                   " %016" PRIx64 " -> %016" PRIx64 "\n",
                                   (uint64_t)stack_phys, sp_raw, sp_enc);
                 }
+            }
+        }
+    }
+    if (reloc_hob_base && stack_phys && in_hob_loop) {
+        uint8_t val[8];
+        if (cpu_memory_rw_debug(cs, stack_phys, val, sizeof(val), false) == 0) {
+            uint64_t sp_raw = ldq_le_p(val);
+            uint64_t sp_phys = ia64_phys_mode_addr(sp_raw);
+            bool sp_in_reloc = reloc_hob_end &&
+                sp_phys >= reloc_hob_base && sp_phys < reloc_hob_end;
+            bool sp_valid = sp_in_reloc;
+            if (!sp_valid && sp_raw) {
+                sp_valid = ia64_fw_validate_efi_hob_list(cs, sp_phys, NULL, NULL);
+            }
+            if (!sp_valid && sp_phys != reloc_hob_base) {
+                uint64_t sp_tmpl = sp_raw ? sp_raw : reloc_hob_base;
+                stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, reloc_hob_base));
+                cpu_physical_memory_write(stack_phys, val, sizeof(val));
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: in-loop redirect hob_ptr sp @%016" PRIx64
+                              " %016" PRIx64 " -> %016" PRIx64 "\n",
+                              (uint64_t)stack_phys, sp_raw, reloc_hob_base);
             }
         }
     }
