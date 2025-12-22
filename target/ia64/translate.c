@@ -665,6 +665,16 @@ static bool ia64_pc_in_fw(uint64_t pc)
     return phys >= fw_base && phys < fw_end;
 }
 
+static bool ia64_fw_break_hypercall_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK_HYPERCALL");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
 static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)
 {
     uint8_t qp = insn & 0x3f;
@@ -2293,6 +2303,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 /* M37: break.m imm21 */
                 uint64_t imm = (extract64(insn, 36, 1) << 20) |
                                extract64(insn, 6, 20);
+                bool in_fw = ia64_pc_in_fw(ctx->base.pc_next);
                 if (imm == 0x80000 || imm == 0x80001) {
                     TCGv_i64 timm = tcg_temp_new_i64();
                     tcg_gen_movi_i64(timm, imm);
@@ -2309,7 +2320,13 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                      * can run under TCG without taking a break fault.
                      */
                     uint64_t nr = imm >> 8;
-                    if (nr == 0x0) {
+                    if (in_fw && !ia64_fw_break_hypercall_enabled()) {
+                        gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+                        if (qp == 0) {
+                            ctx->base.is_jmp = DISAS_NORETURN;
+                        }
+                        tcg_gen_exit_tb(NULL, 0);
+                    } else if (nr == 0x0) {
                         /*
                          * Firmware break(0) call gate.
                          *
@@ -2327,7 +2344,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         /* FW_HYPERCALL_PAL_CALL */
                         gen_helper_fw_pal(tcg_env);
                     } else {
-                        if (ia64_pc_in_fw(ctx->base.pc_next)) {
+                        if (in_fw) {
                             gen_unimpl(ctx, insn, "break.m hypercall");
                         } else {
                             gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
@@ -2338,7 +2355,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         }
                     }
                 } else {
-                    if (ia64_pc_in_fw(ctx->base.pc_next)) {
+                    if (in_fw) {
                         gen_unimpl(ctx, insn, "break.m imm");
                     } else {
                         gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
