@@ -183,6 +183,7 @@ typedef struct CPUArchState {
     uint64_t fw_phit_mem_bottom;
     uint64_t fw_phit_free_top;
     uint64_t fw_phit_free_bottom;
+    uint64_t fw_hob_reloc_base;
 
     /* Firmware bringup: cached EFI system table physical address. */
     uint64_t fw_efi_systab_pa;
