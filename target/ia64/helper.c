@@ -2657,8 +2657,11 @@ static bool ia64_fw_find_pei_hob_list(CPUState *cs, uint64_t stack_phys,
                     }
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "IA64: hob_patch: PEI core hob_list=%016" PRIx64
-                                  " end=%016" PRIx64 " base=%016" PRIx64 "\n",
-                                  phys, end, base);
+                                  " end=%016" PRIx64 " base=%016" PRIx64
+                                  " src_off=0x%zx src_val=%016" PRIx64
+                                  " ps_ptr=%016" PRIx64 " stack=%016" PRIx64 "\n",
+                                  phys, end, base,
+                                  k, v, ps_ptr, stack_phys);
                     return true;
                 }
             }
@@ -6141,6 +6144,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static int dump_after_patch = -1;
     static bool fixed_sysmem_rdesc;
     static bool fixed_fv_hobs;
+    static uint64_t fixed_fv_hobs_base;
     static bool fixed_attr;
     static bool fixed_pei_span;
     static bool fixed_free_bottom;
@@ -6150,6 +6154,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static int attempts;
     static uint32_t throttle;
     static bool logged_phit;
+    static uint64_t logged_hob_base;
     static bool logged_end_mismatch;
     static bool logged_fv_scan;
     static bool logged_fv_state;
@@ -6407,6 +6412,16 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     if (!hob_base) {
         return;
     }
+
+    if (hob_base != logged_hob_base && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        const char *src = hob_from_pei ? "pei" : "scan";
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: hob_patch: using HOB list base=%016" PRIx64
+                      " end=%016" PRIx64 " src=%s stack=%016" PRIx64
+                      " r33=%016" PRIx64 "\n",
+                      hob_base, hob_end, src, stack_phys, env->r[33]);
+        logged_hob_base = hob_base;
+    }
     bool hob_low = (hob_base < IA64_IPF_FW_FLASH_BASE);
     if (hob_low) {
         if (attempts >= 256) {
@@ -6612,6 +6627,9 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         }
     }
 
+    if (fixed_fv_hobs && fixed_fv_hobs_base && fixed_fv_hobs_base != hob_base) {
+        fixed_fv_hobs = false;
+    }
     if (!fixed_fv_hobs) {
         enum { MAX_FV_HOBS = 8 };
         IA64FwFvInfo fv_hobs[MAX_FV_HOBS] = { 0 };
@@ -6713,6 +6731,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 hob_end = new_end_hob + sizeof(endhdr);
                 free_bottom = new_free_bottom;
                 fixed_fv_hobs = true;
+                fixed_fv_hobs_base = hob_base;
 
                 env->fw_phit_free_bottom = free_bottom;
                 env->fw_phit_free_top = free_top;
@@ -6724,6 +6743,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             }
         } else if (fv_hob_count > 0 || fv_flash_count == 0) {
             fixed_fv_hobs = true;
+            fixed_fv_hobs_base = hob_base;
         }
     }
 
