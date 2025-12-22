@@ -20,6 +20,16 @@ firmware path. Items are grouped by status.
   expectations (`hw/ia64/ipf.c:2624`, `hw/ia64/ipf.c:3333`).
 - Add a PIIX3 southbridge device on the IPF PCI bus to match legacy platform
   topology expected by firmware (`hw/ia64/ipf.c:2260`).
+- Match the xenipf firmware SAL break ABI (static r28..r31) and treat PCI
+  arguments as width+CF8 address in the break path
+  (`target/ia64/helper.c:9566`, `target/ia64/helper.c:10062`).
+- Validate SAL PCI size/type strictly while honoring EFI width codes and
+  firmware CF8-style addresses (`target/ia64/helper.c:10062`,
+  `target/ia64/helper.c:10261`).
+- Default-disable EFI HOB patching to avoid masking firmware/TCG bugs
+  (`target/ia64/helper.c:6262`).
+- Default-disable firmware memcpy/memset fastpath so translation bugs show up
+  (`target/ia64/translate.c:109`, `scripts/run-ia64-firmware.sh:19`).
 
 ## Open issues (needs work)
 
@@ -32,6 +42,10 @@ firmware path. Items are grouped by status.
   `target/ia64/helper.c:2174`, `hw/ia64/ipf.c:946`).
 - Firmware status-code callgate patch uses fixed FV offsets; it is build-specific
   and may not match other Flash.fd variants (`hw/ia64/ipf.c:423`).
+- Confirm the hypercall stub at `0x10000080` matches the static ABI and that
+  PCI width/address ordering is correct for all firmware calls.
+- Extended PCI config (type=1) is not implemented; add ECAM handling if
+  firmware uses it.
 - NaT propagation is incomplete in A-unit integer ops (only padd/psub handle NaT);
   other integer ALU ops ignore NaT and will silently compute values (`target/ia64/translate.c:1173`).
 - ALAT/advanced load modeling is minimal; advanced load exceptions and NaT

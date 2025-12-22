@@ -2825,39 +2825,6 @@ static bool ia64_fw_clone_hob_list_ram(CPUState *cs,
     cpu_physical_memory_write(dst_base + sizeof(phit),
                               buf + sizeof(phit),
                               (size_t)(list_len - sizeof(phit)));
-    {
-        uint8_t hdr[8];
-        if (cpu_memory_rw_debug(cs, dst_base, hdr, sizeof(hdr), false) == 0) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: hob_patch: cloned HOB hdr @%016" PRIx64
-                          " = %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                          dst_base,
-                          hdr[0], hdr[1], hdr[2], hdr[3],
-                          hdr[4], hdr[5], hdr[6], hdr[7]);
-        }
-    }
-    {
-        uint64_t cur = dst_base;
-        for (int i = 0; i < 8; i++) {
-            uint8_t h[8];
-            if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
-                break;
-            }
-            uint16_t type = lduw_le_p(&h[0]);
-            uint16_t len = lduw_le_p(&h[2]);
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: hob_patch: cloned HOB[%d] %016" PRIx64
-                          " type=%04x len=%04x\n",
-                          i, cur, type, len);
-            if (len < sizeof(h)) {
-                break;
-            }
-            cur += len;
-            if (type == 0xffff) {
-                break;
-            }
-        }
-    }
     return true;
 }
 
@@ -4657,7 +4624,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   " r24=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
                   " r30=%016" PRIx64 " r31=%016" PRIx64
-                  " r43=%016" PRIx64
+                  " r43=%016" PRIx64 " r44=%016" PRIx64
                   " r59=%016" PRIx64
                   " r62=%016" PRIx64
                   " r16=%016" PRIx64 " r17=%016" PRIx64
@@ -4682,7 +4649,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                   env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
                   env->r[24], env->r[28], env->r[29],
                   env->r[30], env->r[31],
-                  env->r[43],
+                  env->r[43], env->r[44],
                   env->r[59],
                   env->r[62],
                   env->r[16], env->r[17],
@@ -4791,6 +4758,26 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     }
     if (dump_r34_len > 0) {
         ia64_dbg_probe_dump_mem(env, pc, "r34", env->r[34], dump_r34_len);
+    }
+
+    static int dump_r35_len = -1;
+    if (dump_r35_len == -1) {
+        dump_r35_len = 0;
+        const char *s = getenv("QEMU_IA64_DBG_PROBE_DUMP_R35");
+        if (s && *s) {
+            if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+                !strcmp(s, "yes")) {
+                dump_r35_len = 64;
+            } else {
+                dump_r35_len = atoi(s);
+                if (dump_r35_len <= 0) {
+                    dump_r35_len = 64;
+                }
+            }
+        }
+    }
+    if (dump_r35_len > 0) {
+        ia64_dbg_probe_dump_mem(env, pc, "r35", env->r[35], dump_r35_len);
     }
 
     static int dump_r36_len = -1;
@@ -6278,6 +6265,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static int dump_enabled = -1;
     static int dump_after_patch = -1;
     static bool fixed_sysmem_rdesc;
+    static uint64_t fixed_sysmem_rdesc_base;
     static bool fixed_fv_hobs;
     static uint64_t fixed_fv_hobs_base;
     static bool fixed_attr;
@@ -6305,27 +6293,19 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_PATCH");
         /*
-         * Default to enabled: xenipf/EDK firmware can relocate PEI/DXE images
-         * so that GP-relative accesses land just above the firmware-reported
-         * EfiMemoryTop (particularly when QEMU maps a small slack window above
-         * guest RAM). DXE memory services can then clobber the executing
-         * module, leading to early asserts (e.g. Pool.c "CR has Bad
-         * Signature").
+         * Default to disabled so we don't mask firmware/TCG bugs with
+         * synthetic HOB edits. Enable explicitly when needed.
          *
-         * Allow opting out via QEMU_IA64_EFI_HOB_PATCH=0/off/no/false.
+         * Enable via QEMU_IA64_EFI_HOB_PATCH=1/on/true/yes.
          */
         if (!s || !*s) {
-            enabled = 1;
+            enabled = 0;
         } else if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
                    !strcmp(s, "no")) {
             enabled = 0;
         } else {
             enabled = 1;
         }
-    }
-    if (fixed_sysmem_rdesc && fixed_fv_hobs &&
-        (!enabled || (fixed_attr && fixed_free_bottom && fixed_free_top))) {
-        return;
     }
 
     CPUState *cs = env_cpu(env);
@@ -6336,6 +6316,21 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     if (dump_enabled == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP");
         dump_enabled = (s && *s) ? 1 : 0;
+    }
+    if (!enabled) {
+        if (dump_enabled && !dumped_hobs) {
+            if ((dump_throttle++ & 0xff) == 0) {
+                if (ia64_fw_dump_efi_hobs(cs, stack_phys)) {
+                    dumped_hobs = true;
+                }
+            }
+        }
+        return;
+    }
+
+    if (fixed_sysmem_rdesc && fixed_fv_hobs &&
+        (fixed_attr && fixed_free_bottom && fixed_free_top)) {
+        return;
     }
     if (dump_after_patch == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP_AFTER_PATCH");
@@ -6560,6 +6555,10 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                       hob_base, hob_end, src, stack_phys, env->r[33]);
         logged_hob_base = hob_base;
     }
+    if (fixed_sysmem_rdesc_base && fixed_sysmem_rdesc_base != hob_base) {
+        fixed_sysmem_rdesc = false;
+        fixed_sysmem_rdesc_base = 0;
+    }
     bool hob_low = (hob_base < IA64_IPF_FW_FLASH_BASE);
     if (hob_low) {
         if (attempts >= 256) {
@@ -6730,7 +6729,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             }
         } else {
             if (free_bottom_phys < mem_bottom_phys_local ||
-                free_bottom_phys > mem_top_phys_local) {
+                free_bottom_phys > mem_top_phys_local ||
+                free_bottom_phys < end_hob) {
                 free_bottom_phys = (end_hob + 0x1fULL) & ~0x1fULL;
             }
             if (free_top_phys <= free_bottom_phys || free_top_phys > mem_top_phys_local) {
@@ -6753,6 +6753,23 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
 
     mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
     mem_top_phys = ia64_phys_mode_addr(mem_top);
+
+    if (reloc_hob_base && reloc_hob_base != hob_base && hob_end > hob_base) {
+        uint64_t src_len = hob_end - hob_base;
+        uint64_t dst_len = reloc_hob_end > reloc_hob_base ?
+            (reloc_hob_end - reloc_hob_base) : 0;
+        if (src_len && src_len <= (1ULL << 20) && dst_len != src_len) {
+            if (ia64_fw_clone_hob_list_ram(cs, hob_base, hob_end, reloc_hob_base,
+                                           mem_bottom_phys, mem_top_phys,
+                                           stack_phys)) {
+                reloc_hob_end = reloc_hob_base + src_len;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: synced HOB list %016" PRIx64
+                              " -> %016" PRIx64 " len=%" PRIu64 "\n",
+                              hob_base, reloc_hob_base, src_len);
+            }
+        }
+    }
 
     if (!fixed_boot_mode && boot_mode == 0x20) {
         uint8_t out[4];
@@ -6904,7 +6921,6 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 dumped_after_patch = true;
             }
         }
-        return;
     }
 
     if (!logged_phit) {
@@ -7149,6 +7165,9 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             }
         }
         fixed_sysmem_rdesc = has_sysmem || inserted;
+        if (fixed_sysmem_rdesc) {
+            fixed_sysmem_rdesc_base = hob_base;
+        }
         env->fw_phit_mem_bottom = mem_bottom;
         env->fw_phit_mem_top = mem_top;
         env->fw_phit_free_bottom = free_bottom;
@@ -7429,49 +7448,50 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                               "IA64: hob_patch: clone list_len=%" PRIu64
                               " hob_base=%016" PRIx64 " hob_end=%016" PRIx64 "\n",
                               hob_end - hob_base, hob_base, hob_end);
-                if (ia64_fw_clone_hob_list_ram(cs, hob_base, hob_end, best_cand,
+                if (!ia64_fw_clone_hob_list_ram(cs, hob_base, hob_end, best_cand,
                                                mem_bottom_phys, mem_top_phys,
                                                stack_phys)) {
-                    reloc_hob_base = best_cand;
-                    env->fw_hob_reloc_base = reloc_hob_base;
-                    reloc_hob_end = best_cand + (hob_end - hob_base);
+                    return;
+                }
+                reloc_hob_base = best_cand;
+                env->fw_hob_reloc_base = reloc_hob_base;
+                reloc_hob_end = best_cand + (hob_end - hob_base);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: cloned HOB list %016" PRIx64
+                              " -> %016" PRIx64 "\n",
+                              hob_base, best_cand);
+                uint64_t enc = ia64_fw_encode_addr(best_cand_raw, best_cand);
+                if (best_cand_from_reg) {
+                    env->r[33] = enc;
                     qemu_log_mask(LOG_GUEST_ERROR,
-                                  "IA64: hob_patch: cloned HOB list %016" PRIx64
+                                  "IA64: hob_patch: reset hob_ptr r33 -> %016" PRIx64 "\n",
+                                  best_cand);
+                } else if (best_cand_loc) {
+                    uint8_t val[8];
+                    stq_le_p(val, enc);
+                    cpu_physical_memory_write(best_cand_loc, val, sizeof(val));
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: hob_patch: reset hob_ptr @%016" PRIx64
                                   " -> %016" PRIx64 "\n",
-                                  hob_base, best_cand);
-                    uint64_t enc = ia64_fw_encode_addr(best_cand_raw, best_cand);
-                    if (best_cand_from_reg) {
-                        env->r[33] = enc;
-                        qemu_log_mask(LOG_GUEST_ERROR,
-                                      "IA64: hob_patch: reset hob_ptr r33 -> %016" PRIx64 "\n",
-                                      best_cand);
-                    } else if (best_cand_loc) {
-                        uint8_t val[8];
-                        stq_le_p(val, enc);
-                        cpu_physical_memory_write(best_cand_loc, val, sizeof(val));
-                        qemu_log_mask(LOG_GUEST_ERROR,
-                                      "IA64: hob_patch: reset hob_ptr @%016" PRIx64
-                                      " -> %016" PRIx64 "\n",
-                                      best_cand_loc, best_cand);
-                    }
-                    if (stack_phys) {
-                        uint8_t val[8];
-                        if (cpu_memory_rw_debug(cs, stack_phys, val, sizeof(val), false) == 0) {
-                            uint64_t sp_raw = ldq_le_p(val);
-                            uint64_t sp_phys = ia64_phys_mode_addr(sp_raw);
-                            if (!sp_raw ||
-                                sp_phys == hob_base ||
-                                sp_phys == best_cand ||
-                                (sp_phys < IA64_IPF_FW_FLASH_BASE &&
-                                 (sp_phys & 0xfffULL) == 0)) {
-                                uint64_t sp_tmpl = sp_raw ? sp_raw : best_cand_raw;
-                                stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, best_cand));
-                                cpu_physical_memory_write(stack_phys, val, sizeof(val));
-                                qemu_log_mask(LOG_GUEST_ERROR,
-                                              "IA64: hob_patch: reset hob_ptr sp @%016" PRIx64
-                                              " -> %016" PRIx64 "\n",
-                                              (uint64_t)stack_phys, best_cand);
-                            }
+                                  best_cand_loc, best_cand);
+                }
+                if (stack_phys) {
+                    uint8_t val[8];
+                    if (cpu_memory_rw_debug(cs, stack_phys, val, sizeof(val), false) == 0) {
+                        uint64_t sp_raw = ldq_le_p(val);
+                        uint64_t sp_phys = ia64_phys_mode_addr(sp_raw);
+                        if (!sp_raw ||
+                            sp_phys == hob_base ||
+                            sp_phys == best_cand ||
+                            (sp_phys < IA64_IPF_FW_FLASH_BASE &&
+                             (sp_phys & 0xfffULL) == 0)) {
+                            uint64_t sp_tmpl = sp_raw ? sp_raw : best_cand_raw;
+                            stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, best_cand));
+                            cpu_physical_memory_write(stack_phys, val, sizeof(val));
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: hob_patch: reset hob_ptr sp @%016" PRIx64
+                                          " -> %016" PRIx64 "\n",
+                                          (uint64_t)stack_phys, best_cand);
                         }
                     }
                 }
@@ -9550,6 +9570,7 @@ static uint64_t ia64_fw_arg(CPUIA64State *env, uint8_t out0, uint8_t idx)
     return (reg < 128) ? env->r[reg] : 0;
 }
 
+/* Xenipf firmware SAL break ABI passes arguments in static r28..r31. */
 static uint64_t ia64_fw_arg_break(CPUIA64State *env, uint8_t idx)
 {
     uint8_t reg = 28 + idx;
@@ -9685,7 +9706,8 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
 
     ia64_fw_try_install_sal_systab(env);
 
-    uint64_t func_raw = break_abi ? env->r[28] : ia64_fw_arg(env, out0, 0);
+    uint64_t func_raw = break_abi ? ia64_fw_arg_break(env, 0)
+                                  : ia64_fw_arg(env, out0, 0);
     IA64EfiGuid guid;
     if (ia64_fw_read_guid(env, func_raw, &guid) &&
         ia64_fw_guid_equal(&guid, &ia64_efi_guid_esal_pci)) {
@@ -10062,7 +10084,6 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         static int sal_pci_failfast = -1;
         static int sal_pci_dump = -1;
         static int sal_pci_dump_bundles = -1;
-        static int sal_pci_compat_cf8 = -1;
         if (sal_pci_failfast == -1) {
             const char *s = getenv("QEMU_IA64_SAL_PCI_FAILFAST");
             sal_pci_failfast = (s && *s) ? 1 : 0;
@@ -10081,24 +10102,17 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 }
             }
         }
-        if (sal_pci_compat_cf8 == -1) {
-            const char *s = getenv("QEMU_IA64_SAL_PCI_COMPAT_CF8");
-            sal_pci_compat_cf8 = (s && *s) ? 1 : 0;
-        }
 
-        bool use_break_abi = break_abi;
-        uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
-                                      : ia64_fw_arg(env, out0, 1);
-        uint64_t size = break_abi ? ia64_fw_arg_break(env, 2)
+        uint64_t arg1 = break_abi ? ia64_fw_arg_break(env, 1)
+                                  : ia64_fw_arg(env, out0, 1);
+        uint64_t arg2 = break_abi ? ia64_fw_arg_break(env, 2)
                                   : ia64_fw_arg(env, out0, 2);
+        uint64_t arg3 = break_abi ? ia64_fw_arg_break(env, 3)
+                                  : ia64_fw_arg(env, out0, 3);
+        uint64_t pci_addr = break_abi ? arg2 : arg1;
+        uint64_t size = break_abi ? arg1 : arg2;
+        uint64_t type = arg3;
         bool size_valid = (size == 1 || size == 2 || size == 4);
-        bool compat_cf8 = false;
-        uint64_t compat_cf8_addr = 0;
-        bool gfw_cf8 = false;
-        uint64_t alt_addr = break_abi ? ia64_fw_arg(env, out0, 1)
-                                      : ia64_fw_arg_break(env, 1);
-        uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
-                                      : ia64_fw_arg_break(env, 2);
         if (!size_valid) {
             uint64_t width_bytes;
             if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
@@ -10107,55 +10121,15 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             }
         }
         if (!size_valid) {
-            uint64_t width_bytes;
-            if (ia64_fw_pci_width_to_bytes(alt_size, &width_bytes)) {
-                pci_addr = alt_addr;
-                size = width_bytes;
-                size_valid = true;
-                use_break_abi = !break_abi;
-            } else if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
-                pci_addr = alt_addr;
-                size = alt_size;
-                size_valid = true;
-                use_break_abi = !break_abi;
-            }
-        }
-        if (!size_valid && break_abi && (env->r[30] & 0x80000000ULL)) {
-            uint64_t width_bytes;
-            gfw_cf8 = true;
-            compat_cf8 = true;
-            compat_cf8_addr = env->r[30];
-            pci_addr = compat_cf8_addr;
-            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
-                size = width_bytes;
-            } else if (env->r[29] == 1 || env->r[29] == 2 || env->r[29] == 4) {
-                size = env->r[29];
-            } else {
-                size = 4;
-            }
-            size_valid = true;
-        } else if (sal_pci_compat_cf8 && !size_valid && break_abi && pci_addr == 0 &&
-                   (env->r[30] & 0x80000000ULL)) {
-            uint64_t width_bytes;
-            compat_cf8 = true;
-            compat_cf8_addr = env->r[30];
-            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
-                size = width_bytes;
-            } else {
-                size = 4;
-            }
-            size_valid = true;
-        }
-        if (!size_valid) {
             if (ia64_fw_log_enabled()) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: SAL_PCI_CONFIG_READ invalid size=%" PRIu64
-                              " addr=%016" PRIx64 " alt_size=%" PRIu64
-                              " alt_addr=%016" PRIx64 " break_abi=%d"
+                              " addr=%016" PRIx64 " type=%" PRIu64
+                              " break_abi=%d"
                               " cfm=%016" PRIx64 " out0=r%u"
                               " r28=%016" PRIx64 " r29=%016" PRIx64
                               " r30=%016" PRIx64 " r31=%016" PRIx64 "\n",
-                              size, pci_addr, alt_size, alt_addr, break_abi ? 1 : 0,
+                              size, pci_addr, type, break_abi ? 1 : 0,
                               env->cfm, out0,
                               env->r[28], env->r[29], env->r[30], env->r[31]);
             }
@@ -10175,12 +10149,10 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             }
             cpu_abort(env_cpu(env),
                       "IA64: SAL_PCI_CONFIG_READ invalid size=%" PRIu64
-                      " pci_addr=%016" PRIx64 " break_abi=%d"
+                      " pci_addr=%016" PRIx64 " type=%" PRIu64 " break_abi=%d"
                       " lb_from=%016" PRIx64 " lb_to=%016" PRIx64
                       " b0=%016" PRIx64,
-                      size_valid ? size : (break_abi ? ia64_fw_arg_break(env, 2)
-                                                     : ia64_fw_arg(env, out0, 2)),
-                      pci_addr, break_abi ? 1 : 0,
+                      size, pci_addr, type, break_abi ? 1 : 0,
                       env->last_branch_from, env->last_branch_to, env->b[0]);
         }
         if (!size_valid) {
@@ -10190,36 +10162,45 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             v2 = 0;
             break;
         }
+        if (type != 0) {
+            status = -2;
+            if (ia64_fw_log_enabled()) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: SAL_PCI_CONFIG_READ unsupported type=%" PRIu64
+                              " addr=%016" PRIx64 " size=%" PRIu64
+                              " break_abi=%d -> status=%" PRId64 "\n",
+                              type, pci_addr, size, break_abi ? 1 : 0, status);
+            }
+            break;
+        }
         uint16_t seg = 0;
         uint8_t bus = 0, devfn = 0;
         uint16_t reg = 0;
         uint32_t cfgaddr = 0;
-        if (compat_cf8) {
-            uint64_t addr = compat_cf8_addr;
-            bus = (addr >> 16) & 0xff;
-            devfn = (addr >> 8) & 0xff;
-            reg = addr & 0xff;
-            cfgaddr = (uint32_t)(addr & ~3ULL);
+        bool cf8_addr = false;
+        if (break_abi && (pci_addr & 0x80000000ULL)) {
+            cf8_addr = true;
+            bus = (pci_addr >> 16) & 0xff;
+            devfn = (pci_addr >> 8) & 0xff;
+            reg = pci_addr & 0xff;
+            cfgaddr = (uint32_t)(pci_addr & ~3ULL);
         } else {
             ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+            if (seg != 0 || reg > 0xff) {
+                status = -2;
+                if (ia64_fw_log_enabled()) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: SAL_PCI_CONFIG_READ seg=%u bus=%u devfn=%u"
+                                  " reg=0x%x size=%" PRIu64 " break_abi=%d"
+                                  " -> status=%" PRId64 " v0=%016" PRIx64 "\n",
+                                  seg, bus, devfn, reg, size, break_abi ? 1 : 0,
+                                  status, v0);
+                }
+                break;
+            }
             cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
                       ((uint32_t)devfn << 8) | (reg & ~3U);
         }
-
-        if (!compat_cf8 && (seg != 0 || reg > 0xff)) {
-            status = -2;
-            if (ia64_fw_log_enabled()) {
-                qemu_log_mask(LOG_GUEST_ERROR,
-                              "IA64: SAL_PCI_CONFIG_READ seg=%u bus=%u devfn=%u"
-                              " reg=0x%x size=%" PRIu64 " abi=%s"
-                              " -> status=%" PRId64 " v0=%016" PRIx64 "\n",
-                              seg, bus, devfn, reg, size,
-                              use_break_abi ? "break" : "sal",
-                              status, v0);
-            }
-            break;
-        }
-
         cpu_outl(0xcf8, cfgaddr);
 
         if (size == 1) {
@@ -10236,11 +10217,11 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         if (ia64_fw_log_enabled()) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: SAL_PCI_CONFIG_READ seg=%u bus=%u devfn=%u"
-                          " reg=0x%x size=%" PRIu64 " abi=%s gfw_cf8=%d"
+                          " reg=0x%x size=%" PRIu64 " type=%" PRIu64
+                          " break_abi=%d cf8=%d"
                           " -> status=%" PRId64 " v0=%016" PRIx64 "\n",
-                          seg, bus, devfn, reg, size,
-                          use_break_abi ? "break" : "sal",
-                          gfw_cf8 ? 1 : 0,
+                          seg, bus, devfn, reg, size, type, break_abi ? 1 : 0,
+                          cf8_addr ? 1 : 0,
                           status, v0);
         }
         break;
@@ -10256,7 +10237,6 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
         static int sal_pci_failfast = -1;
         static int sal_pci_dump = -1;
         static int sal_pci_dump_bundles = -1;
-        static int sal_pci_compat_cf8 = -1;
         if (sal_pci_failfast == -1) {
             const char *s = getenv("QEMU_IA64_SAL_PCI_FAILFAST");
             sal_pci_failfast = (s && *s) ? 1 : 0;
@@ -10275,28 +10255,20 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                 }
             }
         }
-        if (sal_pci_compat_cf8 == -1) {
-            const char *s = getenv("QEMU_IA64_SAL_PCI_COMPAT_CF8");
-            sal_pci_compat_cf8 = (s && *s) ? 1 : 0;
-        }
 
-        bool use_break_abi = break_abi;
-        uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 1)
-                                      : ia64_fw_arg(env, out0, 1);
-        uint64_t size = break_abi ? ia64_fw_arg_break(env, 2)
+        uint64_t arg1 = break_abi ? ia64_fw_arg_break(env, 1)
+                                  : ia64_fw_arg(env, out0, 1);
+        uint64_t arg2 = break_abi ? ia64_fw_arg_break(env, 2)
                                   : ia64_fw_arg(env, out0, 2);
-        uint64_t value = break_abi ? ia64_fw_arg_break(env, 3)
-                                   : ia64_fw_arg(env, out0, 3);
+        uint64_t arg3 = break_abi ? ia64_fw_arg_break(env, 3)
+                                  : ia64_fw_arg(env, out0, 3);
+        uint64_t arg4 = break_abi ? ia64_fw_arg_break(env, 4)
+                                  : ia64_fw_arg(env, out0, 4);
+        uint64_t pci_addr = break_abi ? arg2 : arg1;
+        uint64_t size = break_abi ? arg1 : arg2;
+        uint64_t value = arg3;
+        uint64_t type = arg4;
         bool size_valid = (size == 1 || size == 2 || size == 4);
-        bool compat_cf8 = false;
-        uint64_t compat_cf8_addr = 0;
-        bool gfw_cf8 = false;
-        uint64_t alt_addr = break_abi ? ia64_fw_arg(env, out0, 1)
-                                      : ia64_fw_arg_break(env, 1);
-        uint64_t alt_size = break_abi ? ia64_fw_arg(env, out0, 2)
-                                      : ia64_fw_arg_break(env, 2);
-        uint64_t alt_value = break_abi ? ia64_fw_arg(env, out0, 3)
-                                       : ia64_fw_arg_break(env, 3);
         if (!size_valid) {
             uint64_t width_bytes;
             if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
@@ -10305,58 +10277,15 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             }
         }
         if (!size_valid) {
-            uint64_t width_bytes;
-            if (ia64_fw_pci_width_to_bytes(alt_size, &width_bytes)) {
-                pci_addr = alt_addr;
-                size = width_bytes;
-                value = alt_value;
-                size_valid = true;
-                use_break_abi = !break_abi;
-            } else if (alt_size == 1 || alt_size == 2 || alt_size == 4) {
-                pci_addr = alt_addr;
-                size = alt_size;
-                value = alt_value;
-                size_valid = true;
-                use_break_abi = !break_abi;
-            }
-        }
-        if (!size_valid && break_abi && (env->r[30] & 0x80000000ULL)) {
-            uint64_t width_bytes;
-            gfw_cf8 = true;
-            compat_cf8 = true;
-            compat_cf8_addr = env->r[30];
-            pci_addr = compat_cf8_addr;
-            value = env->r[31];
-            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
-                size = width_bytes;
-            } else if (env->r[29] == 1 || env->r[29] == 2 || env->r[29] == 4) {
-                size = env->r[29];
-            } else {
-                size = 4;
-            }
-            size_valid = true;
-        } else if (sal_pci_compat_cf8 && !size_valid && break_abi && pci_addr == 0 &&
-                   (env->r[30] & 0x80000000ULL)) {
-            uint64_t width_bytes;
-            compat_cf8 = true;
-            compat_cf8_addr = env->r[30];
-            if (ia64_fw_pci_width_to_bytes(env->r[29], &width_bytes)) {
-                size = width_bytes;
-            } else {
-                size = 4;
-            }
-            size_valid = true;
-        }
-        if (!size_valid) {
             if (ia64_fw_log_enabled()) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: SAL_PCI_CONFIG_WRITE invalid size=%" PRIu64
-                              " addr=%016" PRIx64 " alt_size=%" PRIu64
-                              " alt_addr=%016" PRIx64 " break_abi=%d"
+                              " addr=%016" PRIx64 " type=%" PRIu64
+                              " break_abi=%d"
                               " cfm=%016" PRIx64 " out0=r%u"
                               " r28=%016" PRIx64 " r29=%016" PRIx64
                               " r30=%016" PRIx64 " r31=%016" PRIx64 "\n",
-                              size, pci_addr, alt_size, alt_addr, break_abi ? 1 : 0,
+                              size, pci_addr, type, break_abi ? 1 : 0,
                               env->cfm, out0,
                               env->r[28], env->r[29], env->r[30], env->r[31]);
             }
@@ -10376,12 +10305,10 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             }
             cpu_abort(env_cpu(env),
                       "IA64: SAL_PCI_CONFIG_WRITE invalid size=%" PRIu64
-                      " pci_addr=%016" PRIx64 " break_abi=%d"
+                      " pci_addr=%016" PRIx64 " type=%" PRIu64 " break_abi=%d"
                       " lb_from=%016" PRIx64 " lb_to=%016" PRIx64
                       " b0=%016" PRIx64,
-                      size_valid ? size : (break_abi ? ia64_fw_arg_break(env, 2)
-                                                     : ia64_fw_arg(env, out0, 2)),
-                      pci_addr, break_abi ? 1 : 0,
+                      size, pci_addr, type, break_abi ? 1 : 0,
                       env->last_branch_from, env->last_branch_to, env->b[0]);
         }
         if (!size_valid) {
@@ -10391,36 +10318,46 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             v2 = 0;
             break;
         }
+        if (type != 0) {
+            status = -2;
+            if (ia64_fw_log_enabled()) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: SAL_PCI_CONFIG_WRITE unsupported type=%" PRIu64
+                              " addr=%016" PRIx64 " size=%" PRIu64
+                              " break_abi=%d -> status=%" PRId64 "\n",
+                              type, pci_addr, size, break_abi ? 1 : 0, status);
+            }
+            break;
+        }
         uint16_t seg = 0;
         uint8_t bus = 0, devfn = 0;
         uint16_t reg = 0;
         uint32_t cfgaddr = 0;
-        if (compat_cf8) {
-            uint64_t addr = compat_cf8_addr;
-            bus = (addr >> 16) & 0xff;
-            devfn = (addr >> 8) & 0xff;
-            reg = addr & 0xff;
-            cfgaddr = (uint32_t)(addr & ~3ULL);
+        bool cf8_addr = false;
+        if (break_abi && (pci_addr & 0x80000000ULL)) {
+            cf8_addr = true;
+            bus = (pci_addr >> 16) & 0xff;
+            devfn = (pci_addr >> 8) & 0xff;
+            reg = pci_addr & 0xff;
+            cfgaddr = (uint32_t)(pci_addr & ~3ULL);
         } else {
             ia64_fw_decode_pci_addr(pci_addr, &seg, &bus, &devfn, &reg);
+            if (seg != 0 || reg > 0xff) {
+                status = -2;
+                if (ia64_fw_log_enabled()) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: SAL_PCI_CONFIG_WRITE seg=%u bus=%u devfn=%u"
+                                  " reg=0x%x size=%" PRIu64 " value=%016" PRIx64
+                                  " break_abi=%d -> status=%" PRId64 "\n",
+                                  seg, bus, devfn, reg, size, value,
+                                  break_abi ? 1 : 0,
+                                  status);
+                }
+                break;
+            }
             cfgaddr = 0x80000000U | ((uint32_t)bus << 16) |
                       ((uint32_t)devfn << 8) | (reg & ~3U);
         }
-
-        if (!compat_cf8 && (seg != 0 || reg > 0xff)) {
-            status = -2;
-            if (ia64_fw_log_enabled()) {
-                qemu_log_mask(LOG_GUEST_ERROR,
-                              "IA64: SAL_PCI_CONFIG_WRITE seg=%u bus=%u devfn=%u"
-                              " reg=0x%x size=%" PRIu64 " value=%016" PRIx64
-                              " abi=%s -> status=%" PRId64 "\n",
-                              seg, bus, devfn, reg, size, value,
-                              use_break_abi ? "break" : "sal",
-                              status);
-            }
-            break;
-        }
-
         cpu_outl(0xcf8, cfgaddr);
 
         if (size == 1) {
@@ -10438,10 +10375,10 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: SAL_PCI_CONFIG_WRITE seg=%u bus=%u devfn=%u"
                           " reg=0x%x size=%" PRIu64 " value=%016" PRIx64
-                          " abi=%s gfw_cf8=%d -> status=%" PRId64 "\n",
+                          " type=%" PRIu64 " break_abi=%d cf8=%d -> status=%" PRId64 "\n",
                           seg, bus, devfn, reg, size, value,
-                          use_break_abi ? "break" : "sal",
-                          gfw_cf8 ? 1 : 0,
+                          type, break_abi ? 1 : 0,
+                          cf8_addr ? 1 : 0,
                           status);
         }
         break;

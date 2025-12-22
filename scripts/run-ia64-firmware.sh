@@ -12,7 +12,7 @@ Environment overrides:
   IA64_SMP        (default: 1)
   IA64_LOGDIR     (default: scratch/ia64_logs)
   IA64_DISPLAY    (default: none)
-  IA64_FW_FASTPATH (default: 1; enable memcpy/memset accel)
+  IA64_FW_FASTPATH (default: 0; enable memcpy/memset accel)
   IA64_GUEST_ERRORS (default: 0; enable -d guest_errors/-D)
   IA64_HANG_ABORT (default: 0; empty/0 disables)
 
@@ -37,7 +37,7 @@ mem="${IA64_MEM:-512M}"
 smp="${IA64_SMP:-1}"
 logdir="${IA64_LOGDIR:-scratch/ia64_logs}"
 display="${IA64_DISPLAY:-none}"
-fw_fastpath="${IA64_FW_FASTPATH:-1}"
+fw_fastpath="${IA64_FW_FASTPATH:-0}"
 guest_errors="${IA64_GUEST_ERRORS:-0}"
 
 mkdir -p "$logdir"

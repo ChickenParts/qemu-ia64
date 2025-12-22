@@ -120,10 +120,10 @@ static bool ia64_get_fw_fastpath_enabled(void)
          * loops that are extremely slow under TCG. We have a helper that can
          * recognize and accelerate a few well-known sequences.
          *
-         * Default to enabled and allow opting out via QEMU_IA64_FW_FASTPATH=0.
+         * Default to disabled and allow opting in via QEMU_IA64_FW_FASTPATH=1.
          */
-        ia64_fw_fastpath_enabled = true;
-        return true;
+        ia64_fw_fastpath_enabled = false;
+        return false;
     }
 
     if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
