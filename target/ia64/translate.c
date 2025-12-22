@@ -2340,7 +2340,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                      * can run under TCG without taking a break fault.
                      */
                     uint64_t nr = imm >> 8;
-                    if (in_fw && !fw_hypercall) {
+                    bool allow_fw = in_fw || fw_hypercall;
+                    if (!allow_fw) {
                         gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
                         if (qp == 0) {
                             ctx->base.is_jmp = DISAS_NORETURN;
