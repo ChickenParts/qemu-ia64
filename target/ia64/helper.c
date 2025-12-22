@@ -9008,6 +9008,24 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     ia64_fw_dump_code(env, "hang_pc", pc, 64);
     ia64_fw_dump_code(env, "hang_from", env->last_branch_from, 64);
     ia64_fw_dump_code(env, "hang_to", env->last_branch_to, 64);
+    {
+        static int extra_dump_inited;
+        static uint64_t extra_dump_pc;
+        if (!extra_dump_inited) {
+            extra_dump_inited = 1;
+            const char *s = getenv("QEMU_IA64_HANG_DUMP_PC");
+            if (s && *s) {
+                char *endp = NULL;
+                extra_dump_pc = strtoull(s, &endp, 0);
+                if (endp == s) {
+                    extra_dump_pc = 0;
+                }
+            }
+        }
+        if (extra_dump_pc) {
+            ia64_fw_dump_code(env, "hang_extra", extra_dump_pc, 64);
+        }
+    }
 
     if (env->fw_hob_reloc_base &&
         pc >= 0x0000000000011c20ULL &&
@@ -9091,10 +9109,12 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " ar.lc=%016" PRIx64 " ar.ec=%016" PRIx64
                   " last_branch from=%016" PRIx64 " to=%016" PRIx64
                   " kind=%" PRIu64 " insn=%011" PRIx64
+                  " r8=%016" PRIx64 " r9=%016" PRIx64
+                  " r10=%016" PRIx64 " r11=%016" PRIx64
                   " r1=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
                   " r24=%016" PRIx64 " r27=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
-                  " r31=%016" PRIx64
+                  " r31=%016" PRIx64 " r35=%016" PRIx64 " r36=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
                   " r52=%016" PRIx64 " r53=%016" PRIx64
                   " kbias=%016" PRIx64
@@ -9108,9 +9128,10 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   env->ar[65], env->ar[66],
                   env->last_branch_from, env->last_branch_to,
                   env->last_branch_kind, env->last_branch_insn,
+                  env->r[8], env->r[9], env->r[10], env->r[11],
                   env->r[1], env->r[12], env->r[13],
                   env->r[24], env->r[27], env->r[28], env->r[29],
-                  env->r[31],
+                  env->r[31], env->r[35], env->r[36],
                   env->r[32], env->r[33], env->r[34],
                   env->r[52], env->r[53],
                   env->kernel_bias,
