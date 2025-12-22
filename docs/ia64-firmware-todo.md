@@ -36,6 +36,9 @@ firmware path. Items are grouped by status.
 - Firmware now reaches DXE IPL but asserts in `DxeLoad.c` line 790 with a
   negative Status value; need to identify the failing service or missing HOB
   entry (see serial log output).
+- Firmware also hits an ASSERT in `AfterMemMP.c` line 161 and spins in a
+  dead-loop around `pc=0xffe737a0` (RAM); hang_abort shows the file pointer in
+  r33 and line in r34, but the failing Status source still needs to be traced.
 - SAL systab injection can still be too late or collide with firmware memory:
   we write a synthetic SST_ into fixed low RAM and inject an EFI config entry
   without reserving/allocating space from firmware (`target/ia64/helper.c:1849`,

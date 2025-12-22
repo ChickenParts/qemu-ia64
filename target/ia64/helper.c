@@ -311,6 +311,12 @@ static bool ia64_rse_pop_window(CPUIA64State *env);
 static bool ia64_intr_pop_window(CPUIA64State *env);
 
 #ifndef CONFIG_USER_ONLY
+static void ia64_fw_dump_code(CPUIA64State *env, const char *tag,
+                              uint64_t pc, int bundles);
+static void ia64_fw_trace_dump(void);
+#endif
+
+#ifndef CONFIG_USER_ONLY
 static bool ia64_pc_in_sym(const CPUIA64State *env, uint64_t pc,
                            uint64_t sym_va, uint64_t sym_size)
 {
@@ -8998,6 +9004,11 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     CPUState *cs = env_cpu(env);
     cpu_restore_state(cs, GETPC());
 
+    ia64_fw_trace_dump();
+    ia64_fw_dump_code(env, "hang_pc", pc, 64);
+    ia64_fw_dump_code(env, "hang_from", env->last_branch_from, 64);
+    ia64_fw_dump_code(env, "hang_to", env->last_branch_to, 64);
+
     if (env->fw_hob_reloc_base &&
         pc >= 0x0000000000011c20ULL &&
         pc <= 0x0000000000011d10ULL) {
@@ -9304,6 +9315,88 @@ static bool ia64_fw_log_enabled(void)
     return enabled;
 }
 
+#define IA64_FW_TRACE_RING_SIZE 64
+
+typedef enum IA64FwTraceKind {
+    IA64_FW_TRACE_SAL,
+    IA64_FW_TRACE_PAL,
+} IA64FwTraceKind;
+
+typedef struct IA64FwTraceEntry {
+    IA64FwTraceKind kind;
+    uint64_t pc;
+    uint64_t func_raw;
+    uint64_t func;
+    uint64_t args[4];
+    int64_t status;
+    uint64_t v0;
+    uint64_t v1;
+    uint64_t v2;
+    bool break_abi;
+} IA64FwTraceEntry;
+
+static IA64FwTraceEntry ia64_fw_trace_ring[IA64_FW_TRACE_RING_SIZE];
+static uint32_t ia64_fw_trace_pos;
+static uint32_t ia64_fw_trace_count;
+
+static void ia64_fw_trace_record(IA64FwTraceKind kind, uint64_t pc,
+                                 uint64_t func_raw, uint64_t func,
+                                 const uint64_t *args, int64_t status,
+                                 uint64_t v0, uint64_t v1, uint64_t v2,
+                                 bool break_abi)
+{
+    if (!ia64_fw_log_enabled()) {
+        return;
+    }
+    IA64FwTraceEntry *e = &ia64_fw_trace_ring[ia64_fw_trace_pos];
+    *e = (IA64FwTraceEntry){
+        .kind = kind,
+        .pc = pc,
+        .func_raw = func_raw,
+        .func = func,
+        .status = status,
+        .v0 = v0,
+        .v1 = v1,
+        .v2 = v2,
+        .break_abi = break_abi,
+    };
+    for (int i = 0; i < 4; i++) {
+        e->args[i] = args ? args[i] : 0;
+    }
+    ia64_fw_trace_pos = (ia64_fw_trace_pos + 1) % IA64_FW_TRACE_RING_SIZE;
+    if (ia64_fw_trace_count < IA64_FW_TRACE_RING_SIZE) {
+        ia64_fw_trace_count++;
+    }
+}
+
+static void ia64_fw_trace_dump(void)
+{
+    if (!ia64_fw_log_enabled() || ia64_fw_trace_count == 0) {
+        return;
+    }
+    uint32_t start = (ia64_fw_trace_pos + IA64_FW_TRACE_RING_SIZE -
+                      ia64_fw_trace_count) % IA64_FW_TRACE_RING_SIZE;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_trace last=%u\n", ia64_fw_trace_count);
+    for (uint32_t i = 0; i < ia64_fw_trace_count; i++) {
+        const IA64FwTraceEntry *e =
+            &ia64_fw_trace_ring[(start + i) % IA64_FW_TRACE_RING_SIZE];
+        const char *kind = (e->kind == IA64_FW_TRACE_PAL) ? "PAL" : "SAL";
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_trace[%u] %s pc=%016" PRIx64
+                      " func=%016" PRIx64 " raw=%016" PRIx64
+                      " a0=%016" PRIx64 " a1=%016" PRIx64
+                      " a2=%016" PRIx64 " a3=%016" PRIx64
+                      " status=%" PRId64 " v0=%016" PRIx64
+                      " v1=%016" PRIx64 " v2=%016" PRIx64
+                      " break_abi=%d\n",
+                      i, kind, e->pc, e->func, e->func_raw,
+                      e->args[0], e->args[1], e->args[2], e->args[3],
+                      e->status, e->v0, e->v1, e->v2,
+                      e->break_abi ? 1 : 0);
+    }
+}
+
 #define IA64_PAL_STATUS_SUCCESS        0
 #define IA64_PAL_STATUS_UNIMPLEMENTED  (-1)
 
@@ -9522,6 +9615,10 @@ void HELPER(fw_pal)(CPUIA64State *env)
                       idx, status, v0, v1, v2);
     }
 
+    uint64_t args_trace[4] = { a1, a2, a3, 0 };
+    ia64_fw_trace_record(IA64_FW_TRACE_PAL, env->ip, idx, idx,
+                         args_trace, status, v0, v1, v2, from_call);
+
     env->r[8] = (uint64_t)status;
     env->r[9] = v0;
     env->r[10] = v1;
@@ -9708,6 +9805,12 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
 
     uint64_t func_raw = break_abi ? ia64_fw_arg_break(env, 0)
                                   : ia64_fw_arg(env, out0, 0);
+    uint64_t args_trace[4] = {
+        break_abi ? ia64_fw_arg_break(env, 1) : ia64_fw_arg(env, out0, 1),
+        break_abi ? ia64_fw_arg_break(env, 2) : ia64_fw_arg(env, out0, 2),
+        break_abi ? ia64_fw_arg_break(env, 3) : ia64_fw_arg(env, out0, 3),
+        break_abi ? ia64_fw_arg_break(env, 4) : ia64_fw_arg(env, out0, 4),
+    };
     IA64EfiGuid guid;
     if (ia64_fw_read_guid(env, func_raw, &guid) &&
         ia64_fw_guid_equal(&guid, &ia64_efi_guid_esal_pci)) {
@@ -10408,6 +10511,9 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                       " v0=%016" PRIx64 " v1=%016" PRIx64 " v2=%016" PRIx64 "\n",
                       func, func_raw, status, v0, v1, v2);
     }
+
+    ia64_fw_trace_record(IA64_FW_TRACE_SAL, env->ip, func_raw, func,
+                         args_trace, status, v0, v1, v2, break_abi);
 
     env->r[8] = (uint64_t)status;
     env->r[9] = v0;
