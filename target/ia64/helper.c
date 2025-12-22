@@ -371,6 +371,7 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     static uint32_t last_vec;
     static int log_count;
     static uint32_t break_log_count;
+    static uint32_t break_basic_count;
 
     if (retaddr) {
         cpu_restore_state(cs, retaddr);
@@ -384,6 +385,21 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
      * caller can see what string triggered the BUG.
      */
     if (vec == IA64_VEC_BREAK && break_log_count < 16) {
+        static int break_basic_enabled = -1;
+        if (break_basic_enabled == -1) {
+            const char *s = getenv("QEMU_IA64_LOG_BREAK");
+            break_basic_enabled = (s && *s) ? 1 : 0;
+        }
+        if (break_basic_enabled && break_basic_count < 16) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: break iim=0x%" PRIx64 " ip=%016" PRIx64
+                          " r28=%016" PRIx64 " r32=%016" PRIx64
+                          " r33=%016" PRIx64 " r34=%016" PRIx64
+                          " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                          iim, env->ip, env->r[28], env->r[32],
+                          env->r[33], env->r[34], env->b[0], env->b[6]);
+            break_basic_count++;
+        }
         const char *s = getenv("QEMU_IA64_LOG_BREAK_STR");
         if (s && *s) {
             uint64_t param_va = env->r[32];
