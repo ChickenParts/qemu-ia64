@@ -2757,7 +2757,8 @@ static bool ia64_fw_clone_hob_list_ram(CPUState *cs,
     return true;
 }
 
-static bool ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
+static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
+                                       bool force)
 {
     /*
      * Best-effort EFI HOB list dump to diagnose early DXE ASSERTs.
@@ -2778,7 +2779,11 @@ static bool ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
         EFI_RESOURCE_ATTRIBUTE_TESTED = 0x00000004u,
     };
     static bool dumped;
-    if (dumped) {
+    static bool dumped_force;
+    if (!force && dumped) {
+        return true;
+    }
+    if (force && dumped_force) {
         return true;
     }
 
@@ -3067,10 +3072,24 @@ static bool ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
         }
     }
     if (hob_best_end_ok) {
-        dumped = true;
+        if (force) {
+            dumped_force = true;
+        } else {
+            dumped = true;
+        }
         return true;
     }
     return false;
+}
+
+static bool ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
+{
+    return ia64_fw_dump_efi_hobs_impl(cs, stack_hint, false);
+}
+
+static bool ia64_fw_dump_efi_hobs_force(CPUState *cs, uint64_t stack_hint)
+{
+    return ia64_fw_dump_efi_hobs_impl(cs, stack_hint, true);
 }
 
 #ifndef CONFIG_USER_ONLY
@@ -6119,6 +6138,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
 {
     static int enabled = -1;
     static int dump_enabled = -1;
+    static int dump_after_patch = -1;
     static bool fixed_sysmem_rdesc;
     static bool fixed_fv_hobs;
     static bool fixed_attr;
@@ -6134,6 +6154,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static bool logged_fv_scan;
     static bool logged_fv_state;
     static bool dumped_hobs;
+    static bool dumped_after_patch;
     static uint32_t dump_throttle;
     static uint64_t reloc_hob_base;
     static bool dumped_reloc_hob;
@@ -6173,6 +6194,10 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     if (dump_enabled == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP");
         dump_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dump_after_patch == -1) {
+        const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP_AFTER_PATCH");
+        dump_after_patch = (s && *s) ? 1 : 0;
     }
     if (hob_patch_trace == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_PATCH_TRACE");
@@ -6704,6 +6729,11 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
 
     if (in_flash) {
         /* Defer other HOB fixes until firmware relocates into RAM. */
+        if (dump_after_patch && !dumped_after_patch) {
+            if (ia64_fw_dump_efi_hobs_force(cs, stack_phys)) {
+                dumped_after_patch = true;
+            }
+        }
         return;
     }
 
@@ -7133,6 +7163,12 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                                   (uint64_t)stack_phys, best_cand);
                 }
             }
+        }
+    }
+
+    if (dump_after_patch && !dumped_after_patch) {
+        if (ia64_fw_dump_efi_hobs_force(cs, stack_phys)) {
+            dumped_after_patch = true;
         }
     }
 }

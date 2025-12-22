@@ -624,6 +624,144 @@ static void ipf_log_dxe_status(IPFMachineState *m, const char *tag)
 #define IPF_FW_STATUS_CALLER_ID_ADDR      0x00000000ffe00076ULL
 #define IPF_FW_STATUS_REPORT_PLABEL_ADDR  0x00000000ffe011b6ULL
 
+/* Firmware volume / file type values from EDK1 headers. */
+#define EFI_FVH_SIGNATURE                  0x4856465fU /* "_FVH" */
+#define EFI_FV_FILETYPE_DXE_CORE           0x05
+#define EFI_FV_FILETYPE_FIRMWARE_VOLUME_IMAGE 0x0B
+#define EFI_FFS_FILE_HEADER_SIZE           24
+#define EFI_FFS_FILE_HEADER2_SIZE          32
+
+static bool ipf_fw_scan_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IPF_FW_SCAN");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static bool ipf_fw_is_erased(const uint8_t *buf, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] != 0xff) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static size_t ipf_fw_align_up(size_t val, size_t align)
+{
+    if (align == 0) {
+        return val;
+    }
+    return (val + align - 1) & ~(align - 1);
+}
+
+static void ipf_fw_guid_to_str(char *out, size_t out_len, const uint8_t *guid)
+{
+    uint32_t d1 = ldl_le_p(&guid[0]);
+    uint16_t d2 = lduw_le_p(&guid[4]);
+    uint16_t d3 = lduw_le_p(&guid[6]);
+    snprintf(out, out_len,
+             "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             d1, d2, d3,
+             guid[8], guid[9], guid[10], guid[11],
+             guid[12], guid[13], guid[14], guid[15]);
+}
+
+static void ipf_fw_scan_fv_files(const uint8_t *buf, size_t size,
+                                 size_t fv_base, size_t fv_len,
+                                 size_t fv_hdr_len, hwaddr fw_base)
+{
+    size_t fv_end = fv_base + fv_len;
+    size_t off = fv_base + fv_hdr_len;
+    int files = 0;
+    int dxe_cores = 0;
+    int fv_images = 0;
+
+    while (off + EFI_FFS_FILE_HEADER_SIZE <= fv_end && off + 16 <= size) {
+        const uint8_t *fh = &buf[off];
+        if (ipf_fw_is_erased(fh, EFI_FFS_FILE_HEADER_SIZE)) {
+            break;
+        }
+
+        uint8_t type = fh[18];
+        uint32_t size24 = (uint32_t)fh[20] |
+                          ((uint32_t)fh[21] << 8) |
+                          ((uint32_t)fh[22] << 16);
+        uint64_t fsize = size24;
+        size_t hdr_size = EFI_FFS_FILE_HEADER_SIZE;
+
+        if (size24 == 0xffffff) {
+            if (off + EFI_FFS_FILE_HEADER2_SIZE > fv_end) {
+                break;
+            }
+            fsize = ldq_le_p(&fh[24]);
+            hdr_size = EFI_FFS_FILE_HEADER2_SIZE;
+        }
+        if (fsize < hdr_size || off + fsize > fv_end) {
+            break;
+        }
+
+        if (type == EFI_FV_FILETYPE_DXE_CORE ||
+            type == EFI_FV_FILETYPE_FIRMWARE_VOLUME_IMAGE) {
+            char guid[48];
+            ipf_fw_guid_to_str(guid, sizeof(guid), fh);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: FW scan: FFS type=%02x size=0x%" PRIx64
+                          " off=0x%zx phys=%016" HWADDR_PRIx " guid=%s\n",
+                          type, fsize, off, fw_base + off, guid);
+        }
+        if (type == EFI_FV_FILETYPE_DXE_CORE) {
+            dxe_cores++;
+        } else if (type == EFI_FV_FILETYPE_FIRMWARE_VOLUME_IMAGE) {
+            fv_images++;
+        }
+
+        files++;
+        off += ipf_fw_align_up((size_t)fsize, 8);
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IPF: FW scan: FV off=0x%zx phys=%016" HWADDR_PRIx
+                  " len=0x%zx hdr=0x%zx files=%d dxe=%d fvimg=%d\n",
+                  fv_base, fw_base + fv_base, fv_len, fv_hdr_len,
+                  files, dxe_cores, fv_images);
+}
+
+static void ipf_fw_scan_firmware(const uint8_t *buf, size_t size,
+                                 hwaddr fw_base)
+{
+    size_t fv_count = 0;
+    for (size_t base = 0; base + 0x38 <= size; base += 0x10) {
+        if (ldl_le_p(&buf[base + 0x28]) != EFI_FVH_SIGNATURE) {
+            continue;
+        }
+        uint64_t fv_len = ldq_le_p(&buf[base + 0x20]);
+        uint16_t hdr_len = lduw_le_p(&buf[base + 0x30]);
+        if (fv_len < 0x38 || fv_len > (size - base)) {
+            continue;
+        }
+        if (hdr_len < 0x38 || hdr_len > fv_len) {
+            continue;
+        }
+
+        ipf_fw_scan_fv_files(buf, size, base, (size_t)fv_len,
+                             (size_t)hdr_len, fw_base);
+        fv_count++;
+
+        if (fv_len > 0x10) {
+            base += (size_t)fv_len - 0x10;
+        }
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IPF: FW scan: total FVs=%zu size=0x%zx base=%016" HWADDR_PRIx "\n",
+                  fv_count, size, fw_base);
+}
+
 static void ipf_patch_firmware_statuscode_callgate(void)
 {
     /*
@@ -2852,6 +2990,9 @@ static void ipf_init(MachineState *machine)
         if (load_image_size(bios_name, buf, (size_t)image_size) != image_size) {
             error_report("Unable to read firmware file '%s'", bios_name);
             exit(1);
+        }
+        if (ipf_fw_scan_enabled()) {
+            ipf_fw_scan_firmware(buf, (size_t)image_size, fw_offset);
         }
         address_space_write(&address_space_memory, fw_offset,
                             MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
