@@ -1911,12 +1911,21 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
  * Minimal EFI status code definitions used for firmware assert decoding.
  * Values match EDK's EfiStatusCode.h.
  */
-#define IA64_EFI_STATUS_CODE_TYPE_MASK       0x000000FFu
-#define IA64_EFI_STATUS_CODE_SEVERITY_MASK   0xFF000000u
-#define IA64_EFI_STATUS_CODE_OPERATION_MASK  0x0000FFFFu
+#define IA64_EFI_STATUS_CODE_TYPE_MASK        0x000000FFu
+#define IA64_EFI_STATUS_CODE_SEVERITY_MASK    0xFF000000u
+#define IA64_EFI_STATUS_CODE_CLASS_MASK       0xFF000000u
+#define IA64_EFI_STATUS_CODE_SUBCLASS_MASK    0x00FF0000u
+#define IA64_EFI_STATUS_CODE_OPERATION_MASK   0x0000FFFFu
+#define IA64_EFI_PROGRESS_CODE                0x00000001u
 #define IA64_EFI_ERROR_CODE                  0x00000002u
+#define IA64_EFI_DEBUG_CODE                  0x00000003u
 #define IA64_EFI_ERROR_UNRECOVERED           0x90000000u
 #define IA64_EFI_SW_EC_ILLEGAL_SOFTWARE_STATE 0x00000007u
+#define IA64_EFI_CLASS_COMPUTING             0x00000000u
+#define IA64_EFI_CLASS_PERIPHERAL            0x01000000u
+#define IA64_EFI_CLASS_IO_BUS                0x02000000u
+#define IA64_EFI_CLASS_SOFTWARE              0x03000000u
+#define IA64_EFI_IO_BUS_PCI_SUBCLASS         0x00010000u
 
 static bool ia64_fw_status_is_assert(uint32_t code_type, uint32_t value)
 {
@@ -1925,6 +1934,49 @@ static bool ia64_fw_status_is_assert(uint32_t code_type, uint32_t value)
                IA64_EFI_ERROR_UNRECOVERED &&
            (value & IA64_EFI_STATUS_CODE_OPERATION_MASK) ==
                IA64_EFI_SW_EC_ILLEGAL_SOFTWARE_STATE;
+}
+
+static bool ia64_fw_status_code_valid(uint32_t code_type, uint32_t value)
+{
+    uint32_t type = code_type & IA64_EFI_STATUS_CODE_TYPE_MASK;
+    uint32_t class = value & IA64_EFI_STATUS_CODE_CLASS_MASK;
+
+    if (type != IA64_EFI_PROGRESS_CODE &&
+        type != IA64_EFI_ERROR_CODE &&
+        type != IA64_EFI_DEBUG_CODE) {
+        return false;
+    }
+
+    return class == IA64_EFI_CLASS_COMPUTING ||
+           class == IA64_EFI_CLASS_PERIPHERAL ||
+           class == IA64_EFI_CLASS_IO_BUS ||
+           class == IA64_EFI_CLASS_SOFTWARE;
+}
+
+static const char *ia64_fw_status_class_name(uint32_t class)
+{
+    switch (class) {
+    case IA64_EFI_CLASS_COMPUTING:
+        return "COMPUTING";
+    case IA64_EFI_CLASS_PERIPHERAL:
+        return "PERIPHERAL";
+    case IA64_EFI_CLASS_IO_BUS:
+        return "IO_BUS";
+    case IA64_EFI_CLASS_SOFTWARE:
+        return "SOFTWARE";
+    default:
+        return NULL;
+    }
+}
+
+static const char *ia64_fw_status_subclass_name(uint32_t value)
+{
+    if ((value & IA64_EFI_STATUS_CODE_CLASS_MASK) == IA64_EFI_CLASS_IO_BUS &&
+        (value & IA64_EFI_STATUS_CODE_SUBCLASS_MASK) ==
+            IA64_EFI_IO_BUS_PCI_SUBCLASS) {
+        return "PCI";
+    }
+    return NULL;
 }
 
 static const char *ia64_fw_decode_sala_post_code(uint16_t code)
@@ -3325,23 +3377,25 @@ static void ia64_fw_break0_scan_status_records_impl(CPUState *cpu,
 
     if (!*out_found_assert && depth < 2) {
         const size_t max_qwords = MIN(scan_window / 8, 256);
+        uint64_t start_phys = ia64_phys_mode_addr(start);
         int follow_limit = (depth == 0) ? 16 : 8;
         int followed = 0;
         for (size_t qi = 0; qi < max_qwords && !*out_found_assert; qi++) {
             uint64_t p = ldq_le_p(&buf[qi * 8]);
+            uint64_t phys = ia64_phys_mode_addr(p);
             if (p < 0x1000) {
                 continue;
             }
-            if (p >= (1ULL << 32)) {
+            if (phys < 0x1000 || phys >= (1ULL << 32)) {
                 continue;
             }
             /* Skip pointers that fall inside the window we already scanned. */
-            if (p >= start && p < start + scan_window) {
+            if (phys >= start_phys && phys < start_phys + scan_window) {
                 continue;
             }
             /* Heuristic: prefer pool-ish RAM and firmware windows. */
-            if (!((p >= 0x1e000000ULL && p < 0x30000000ULL) ||
-                  (p >= 0xff000000ULL && p < 0x100000000ULL))) {
+            if (!((phys >= 0x1e000000ULL && phys < 0x30000000ULL) ||
+                  (phys >= 0xff000000ULL && phys < 0x100000000ULL))) {
                 continue;
             }
             if (followed++ >= follow_limit) {
@@ -3478,6 +3532,9 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     static int log_limit = -1;
     static int log_count;
     static int gcd_dump_enabled = -1;
+    static int scan_always = -1;
+    static int scan_limit = -1;
+    static int scan_count;
 
     ia64_fw_try_install_sal_systab(env);
 #ifndef CONFIG_USER_ONLY
@@ -3488,11 +3545,18 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     uint32_t value = (uint32_t)env->r[33];
     uint32_t alt_code_type = (uint32_t)env->r[8];
     uint32_t alt_value = (uint32_t)env->r[9];
+    uint32_t log_code_type = code_type;
+    uint32_t log_value = value;
     bool is_assert = ia64_fw_status_is_assert(code_type, value);
     if (!is_assert && ia64_fw_status_is_assert(alt_code_type, alt_value)) {
         is_assert = true;
         code_type = alt_code_type;
         value = alt_value;
+    }
+    if (!ia64_fw_status_code_valid(log_code_type, log_value) &&
+        ia64_fw_status_code_valid(alt_code_type, alt_value)) {
+        log_code_type = alt_code_type;
+        log_value = alt_value;
     }
 
     if (dump_enabled == -1) {
@@ -3520,6 +3584,20 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         const char *s = getenv("QEMU_IA64_FW_GCD_DUMP");
         gcd_dump_enabled = (s && *s) ? 1 : 0;
     }
+    if (scan_always == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_SCAN_ALWAYS");
+        scan_always = (s && *s) ? 1 : 0;
+    }
+    if (scan_limit == -1) {
+        scan_limit = 0;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_SCAN_LIMIT");
+        if (s && *s) {
+            scan_limit = atoi(s);
+        }
+        if (scan_limit < 0) {
+            scan_limit = 0;
+        }
+    }
 
     if (log_limit == -1) {
         log_limit = 128;
@@ -3538,6 +3616,22 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     const char *post_desc_alt = (post_code_alt != post_code) ?
                                 ia64_fw_decode_sala_post_code(post_code_alt) :
                                 NULL;
+    uint8_t post_code_efi = 0;
+    const char *class_name = NULL;
+    const char *subclass_name = NULL;
+    if (ia64_fw_status_code_valid(log_code_type, log_value)) {
+        class_name = ia64_fw_status_class_name(
+            log_value & IA64_EFI_STATUS_CODE_CLASS_MASK);
+        subclass_name = ia64_fw_status_subclass_name(log_value);
+        if ((log_code_type & IA64_EFI_STATUS_CODE_TYPE_MASK) ==
+                IA64_EFI_PROGRESS_CODE ||
+            (log_code_type & IA64_EFI_STATUS_CODE_TYPE_MASK) ==
+                IA64_EFI_ERROR_CODE) {
+            post_code_efi = (uint8_t)
+                ((((log_value & IA64_EFI_STATUS_CODE_CLASS_MASK) >> 24) << 5) |
+                 (((log_value & IA64_EFI_STATUS_CODE_SUBCLASS_MASK) >> 16) & 0x1f));
+        }
+    }
 
     if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
         (log_limit == 0 || log_count++ < log_limit)) {
@@ -3551,6 +3645,24 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                       env->ip, pc, env->b[0], is_assert ? 1 : 0,
                       env->r[8], env->r[9], env->r[10], env->r[11],
                       env->r[32], env->r[33], env->r[34], env->r[35], env->r[36]);
+        if (ia64_fw_status_code_valid(log_code_type, log_value)) {
+            const char *class_open = class_name ? "(" : "";
+            const char *class_close = class_name ? ")" : "";
+            const char *sub_open = subclass_name ? "(" : "";
+            const char *sub_close = subclass_name ? ")" : "";
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_status type=%08x severity=%08x value=%08x"
+                          " class=%02x%s%s%s subclass=%02x%s%s%s op=%04x post=0x%02x\n",
+                          log_code_type,
+                          log_code_type & IA64_EFI_STATUS_CODE_SEVERITY_MASK,
+                          log_value,
+                          (unsigned)((log_value & IA64_EFI_STATUS_CODE_CLASS_MASK) >> 24),
+                          class_open, class_name ? class_name : "", class_close,
+                          (unsigned)((log_value & IA64_EFI_STATUS_CODE_SUBCLASS_MASK) >> 16),
+                          sub_open, subclass_name ? subclass_name : "", sub_close,
+                          (unsigned)(log_value & IA64_EFI_STATUS_CODE_OPERATION_MASK),
+                          (unsigned)post_code_efi);
+        }
         if (post_desc) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: fw_post r33=0x%04x %s\n",
@@ -3563,7 +3675,10 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         }
     }
 
-    if (is_assert) {
+    bool do_scan = (is_assert || scan_always) &&
+                   (scan_limit == 0 || scan_count++ < scan_limit);
+
+    if (do_scan) {
         CPUState *cs = env_cpu(env);
         static int stack_dump_enabled = -1;
         static int stack_dump_len = -1;
@@ -3591,11 +3706,16 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             { "r9", env->r[9] },
             { "r10", env->r[10] },
             { "r11", env->r[11] },
+            { "r32", env->r[32] },
+            { "r33", env->r[33] },
+            { "r34", env->r[34] },
+            { "r35", env->r[35] },
+            { "r36", env->r[36] },
         };
 
         for (size_t i = 0; i < ARRAY_SIZE(probes); i++) {
             uint64_t a = probes[i].val;
-            if (a < 0x1000 || a >= (1ULL << 32)) {
+            if (a < 0x1000) {
                 continue;
             }
             uint8_t tmp[64];

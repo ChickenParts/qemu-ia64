@@ -2375,15 +2375,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         }
                     }
                 } else {
-                    if (in_fw) {
-                        gen_unimpl(ctx, insn, "break.m imm");
-                    } else {
-                        gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                        if (qp == 0) {
-                            ctx->base.is_jmp = DISAS_NORETURN;
-                        }
-                        tcg_gen_exit_tb(NULL, 0);
+                    gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+                    if (qp == 0) {
+                        ctx->base.is_jmp = DISAS_NORETURN;
                     }
+                    tcg_gen_exit_tb(NULL, 0);
                 }
             } else {
                 gen_unimpl(ctx, insn, "M-slot");
