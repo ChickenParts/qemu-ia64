@@ -762,6 +762,112 @@ static void ipf_fw_scan_firmware(const uint8_t *buf, size_t size,
                   fv_count, size, fw_base);
 }
 
+static bool ipf_fw_find_dxe_core(const uint8_t *buf, size_t size,
+                                 size_t *off_out, uint64_t *size_out)
+{
+    for (size_t base = 0; base + 0x38 <= size; base += 0x10) {
+        if (ldl_le_p(&buf[base + 0x28]) != EFI_FVH_SIGNATURE) {
+            continue;
+        }
+        uint64_t fv_len = ldq_le_p(&buf[base + 0x20]);
+        uint16_t hdr_len = lduw_le_p(&buf[base + 0x30]);
+        if (fv_len < 0x38 || fv_len > (size - base)) {
+            continue;
+        }
+        if (hdr_len < 0x38 || hdr_len > fv_len) {
+            continue;
+        }
+
+        size_t fv_end = base + (size_t)fv_len;
+        size_t off = base + (size_t)hdr_len;
+        while (off + EFI_FFS_FILE_HEADER_SIZE <= fv_end && off + 16 <= size) {
+            const uint8_t *fh = &buf[off];
+            if (ipf_fw_is_erased(fh, EFI_FFS_FILE_HEADER_SIZE)) {
+                break;
+            }
+
+            uint8_t type = fh[18];
+            uint32_t size24 = (uint32_t)fh[20] |
+                              ((uint32_t)fh[21] << 8) |
+                              ((uint32_t)fh[22] << 16);
+            uint64_t fsize = size24;
+            size_t hdr_size = EFI_FFS_FILE_HEADER_SIZE;
+
+            if (size24 == 0xffffff) {
+                if (off + EFI_FFS_FILE_HEADER2_SIZE > fv_end) {
+                    break;
+                }
+                fsize = ldq_le_p(&fh[24]);
+                hdr_size = EFI_FFS_FILE_HEADER2_SIZE;
+            }
+            if (fsize < hdr_size || off + fsize > fv_end) {
+                break;
+            }
+
+            if (type == EFI_FV_FILETYPE_DXE_CORE) {
+                if (off_out) {
+                    *off_out = off;
+                }
+                if (size_out) {
+                    *size_out = fsize;
+                }
+                return true;
+            }
+
+            off += ipf_fw_align_up((size_t)fsize, 8);
+        }
+    }
+    return false;
+}
+
+static void ipf_fw_dump_dxe_core(const uint8_t *buf, size_t size,
+                                 hwaddr fw_base)
+{
+    size_t off = 0;
+    uint64_t fsize = 0;
+    if (!ipf_fw_find_dxe_core(buf, size, &off, &fsize)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: FW DXE dump: DXE core not found\n");
+        return;
+    }
+    const uint8_t *fh = &buf[off];
+    char guid[48];
+    ipf_fw_guid_to_str(guid, sizeof(guid), fh);
+    uint8_t type = fh[18];
+    uint8_t attr = fh[19];
+    uint8_t state = fh[23];
+    uint32_t size24 = (uint32_t)fh[20] |
+                      ((uint32_t)fh[21] << 8) |
+                      ((uint32_t)fh[22] << 16);
+    uint64_t ext_size = 0;
+    bool ext = (size24 == 0xffffff);
+    if (ext && off + EFI_FFS_FILE_HEADER2_SIZE <= size) {
+        ext_size = ldq_le_p(&fh[24]);
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IPF: FW DXE dump: off=0x%zx phys=%016" HWADDR_PRIx
+                  " type=%02x attr=%02x state=%02x size=0x%" PRIx64
+                  " ext=%d guid=%s\n",
+                  off, fw_base + off, type, attr, state,
+                  ext ? ext_size : (uint64_t)size24, ext ? 1 : 0, guid);
+
+    g_mkdir_with_parents("scratch/ia64_logs", 0755);
+    char path[256];
+    snprintf(path, sizeof(path),
+             "scratch/ia64_logs/fw_dxe_core_header_%016" HWADDR_PRIx ".bin",
+             fw_base + off);
+    FILE *fp = fopen(path, "wb");
+    if (fp) {
+        size_t dump_len = MIN((size_t)64, size - off);
+        fwrite(fh, 1, dump_len, fp);
+        fclose(fp);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: FW DXE dump: wrote %s (%zu bytes)\n",
+                      path, dump_len);
+    }
+}
+
 static void ipf_patch_firmware_statuscode_callgate(void)
 {
     /*
@@ -879,6 +985,7 @@ static void ipf_patch_firmware_statuscode_callgate(void)
 typedef struct IpfTextWatch {
     MemoryRegion mr;
     uint8_t *ram_ptr;
+    hwaddr ram_base;
     hwaddr pa_base;
     IA64CPU *cpu;
     uint32_t read_count;
@@ -889,7 +996,9 @@ static uint64_t ipf_text_watch_read(void *opaque, hwaddr addr, unsigned size)
 {
     IpfTextWatch *w = opaque;
     CPUIA64State *env = w->cpu ? &w->cpu->env : NULL;
-    uint8_t *p = w->ram_ptr + w->pa_base + addr;
+    hwaddr base = (w->pa_base >= w->ram_base) ?
+                  (w->pa_base - w->ram_base) : 0;
+    uint8_t *p = w->ram_ptr + base + addr;
     hwaddr pa = w->pa_base + addr;
     uint64_t ret = 0;
 
@@ -978,7 +1087,9 @@ static void ipf_text_watch_write(void *opaque, hwaddr addr, uint64_t data,
     IpfTextWatch *w = opaque;
     CPUIA64State *env = w->cpu ? &w->cpu->env : NULL;
     hwaddr pa = w->pa_base + addr;
-    uint8_t *p = w->ram_ptr + w->pa_base + addr;
+    hwaddr base = (w->pa_base >= w->ram_base) ?
+                  (w->pa_base - w->ram_base) : 0;
+    uint8_t *p = w->ram_ptr + base + addr;
 
     static int watch_limit = -1;
     if (watch_limit == -1) {
@@ -1063,13 +1174,15 @@ static const MemoryRegionOps ipf_text_watch_ops = {
 };
 
 static void ipf_add_text_watch(IPFMachineState *m, MemoryRegion *sysmem,
-                               IA64CPU *cpu, MemoryRegion *ram, hwaddr pa,
-                               hwaddr size, const char *label)
+                               IA64CPU *cpu, MemoryRegion *ram,
+                               hwaddr ram_base, hwaddr pa, hwaddr size,
+                               const char *label)
 {
     for (size_t i = 0; i < ARRAY_SIZE(m->text_watch); i++) {
         if (!m->text_watch[i]) {
             IpfTextWatch *w = g_new0(IpfTextWatch, 1);
             w->ram_ptr = memory_region_get_ram_ptr(ram);
+            w->ram_base = ram_base;
             w->pa_base = pa;
             w->cpu = cpu;
             memory_region_init_io(&w->mr, OBJECT(m), &ipf_text_watch_ops, w,
@@ -2998,6 +3111,54 @@ static void ipf_init(MachineState *machine)
                             MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
         cpu_flush_icache_range(fw_offset, (size_t)image_size);
         DPRINTF("Loaded firmware '%s' at 0x%lx\n", bios_name, fw_offset);
+        if (run_firmware) {
+            const char *dxe_dump = getenv("QEMU_IPF_FW_DXE_DUMP");
+            if (dxe_dump && *dxe_dump) {
+                ipf_fw_dump_dxe_core(buf, (size_t)image_size, fw_offset);
+            }
+
+            const char *watch_dxe = getenv("QEMU_IPF_FW_WATCH_DXE");
+            if (watch_dxe && *watch_dxe) {
+                size_t off = 0;
+                uint64_t fsize = 0;
+                if (ipf_fw_find_dxe_core(buf, (size_t)image_size, &off, &fsize)) {
+                    if (fsize > 0) {
+                        ipf_add_text_watch(m, sysmem, cpu, &m->rom, GFW_START,
+                                           fw_offset + (hwaddr)off,
+                                           (hwaddr)fsize, "fw_dxe_core");
+                    }
+                } else {
+                    fprintf(stderr, "IPF_TEXT_WATCH: DXE core not found\n");
+                }
+            }
+
+            const char *watch_range = getenv("QEMU_IPF_FW_WATCH_RANGE");
+            if (watch_range && *watch_range) {
+                uint64_t lo = 0;
+                uint64_t hi = 0;
+                if (ipf_parse_range(watch_range, &lo, &hi)) {
+                    uint64_t size64 = (hi >= lo) ? (hi - lo + 1) : 0;
+                    hwaddr pa = (hwaddr)lo;
+                    if (lo < (uint64_t)image_size && hi < (uint64_t)image_size) {
+                        pa = fw_offset + (hwaddr)lo;
+                    }
+                    uint64_t end = (uint64_t)pa + size64;
+                    if (size64 == 0 || end < (uint64_t)pa) {
+                        fprintf(stderr,
+                                "IPF_TEXT_WATCH: invalid fw range size\n");
+                    } else if (pa < GFW_START || end > (GFW_START + GFW_SIZE)) {
+                        fprintf(stderr,
+                                "IPF_TEXT_WATCH: fw range outside GFW window\n");
+                    } else {
+                        ipf_add_text_watch(m, sysmem, cpu, &m->rom, GFW_START,
+                                           pa, (hwaddr)size64, "fw_range");
+                    }
+                } else {
+                    fprintf(stderr,
+                            "IPF_TEXT_WATCH: invalid QEMU_IPF_FW_WATCH_RANGE\n");
+                }
+            }
+        }
 
         if (ipf_gfw_build_hob(machine->ram_size, machine->smp.cpus,
                               NVRAM_START) < 0) {
@@ -3114,7 +3275,7 @@ static void ipf_init(MachineState *machine)
             (strcmp(watch, "ia64_bad_break") == 0) ||
             (strcmp(watch, "all") == 0)) {
             if (ipf_sym_ia64_bad_break) {
-                ipf_add_text_watch(m, sysmem, cpu, machine->ram,
+                ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0,
                                    ipf_sym_ia64_bad_break - ipf_kernel_bias,
                                    0x20, "ia64_bad_break");
             } else {
@@ -3125,7 +3286,7 @@ static void ipf_init(MachineState *machine)
         if ((strcmp(watch, "search_extable") == 0) ||
             (strcmp(watch, "all") == 0)) {
             if (ipf_sym_search_extable) {
-                ipf_add_text_watch(m, sysmem, cpu, machine->ram,
+                ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0,
                                    ipf_sym_search_extable - ipf_kernel_bias,
                                    0x20, "search_extable");
             } else {
@@ -3156,7 +3317,7 @@ static void ipf_init(MachineState *machine)
         if (strcmp(w, "console_srcu") == 0 || strcmp(w, "console_srcu+8") == 0) {
             const uint64_t console_srcu_va = 0xa000000101f57678ULL;
             pa = (console_srcu_va + 8) - ipf_kernel_bias;
-            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
+            ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
                                data_watches[wi].label);
         } else if (strcmp(w, "console_owner") == 0) {
             if (!ipf_sym_console_owner) {
@@ -3166,7 +3327,7 @@ static void ipf_init(MachineState *machine)
             }
             pa = ipf_sym_console_owner - ipf_kernel_bias;
             size = 8;
-            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
+            ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
                                "console_owner");
         } else if (strcmp(w, "console_waiter") == 0) {
             if (!ipf_sym_console_waiter) {
@@ -3176,13 +3337,13 @@ static void ipf_init(MachineState *machine)
             }
             pa = ipf_sym_console_waiter - ipf_kernel_bias;
             size = 1;
-            ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
+            ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
                                "console_waiter");
         } else {
             char *endp = NULL;
             pa = (hwaddr)strtoull(w, &endp, 0);
             if (endp && endp != w) {
-                ipf_add_text_watch(m, sysmem, cpu, machine->ram, pa, size,
+                ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
                                    data_watches[wi].label);
             }
         }

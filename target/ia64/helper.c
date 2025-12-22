@@ -1979,6 +1979,81 @@ static const char *ia64_fw_status_subclass_name(uint32_t value)
     return NULL;
 }
 
+#define IA64_EFI_STATUS_ERROR_BIT (1ULL << 63)
+
+static const char *ia64_fw_efi_status_name(uint64_t status)
+{
+    uint64_t code = status & ~IA64_EFI_STATUS_ERROR_BIT;
+
+    if (status == 0) {
+        return "EFI_SUCCESS";
+    }
+
+    if (status & IA64_EFI_STATUS_ERROR_BIT) {
+        switch (code) {
+        case 1: return "EFI_LOAD_ERROR";
+        case 2: return "EFI_INVALID_PARAMETER";
+        case 3: return "EFI_UNSUPPORTED";
+        case 4: return "EFI_BAD_BUFFER_SIZE";
+        case 5: return "EFI_BUFFER_TOO_SMALL";
+        case 6: return "EFI_NOT_READY";
+        case 7: return "EFI_DEVICE_ERROR";
+        case 8: return "EFI_WRITE_PROTECTED";
+        case 9: return "EFI_OUT_OF_RESOURCES";
+        case 10: return "EFI_VOLUME_CORRUPTED";
+        case 11: return "EFI_VOLUME_FULL";
+        case 12: return "EFI_NO_MEDIA";
+        case 13: return "EFI_MEDIA_CHANGED";
+        case 14: return "EFI_NOT_FOUND";
+        case 15: return "EFI_ACCESS_DENIED";
+        case 16: return "EFI_NO_RESPONSE";
+        case 17: return "EFI_NO_MAPPING";
+        case 18: return "EFI_TIMEOUT";
+        case 19: return "EFI_NOT_STARTED";
+        case 20: return "EFI_ALREADY_STARTED";
+        case 21: return "EFI_ABORTED";
+        case 22: return "EFI_ICMP_ERROR";
+        case 23: return "EFI_TFTP_ERROR";
+        case 24: return "EFI_PROTOCOL_ERROR";
+        case 25: return "EFI_INCOMPATIBLE_VERSION";
+        case 26: return "EFI_SECURITY_VIOLATION";
+        case 27: return "EFI_CRC_ERROR";
+        case 28: return "EFI_END_OF_MEDIA";
+        case 31: return "EFI_END_OF_FILE";
+        case 32: return "EFI_INVALID_LANGUAGE";
+        case 33: return "EFI_COMPROMISED_DATA";
+        case 34: return "EFI_IP_ADDRESS_CONFLICT";
+        case 35: return "EFI_HTTP_ERROR";
+        default:
+            return NULL;
+        }
+    }
+
+    switch (code) {
+    case 1: return "EFI_WARN_UNKNOWN_GLYPH";
+    case 2: return "EFI_WARN_DELETE_FAILURE";
+    case 3: return "EFI_WARN_WRITE_FAILURE";
+    case 4: return "EFI_WARN_BUFFER_TOO_SMALL";
+    case 5: return "EFI_WARN_STALE_DATA";
+    case 6: return "EFI_WARN_FILE_SYSTEM";
+    case 7: return "EFI_WARN_RESET_REQUIRED";
+    default:
+        return NULL;
+    }
+}
+
+static bool ia64_fw_efi_status_maybe(uint64_t status)
+{
+    if (status == 0) {
+        return true;
+    }
+    uint64_t code = status & ~IA64_EFI_STATUS_ERROR_BIT;
+    if (code == 0 || code > 0x2000) {
+        return false;
+    }
+    return true;
+}
+
 static const char *ia64_fw_decode_sala_post_code(uint16_t code)
 {
     switch (code) {
@@ -3694,6 +3769,40 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: fw_post r9=0x%04x %s\n",
                           post_code_alt, post_desc_alt);
+        }
+    }
+
+    if (is_assert && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        uint64_t status = env->r[8];
+        if (ia64_fw_efi_status_maybe(status)) {
+            const char *name = ia64_fw_efi_status_name(status);
+            if (name) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_assert_status r8=%016" PRIx64 " %s\n",
+                              status, name);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_assert_status r8=%016" PRIx64
+                              " code=0x%llx\n",
+                              status,
+                              (unsigned long long)(status & ~IA64_EFI_STATUS_ERROR_BIT));
+            }
+        }
+
+        status = env->r[9];
+        if (status != env->r[8] && ia64_fw_efi_status_maybe(status)) {
+            const char *name = ia64_fw_efi_status_name(status);
+            if (name) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_assert_status r9=%016" PRIx64 " %s\n",
+                              status, name);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_assert_status r9=%016" PRIx64
+                              " code=0x%llx\n",
+                              status,
+                              (unsigned long long)(status & ~IA64_EFI_STATUS_ERROR_BIT));
+            }
         }
     }
 
