@@ -675,6 +675,24 @@ static bool ia64_fw_break_hypercall_enabled(void)
     return enabled;
 }
 
+static void ia64_fw_break_hypercall_log(uint64_t pc, uint64_t imm, bool in_fw,
+                                        bool enabled)
+{
+    static int log_enabled = -1;
+    static int log_count;
+    if (log_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK_LOG");
+        log_enabled = (s && *s) ? 1 : 0;
+    }
+    if (!log_enabled || log_count++ >= 16) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_break pc=%016" PRIx64 " imm=%08" PRIx64
+                  " in_fw=%d hypercall=%d\n",
+                  pc, imm, in_fw ? 1 : 0, enabled ? 1 : 0);
+}
+
 static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)
 {
     uint8_t qp = insn & 0x3f;
@@ -2304,6 +2322,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint64_t imm = (extract64(insn, 36, 1) << 20) |
                                extract64(insn, 6, 20);
                 bool in_fw = ia64_pc_in_fw(ctx->base.pc_next);
+                bool fw_hypercall = ia64_fw_break_hypercall_enabled();
+                ia64_fw_break_hypercall_log(ctx->base.pc_next, imm, in_fw, fw_hypercall);
                 if (imm == 0x80000 || imm == 0x80001) {
                     TCGv_i64 timm = tcg_temp_new_i64();
                     tcg_gen_movi_i64(timm, imm);
@@ -2320,7 +2340,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                      * can run under TCG without taking a break fault.
                      */
                     uint64_t nr = imm >> 8;
-                    if (in_fw && !ia64_fw_break_hypercall_enabled()) {
+                    if (in_fw && !fw_hypercall) {
                         gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
                         if (qp == 0) {
                             ctx->base.is_jmp = DISAS_NORETURN;
