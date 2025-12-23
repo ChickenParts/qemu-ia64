@@ -2452,6 +2452,32 @@ static int ia64_fw_pei_locate_trace_limit(void)
     return limit;
 }
 
+static bool ia64_fw_pei_install_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_INSTALL_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_pei_install_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 128;
+        const char *s = getenv("QEMU_IA64_PEI_INSTALL_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
 static bool ia64_fw_decode_pci_addr(uint64_t addr, uint16_t *seg,
                                     uint8_t *bus, uint8_t *devfn,
                                     uint16_t *reg)
@@ -5856,6 +5882,86 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
         }
     }
 
+    if (ia64_fw_pei_install_trace_enabled()) {
+        static int pei_install_count;
+        int limit = ia64_fw_pei_install_trace_limit();
+        if (limit == 0 || pei_install_count < limit) {
+            CPUState *cs = env_cpu(env);
+            uint64_t ps_ptr = 0;
+            if (ia64_fw_pei_get_ps_ptr(env, call_a0, &ps_ptr)) {
+                uint64_t plabel = 0;
+                uint64_t entry = 0;
+                if (ia64_fw_read_u64(cs, ps_ptr + 0x18, &plabel) &&
+                    plabel != 0 &&
+                    ia64_fw_read_u64(cs, plabel, &entry) &&
+                    entry != 0 &&
+                    ((entry ^ tgt) & ~0xFULL) == 0) {
+                    uint64_t desc_ptr = call_a1;
+                    uint64_t flags = 0;
+                    uint64_t guid_ptr = 0;
+                    uint64_t ppi_ptr = 0;
+                    bool desc_ok = false;
+                    if (desc_ptr) {
+                        uint8_t desc[24];
+                        if (ia64_fw_read_bytes_any(cs, desc_ptr,
+                                                   desc, sizeof(desc))) {
+                            flags = ldq_le_p(&desc[0]);
+                            guid_ptr = ldq_le_p(&desc[8]);
+                            ppi_ptr = ldq_le_p(&desc[16]);
+                            desc_ok = true;
+                        }
+                    }
+                    uint8_t guid_bytes[16];
+                    IA64EfiGuid guid;
+                    bool guid_ok = false;
+                    if (desc_ok && guid_ptr &&
+                        ia64_fw_read_bytes_any(cs, guid_ptr,
+                                               guid_bytes, sizeof(guid_bytes))) {
+                        ia64_fw_guid_from_bytes(guid_bytes, &guid);
+                        memcpy(env->fw_pei_install_guid,
+                               guid_bytes, sizeof(guid_bytes));
+                        env->fw_pei_install_guid_valid = 1;
+                        guid_ok = true;
+                    } else {
+                        env->fw_pei_install_guid_valid = 0;
+                    }
+                    env->fw_pei_ps = ps_ptr;
+                    env->fw_pei_install_ret_pc = pc + 16;
+                    env->fw_pei_install_desc_ptr = desc_ptr;
+
+                    if (guid_ok) {
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: pei_install_call pc=%016" PRIx64
+                                      " tgt=%016" PRIx64 " ps=%016" PRIx64
+                                      " plabel=%016" PRIx64 " entry=%016" PRIx64
+                                      " desc=%016" PRIx64 " flags=%016" PRIx64
+                                      " ppi=%016" PRIx64
+                                      " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                      pc, tgt, ps_ptr, plabel, entry,
+                                      desc_ptr, flags, ppi_ptr,
+                                      guid.data1, guid.data2, guid.data3,
+                                      guid.data4[0], guid.data4[1],
+                                      guid.data4[2], guid.data4[3],
+                                      guid.data4[4], guid.data4[5],
+                                      guid.data4[6], guid.data4[7]);
+                    } else {
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: pei_install_call pc=%016" PRIx64
+                                      " tgt=%016" PRIx64 " ps=%016" PRIx64
+                                      " plabel=%016" PRIx64 " entry=%016" PRIx64
+                                      " desc=%016" PRIx64 " flags=%016" PRIx64
+                                      " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
+                                      " desc_ok=%d\n",
+                                      pc, tgt, ps_ptr, plabel, entry,
+                                      desc_ptr, flags, ppi_ptr, guid_ptr,
+                                      desc_ok ? 1 : 0);
+                    }
+                    pei_install_count++;
+                }
+            }
+        }
+    }
+
     if (trace_call_match_a0 &&
         call_a0 == trace_call_match_a0 &&
         (!trace_call_match_a1 || call_a1 == trace_call_match_a1)) {
@@ -6398,6 +6504,54 @@ void HELPER(ret_restore)(CPUIA64State *env)
         env->fw_pei_locate_ret_pc = 0;
         env->fw_pei_locate_guid_valid = 0;
     }
+    if (ia64_fw_pei_install_trace_enabled() &&
+        env->fw_pei_install_ret_pc &&
+        ((env->b[0] ^ env->fw_pei_install_ret_pc) & ~0xFULL) == 0) {
+        CPUState *cs = env_cpu(env);
+        uint64_t flags = 0;
+        uint64_t guid_ptr = 0;
+        uint64_t ppi_ptr = 0;
+        bool desc_ok = false;
+        if (env->fw_pei_install_desc_ptr) {
+            uint8_t desc[24];
+            if (ia64_fw_read_bytes_any(cs, env->fw_pei_install_desc_ptr,
+                                       desc, sizeof(desc))) {
+                flags = ldq_le_p(&desc[0]);
+                guid_ptr = ldq_le_p(&desc[8]);
+                ppi_ptr = ldq_le_p(&desc[16]);
+                desc_ok = true;
+            }
+        }
+        if (env->fw_pei_install_guid_valid) {
+            IA64EfiGuid guid;
+            ia64_fw_guid_from_bytes(env->fw_pei_install_guid, &guid);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_ret ip=%016" PRIx64
+                          " b0=%016" PRIx64 " status=%016" PRIx64
+                          " desc=%016" PRIx64 " flags=%016" PRIx64
+                          " ppi=%016" PRIx64
+                          " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                          env->ip, env->b[0], env->r[8],
+                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                          guid.data1, guid.data2, guid.data3,
+                          guid.data4[0], guid.data4[1],
+                          guid.data4[2], guid.data4[3],
+                          guid.data4[4], guid.data4[5],
+                          guid.data4[6], guid.data4[7]);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_ret ip=%016" PRIx64
+                          " b0=%016" PRIx64 " status=%016" PRIx64
+                          " desc=%016" PRIx64 " flags=%016" PRIx64
+                          " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
+                          " desc_ok=%d\n",
+                          env->ip, env->b[0], env->r[8],
+                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                          guid_ptr, desc_ok ? 1 : 0);
+        }
+        env->fw_pei_install_ret_pc = 0;
+        env->fw_pei_install_guid_valid = 0;
+    }
     uint64_t bsp = ia64_rse_get_bsp(env);
     uint8_t sof = env->cfm & 0x7f;
     ia64_rse_store_frame(env, bsp, sof);
@@ -6475,6 +6629,54 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
         }
         env->fw_pei_locate_ret_pc = 0;
         env->fw_pei_locate_guid_valid = 0;
+    }
+    if (ia64_fw_pei_install_trace_enabled() &&
+        env->fw_pei_install_ret_pc &&
+        ((env->b[0] ^ env->fw_pei_install_ret_pc) & ~0xFULL) == 0) {
+        CPUState *cs = env_cpu(env);
+        uint64_t flags = 0;
+        uint64_t guid_ptr = 0;
+        uint64_t ppi_ptr = 0;
+        bool desc_ok = false;
+        if (env->fw_pei_install_desc_ptr) {
+            uint8_t desc[24];
+            if (ia64_fw_read_bytes_any(cs, env->fw_pei_install_desc_ptr,
+                                       desc, sizeof(desc))) {
+                flags = ldq_le_p(&desc[0]);
+                guid_ptr = ldq_le_p(&desc[8]);
+                ppi_ptr = ldq_le_p(&desc[16]);
+                desc_ok = true;
+            }
+        }
+        if (env->fw_pei_install_guid_valid) {
+            IA64EfiGuid guid;
+            ia64_fw_guid_from_bytes(env->fw_pei_install_guid, &guid);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_ret_b0 ip=%016" PRIx64
+                          " b0=%016" PRIx64 " status=%016" PRIx64
+                          " desc=%016" PRIx64 " flags=%016" PRIx64
+                          " ppi=%016" PRIx64
+                          " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                          env->ip, env->b[0], env->r[8],
+                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                          guid.data1, guid.data2, guid.data3,
+                          guid.data4[0], guid.data4[1],
+                          guid.data4[2], guid.data4[3],
+                          guid.data4[4], guid.data4[5],
+                          guid.data4[6], guid.data4[7]);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_ret_b0 ip=%016" PRIx64
+                          " b0=%016" PRIx64 " status=%016" PRIx64
+                          " desc=%016" PRIx64 " flags=%016" PRIx64
+                          " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
+                          " desc_ok=%d\n",
+                          env->ip, env->b[0], env->r[8],
+                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                          guid_ptr, desc_ok ? 1 : 0);
+        }
+        env->fw_pei_install_ret_pc = 0;
+        env->fw_pei_install_guid_valid = 0;
     }
 
     if (do_pop) {
@@ -8837,15 +9039,25 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
         return;
     }
 
+    static int clear_oldcore = -1;
+    if (clear_oldcore == -1) {
+        clear_oldcore = getenv("QEMU_IA64_PEI_CLEAR_OLDCORE") ? 1 : 0;
+    }
+
+    uint64_t oldcore = env->r[34];
     env->r[32] = handoff;
     env->r[33] = ppi;
+    if (clear_oldcore) {
+        env->r[34] = 0;
+    }
 
     if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         logged = true;
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_entry_fix pc=%016" PRIx64
-                      " handoff=%016" PRIx64 " ppi=%016" PRIx64 "\n",
-                      pc, handoff, ppi);
+                      " handoff=%016" PRIx64 " ppi=%016" PRIx64
+                      " old=%016" PRIx64 " oldcore=%016" PRIx64 "\n",
+                      pc, handoff, ppi, env->r[34], oldcore);
     }
 #endif
 }
