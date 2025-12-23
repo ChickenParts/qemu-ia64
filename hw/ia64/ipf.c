@@ -31,6 +31,7 @@
 #include "hw/i386/pc.h"
 /* #include "fdc.h" */
 #include "hw/pci/pci.h"
+#include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_host.h"
 #include "hw/southbridge/piix.h"
 #include "qemu/cutils.h"
@@ -3012,10 +3013,10 @@ static void ipf_pci_root_class_init(ObjectClass *klass, const void *data)
     /*
      * The xenipf guest firmware expects a conventional host bridge at 00:00.0.
      * Vendor/device IDs are not currently used by our platform code; pick an
-     * Intel host bridge-like identity and correct class code.
+     * Intel 82441FX-compatible host bridge identity and class code.
      */
     k->vendor_id = PCI_VENDOR_ID_INTEL;
-    k->device_id = 0x122e;
+    k->device_id = PCI_DEVICE_ID_INTEL_82441;
     k->revision = 0;
     k->class_id = PCI_CLASS_BRIDGE_HOST;
 
@@ -3050,9 +3051,9 @@ static void ipf_init_southbridge(IPFMachineState *m)
 {
     /*
      * Original IPF hardware used an Intel PCI-to-ISA southbridge.
-     * Provide a PIIX3-compatible device so firmware can discover it.
+     * Provide a PIIX4-compatible device so firmware can discover it.
      */
-    PCIDevice *piix = pci_new_multifunction(PCI_DEVFN(1, 0), TYPE_PIIX3_DEVICE);
+    PCIDevice *piix = pci_new_multifunction(PCI_DEVFN(1, 0), TYPE_PIIX4_PCI_DEVICE);
     pci_realize_and_unref(piix, m->pcibus, &error_fatal);
 }
 
