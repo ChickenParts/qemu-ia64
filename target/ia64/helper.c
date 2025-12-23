@@ -10353,10 +10353,17 @@ fvb_range_log:
         uint64_t arg3 = break_abi ? ia64_fw_arg_break(env, 3)
                                   : ia64_fw_arg(env, out0, 3);
         uint64_t pci_addr = break_abi ? arg2 : arg1;
-        uint64_t size = break_abi ? arg1 : arg2;
+        uint64_t size_raw = break_abi ? arg1 : arg2;
+        uint64_t size = size_raw;
         uint64_t type = arg3;
+        if (break_abi) {
+            uint64_t width_bytes;
+            if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
+                size = width_bytes;
+            }
+        }
         bool size_valid = (size == 1 || size == 2 || size == 4);
-        if (!size_valid) {
+        if (!size_valid && !break_abi) {
             uint64_t width_bytes;
             if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
                 size = width_bytes;
@@ -10369,10 +10376,12 @@ fvb_range_log:
                               "IA64: SAL_PCI_CONFIG_READ invalid size=%" PRIu64
                               " addr=%016" PRIx64 " type=%" PRIu64
                               " break_abi=%d"
+                              " raw=%" PRIu64
                               " cfm=%016" PRIx64 " out0=r%u"
                               " r28=%016" PRIx64 " r29=%016" PRIx64
                               " r30=%016" PRIx64 " r31=%016" PRIx64 "\n",
                               size, pci_addr, type, break_abi ? 1 : 0,
+                              size_raw,
                               env->cfm, out0,
                               env->r[28], env->r[29], env->r[30], env->r[31]);
             }
@@ -10508,11 +10517,18 @@ fvb_range_log:
         uint64_t arg4 = break_abi ? ia64_fw_arg_break(env, 4)
                                   : ia64_fw_arg(env, out0, 4);
         uint64_t pci_addr = break_abi ? arg2 : arg1;
-        uint64_t size = break_abi ? arg1 : arg2;
+        uint64_t size_raw = break_abi ? arg1 : arg2;
+        uint64_t size = size_raw;
         uint64_t value = arg3;
         uint64_t type = arg4;
+        if (break_abi) {
+            uint64_t width_bytes;
+            if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
+                size = width_bytes;
+            }
+        }
         bool size_valid = (size == 1 || size == 2 || size == 4);
-        if (!size_valid) {
+        if (!size_valid && !break_abi) {
             uint64_t width_bytes;
             if (ia64_fw_pci_width_to_bytes(size, &width_bytes)) {
                 size = width_bytes;
@@ -10525,10 +10541,12 @@ fvb_range_log:
                               "IA64: SAL_PCI_CONFIG_WRITE invalid size=%" PRIu64
                               " addr=%016" PRIx64 " type=%" PRIu64
                               " break_abi=%d"
+                              " raw=%" PRIu64
                               " cfm=%016" PRIx64 " out0=r%u"
                               " r28=%016" PRIx64 " r29=%016" PRIx64
                               " r30=%016" PRIx64 " r31=%016" PRIx64 "\n",
                               size, pci_addr, type, break_abi ? 1 : 0,
+                              size_raw,
                               env->cfm, out0,
                               env->r[28], env->r[29], env->r[30], env->r[31]);
             }
