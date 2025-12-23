@@ -1294,6 +1294,18 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     /*
+     * xenipf/EDK firmware: ensure PEI core entry receives the SEC handoff
+     * pointer in r32 (arg0) and the PPI list in r33 (arg1).
+     */
+    if (ctx->mem_idx == MMU_PHYS_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e170ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e170ULL)) {
+        gen_helper_fw_pei_entry_fix(tcg_env,
+                                    tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    /*
      * xenipf/EDK firmware: ensure ar.k4 gets the PEI stack count instead of
      * a clobbered PPI pointer before stack/RSE init.
      */

@@ -8556,6 +8556,34 @@ void HELPER(fw_pei_ppi_fix)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    uint64_t handoff = env->fw_pei_handoff;
+    uint64_t ppi = env->fw_pei_ppi;
+    static bool logged;
+
+    if (!handoff && !ppi) {
+        return;
+    }
+
+    env->r[32] = handoff;
+    env->r[33] = ppi;
+
+    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_entry_fix pc=%016" PRIx64
+                      " handoff=%016" PRIx64 " ppi=%016" PRIx64 "\n",
+                      pc, handoff, ppi);
+    }
+#endif
+}
+
 void HELPER(fw_stack_count_fix)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
