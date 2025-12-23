@@ -8556,6 +8556,31 @@ void HELPER(fw_pei_ppi_fix)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_stack_count_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    uint64_t count = env->fw_pei_stack_count;
+    static bool logged;
+
+    if (count == 0) {
+        return;
+    }
+    env->r[33] = count;
+
+    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_stack_count_fix pc=%016" PRIx64
+                      " r33=%016" PRIx64 "\n",
+                      pc, count);
+    }
+#endif
+}
+
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,

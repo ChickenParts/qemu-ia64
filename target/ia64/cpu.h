@@ -186,6 +186,7 @@ typedef struct CPUArchState {
     /* Firmware bringup: PEI handoff pointers for early call fixups. */
     uint64_t fw_pei_handoff;
     uint64_t fw_pei_ppi;
+    uint64_t fw_pei_stack_count;
 
     /* Debug: last observed EFI PHIT values (xenipf/EDK firmware bringup). */
     uint64_t fw_phit_mem_top;

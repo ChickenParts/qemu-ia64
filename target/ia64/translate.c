@@ -1292,6 +1292,18 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         tcg_gen_exit_tb(NULL, 0);
         return;
     }
+
+    /*
+     * xenipf/EDK firmware: ensure ar.k4 gets the PEI stack count instead of
+     * a clobbered PPI pointer before stack/RSE init.
+     */
+    if (ctx->mem_idx == MMU_PHYS_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e4a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e4a0ULL)) {
+        gen_helper_fw_stack_count_fix(tcg_env,
+                                      tcg_constant_i64(ctx->base.pc_next));
+    }
 #endif
 }
 

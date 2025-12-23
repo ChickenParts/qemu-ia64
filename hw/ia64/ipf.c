@@ -174,6 +174,7 @@ static uint64_t ipf_boot_ip;
 static uint64_t ipf_boot_r28;
 static uint64_t ipf_boot_r9;
 static uint64_t ipf_boot_r10;
+static uint64_t ipf_boot_ppi;
 static uint64_t ipf_ram_size;
 static uint64_t ipf_kernel_low;
 static uint64_t ipf_kernel_high;
@@ -682,7 +683,31 @@ static size_t ipf_fw_align_up(size_t val, size_t align)
 
 static uint64_t ipf_fw_region8_addr(uint64_t phys)
 {
-    return phys | 0x8000000000000000ULL;
+    /*
+     * The xenipf/EDK PEI core performs arithmetic on the handoff pointers.
+     * Keep them in region 0 (physical) so shifts don't propagate sign bits.
+     */
+    return phys;
+}
+
+static uint64_t ipf_fw_boot_r10_count(void)
+{
+    /*
+     * The firmware stack/BSP setup at 0xffe2e630 walks forward from a fixed
+     * base (0xff300000) in 128KiB steps using ar.k4 (boot r10). The firmware
+     * uses 0x80 (16MiB/128KiB) in its later paths, so match that sizing.
+     */
+    const uint64_t stride = 0x20000ULL;
+    if ((IPF_FW_WORKRAM_SIZE % stride) != 0) {
+        error_report("IPF: fw-workram size not aligned to 128KiB");
+        exit(EXIT_FAILURE);
+    }
+    const uint64_t count = IPF_FW_WORKRAM_SIZE / stride;
+    if (count == 0) {
+        error_report("IPF: fw-workram size too small for firmware stack");
+        exit(EXIT_FAILURE);
+    }
+    return count;
 }
 
 static void ipf_fw_guid_to_str(char *out, size_t out_len, const uint8_t *guid)
@@ -1179,22 +1204,26 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     cpu_physical_memory_write(ppi_phys, ppi, sizeof(ppi));
 
     ipf_boot_r9 = ipf_fw_region8_addr(handoff_phys);
-    ipf_boot_r10 = ipf_fw_region8_addr(ppi_phys);
+    ipf_boot_ppi = ipf_fw_region8_addr(ppi_phys);
+    ipf_boot_r10 = ipf_fw_boot_r10_count();
     DPRINTF("PEI handoff: bfv=%016" PRIx64 " len=%" PRIu64
             " temp=%016" PRIx64 " tsize=%" PRIu64
             " stack=%016" PRIx64 " ssize=%" PRIu64
-            " r9=%016" PRIx64 " r10=%016" PRIx64 "\n",
+            " r9=%016" PRIx64 " r10=%016" PRIx64
+            " ppi=%016" PRIx64 "\n",
             bfv_phys, bfv_size, temp_phys, temp_size,
-            stack_base, stack_size, ipf_boot_r9, ipf_boot_r10);
+            stack_base, stack_size, ipf_boot_r9, ipf_boot_r10, ipf_boot_ppi);
 
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IPF: PEI handoff: bfv=%016" PRIx64 " len=%" PRIu64
                       " handoff=%016" PRIx64 " ppi=%016" PRIx64
                       " temp=%016" PRIx64 " tsize=%" PRIu64
-                      " stack=%016" PRIx64 " ssize=%" PRIu64 "\n",
+                      " stack=%016" PRIx64 " ssize=%" PRIu64
+                      " r10=%016" PRIx64 "\n",
                       bfv_phys, bfv_size, handoff_phys, ppi_phys,
-                      temp_phys, temp_size, stack_base, stack_size);
+                      temp_phys, temp_size, stack_base, stack_size,
+                      ipf_boot_r10);
     }
 }
 
@@ -2265,17 +2294,15 @@ static void main_cpu_reset(void *opaque)
         s->r[28] = ipf_boot_r28;
     }
     if (booting_firmware) {
-        if (ipf_boot_r9) {
-            s->r[9] = ipf_boot_r9;
-        }
-        if (ipf_boot_r10) {
-            s->r[10] = ipf_boot_r10;
-        }
+        s->r[9] = ipf_boot_r9;
+        s->r[10] = ipf_boot_r10;
         s->fw_pei_handoff = ipf_boot_r9;
-        s->fw_pei_ppi = ipf_boot_r10;
+        s->fw_pei_ppi = ipf_boot_ppi;
+        s->fw_pei_stack_count = ipf_boot_r10;
     } else {
         s->fw_pei_handoff = 0;
         s->fw_pei_ppi = 0;
+        s->fw_pei_stack_count = 0;
     }
     /*
      * Seed ar.k0 (AR.KR0) with the legacy I/O port space base so that Linux
