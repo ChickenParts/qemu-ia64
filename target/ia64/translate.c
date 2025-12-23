@@ -105,6 +105,11 @@ static uint64_t ia64_hang_abort_threshold;
 
 static bool ia64_fw_fastpath_inited;
 static bool ia64_fw_fastpath_enabled;
+static bool ia64_fw_r8_trace_inited;
+static bool ia64_fw_r8_trace_enabled;
+static bool ia64_fw_r8_trace_range_inited;
+static uint64_t ia64_fw_r8_trace_min_pc;
+static uint64_t ia64_fw_r8_trace_max_pc;
 
 static bool ia64_get_fw_fastpath_enabled(void)
 {
@@ -133,6 +138,52 @@ static bool ia64_get_fw_fastpath_enabled(void)
         ia64_fw_fastpath_enabled = true;
     }
     return ia64_fw_fastpath_enabled;
+}
+
+static bool ia64_get_fw_r8_trace_enabled(void)
+{
+    if (ia64_fw_r8_trace_inited) {
+        return ia64_fw_r8_trace_enabled;
+    }
+    ia64_fw_r8_trace_inited = true;
+
+    const char *s = getenv("QEMU_IA64_FW_R8_TRACE");
+    if (!s || !*s) {
+        ia64_fw_r8_trace_enabled = false;
+        return false;
+    }
+
+    if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
+        !strcmp(s, "no")) {
+        ia64_fw_r8_trace_enabled = false;
+    } else {
+        ia64_fw_r8_trace_enabled = true;
+    }
+
+    ia64_fw_r8_trace_range_inited = true;
+    ia64_fw_r8_trace_min_pc = 0;
+    ia64_fw_r8_trace_max_pc = UINT64_MAX;
+    s = getenv("QEMU_IA64_FW_R8_TRACE_MIN_PC");
+    if (s && *s) {
+        ia64_fw_r8_trace_min_pc = strtoull(s, NULL, 0) & ~0xFULL;
+    }
+    s = getenv("QEMU_IA64_FW_R8_TRACE_MAX_PC");
+    if (s && *s) {
+        ia64_fw_r8_trace_max_pc = strtoull(s, NULL, 0) & ~0xFULL;
+    }
+
+    return ia64_fw_r8_trace_enabled;
+}
+
+static bool ia64_fw_r8_trace_match(uint64_t pc)
+{
+    if (!ia64_get_fw_r8_trace_enabled()) {
+        return false;
+    }
+    if (!ia64_fw_r8_trace_range_inited) {
+        return true;
+    }
+    return pc >= ia64_fw_r8_trace_min_pc && pc <= ia64_fw_r8_trace_max_pc;
 }
 
 static uint64_t ia64_get_hang_abort_threshold(void)
@@ -5333,6 +5384,15 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     decode_insn(ctx, insn, type);
+
+    if (ctx->base.is_jmp == DISAS_NEXT &&
+        ia64_pc_in_fw(ctx->base.pc_next) &&
+        ia64_fw_r8_trace_match(ctx->base.pc_next)) {
+        gen_helper_fw_r8_watch(tcg_env,
+                               tcg_constant_i64(ctx->base.pc_next),
+                               tcg_constant_i32(ctx->ri),
+                               tcg_constant_i64(insn));
+    }
     
     ctx->ri++;
     if (ctx->ri == 3) {

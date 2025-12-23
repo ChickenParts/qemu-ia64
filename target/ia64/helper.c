@@ -9336,6 +9336,26 @@ static bool ia64_fw_log_enabled(void)
     return enabled;
 }
 
+static bool ia64_fw_r8_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_R8_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_fvb_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_FVB_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
 #define IA64_FW_TRACE_RING_SIZE 64
 
 typedef enum IA64FwTraceKind {
@@ -9763,6 +9783,28 @@ static void ia64_fw_dump_code(CPUIA64State *env, const char *tag,
                   base, start, bundles, path);
 }
 
+void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                         uint64_t insn)
+{
+    if (!ia64_fw_r8_trace_enabled()) {
+        return;
+    }
+    uint64_t r8 = env->r[8];
+    if (r8 == env->dbg_fw_r8_last) {
+        return;
+    }
+    env->dbg_fw_r8_last = r8;
+    if ((r8 & (1ULL << 63)) == 0) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_r8_error pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                  " r8=%016" PRIx64 "\n",
+                  pc, ri, insn, r8);
+    env->dbg_fw_r8_logged = 1;
+}
+
 static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
 {
     uint8_t out0 = ia64_fw_out_base(env);
@@ -9904,6 +9946,7 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                       : ia64_fw_arg(env, out0, 2);
         int64_t status = 0;
         uint64_t v0 = 0, v1 = 0, v2 = 0;
+        bool trace = ia64_fw_fvb_trace_enabled();
 
         switch (func_id) {
         case IA64_ESAL_FVB_READ: {
@@ -9915,21 +9958,24 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                                : ia64_fw_arg(env, out0, 5);
             uint64_t buf_ptr = break_abi ? ia64_fw_arg_break(env, 6)
                                          : ia64_fw_arg(env, out0, 6);
+            uint64_t req_bytes = 0;
+            uint64_t pa = 0;
+            uint64_t avail = 0;
+            uint64_t n = 0;
+            g_autofree uint8_t *tmp = NULL;
             if (!num_bytes_ptr || !buf_ptr) {
                 status = -1;
-                break;
+                goto fvb_read_log;
             }
-            uint64_t req_bytes = 0;
             if (!ia64_fw_read_bytes_any(cs, num_bytes_ptr,
                                         (uint8_t *)&req_bytes,
                                         sizeof(req_bytes))) {
                 status = -1;
-                break;
+                goto fvb_read_log;
             }
-            uint64_t pa = 0, avail = 0;
             if (!ia64_fw_fvb_translate(instance, lba, offset, &pa, &avail)) {
                 status = -1;
-                break;
+                goto fvb_read_log;
             }
             uint64_t want = req_bytes;
             if (want > avail) {
@@ -9938,20 +9984,33 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             if (want > IA64_IPF_FW_FLASH_SIZE) {
                 want = IA64_IPF_FW_FLASH_SIZE;
             }
-            size_t n = (size_t)want;
+            n = (uint64_t)want;
             if (n) {
-                g_autofree uint8_t *tmp = g_malloc(n);
+                tmp = g_malloc((size_t)n);
                 if (address_space_read(&address_space_memory, (hwaddr)pa,
-                                       MEMTXATTRS_UNSPECIFIED, tmp, n) != MEMTX_OK ||
-                    !ia64_fw_write_bytes_any(cs, buf_ptr, tmp, n)) {
+                                       MEMTXATTRS_UNSPECIFIED, tmp,
+                                       (size_t)n) != MEMTX_OK ||
+                    !ia64_fw_write_bytes_any(cs, buf_ptr, tmp, (size_t)n)) {
                     status = -1;
-                    break;
+                    goto fvb_read_log;
                 }
             }
             uint8_t out[8];
-            stq_le_p(out, (uint64_t)n);
+            stq_le_p(out, n);
             if (!ia64_fw_write_bytes_any(cs, num_bytes_ptr, out, sizeof(out))) {
                 status = -1;
+            }
+fvb_read_log:
+            if (ia64_fw_log_enabled() && (trace || status != 0)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: ESAL_FVB_READ inst=%" PRIu64
+                              " lba=%" PRIu64 " off=%" PRIu64
+                              " req=%" PRIu64 " got=%" PRIu64
+                              " num_ptr=%016" PRIx64 " buf=%016" PRIx64
+                              " pa=%016" PRIx64 " avail=%" PRIu64
+                              " -> status=%" PRId64 "\n",
+                              instance, lba, offset, req_bytes, n,
+                              num_bytes_ptr, buf_ptr, pa, avail, status);
             }
             break;
         }
@@ -9964,21 +10023,24 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                                : ia64_fw_arg(env, out0, 5);
             uint64_t buf_ptr = break_abi ? ia64_fw_arg_break(env, 6)
                                          : ia64_fw_arg(env, out0, 6);
+            uint64_t req_bytes = 0;
+            uint64_t pa = 0;
+            uint64_t avail = 0;
+            uint64_t n = 0;
+            g_autofree uint8_t *tmp = NULL;
             if (!num_bytes_ptr || !buf_ptr) {
                 status = -1;
-                break;
+                goto fvb_write_log;
             }
-            uint64_t req_bytes = 0;
             if (!ia64_fw_read_bytes_any(cs, num_bytes_ptr,
                                         (uint8_t *)&req_bytes,
                                         sizeof(req_bytes))) {
                 status = -1;
-                break;
+                goto fvb_write_log;
             }
-            uint64_t pa = 0, avail = 0;
             if (!ia64_fw_fvb_translate(instance, lba, offset, &pa, &avail)) {
                 status = -1;
-                break;
+                goto fvb_write_log;
             }
             uint64_t want = req_bytes;
             if (want > avail) {
@@ -9987,20 +10049,33 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             if (want > IA64_IPF_FW_FLASH_SIZE) {
                 want = IA64_IPF_FW_FLASH_SIZE;
             }
-            size_t n = (size_t)want;
+            n = (uint64_t)want;
             if (n) {
-                g_autofree uint8_t *tmp = g_malloc(n);
-                if (!ia64_fw_read_bytes_any(cs, buf_ptr, tmp, n) ||
+                tmp = g_malloc((size_t)n);
+                if (!ia64_fw_read_bytes_any(cs, buf_ptr, tmp, (size_t)n) ||
                     address_space_write(&address_space_memory, (hwaddr)pa,
-                                        MEMTXATTRS_UNSPECIFIED, tmp, n) != MEMTX_OK) {
+                                        MEMTXATTRS_UNSPECIFIED, tmp,
+                                        (size_t)n) != MEMTX_OK) {
                     status = -1;
-                    break;
+                    goto fvb_write_log;
                 }
             }
             uint8_t out[8];
-            stq_le_p(out, (uint64_t)n);
+            stq_le_p(out, n);
             if (!ia64_fw_write_bytes_any(cs, num_bytes_ptr, out, sizeof(out))) {
                 status = -1;
+            }
+fvb_write_log:
+            if (ia64_fw_log_enabled() && (trace || status != 0)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: ESAL_FVB_WRITE inst=%" PRIu64
+                              " lba=%" PRIu64 " off=%" PRIu64
+                              " req=%" PRIu64 " put=%" PRIu64
+                              " num_ptr=%016" PRIx64 " buf=%016" PRIx64
+                              " pa=%016" PRIx64 " avail=%" PRIu64
+                              " -> status=%" PRId64 "\n",
+                              instance, lba, offset, req_bytes, n,
+                              num_bytes_ptr, buf_ptr, pa, avail, status);
             }
             break;
         }
@@ -10008,16 +10083,25 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             uint64_t lba = break_abi ? ia64_fw_arg_break(env, 3)
                                      : ia64_fw_arg(env, out0, 3);
             uint64_t pa = 0, avail = 0;
+            g_autofree uint8_t *tmp = NULL;
             if (!ia64_fw_fvb_translate(instance, lba, 0, &pa, &avail)) {
                 status = -1;
-                break;
+                goto fvb_erase_log;
             }
             size_t n = IA64_IPF_FW_FLASH_BLOCK_SIZE;
-            g_autofree uint8_t *tmp = g_malloc(n);
+            tmp = g_malloc(n);
             memset(tmp, 0xff, n);
             if (address_space_write(&address_space_memory, (hwaddr)pa,
                                     MEMTXATTRS_UNSPECIFIED, tmp, n) != MEMTX_OK) {
                 status = -1;
+            }
+fvb_erase_log:
+            if (ia64_fw_log_enabled() && (trace || status != 0)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: ESAL_FVB_ERASE inst=%" PRIu64
+                              " lba=%" PRIu64 " pa=%016" PRIx64
+                              " avail=%" PRIu64 " -> status=%" PRId64 "\n",
+                              instance, lba, pa, avail, status);
             }
             break;
         }
@@ -10027,12 +10111,19 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                            : ia64_fw_arg(env, out0, 3);
             if (!attrs_ptr) {
                 status = -1;
-                break;
+                goto fvb_attr_log;
             }
             uint8_t out[4];
             stl_le_p(out, IA64_IPF_FW_FLASH_ATTRS);
             if (!ia64_fw_write_bytes_any(cs, attrs_ptr, out, sizeof(out))) {
                 status = -1;
+            }
+fvb_attr_log:
+            if (ia64_fw_log_enabled() && (trace || status != 0)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: ESAL_FVB_ATTRS inst=%" PRIu64
+                              " attrs_ptr=%016" PRIx64 " -> status=%" PRId64 "\n",
+                              instance, attrs_ptr, status);
             }
             break;
         }
@@ -10041,12 +10132,21 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                           : ia64_fw_arg(env, out0, 3);
             if (!base_ptr) {
                 status = -1;
-                break;
+                goto fvb_phys_log;
             }
             uint8_t out[8];
             stq_le_p(out, IA64_IPF_FW_FLASH_BASE);
             if (!ia64_fw_write_bytes_any(cs, base_ptr, out, sizeof(out))) {
                 status = -1;
+            }
+fvb_phys_log:
+            if (ia64_fw_log_enabled() && (trace || status != 0)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: ESAL_FVB_GET_PHYS inst=%" PRIu64
+                              " base_ptr=%016" PRIx64 " base=%016" PRIx64
+                              " -> status=%" PRId64 "\n",
+                              instance, base_ptr,
+                              (uint64_t)IA64_IPF_FW_FLASH_BASE, status);
             }
             break;
         }
@@ -10059,21 +10159,29 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                            : ia64_fw_arg(env, out0, 5);
             if (!block_ptr || !count_ptr) {
                 status = -1;
-                break;
+                goto fvb_block_log;
             }
             if (lba >= IA64_IPF_FW_FLASH_BLOCKS) {
                 status = -1;
-                break;
+                goto fvb_block_log;
             }
             uint8_t out[8];
             stq_le_p(out, IA64_IPF_FW_FLASH_BLOCK_SIZE);
             if (!ia64_fw_write_bytes_any(cs, block_ptr, out, sizeof(out))) {
                 status = -1;
-                break;
+                goto fvb_block_log;
             }
             stq_le_p(out, IA64_IPF_FW_FLASH_BLOCKS - lba);
             if (!ia64_fw_write_bytes_any(cs, count_ptr, out, sizeof(out))) {
                 status = -1;
+            }
+fvb_block_log:
+            if (ia64_fw_log_enabled() && (trace || status != 0)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: ESAL_FVB_GET_BLOCK inst=%" PRIu64
+                              " lba=%" PRIu64 " blk_ptr=%016" PRIx64
+                              " cnt_ptr=%016" PRIx64 " -> status=%" PRId64 "\n",
+                              instance, lba, block_ptr, count_ptr, status);
             }
             break;
         }
@@ -10088,21 +10196,32 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                                              : ia64_fw_arg(env, out0, 6);
             uint64_t start_off = start_lba * IA64_IPF_FW_FLASH_BLOCK_SIZE + offset_start;
             uint64_t end_off = last_lba * IA64_IPF_FW_FLASH_BLOCK_SIZE + offset_last;
+            g_autofree uint8_t *tmp = NULL;
             if (start_lba >= IA64_IPF_FW_FLASH_BLOCKS ||
                 last_lba >= IA64_IPF_FW_FLASH_BLOCKS ||
                 start_off >= IA64_IPF_FW_FLASH_SIZE ||
                 end_off >= IA64_IPF_FW_FLASH_SIZE ||
                 start_off > end_off) {
                 status = -1;
-                break;
+                goto fvb_range_log;
             }
             uint64_t len = end_off - start_off + 1;
-            g_autofree uint8_t *tmp = g_malloc((size_t)len);
+            tmp = g_malloc((size_t)len);
             memset(tmp, 0xff, (size_t)len);
             if (address_space_write(&address_space_memory,
                                     (hwaddr)(IA64_IPF_FW_FLASH_BASE + start_off),
                                     MEMTXATTRS_UNSPECIFIED, tmp, (size_t)len) != MEMTX_OK) {
                 status = -1;
+            }
+fvb_range_log:
+            if (ia64_fw_log_enabled() && (trace || status != 0)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: ESAL_FVB_ERASE_RANGE inst=%" PRIu64
+                              " start_lba=%" PRIu64 " off_start=%" PRIu64
+                              " last_lba=%" PRIu64 " off_last=%" PRIu64
+                              " -> status=%" PRId64 "\n",
+                              instance, start_lba, offset_start,
+                              last_lba, offset_last, status);
             }
             break;
         }

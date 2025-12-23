@@ -685,13 +685,23 @@ static void ipf_fw_guid_to_str(char *out, size_t out_len, const uint8_t *guid)
 
 static void ipf_fw_scan_fv_files(const uint8_t *buf, size_t size,
                                  size_t fv_base, size_t fv_len,
-                                 size_t fv_hdr_len, hwaddr fw_base)
+                                 size_t fv_hdr_len, hwaddr fw_base,
+                                 hwaddr *min_phys, hwaddr *max_phys)
 {
     size_t fv_end = fv_base + fv_len;
     size_t off = fv_base + fv_hdr_len;
     int files = 0;
     int dxe_cores = 0;
     int fv_images = 0;
+
+    hwaddr fv_phys = fw_base + fv_base;
+    hwaddr fv_phys_end = fv_phys + fv_len;
+    if (min_phys && fv_phys < *min_phys) {
+        *min_phys = fv_phys;
+    }
+    if (max_phys && fv_phys_end > *max_phys) {
+        *max_phys = fv_phys_end;
+    }
 
     while (off + EFI_FFS_FILE_HEADER_SIZE <= fv_end && off + 16 <= size) {
         const uint8_t *fh = &buf[off];
@@ -747,6 +757,8 @@ static void ipf_fw_scan_firmware(const uint8_t *buf, size_t size,
                                  hwaddr fw_base)
 {
     size_t fv_count = 0;
+    hwaddr min_phys = UINT64_MAX;
+    hwaddr max_phys = 0;
     for (size_t base = 0; base + 0x38 <= size; base += 0x10) {
         if (ldl_le_p(&buf[base + 0x28]) != EFI_FVH_SIGNATURE) {
             continue;
@@ -761,7 +773,8 @@ static void ipf_fw_scan_firmware(const uint8_t *buf, size_t size,
         }
 
         ipf_fw_scan_fv_files(buf, size, base, (size_t)fv_len,
-                             (size_t)hdr_len, fw_base);
+                             (size_t)hdr_len, fw_base,
+                             &min_phys, &max_phys);
         fv_count++;
 
         if (fv_len > 0x10) {
@@ -772,6 +785,20 @@ static void ipf_fw_scan_firmware(const uint8_t *buf, size_t size,
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IPF: FW scan: total FVs=%zu size=0x%zx base=%016" HWADDR_PRIx "\n",
                   fv_count, size, fw_base);
+    if (fv_count && min_phys != UINT64_MAX) {
+        hwaddr flash_lo = GFW_START;
+        hwaddr flash_hi = GFW_START + GFW_SIZE;
+        hwaddr max_phys_inc = max_phys ? (max_phys - 1) : max_phys;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: FW scan: FV phys range=%016" HWADDR_PRIx
+                      "..%016" HWADDR_PRIx " flash=%016" HWADDR_PRIx
+                      "..%016" HWADDR_PRIx "\n",
+                      min_phys, max_phys_inc, flash_lo, flash_hi - 1);
+        if (min_phys < flash_lo || max_phys > flash_hi) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: FW scan: FV range exceeds flash window\n");
+        }
+    }
 }
 
 static bool ipf_fw_find_dxe_core(const uint8_t *buf, size_t size,
