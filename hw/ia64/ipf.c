@@ -2312,7 +2312,8 @@ static void main_cpu_reset(void *opaque)
     }
     if (booting_firmware) {
         s->r[9] = ipf_boot_r9;
-        s->r[10] = ipf_boot_r10;
+        s->r[10] = ipf_boot_ppi;
+        s->r[33] = ipf_boot_r10;
         s->fw_pei_handoff = ipf_boot_r9;
         s->fw_pei_ppi = ipf_boot_ppi;
         s->fw_pei_stack_count = ipf_boot_r10;

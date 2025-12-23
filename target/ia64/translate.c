@@ -1367,8 +1367,8 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     /*
-     * xenipf/EDK firmware: ensure PEI core entry receives the SEC handoff
-     * pointer in r32 (arg0) and the PPI list in r33 (arg1).
+     * xenipf/EDK firmware: ensure PEI core entry has SEC handoff in r32,
+     * stack count in r33 for early RSE init, and the PPI list in r10.
      */
     if (ctx->mem_idx == MMU_PHYS_IDX &&
         ctx->ri == 0 &&

@@ -9193,9 +9193,10 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
 #else
     uint64_t handoff = env->fw_pei_handoff;
     uint64_t ppi = env->fw_pei_ppi;
+    uint64_t stack_count = env->fw_pei_stack_count;
     static bool logged;
 
-    if (!handoff && !ppi) {
+    if (!handoff && !ppi && !stack_count) {
         return;
     }
 
@@ -9205,8 +9206,15 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     }
 
     uint64_t oldcore = env->r[34];
-    env->r[32] = handoff;
-    env->r[33] = ppi;
+    if (handoff) {
+        env->r[32] = handoff;
+    }
+    if (ppi) {
+        env->r[10] = ppi;
+    }
+    if (stack_count) {
+        env->r[33] = stack_count;
+    }
     if (clear_oldcore) {
         env->r[34] = 0;
     }
@@ -9233,8 +9241,9 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_entry_fix pc=%016" PRIx64
                       " handoff=%016" PRIx64 " ppi=%016" PRIx64
-                      " old=%016" PRIx64 " oldcore=%016" PRIx64 "\n",
-                      pc, handoff, ppi, env->r[34], oldcore);
+                      " stack_count=%016" PRIx64 " old=%016" PRIx64
+                      " oldcore=%016" PRIx64 "\n",
+                      pc, handoff, ppi, stack_count, env->r[34], oldcore);
     }
 #endif
 }
@@ -9247,19 +9256,22 @@ void HELPER(fw_stack_count_fix)(CPUIA64State *env, uint64_t pc)
     return;
 #else
     uint64_t count = env->fw_pei_stack_count;
+    uint64_t prev = env->r[33];
     static bool logged;
 
     if (count == 0) {
         return;
     }
-    env->r[33] = count;
+    if (prev != count) {
+        env->r[33] = count;
+    }
 
     if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         logged = true;
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_stack_count_fix pc=%016" PRIx64
-                      " r33=%016" PRIx64 "\n",
-                      pc, count);
+                      " r33_prev=%016" PRIx64 " r33=%016" PRIx64 "\n",
+                      pc, prev, count);
     }
 #endif
 }
