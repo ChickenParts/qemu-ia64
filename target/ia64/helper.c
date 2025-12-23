@@ -2365,24 +2365,64 @@ static bool ia64_fw_pei_get_ps_ptr(CPUIA64State *env, uint64_t arg0,
     return false;
 }
 
-static bool ia64_fw_pei_find_core_from_ps(CPUState *cs, uint64_t ps_ptr,
+static bool ia64_fw_pei_find_core_from_ps(CPUIA64State *env, uint64_t ps_ptr,
                                           uint64_t *core_out)
 {
+    CPUState *cs = env_cpu(env);
     const uint32_t sig = 0x43696550u; /* "PeiC" */
     if (ps_ptr < 8) {
         return false;
     }
-    for (uint64_t off = 0; off <= 0x100; off += 8) {
+    for (uint64_t off = 0; off <= 0x4000; off += 8) {
         uint64_t cand = ps_ptr - 8 - off;
         uint8_t buf[4];
         if (!ia64_fw_read_bytes_any(cs, cand, buf, sizeof(buf))) {
             continue;
         }
         if (ldl_le_p(buf) == sig) {
+            uint64_t ps_check = 0;
+            if (!ia64_fw_read_u64(cs, cand + 8, &ps_check)) {
+                continue;
+            }
+            if (ps_check != ps_ptr) {
+                continue;
+            }
             *core_out = cand;
             return true;
         }
     }
+
+    hwaddr sp_phys = ia64_phys_mode_addr(env->r[12]);
+    const uint8_t sig_bytes[4] = { 'P', 'e', 'i', 'C' };
+    const uint64_t scan_span = 256ULL << 10;
+    const uint64_t scan_base =
+        (sp_phys > (scan_span / 2)) ? (sp_phys - (scan_span / 2)) : 0;
+    const uint64_t scan_len = scan_span;
+    const size_t chunk = 64 * 1024;
+    g_autofree uint8_t *buf = g_malloc(chunk);
+
+    for (uint64_t off = 0; off < scan_len; off += chunk - 4) {
+        uint64_t addr = scan_base + off;
+        if (cpu_memory_rw_debug(cs, addr, buf, chunk, false) != 0) {
+            continue;
+        }
+        for (size_t j = 0; j + sizeof(sig_bytes) <= chunk; j++) {
+            if (memcmp(&buf[j], sig_bytes, sizeof(sig_bytes)) != 0) {
+                continue;
+            }
+            uint64_t cand = addr + j;
+            uint64_t ps_check = 0;
+            if (!ia64_fw_read_u64(cs, cand + 8, &ps_check)) {
+                continue;
+            }
+            if (ps_check != ps_ptr) {
+                continue;
+            }
+            *core_out = cand;
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -8867,7 +8907,7 @@ void HELPER(fw_pei_ppi_dump)(CPUIA64State *env, uint64_t pc)
     env->fw_pei_ps = ps_ptr;
 
     uint64_t core = 0;
-    if (!ia64_fw_pei_find_core_from_ps(cs, ps_ptr, &core)) {
+    if (!ia64_fw_pei_find_core_from_ps(env, ps_ptr, &core)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_ppi_db pc=%016" PRIx64
                       " ps=%016" PRIx64 " missing core\n",
