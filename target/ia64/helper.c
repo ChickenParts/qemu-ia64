@@ -9802,6 +9802,25 @@ void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   "IA64: fw_r8_error pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
                   " r8=%016" PRIx64 "\n",
                   pc, ri, insn, r8);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_r8_ctx lb_from=%016" PRIx64 " lb_to=%016" PRIx64
+                  " lb_kind=%" PRIu64 " b0=%016" PRIx64 " b7=%016" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64
+                  " r28=%016" PRIx64 " r29=%016" PRIx64
+                  " r30=%016" PRIx64 " r31=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r34=%016" PRIx64 " r35=%016" PRIx64
+                  " r39=%016" PRIx64 " r40=%016" PRIx64
+                  " r41=%016" PRIx64 " r42=%016" PRIx64
+                  " r43=%016" PRIx64 " r44=%016" PRIx64 "\n",
+                  env->last_branch_from, env->last_branch_to,
+                  env->last_branch_kind,
+                  env->b[0], env->b[7],
+                  env->r[1], env->r[12],
+                  env->r[28], env->r[29], env->r[30], env->r[31],
+                  env->r[32], env->r[33], env->r[34], env->r[35],
+                  env->r[39], env->r[40], env->r[41], env->r[42],
+                  env->r[43], env->r[44]);
     env->dbg_fw_r8_logged = 1;
 }
 
