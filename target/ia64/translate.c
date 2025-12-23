@@ -148,16 +148,19 @@ static bool ia64_get_fw_r8_trace_enabled(void)
     ia64_fw_r8_trace_inited = true;
 
     const char *s = getenv("QEMU_IA64_FW_R8_TRACE");
-    if (!s || !*s) {
-        ia64_fw_r8_trace_enabled = false;
-        return false;
+    const char *c = getenv("QEMU_IA64_FW_CALL_TRACE");
+    bool enabled = false;
+    if (s && *s && strcmp(s, "0") && strcmp(s, "off") &&
+        strcmp(s, "false") && strcmp(s, "no")) {
+        enabled = true;
     }
-
-    if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
-        !strcmp(s, "no")) {
-        ia64_fw_r8_trace_enabled = false;
-    } else {
-        ia64_fw_r8_trace_enabled = true;
+    if (!enabled && c && *c && strcmp(c, "0") && strcmp(c, "off") &&
+        strcmp(c, "false") && strcmp(c, "no")) {
+        enabled = true;
+    }
+    ia64_fw_r8_trace_enabled = enabled;
+    if (!ia64_fw_r8_trace_enabled) {
+        return false;
     }
 
     ia64_fw_r8_trace_range_inited = true;

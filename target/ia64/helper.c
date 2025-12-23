@@ -9336,12 +9336,25 @@ static bool ia64_fw_log_enabled(void)
     return enabled;
 }
 
+static bool ia64_env_truthy(const char *s)
+{
+    if (!s || !*s) {
+        return false;
+    }
+    if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
+        !strcmp(s, "no")) {
+        return false;
+    }
+    return true;
+}
+
 static bool ia64_fw_r8_trace_enabled(void)
 {
     static int enabled = -1;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_FW_R8_TRACE");
-        enabled = (s && *s) ? 1 : 0;
+        const char *c = getenv("QEMU_IA64_FW_CALL_TRACE");
+        enabled = ia64_env_truthy(s) || ia64_env_truthy(c);
     }
     return enabled;
 }
@@ -9354,6 +9367,107 @@ static bool ia64_fw_fvb_trace_enabled(void)
         enabled = (s && *s) ? 1 : 0;
     }
     return enabled;
+}
+
+#define IA64_FW_CALL_TRACE_MAX 32
+
+static uint64_t ia64_fw_call_trace_pcs[IA64_FW_CALL_TRACE_MAX];
+static uint32_t ia64_fw_call_trace_count;
+static int ia64_fw_call_trace_inited;
+
+static bool ia64_fw_call_trace_match(uint64_t pc)
+{
+    if (!ia64_fw_call_trace_inited) {
+        ia64_fw_call_trace_inited = 1;
+        const char *s = getenv("QEMU_IA64_FW_CALL_TRACE");
+        if (ia64_env_truthy(s)) {
+            while (*s && ia64_fw_call_trace_count <
+                         ARRAY_SIZE(ia64_fw_call_trace_pcs)) {
+                while (*s && (isspace((unsigned char)*s) || *s == ',')) {
+                    s++;
+                }
+                if (!*s) {
+                    break;
+                }
+                char *endp = NULL;
+                uint64_t raw_pc = strtoull(s, &endp, 0);
+                if (!endp || endp == s) {
+                    break;
+                }
+                ia64_fw_call_trace_pcs[ia64_fw_call_trace_count++] =
+                    raw_pc & ~0xFULL;
+                s = endp;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < ia64_fw_call_trace_count; i++) {
+        if (ia64_fw_call_trace_pcs[i] == pc) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ia64_fw_call_trace_step(CPUIA64State *env, uint64_t pc)
+{
+    static int limit = -1;
+    static uint32_t count;
+    if (limit == -1) {
+        limit = 256;
+        const char *s = getenv("QEMU_IA64_FW_CALL_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+
+    if (env->dbg_fw_call_depth) {
+        for (int i = (int)env->dbg_fw_call_depth - 1; i >= 0; i--) {
+            if (env->dbg_fw_call_ret_pc[i] == pc) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_call ret pc=%016" PRIx64
+                              " entry=%016" PRIx64
+                              " r8=%016" PRIx64 "\n",
+                              pc, env->dbg_fw_call_entry_pc[i], env->r[8]);
+                env->dbg_fw_call_depth = (uint32_t)i;
+                break;
+            }
+        }
+    }
+
+    if (!ia64_fw_call_trace_match(pc)) {
+        return;
+    }
+    if (count++ >= (uint32_t)limit) {
+        return;
+    }
+
+    if (env->dbg_fw_call_depth >=
+        ARRAY_SIZE(env->dbg_fw_call_ret_pc)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_call overflow pc=%016" PRIx64 "\n", pc);
+        return;
+    }
+
+    env->dbg_fw_call_ret_pc[env->dbg_fw_call_depth] = env->b[0];
+    env->dbg_fw_call_entry_pc[env->dbg_fw_call_depth] = pc;
+    env->dbg_fw_call_depth++;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_call enter pc=%016" PRIx64
+                  " ret=%016" PRIx64
+                  " r28=%016" PRIx64 " r29=%016" PRIx64
+                  " r30=%016" PRIx64 " r31=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r34=%016" PRIx64 " r35=%016" PRIx64
+                  " r36=%016" PRIx64 " r37=%016" PRIx64
+                  " r38=%016" PRIx64 "\n",
+                  pc, env->b[0],
+                  env->r[28], env->r[29], env->r[30], env->r[31],
+                  env->r[32], env->r[33], env->r[34], env->r[35],
+                  env->r[36], env->r[37], env->r[38]);
 }
 
 #define IA64_FW_TRACE_RING_SIZE 64
@@ -9788,6 +9902,11 @@ void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 {
     if (!ia64_fw_r8_trace_enabled()) {
         return;
+    }
+    if (ia64_fw_call_trace_match(pc)) {
+        ia64_fw_call_trace_step(env, pc);
+    } else if (env->dbg_fw_call_depth) {
+        ia64_fw_call_trace_step(env, pc);
     }
     uint64_t r8 = env->r[8];
     if (r8 == env->dbg_fw_r8_last) {
