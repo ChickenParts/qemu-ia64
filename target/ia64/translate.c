@@ -1341,7 +1341,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
      * NULL rendezvous function pointer. Patch in a minimal MP buffer before
      * the signature compare executes.
      */
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         ctx->base.pc_next == 0x00000000ffe59900ULL) {
         gen_helper_fw_xenipf_mpbuffer_fix(tcg_env,
@@ -1352,7 +1352,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
      * xenipf/EDK firmware: function-id 12 returns the PEI PPI list pointer.
      * The ROM handler zeros r9, so fix it up and skip the handler body.
      */
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffffb7a0ULL ||
          ctx->base.pc_next == 0x00000000ffffb7a0ULL)) {
@@ -1367,10 +1367,10 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     /*
-     * xenipf/EDK firmware: ensure PEI core entry has SEC handoff in r32,
-     * stack count in r33 for early RSE init, and the PPI list in r10.
+     * xenipf/EDK firmware: ensure PEI core entry has the startup descriptor
+     * in r32 plus the stack count in r10/r33 for early RSE init.
      */
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe2e170ULL ||
          ctx->base.pc_next == 0x00000000ffe2e170ULL)) {
@@ -1381,19 +1381,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                     tcg_constant_i32(0));
     }
 
-    /*
-     * xenipf/EDK firmware: ensure ar.k4 gets the PEI stack count instead of
-     * a clobbered PPI pointer before stack/RSE init.
-     */
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
-        ctx->ri == 0 &&
-        (ctx->base.pc_next == 0x80000000ffe2e4a0ULL ||
-         ctx->base.pc_next == 0x00000000ffe2e4a0ULL)) {
-        gen_helper_fw_stack_count_fix(tcg_env,
-                                      tcg_constant_i64(ctx->base.pc_next));
-    }
-
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe2e1c0ULL ||
          ctx->base.pc_next == 0x00000000ffe2e1c0ULL)) {
@@ -1402,7 +1390,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                     tcg_constant_i32(1));
     }
 
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe2e260ULL ||
          ctx->base.pc_next == 0x00000000ffe2e260ULL)) {
@@ -1414,7 +1402,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     /*
      * xenipf/EDK firmware: trace PeiMain's InstallPpi call site.
      */
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe20910ULL ||
          ctx->base.pc_next == 0x00000000ffe20910ULL)) {
@@ -1426,7 +1414,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
      * xenipf/EDK firmware: dump PEI PPI database at the AfterMemMP assert loop
      * to confirm which PPIs are installed before DXE handoff.
      */
-    if (ctx->mem_idx == MMU_PHYS_IDX &&
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe737a0ULL ||
          ctx->base.pc_next == 0x00000000ffe737a0ULL)) {

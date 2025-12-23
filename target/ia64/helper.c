@@ -2508,6 +2508,20 @@ static bool ia64_fw_pei_install_pplist_trace_enabled(void)
     return enabled;
 }
 
+static uint64_t ia64_fw_pei_install_pplist_match_addr(void)
+{
+    static uint64_t addr = UINT64_MAX;
+    if (addr == UINT64_MAX) {
+        const char *s = getenv("QEMU_IA64_PEI_INSTALL_PPLIST_ADDR");
+        if (s && *s) {
+            addr = strtoull(s, NULL, 0);
+        } else {
+            addr = 0;
+        }
+    }
+    return addr;
+}
+
 static bool ia64_fw_r33_watch_enabled(void)
 {
     static int enabled = -1;
@@ -5782,15 +5796,6 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
                ((sol & 0x7f) << 7) |
                ((sor & 0xf) << 14);
 
-    /* Clear newly allocated stacked regs (beyond previous SOF). */
-    if (sof > old_sof) {
-        uint8_t n = MIN((uint8_t)sof, (uint8_t)96);
-        for (uint8_t i = old_sof; i < n; i++) {
-            env->r[32 + i] = 0;
-            env->nat[32 + i] = 0;
-        }
-    }
-
     int64_t growth = (int64_t)(sof & 0x7f) - (int64_t)old_sof;
     if (growth != 0) {
         uint64_t bsp = ia64_rse_get_bsp(env);
@@ -6104,11 +6109,20 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
     }
 
     if (ia64_fw_pei_install_pplist_trace_enabled()) {
+        uint64_t match_addr = ia64_fw_pei_install_pplist_match_addr();
         uint64_t fw_ppi = env->fw_pei_ppi;
         uint64_t fw_ppi_phys = fw_ppi & ((1ULL << 61) - 1);
         uint64_t desc_phys = call_a1 & ((1ULL << 61) - 1);
-        if (call_a1 && fw_ppi &&
-            (call_a1 == fw_ppi || desc_phys == fw_ppi_phys)) {
+        bool match = false;
+        if (match_addr) {
+            uint64_t match_phys = match_addr & ((1ULL << 61) - 1);
+            match = call_a1 &&
+                    (call_a1 == match_addr || desc_phys == match_phys);
+        } else {
+            match = call_a1 && fw_ppi &&
+                    (call_a1 == fw_ppi || desc_phys == fw_ppi_phys);
+        }
+        if (match) {
             static bool logged;
             if (!logged) {
                 logged = true;
@@ -9209,10 +9223,8 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     if (handoff) {
         env->r[32] = handoff;
     }
-    if (ppi) {
-        env->r[10] = ppi;
-    }
     if (stack_count) {
+        env->r[10] = stack_count;
         env->r[33] = stack_count;
     }
     if (clear_oldcore) {
@@ -9244,34 +9256,6 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
                       " stack_count=%016" PRIx64 " old=%016" PRIx64
                       " oldcore=%016" PRIx64 "\n",
                       pc, handoff, ppi, stack_count, env->r[34], oldcore);
-    }
-#endif
-}
-
-void HELPER(fw_stack_count_fix)(CPUIA64State *env, uint64_t pc)
-{
-#ifdef CONFIG_USER_ONLY
-    (void)env;
-    (void)pc;
-    return;
-#else
-    uint64_t count = env->fw_pei_stack_count;
-    uint64_t prev = env->r[33];
-    static bool logged;
-
-    if (count == 0) {
-        return;
-    }
-    if (prev != count) {
-        env->r[33] = count;
-    }
-
-    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
-        logged = true;
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: fw_stack_count_fix pc=%016" PRIx64
-                      " r33_prev=%016" PRIx64 " r33=%016" PRIx64 "\n",
-                      pc, prev, count);
     }
 #endif
 }
