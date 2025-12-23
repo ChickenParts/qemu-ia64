@@ -3641,6 +3641,8 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     uint32_t value = (uint32_t)env->r[33];
     uint32_t alt_code_type = (uint32_t)env->r[8];
     uint32_t alt_value = (uint32_t)env->r[9];
+    uint32_t ppi_code_type = (uint32_t)env->r[33];
+    uint32_t ppi_value = (uint32_t)env->r[34];
     uint32_t log_code_type = code_type;
     uint32_t log_value = value;
     bool is_assert = ia64_fw_status_is_assert(code_type, value);
@@ -3649,10 +3651,20 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         code_type = alt_code_type;
         value = alt_value;
     }
+    if (!is_assert && ia64_fw_status_is_assert(ppi_code_type, ppi_value)) {
+        is_assert = true;
+        code_type = ppi_code_type;
+        value = ppi_value;
+    }
     if (!ia64_fw_status_code_valid(log_code_type, log_value) &&
         ia64_fw_status_code_valid(alt_code_type, alt_value)) {
         log_code_type = alt_code_type;
         log_value = alt_value;
+    }
+    if (!ia64_fw_status_code_valid(log_code_type, log_value) &&
+        ia64_fw_status_code_valid(ppi_code_type, ppi_value)) {
+        log_code_type = ppi_code_type;
+        log_value = ppi_value;
     }
 
     if (dump_enabled == -1) {
@@ -4611,59 +4623,115 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
         }
     }
 
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "dbg_probe pc=%016" PRIx64 " ri=%u"
-                  " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64 " depth=%u"
-                  " last_br from=%016" PRIx64 " to=%016" PRIx64
-                  " kind=%" PRIu64 " insn=%011" PRIx64
-                  " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
-                  " pta=%016" PRIx64 " itir=%016" PRIx64
-                  " ar.rsc=%016" PRIx64 " ar.bsp=%016" PRIx64 " ar.bspstore=%016" PRIx64
-                  " ar.rnat=%016" PRIx64 " ar.pfs=%016" PRIx64
-                  " ar.k6=%016" PRIx64 " ar.lc=%016" PRIx64 " ar.ec=%016" PRIx64
-                  " r0=%016" PRIx64 " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
-                  " r8=%016" PRIx64 " r9=%016" PRIx64
-                  " r10=%016" PRIx64 " r11=%016" PRIx64
-                  " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
-                  " r18=%016" PRIx64
-                  " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
-                  " r24=%016" PRIx64
-                  " r28=%016" PRIx64 " r29=%016" PRIx64
-                  " r30=%016" PRIx64 " r31=%016" PRIx64
-                  " r43=%016" PRIx64 " r44=%016" PRIx64
-                  " r59=%016" PRIx64
-                  " r62=%016" PRIx64
-                  " r16=%016" PRIx64 " r17=%016" PRIx64
-                  " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
-                  " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
-                  " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
-                  " r41=%016" PRIx64 " r42=%016" PRIx64
-                  " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
-                  " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
-                  " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
-                  pc, ri,
-                  env->psr, env->cfm, env->pr, env->rse_depth,
-                  env->last_branch_from, env->last_branch_to,
-                  env->last_branch_kind, env->last_branch_insn,
-                  env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
-                  env->ar[IA64_AR_RSC], env->ar[IA64_AR_BSP],
-                  env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RNAT],
-                  env->ar[IA64_AR_PFS], env->ar[6], env->ar[65], env->ar[66],
-                  env->r[0], env->r[1], env->r[2], env->r[3],
-                  env->r[8], env->r[9], env->r[10], env->r[11],
-                  env->r[12], env->r[14], env->r[15],
-                  env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
-                  env->r[24], env->r[28], env->r[29],
-                  env->r[30], env->r[31],
-                  env->r[43], env->r[44],
-                  env->r[59],
-                  env->r[62],
-                  env->r[16], env->r[17],
-                  env->r[32], env->r[33], env->r[34], env->r[35],
-                  env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
-                  env->r[41], env->r[42],
-                  env->r[47], env->r[48], env->r[49],
-                  env->b[0], env->b[6], env->b[7], env->r[45], env->r[46]);
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_probe pc=%016" PRIx64 " ri=%u"
+                      " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64 " depth=%u"
+                      " last_br from=%016" PRIx64 " to=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64
+                      " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
+                      " pta=%016" PRIx64 " itir=%016" PRIx64
+                      " ar.rsc=%016" PRIx64 " ar.bsp=%016" PRIx64 " ar.bspstore=%016" PRIx64
+                      " ar.rnat=%016" PRIx64 " ar.pfs=%016" PRIx64
+                      " ar.k6=%016" PRIx64 " ar.lc=%016" PRIx64 " ar.ec=%016" PRIx64
+                      " r0=%016" PRIx64 " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
+                      " r8=%016" PRIx64 " r9=%016" PRIx64
+                      " r10=%016" PRIx64 " r11=%016" PRIx64
+                      " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
+                      " r18=%016" PRIx64
+                      " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
+                      " r24=%016" PRIx64
+                      " r28=%016" PRIx64 " r29=%016" PRIx64
+                      " r30=%016" PRIx64 " r31=%016" PRIx64
+                      " r43=%016" PRIx64 " r44=%016" PRIx64
+                      " r59=%016" PRIx64
+                      " r62=%016" PRIx64
+                      " r16=%016" PRIx64 " r17=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                      " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
+                      " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                      " r41=%016" PRIx64 " r42=%016" PRIx64
+                      " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
+                      " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
+                      " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
+                      pc, ri,
+                      env->psr, env->cfm, env->pr, env->rse_depth,
+                      env->last_branch_from, env->last_branch_to,
+                      env->last_branch_kind, env->last_branch_insn,
+                      env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
+                      env->ar[IA64_AR_RSC], env->ar[IA64_AR_BSP],
+                      env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RNAT],
+                      env->ar[IA64_AR_PFS], env->ar[6], env->ar[65], env->ar[66],
+                      env->r[0], env->r[1], env->r[2], env->r[3],
+                      env->r[8], env->r[9], env->r[10], env->r[11],
+                      env->r[12], env->r[14], env->r[15],
+                      env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
+                      env->r[24], env->r[28], env->r[29],
+                      env->r[30], env->r[31],
+                      env->r[43], env->r[44],
+                      env->r[59],
+                      env->r[62],
+                      env->r[16], env->r[17],
+                      env->r[32], env->r[33], env->r[34], env->r[35],
+                      env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
+                      env->r[41], env->r[42],
+                      env->r[47], env->r[48], env->r[49],
+                      env->b[0], env->b[6], env->b[7], env->r[45], env->r[46]);
+    } else {
+        fprintf(stderr,
+                "dbg_probe pc=%016" PRIx64 " ri=%u"
+                " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64 " depth=%u"
+                " last_br from=%016" PRIx64 " to=%016" PRIx64
+                " kind=%" PRIu64 " insn=%011" PRIx64
+                " cr_ifa=%016" PRIx64 " cr_iha=%016" PRIx64
+                " pta=%016" PRIx64 " itir=%016" PRIx64
+                " ar.rsc=%016" PRIx64 " ar.bsp=%016" PRIx64 " ar.bspstore=%016" PRIx64
+                " ar.rnat=%016" PRIx64 " ar.pfs=%016" PRIx64
+                " ar.k6=%016" PRIx64 " ar.lc=%016" PRIx64 " ar.ec=%016" PRIx64
+                " r0=%016" PRIx64 " r1=%016" PRIx64 " r2=%016" PRIx64 " r3=%016" PRIx64
+                " r8=%016" PRIx64 " r9=%016" PRIx64
+                " r10=%016" PRIx64 " r11=%016" PRIx64
+                " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
+                " r18=%016" PRIx64
+                " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
+                " r24=%016" PRIx64
+                " r28=%016" PRIx64 " r29=%016" PRIx64
+                " r30=%016" PRIx64 " r31=%016" PRIx64
+                " r43=%016" PRIx64 " r44=%016" PRIx64
+                " r59=%016" PRIx64
+                " r62=%016" PRIx64
+                " r16=%016" PRIx64 " r17=%016" PRIx64
+                " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
+                " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                " r41=%016" PRIx64 " r42=%016" PRIx64
+                " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
+                " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
+                " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
+                pc, ri,
+                env->psr, env->cfm, env->pr, env->rse_depth,
+                env->last_branch_from, env->last_branch_to,
+                env->last_branch_kind, env->last_branch_insn,
+                env->cr_ifa, env->cr_iha, env->cr[8], env->cr[21],
+                env->ar[IA64_AR_RSC], env->ar[IA64_AR_BSP],
+                env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RNAT],
+                env->ar[IA64_AR_PFS], env->ar[6], env->ar[65], env->ar[66],
+                env->r[0], env->r[1], env->r[2], env->r[3],
+                env->r[8], env->r[9], env->r[10], env->r[11],
+                env->r[12], env->r[14], env->r[15],
+                env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
+                env->r[24], env->r[28], env->r[29],
+                env->r[30], env->r[31],
+                env->r[43], env->r[44],
+                env->r[59],
+                env->r[62],
+                env->r[16], env->r[17],
+                env->r[32], env->r[33], env->r[34], env->r[35],
+                env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
+                env->r[41], env->r[42],
+                env->r[47], env->r[48], env->r[49],
+                env->b[0], env->b[6], env->b[7], env->r[45], env->r[46]);
+    }
 
 #ifndef CONFIG_USER_ONLY
     static int dump_r8_len = -1;
@@ -8462,6 +8530,32 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_ppi_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    uint64_t ppi = env->fw_pei_ppi;
+    uint64_t handoff = env->fw_pei_handoff;
+    static bool logged;
+
+    env->r[8] = 0;
+    env->r[9] = ppi;
+    env->r[10] = handoff;
+    env->r[11] = 0;
+
+    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_ppi_fix pc=%016" PRIx64
+                      " ppi=%016" PRIx64 " handoff=%016" PRIx64 "\n",
+                      pc, ppi, handoff);
+    }
+#endif
+}
+
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,
@@ -9458,6 +9552,9 @@ static void ia64_fw_call_trace_step(CPUIA64State *env, uint64_t pc)
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64: fw_call enter pc=%016" PRIx64
                   " ret=%016" PRIx64
+                  " r9=%016" PRIx64 " r10=%016" PRIx64
+                  " r20=%016" PRIx64 " r21=%016" PRIx64
+                  " r22=%016" PRIx64 " r23=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
                   " r30=%016" PRIx64 " r31=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64
@@ -9465,6 +9562,8 @@ static void ia64_fw_call_trace_step(CPUIA64State *env, uint64_t pc)
                   " r36=%016" PRIx64 " r37=%016" PRIx64
                   " r38=%016" PRIx64 "\n",
                   pc, env->b[0],
+                  env->r[9], env->r[10],
+                  env->r[20], env->r[21], env->r[22], env->r[23],
                   env->r[28], env->r[29], env->r[30], env->r[31],
                   env->r[32], env->r[33], env->r[34], env->r[35],
                   env->r[36], env->r[37], env->r[38]);

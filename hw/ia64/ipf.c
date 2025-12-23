@@ -172,6 +172,8 @@ struct IPFPCIRoot {
 
 static uint64_t ipf_boot_ip;
 static uint64_t ipf_boot_r28;
+static uint64_t ipf_boot_r9;
+static uint64_t ipf_boot_r10;
 static uint64_t ipf_ram_size;
 static uint64_t ipf_kernel_low;
 static uint64_t ipf_kernel_high;
@@ -406,6 +408,12 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_FW_WORKRAM_BASE 0x0000000100000000ULL
 #define IPF_FW_WORKRAM_SIZE (16ULL << 20)
 
+#define IPF_FW_PEI_HANDOFF_BASE (IPF_FW_WORKRAM_BASE + 0x1000)
+#define IPF_FW_PEI_PPI_BASE (IPF_FW_WORKRAM_BASE + 0x2000)
+#define IPF_FW_PEI_STUB_BASE (IPF_FW_WORKRAM_BASE + 0x3000)
+#define IPF_FW_PEI_TEMP_BASE (IPF_FW_WORKRAM_BASE + 0x4000)
+#define IPF_FW_PEI_TEMP_SIZE (2ULL << 20)
+
 #define IPF_IOSAPIC_VERSION_REG 0x1
 
 typedef struct QEMU_PACKED {
@@ -638,6 +646,7 @@ static void ipf_fill_fw_window_erased(void)
 
 /* Firmware volume / file type values from EDK1 headers. */
 #define EFI_FVH_SIGNATURE                  0x4856465fU /* "_FVH" */
+#define EFI_FV_FILETYPE_PEI_CORE           0x04
 #define EFI_FV_FILETYPE_DXE_CORE           0x05
 #define EFI_FV_FILETYPE_FIRMWARE_VOLUME_IMAGE 0x0B
 #define EFI_FFS_FILE_HEADER_SIZE           24
@@ -669,6 +678,11 @@ static size_t ipf_fw_align_up(size_t val, size_t align)
         return val;
     }
     return (val + align - 1) & ~(align - 1);
+}
+
+static uint64_t ipf_fw_region8_addr(uint64_t phys)
+{
+    return phys | 0x8000000000000000ULL;
 }
 
 static void ipf_fw_guid_to_str(char *out, size_t out_len, const uint8_t *guid)
@@ -717,13 +731,13 @@ static void ipf_fw_scan_fv_files(const uint8_t *buf, size_t size,
         size_t hdr_size = EFI_FFS_FILE_HEADER_SIZE;
 
         if (size24 == 0xffffff) {
-            if (off + EFI_FFS_FILE_HEADER2_SIZE > fv_end) {
+            if (EFI_FFS_FILE_HEADER2_SIZE > fv_end - off) {
                 break;
             }
             fsize = ldq_le_p(&fh[24]);
             hdr_size = EFI_FFS_FILE_HEADER2_SIZE;
         }
-        if (fsize < hdr_size || off + fsize > fv_end) {
+        if (fsize < hdr_size || fsize > fv_end - off) {
             break;
         }
 
@@ -743,7 +757,11 @@ static void ipf_fw_scan_fv_files(const uint8_t *buf, size_t size,
         }
 
         files++;
-        off += ipf_fw_align_up((size_t)fsize, 8);
+        size_t advance = ipf_fw_align_up((size_t)fsize, 8);
+        if (advance == 0 || advance > fv_end - off) {
+            break;
+        }
+        off += advance;
     }
 
     qemu_log_mask(LOG_GUEST_ERROR,
@@ -833,13 +851,13 @@ static bool ipf_fw_find_dxe_core(const uint8_t *buf, size_t size,
             size_t hdr_size = EFI_FFS_FILE_HEADER_SIZE;
 
             if (size24 == 0xffffff) {
-                if (off + EFI_FFS_FILE_HEADER2_SIZE > fv_end) {
+                if (EFI_FFS_FILE_HEADER2_SIZE > fv_end - off) {
                     break;
                 }
                 fsize = ldq_le_p(&fh[24]);
                 hdr_size = EFI_FFS_FILE_HEADER2_SIZE;
             }
-            if (fsize < hdr_size || off + fsize > fv_end) {
+            if (fsize < hdr_size || fsize > fv_end - off) {
                 break;
             }
 
@@ -853,7 +871,73 @@ static bool ipf_fw_find_dxe_core(const uint8_t *buf, size_t size,
                 return true;
             }
 
-            off += ipf_fw_align_up((size_t)fsize, 8);
+            size_t advance = ipf_fw_align_up((size_t)fsize, 8);
+            if (advance == 0 || advance > fv_end - off) {
+                break;
+            }
+            off += advance;
+        }
+    }
+    return false;
+}
+
+static bool ipf_fw_find_pei_core_fv(const uint8_t *buf, size_t size,
+                                    size_t *fv_off_out, uint64_t *fv_size_out)
+{
+    for (size_t base = 0; base + 0x38 <= size; base += 0x10) {
+        if (ldl_le_p(&buf[base + 0x28]) != EFI_FVH_SIGNATURE) {
+            continue;
+        }
+        uint64_t fv_len = ldq_le_p(&buf[base + 0x20]);
+        uint16_t hdr_len = lduw_le_p(&buf[base + 0x30]);
+        if (fv_len < 0x38 || fv_len > (size - base)) {
+            continue;
+        }
+        if (hdr_len < 0x38 || hdr_len > fv_len) {
+            continue;
+        }
+
+        size_t fv_end = base + (size_t)fv_len;
+        size_t off = base + (size_t)hdr_len;
+        while (off + EFI_FFS_FILE_HEADER_SIZE <= fv_end && off + 16 <= size) {
+            const uint8_t *fh = &buf[off];
+            if (ipf_fw_is_erased(fh, EFI_FFS_FILE_HEADER_SIZE)) {
+                break;
+            }
+
+            uint8_t type = fh[18];
+            uint32_t size24 = (uint32_t)fh[20] |
+                              ((uint32_t)fh[21] << 8) |
+                              ((uint32_t)fh[22] << 16);
+            uint64_t fsize = size24;
+            size_t hdr_size = EFI_FFS_FILE_HEADER_SIZE;
+
+            if (size24 == 0xffffff) {
+                if (EFI_FFS_FILE_HEADER2_SIZE > fv_end - off) {
+                    break;
+                }
+                fsize = ldq_le_p(&fh[24]);
+                hdr_size = EFI_FFS_FILE_HEADER2_SIZE;
+            }
+            if (fsize < hdr_size || fsize > fv_end - off) {
+                break;
+            }
+
+            if (type == EFI_FV_FILETYPE_PEI_CORE) {
+                if (fv_off_out) {
+                    *fv_off_out = base;
+                }
+                if (fv_size_out) {
+                    *fv_size_out = fv_len;
+                }
+                return true;
+            }
+
+            size_t advance = ipf_fw_align_up((size_t)fsize, 8);
+            if (advance == 0 || advance > fv_end - off) {
+                break;
+            }
+            off += advance;
         }
     }
     return false;
@@ -1018,6 +1102,99 @@ static void ipf_patch_firmware_statuscode_callgate(void)
                       " stub_plabel=%016" HWADDR_PRIx " stub_object=%016" HWADDR_PRIx "\n",
                       caller_id, report_plabel_ptr,
                       stub_code, stub_plabel, stub_object);
+    }
+}
+
+static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
+                                     hwaddr fw_base)
+{
+    size_t fv_off = 0;
+    uint64_t fv_len = 0;
+    if (!ipf_fw_find_pei_core_fv(buf, size, &fv_off, &fv_len)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: PEI handoff: PEI core FV not found; using firmware base\n");
+        fv_off = 0;
+        fv_len = size;
+    }
+
+    const uint64_t bfv_phys = (uint64_t)fw_base + fv_off;
+    const uint64_t bfv_size = fv_len;
+    const uint64_t handoff_phys = IPF_FW_PEI_HANDOFF_BASE;
+    const uint64_t ppi_phys = IPF_FW_PEI_PPI_BASE;
+    const uint64_t stub_phys = IPF_FW_PEI_STUB_BASE;
+    const uint64_t plabel_phys = stub_phys + 0x20;
+    const uint64_t ppi_iface_phys = stub_phys + 0x40;
+    const uint64_t temp_phys = IPF_FW_PEI_TEMP_BASE;
+    const uint64_t temp_size = IPF_FW_PEI_TEMP_SIZE;
+    const uint64_t pei_temp_size = temp_size / 2;
+    const uint64_t stack_size = temp_size - pei_temp_size;
+    const uint64_t stack_base = temp_phys + temp_size;
+
+    static const uint8_t status_stub[16] = {
+        0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00,
+        0x00, 0x00, 0x42, 0x80, 0x00, 0x00, 0x84, 0x00,
+    };
+    static const uint8_t status_guid[16] = {
+        0xd3, 0x32, 0x98, 0x22, 0x30, 0x7a, 0x36, 0x4b,
+        0xb8, 0x27, 0xf4, 0x0c, 0xb7, 0xd4, 0x54, 0x36,
+    };
+
+    uint8_t handoff[0x48];
+    memset(handoff, 0, sizeof(handoff));
+    stw_le_p(&handoff[0], (uint16_t)sizeof(handoff));
+    stq_le_p(&handoff[8], ipf_fw_region8_addr(bfv_phys));
+    stq_le_p(&handoff[16], bfv_size);
+    stq_le_p(&handoff[24], ipf_fw_region8_addr(temp_phys));
+    stq_le_p(&handoff[32], temp_size);
+    stq_le_p(&handoff[40], ipf_fw_region8_addr(temp_phys));
+    stq_le_p(&handoff[48], pei_temp_size);
+    stq_le_p(&handoff[56], ipf_fw_region8_addr(stack_base));
+    stq_le_p(&handoff[64], stack_size);
+    cpu_physical_memory_write(handoff_phys, handoff, sizeof(handoff));
+
+    struct QEMU_PACKED {
+        uint64_t entry;
+        uint64_t gp;
+    } plabel = {
+        .entry = cpu_to_le64(ipf_fw_region8_addr(stub_phys)),
+        .gp = 0,
+    };
+    cpu_physical_memory_write(stub_phys, status_stub, sizeof(status_stub));
+    cpu_physical_memory_write(plabel_phys, (const uint8_t *)&plabel, sizeof(plabel));
+    cpu_flush_icache_range(stub_phys, sizeof(status_stub));
+
+    uint64_t status_iface = cpu_to_le64(ipf_fw_region8_addr(plabel_phys));
+    cpu_physical_memory_write(ppi_iface_phys,
+                              (const uint8_t *)&status_iface,
+                              sizeof(status_iface));
+
+    uint8_t ppi[0x30];
+    memset(ppi, 0, sizeof(ppi));
+    uint64_t flags = 0x80000000ULL | 0x00000010ULL; /* TERMINATE_LIST | PPI */
+    stq_le_p(&ppi[0], flags);
+    stq_le_p(&ppi[8], ipf_fw_region8_addr(ppi_phys + 0x18));
+    stq_le_p(&ppi[16], ipf_fw_region8_addr(ppi_phys + 0x28));
+    memcpy(&ppi[0x18], status_guid, sizeof(status_guid));
+    stq_le_p(&ppi[0x28], ipf_fw_region8_addr(ppi_iface_phys));
+    cpu_physical_memory_write(ppi_phys, ppi, sizeof(ppi));
+
+    ipf_boot_r9 = ipf_fw_region8_addr(handoff_phys);
+    ipf_boot_r10 = ipf_fw_region8_addr(ppi_phys);
+    DPRINTF("PEI handoff: bfv=%016" PRIx64 " len=%" PRIu64
+            " temp=%016" PRIx64 " tsize=%" PRIu64
+            " stack=%016" PRIx64 " ssize=%" PRIu64
+            " r9=%016" PRIx64 " r10=%016" PRIx64 "\n",
+            bfv_phys, bfv_size, temp_phys, temp_size,
+            stack_base, stack_size, ipf_boot_r9, ipf_boot_r10);
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: PEI handoff: bfv=%016" PRIx64 " len=%" PRIu64
+                      " handoff=%016" PRIx64 " ppi=%016" PRIx64
+                      " temp=%016" PRIx64 " tsize=%" PRIu64
+                      " stack=%016" PRIx64 " ssize=%" PRIu64 "\n",
+                      bfv_phys, bfv_size, handoff_phys, ppi_phys,
+                      temp_phys, temp_size, stack_base, stack_size);
     }
 }
 
@@ -2078,13 +2255,27 @@ static void main_cpu_reset(void *opaque)
     const bool booting_firmware = (ipf_boot_ip == IPF_GFW_ENTRY);
 
     cpu_reset(env);
-    DPRINTF("Reset CPU: boot_ip=0x%" PRIx64 " boot_r28=0x%" PRIx64 "\n",
-            ipf_boot_ip, ipf_boot_r28);
+    DPRINTF("Reset CPU: boot_ip=0x%" PRIx64 " boot_r28=0x%" PRIx64
+            " boot_r9=0x%" PRIx64 " boot_r10=0x%" PRIx64 "\n",
+            ipf_boot_ip, ipf_boot_r28, ipf_boot_r9, ipf_boot_r10);
     if (ipf_boot_ip) {
         s->ip = ipf_boot_ip;
     }
     if (ipf_boot_r28) {
         s->r[28] = ipf_boot_r28;
+    }
+    if (booting_firmware) {
+        if (ipf_boot_r9) {
+            s->r[9] = ipf_boot_r9;
+        }
+        if (ipf_boot_r10) {
+            s->r[10] = ipf_boot_r10;
+        }
+        s->fw_pei_handoff = ipf_boot_r9;
+        s->fw_pei_ppi = ipf_boot_r10;
+    } else {
+        s->fw_pei_handoff = 0;
+        s->fw_pei_ppi = 0;
     }
     /*
      * Seed ar.k0 (AR.KR0) with the legacy I/O port space base so that Linux
@@ -3167,6 +3358,9 @@ static void ipf_init(MachineState *machine)
                             MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
         cpu_flush_icache_range(fw_offset, (size_t)image_size);
         DPRINTF("Loaded firmware '%s' at 0x%lx\n", bios_name, fw_offset);
+        if (run_firmware) {
+            ipf_fw_setup_pei_handoff(buf, (size_t)image_size, fw_offset);
+        }
         if (run_firmware) {
             const char *dxe_dump = getenv("QEMU_IPF_FW_DXE_DUMP");
             if (dxe_dump && *dxe_dump) {
