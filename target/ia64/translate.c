@@ -1316,6 +1316,18 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         gen_helper_fw_stack_count_fix(tcg_env,
                                       tcg_constant_i64(ctx->base.pc_next));
     }
+
+    /*
+     * xenipf/EDK firmware: dump PEI PPI database at the AfterMemMP assert loop
+     * to confirm which PPIs are installed before DXE handoff.
+     */
+    if (ctx->mem_idx == MMU_PHYS_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe737a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe737a0ULL)) {
+        gen_helper_fw_pei_ppi_dump(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next));
+    }
 #endif
 }
 

@@ -187,6 +187,12 @@ typedef struct CPUArchState {
     uint64_t fw_pei_handoff;
     uint64_t fw_pei_ppi;
     uint64_t fw_pei_stack_count;
+    uint64_t fw_pei_ps;
+    uint64_t fw_pei_locate_ret_pc;
+    uint64_t fw_pei_locate_instance;
+    uint64_t fw_pei_locate_desc_ptr;
+    uint8_t fw_pei_locate_guid[16];
+    uint8_t fw_pei_locate_guid_valid;
 
     /* Debug: last observed EFI PHIT values (xenipf/EDK firmware bringup). */
     uint64_t fw_phit_mem_top;

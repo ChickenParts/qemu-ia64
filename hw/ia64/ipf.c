@@ -688,7 +688,23 @@ static uint64_t ipf_fw_region8_addr(uint64_t phys)
      * The xenipf/EDK PEI core performs arithmetic on the handoff pointers.
      * Keep them in region 0 (physical) so shifts don't propagate sign bits.
      */
-    return phys;
+    static int region = -1;
+    if (region == -1) {
+        const char *s = getenv("QEMU_IPF_FW_REGION");
+        if (s && *s) {
+            region = (int)strtol(s, NULL, 0);
+        } else {
+            region = 0;
+        }
+        if (region < 0 || region > 7) {
+            warn_report("IPF: invalid QEMU_IPF_FW_REGION=%d, using 0", region);
+            region = 0;
+        }
+    }
+    if (region == 0) {
+        return phys;
+    }
+    return ((uint64_t)region << 61) | (phys & ((1ULL << 61) - 1));
 }
 
 static uint64_t ipf_fw_boot_r10_count(void)
