@@ -9821,6 +9821,40 @@ void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   env->r[32], env->r[33], env->r[34], env->r[35],
                   env->r[39], env->r[40], env->r[41], env->r[42],
                   env->r[43], env->r[44]);
+    {
+        static int dump_enabled = -1;
+        static int dump_bundles = 32;
+        if (dump_enabled == -1) {
+            const char *s = getenv("QEMU_IA64_FW_R8_DUMP");
+            dump_enabled = (s && *s) ? 1 : 0;
+            const char *b = getenv("QEMU_IA64_FW_R8_DUMP_BUNDLES");
+            if (b && *b) {
+                dump_bundles = atoi(b);
+                if (dump_bundles <= 0) {
+                    dump_bundles = 32;
+                }
+            }
+        }
+        if (dump_enabled) {
+            ia64_fw_dump_code(env, "r8_err_pc", pc, dump_bundles);
+            if (env->b[7]) {
+                ia64_fw_dump_code(env, "r8_err_b7", env->b[7], dump_bundles);
+            }
+            if (env->last_branch_from) {
+                ia64_fw_dump_code(env, "r8_err_from",
+                                  env->last_branch_from, dump_bundles);
+            }
+            if (env->last_branch_to) {
+                ia64_fw_dump_code(env, "r8_err_to",
+                                  env->last_branch_to, dump_bundles);
+            }
+#ifndef CONFIG_USER_ONLY
+            ia64_dbg_probe_dump_mem(env, pc, "r8_r33", env->r[33], 128);
+            ia64_dbg_probe_dump_mem(env, pc, "r8_r35", env->r[35], 128);
+            ia64_dbg_probe_dump_mem(env, pc, "r8_r43", env->r[43], 128);
+#endif
+        }
+    }
     env->dbg_fw_r8_logged = 1;
 }
 
