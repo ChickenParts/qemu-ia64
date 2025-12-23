@@ -2508,6 +2508,59 @@ static bool ia64_fw_pei_install_pplist_trace_enabled(void)
     return enabled;
 }
 
+static bool ia64_fw_r33_watch_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_WATCH_R33");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_pei_rse_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_RSE_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static void ia64_fw_rse_log(CPUIA64State *env, uint64_t pc, const char *tag)
+{
+    if (!ia64_fw_pei_rse_trace_enabled()) {
+        return;
+    }
+
+    uint64_t bsp = ia64_rse_get_bsp(env);
+    uint64_t bspstore = env->ar[IA64_AR_BSPSTORE];
+    uint64_t pfs = env->ar[IA64_AR_PFS];
+    uint64_t rsc = env->ar[IA64_AR_RSC];
+    uint64_t rnat = env->ar[IA64_AR_RNAT];
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_rse %s pc=%016" PRIx64
+                  " ip=%016" PRIx64 " cfm=%016" PRIx64
+                  " pfs=%016" PRIx64 " rsc=%016" PRIx64
+                  " bsp=%016" PRIx64 " bspstore=%016" PRIx64
+                  " rnat=%016" PRIx64 " depth=%u"
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r34=%016" PRIx64 " r12=%016" PRIx64
+                  " r1=%016" PRIx64 "\n",
+                  tag, pc, env->ip, env->cfm,
+                  pfs, rsc, bsp, bspstore, rnat, env->rse_depth,
+                  env->r[32], env->r[33], env->r[34], env->r[12], env->r[1]);
+
+    if (env->rse_depth > 0 && env->rse_frames) {
+        const struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth - 1];
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_rse %s top_frame ret=%016" PRIx64
+                      " pfs=%016" PRIx64 " cfm=%016" PRIx64 "\n",
+                      tag, frame->ret_addr, frame->ar_pfs, frame->cfm);
+    }
+}
+
 static void ia64_fw_dump_pei_ppi_list(CPUIA64State *env, uint64_t ppi_list)
 {
     CPUState *cs = env_cpu(env);
@@ -9157,6 +9210,15 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     if (clear_oldcore) {
         env->r[34] = 0;
     }
+    if (ia64_fw_r33_watch_enabled()) {
+        env->fw_pei_r33_watch_active = 1;
+        env->fw_pei_r33_last = env->r[33];
+        env->fw_pei_r33_last_pc = pc;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: r33_watch start pc=%016" PRIx64
+                      " r33=%016" PRIx64 "\n",
+                      pc, env->r[33]);
+    }
     if (ia64_fw_pei_ppi_list_dump_enabled()) {
         static bool dumped;
         if (!dumped) {
@@ -9164,6 +9226,7 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
             ia64_fw_dump_pei_ppi_list(env, ppi);
         }
     }
+    ia64_fw_rse_log(env, pc, "pei_entry_fix");
 
     if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         logged = true;
@@ -9361,6 +9424,16 @@ void HELPER(fw_pei_pre_install_probe)(CPUIA64State *env, uint64_t pc)
                   " r1=%016" PRIx64 " fw_ppi=%016" PRIx64 "\n",
                   pc, env->r[32], r33, env->r[34], env->r[35],
                   env->r[12], env->r[13], env->r[1], fw_ppi);
+    if (ia64_fw_r33_watch_enabled() && env->fw_pei_r33_watch_active) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: r33_watch stop pc=%016" PRIx64
+                      " last=%016" PRIx64 " r33=%016" PRIx64
+                      " last_pc=%016" PRIx64 "\n",
+                      pc, env->fw_pei_r33_last, env->r[33],
+                      env->fw_pei_r33_last_pc);
+        env->fw_pei_r33_watch_active = 0;
+    }
+    ia64_fw_rse_log(env, pc, "pei_pre_install");
 
     if (fw_ppi) {
         ia64_fw_dump_pei_ppi_list(env, fw_ppi);
@@ -9384,6 +9457,35 @@ void HELPER(fw_pei_pre_install_probe)(CPUIA64State *env, uint64_t pc)
             }
         }
     }
+#endif
+}
+
+void HELPER(fw_pei_rse_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)stage;
+    return;
+#else
+    if (!ia64_fw_pei_rse_trace_enabled()) {
+        return;
+    }
+    const char *tag = "pei_rse_probe";
+    switch (stage) {
+    case 0:
+        tag = "pei_rse_entry";
+        break;
+    case 1:
+        tag = "pei_rse_mid";
+        break;
+    case 2:
+        tag = "pei_rse_post";
+        break;
+    default:
+        break;
+    }
+    ia64_fw_rse_log(env, pc, tag);
 #endif
 }
 
@@ -9891,6 +9993,24 @@ void HELPER(dbg_load_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
                   " addr=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
                   pc, ri, env->ip, env->psr, env->cfm, addr, size, val);
+}
+
+void HELPER(dbg_r33_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri)
+{
+    if (!env->fw_pei_r33_watch_active) {
+        return;
+    }
+    uint64_t cur = env->r[33];
+    if (cur == env->fw_pei_r33_last) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: r33_watch pc=%016" PRIx64 " ri=%u"
+                  " last=%016" PRIx64 " new=%016" PRIx64
+                  " last_pc=%016" PRIx64 "\n",
+                  pc, ri, env->fw_pei_r33_last, cur, env->fw_pei_r33_last_pc);
+    env->fw_pei_r33_last = cur;
+    env->fw_pei_r33_last_pc = pc;
 }
 
 void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,

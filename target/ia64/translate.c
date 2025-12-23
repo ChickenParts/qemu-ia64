@@ -524,6 +524,8 @@ static bool ia64_store_watch_value_inited;
 static bool ia64_store_watch_value_enabled;
 static uint64_t ia64_store_watch_value;
 static uint64_t ia64_store_watch_value_mask;
+static bool ia64_watch_r33_inited;
+static bool ia64_watch_r33_enabled;
 
 static void ia64_init_store_watch(void)
 {
@@ -635,6 +637,16 @@ static bool ia64_store_watch_value_match(void)
 {
     ia64_init_store_watch_value();
     return ia64_store_watch_value_enabled;
+}
+
+static bool ia64_watch_r33_match(void)
+{
+    if (!ia64_watch_r33_inited) {
+        ia64_watch_r33_inited = true;
+        const char *s = getenv("QEMU_IA64_WATCH_R33");
+        ia64_watch_r33_enabled = (s && *s) ? true : false;
+    }
+    return ia64_watch_r33_enabled;
 }
 
 static TCGv_i64 gen_phys_mode_addr(TCGv_i64 addr)
@@ -1364,6 +1376,9 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
          ctx->base.pc_next == 0x00000000ffe2e170ULL)) {
         gen_helper_fw_pei_entry_fix(tcg_env,
                                     tcg_constant_i64(ctx->base.pc_next));
+        gen_helper_fw_pei_rse_probe(tcg_env,
+                                    tcg_constant_i64(ctx->base.pc_next),
+                                    tcg_constant_i32(0));
     }
 
     /*
@@ -1376,6 +1391,24 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
          ctx->base.pc_next == 0x00000000ffe2e4a0ULL)) {
         gen_helper_fw_stack_count_fix(tcg_env,
                                       tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    if (ctx->mem_idx == MMU_PHYS_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e1c0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e1c0ULL)) {
+        gen_helper_fw_pei_rse_probe(tcg_env,
+                                    tcg_constant_i64(ctx->base.pc_next),
+                                    tcg_constant_i32(1));
+    }
+
+    if (ctx->mem_idx == MMU_PHYS_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e260ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e260ULL)) {
+        gen_helper_fw_pei_rse_probe(tcg_env,
+                                    tcg_constant_i64(ctx->base.pc_next),
+                                    tcg_constant_i32(2));
     }
 
     /*
@@ -1401,6 +1434,12 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                    tcg_constant_i64(ctx->base.pc_next));
     }
 #endif
+
+    if (ia64_watch_r33_match()) {
+        gen_helper_dbg_r33_watch(tcg_env,
+                                 tcg_constant_i64(ctx->base.pc_next),
+                                 tcg_constant_i32(ctx->ri));
+    }
 }
 
 static void decode_a_unit(DisasContext *ctx, uint64_t insn)

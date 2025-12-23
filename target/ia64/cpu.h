@@ -197,6 +197,9 @@ typedef struct CPUArchState {
     uint64_t fw_pei_install_desc_ptr;
     uint8_t fw_pei_install_guid[16];
     uint8_t fw_pei_install_guid_valid;
+    uint8_t fw_pei_r33_watch_active;
+    uint64_t fw_pei_r33_last;
+    uint64_t fw_pei_r33_last_pc;
 
     /* Debug: last observed EFI PHIT values (xenipf/EDK firmware bringup). */
     uint64_t fw_phit_mem_top;
