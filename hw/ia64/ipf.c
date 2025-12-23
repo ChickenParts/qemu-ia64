@@ -1181,17 +1181,12 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
         0xb8, 0x27, 0xf4, 0x0c, 0xb7, 0xd4, 0x54, 0x36,
     };
 
-    uint8_t handoff[0x48];
+    /* EFI_PEI_STARTUP_DESCRIPTOR (Framework PEI): BFV, Cache-as-RAM, PPI list. */
+    uint8_t handoff[0x18];
     memset(handoff, 0, sizeof(handoff));
-    stw_le_p(&handoff[0], (uint16_t)sizeof(handoff));
-    stq_le_p(&handoff[8], ipf_fw_region8_addr(bfv_phys));
-    stq_le_p(&handoff[16], bfv_size);
-    stq_le_p(&handoff[24], ipf_fw_region8_addr(temp_phys));
-    stq_le_p(&handoff[32], temp_size);
-    stq_le_p(&handoff[40], ipf_fw_region8_addr(temp_phys));
-    stq_le_p(&handoff[48], pei_temp_size);
-    stq_le_p(&handoff[56], ipf_fw_region8_addr(stack_base));
-    stq_le_p(&handoff[64], stack_size);
+    stq_le_p(&handoff[0], ipf_fw_region8_addr(bfv_phys));
+    stq_le_p(&handoff[8], temp_size);
+    stq_le_p(&handoff[16], ipf_fw_region8_addr(ppi_phys));
     cpu_physical_memory_write(handoff_phys, handoff, sizeof(handoff));
 
     struct QEMU_PACKED {
@@ -1223,22 +1218,22 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     ipf_boot_r9 = ipf_fw_region8_addr(handoff_phys);
     ipf_boot_ppi = ipf_fw_region8_addr(ppi_phys);
     ipf_boot_r10 = ipf_fw_boot_r10_count();
-    DPRINTF("PEI handoff: bfv=%016" PRIx64 " len=%" PRIu64
-            " temp=%016" PRIx64 " tsize=%" PRIu64
+    DPRINTF("PEI startup: bfv=%016" PRIx64 " cache=%" PRIu64
+            " dispatch=%016" PRIx64 " temp=%016" PRIx64 " tsize=%" PRIu64
             " stack=%016" PRIx64 " ssize=%" PRIu64
-            " r9=%016" PRIx64 " r10=%016" PRIx64
-            " ppi=%016" PRIx64 "\n",
-            bfv_phys, bfv_size, temp_phys, temp_size,
-            stack_base, stack_size, ipf_boot_r9, ipf_boot_r10, ipf_boot_ppi);
+            " r9=%016" PRIx64 " r10=%016" PRIx64 " ppi=%016" PRIx64 "\n",
+            bfv_phys, temp_size, ppi_phys,
+            temp_phys, temp_size, stack_base, stack_size,
+            ipf_boot_r9, ipf_boot_r10, ipf_boot_ppi);
 
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "IPF: PEI handoff: bfv=%016" PRIx64 " len=%" PRIu64
-                      " handoff=%016" PRIx64 " ppi=%016" PRIx64
+                      "IPF: PEI startup: bfv=%016" PRIx64 " cache=%" PRIu64
+                      " startup=%016" PRIx64 " ppi=%016" PRIx64
                       " temp=%016" PRIx64 " tsize=%" PRIu64
                       " stack=%016" PRIx64 " ssize=%" PRIu64
                       " r10=%016" PRIx64 "\n",
-                      bfv_phys, bfv_size, handoff_phys, ppi_phys,
+                      bfv_phys, temp_size, handoff_phys, ppi_phys,
                       temp_phys, temp_size, stack_base, stack_size,
                       ipf_boot_r10);
     }

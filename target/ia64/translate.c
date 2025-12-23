@@ -1381,6 +1381,19 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                     tcg_constant_i32(0));
     }
 
+    /*
+     * xenipf/EDK firmware: PEI startup path should hand off SecCoreData in r9
+     * and the initial PPI list in r10 before the PEI core copies them into
+     * r32/r33. The ROM stub leaves these zeroed; override with our data.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e450ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e450ULL)) {
+        gen_helper_fw_pei_startup_fix(tcg_env,
+                                      tcg_constant_i64(ctx->base.pc_next));
+    }
+
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe2e1c0ULL ||
