@@ -122,6 +122,12 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 #define IA64_IPF_FW_FLASH_BLOCK_SIZE  (64ULL << 10)
 #define IA64_IPF_FW_FLASH_BLOCKS      (IA64_IPF_FW_FLASH_SIZE / IA64_IPF_FW_FLASH_BLOCK_SIZE)
 #define IA64_IPF_FW_FLASH_ATTRS       0x00100C36U
+#define IA64_EFI_FVH_SIGNATURE        0x4856465fU /* "_FVH" */
+
+static const uint8_t ia64_efi_ffs_guid[16] = {
+    0xd9, 0x54, 0x93, 0x7a, 0x68, 0x04, 0x4a, 0x44,
+    0x81, 0xce, 0x0b, 0xf6, 0x17, 0xd8, 0x90, 0xdf,
+};
 
 static inline uint64_t ia64_rsc_get_loadrs(uint64_t rsc)
 {
@@ -3916,6 +3922,109 @@ static int ia64_fw_scan_flash_fvs(CPUState *cs, IA64FwFvInfo *out, int max)
 }
 #endif
 
+static bool ia64_fw_find_fv_by_index(CPUIA64State *env, uint8_t index,
+                                     uint64_t *out_addr)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)index;
+    (void)out_addr;
+    return false;
+#else
+    CPUState *cs = env_cpu(env);
+    const uint64_t flash_base = IA64_IPF_FW_FLASH_BASE;
+    const uint64_t flash_size = IA64_IPF_FW_FLASH_SIZE;
+    uint8_t hdr[0x38];
+    uint8_t cur = 0;
+
+    for (uint64_t off = 0; off + sizeof(hdr) <= flash_size; off += 0x10) {
+        if (!ia64_fw_read_bytes_any(cs, flash_base + off, hdr, sizeof(hdr))) {
+            continue;
+        }
+        if (ldl_le_p(&hdr[0x28]) != IA64_EFI_FVH_SIGNATURE) {
+            continue;
+        }
+        uint64_t fv_len = ldq_le_p(&hdr[0x20]);
+        uint16_t hdr_len = lduw_le_p(&hdr[0x30]);
+        if (fv_len < sizeof(hdr) || fv_len > flash_size - off) {
+            continue;
+        }
+        if (hdr_len < sizeof(hdr) || hdr_len > fv_len) {
+            continue;
+        }
+        if (memcmp(&hdr[0x10], ia64_efi_ffs_guid,
+                   sizeof(ia64_efi_ffs_guid)) != 0) {
+            continue;
+        }
+        if (cur == index) {
+            if (out_addr) {
+                *out_addr = flash_base + off;
+            }
+            return true;
+        }
+        cur++;
+        if (fv_len > 0x10) {
+            off += fv_len - 0x10;
+        }
+    }
+    return false;
+#endif
+}
+
+static void ia64_fw_handle_findfv(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    CPUState *cs = env_cpu(env);
+    uint64_t fv_num_ptr = env->r[34];
+    uint64_t fv_addr_ptr = env->r[35];
+    uint8_t fv_num = 0;
+    uint64_t fv_addr = 0;
+    uint64_t status = 0;
+
+    if (!fv_addr_ptr || !fv_num_ptr) {
+        status = IA64_EFI_STATUS_ERROR_BIT | 2; /* EFI_INVALID_PARAMETER */
+        env->r[8] = status;
+        return;
+    }
+
+    if (!ia64_fw_read_bytes_any(cs, fv_num_ptr, &fv_num, sizeof(fv_num))) {
+        status = IA64_EFI_STATUS_ERROR_BIT | 2; /* EFI_INVALID_PARAMETER */
+        env->r[8] = status;
+        return;
+    }
+
+    if (!ia64_fw_find_fv_by_index(env, fv_num, &fv_addr)) {
+        status = IA64_EFI_STATUS_ERROR_BIT | 9; /* EFI_OUT_OF_RESOURCES */
+        fv_num = 0;
+        ia64_fw_write_bytes_any(cs, fv_num_ptr, &fv_num, sizeof(fv_num));
+        env->r[8] = status;
+        return;
+    }
+
+    uint64_t le = cpu_to_le64(fv_addr);
+    if (!ia64_fw_write_bytes_any(cs, fv_addr_ptr,
+                                 (const uint8_t *)&le, sizeof(le))) {
+        status = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+        env->r[8] = status;
+        return;
+    }
+
+    fv_num++;
+    ia64_fw_write_bytes_any(cs, fv_num_ptr, &fv_num, sizeof(fv_num));
+    env->r[8] = 0; /* EFI_SUCCESS */
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_findfv pc=%016" PRIx64 " fv=%u addr=%016" PRIx64 "\n",
+                      pc, fv_num - 1, fv_addr);
+    }
+#endif
+}
+
 void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 {
     /*
@@ -3940,6 +4049,12 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 #ifndef CONFIG_USER_ONLY
     ia64_fw_try_patch_efi_hobs(env);
 #endif
+
+    if (env->fw_pei_findfv_stub &&
+        ((pc ^ env->fw_pei_findfv_stub) & ~0xFULL) == 0) {
+        ia64_fw_handle_findfv(env, pc);
+        return;
+    }
 
     uint32_t code_type = (uint32_t)env->r[32];
     uint32_t value = (uint32_t)env->r[33];
