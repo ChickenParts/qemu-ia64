@@ -9184,8 +9184,8 @@ void HELPER(fw_pei_ppi_fix)(CPUIA64State *env, uint64_t pc)
     static bool logged;
 
     env->r[8] = 0;
-    env->r[9] = ppi;
-    env->r[10] = handoff;
+    env->r[9] = handoff;
+    env->r[10] = ppi;
     env->r[11] = 0;
 
     if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
