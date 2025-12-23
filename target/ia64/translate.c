@@ -3433,11 +3433,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                              src);
                     gen_set_label(skip_watch);
                 }
-                if (ia64_store_watch_value_match()) {
-                    uint64_t size_mask = (size == 8) ? UINT64_MAX :
-                                         ((1ULL << (size * 8)) - 1);
-                    uint64_t effective_mask =
-                        ia64_store_watch_value_mask & size_mask;
+                if (ia64_store_watch_value_match() && size == 8) {
+                    uint64_t effective_mask = ia64_store_watch_value_mask;
                     if (effective_mask) {
                         TCGv_i64 masked = tcg_temp_new_i64();
                         TCGv_i64 masked_watch = tcg_temp_new_i64();
