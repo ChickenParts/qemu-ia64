@@ -520,6 +520,10 @@ static bool ia64_store_watch_range_inited;
 static bool ia64_store_watch_range_enabled;
 static uint64_t ia64_store_watch_range_lo;
 static uint64_t ia64_store_watch_range_hi;
+static bool ia64_store_watch_value_inited;
+static bool ia64_store_watch_value_enabled;
+static uint64_t ia64_store_watch_value;
+static uint64_t ia64_store_watch_value_mask;
 
 static void ia64_init_store_watch(void)
 {
@@ -595,6 +599,42 @@ static bool ia64_store_watch_range_match(void)
 {
     ia64_init_store_watch_range();
     return ia64_store_watch_range_enabled;
+}
+
+static void ia64_init_store_watch_value(void)
+{
+    if (ia64_store_watch_value_inited) {
+        return;
+    }
+    ia64_store_watch_value_inited = true;
+
+    const char *s = getenv("QEMU_IA64_WATCH_STORE_VALUE");
+    if (!s || !*s) {
+        return;
+    }
+    char *endp = NULL;
+    ia64_store_watch_value = strtoull(s, &endp, 0);
+    if (endp == s) {
+        return;
+    }
+    ia64_store_watch_value_enabled = true;
+
+    const char *m = getenv("QEMU_IA64_WATCH_STORE_VALUE_MASK");
+    if (m && *m) {
+        char *endm = NULL;
+        ia64_store_watch_value_mask = strtoull(m, &endm, 0);
+        if (endm == m) {
+            ia64_store_watch_value_mask = (1ULL << 61) - 1;
+        }
+    } else {
+        ia64_store_watch_value_mask = (1ULL << 61) - 1;
+    }
+}
+
+static bool ia64_store_watch_value_match(void)
+{
+    ia64_init_store_watch_value();
+    return ia64_store_watch_value_enabled;
 }
 
 static TCGv_i64 gen_phys_mode_addr(TCGv_i64 addr)
@@ -3392,6 +3432,29 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                              tcg_constant_i32(size),
                                              src);
                     gen_set_label(skip_watch);
+                }
+                if (ia64_store_watch_value_match()) {
+                    uint64_t size_mask = (size == 8) ? UINT64_MAX :
+                                         ((1ULL << (size * 8)) - 1);
+                    uint64_t effective_mask =
+                        ia64_store_watch_value_mask & size_mask;
+                    if (effective_mask) {
+                        TCGv_i64 masked = tcg_temp_new_i64();
+                        TCGv_i64 masked_watch = tcg_temp_new_i64();
+                        tcg_gen_andi_i64(masked, src, effective_mask);
+                        tcg_gen_movi_i64(masked_watch,
+                                         ia64_store_watch_value & effective_mask);
+                        TCGLabel *skip_watch = gen_new_label();
+                        tcg_gen_brcond_i64(TCG_COND_NE, masked,
+                                           masked_watch, skip_watch);
+                        gen_helper_dbg_mem_watch(tcg_env,
+                                                 tcg_constant_i64(ctx->base.pc_next),
+                                                 tcg_constant_i32(ctx->ri),
+                                                 watch_addr,
+                                                 tcg_constant_i32(size),
+                                                 src);
+                        gen_set_label(skip_watch);
+                    }
                 }
                 tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, mop);
                 {
