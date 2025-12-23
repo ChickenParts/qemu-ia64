@@ -2488,6 +2488,26 @@ static bool ia64_fw_pei_ppi_list_dump_enabled(void)
     return enabled;
 }
 
+static bool ia64_fw_pei_pre_install_probe_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PRE_INSTALL_PROBE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_pei_install_pplist_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_INSTALL_PPLIST_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
 static void ia64_fw_dump_pei_ppi_list(CPUIA64State *env, uint64_t ppi_list)
 {
     CPUState *cs = env_cpu(env);
@@ -6030,6 +6050,25 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
         }
     }
 
+    if (ia64_fw_pei_install_pplist_trace_enabled()) {
+        uint64_t fw_ppi = env->fw_pei_ppi;
+        uint64_t fw_ppi_phys = fw_ppi & ((1ULL << 61) - 1);
+        uint64_t desc_phys = call_a1 & ((1ULL << 61) - 1);
+        if (call_a1 && fw_ppi &&
+            (call_a1 == fw_ppi || desc_phys == fw_ppi_phys)) {
+            static bool logged;
+            if (!logged) {
+                logged = true;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_pplist pc=%016" PRIx64
+                              " tgt=%016" PRIx64 " desc=%016" PRIx64
+                              " fw_ppi=%016" PRIx64 "\n",
+                              pc, tgt, call_a1, fw_ppi);
+                ia64_fw_dump_pei_ppi_list(env, call_a1);
+            }
+        }
+    }
+
     if (trace_call_match_a0 &&
         call_a0 == trace_call_match_a0 &&
         (!trace_call_match_a1 || call_a1 == trace_call_match_a1)) {
@@ -9296,6 +9335,58 @@ void HELPER(fw_pei_ppi_dump)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_pre_install_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!ia64_fw_pei_pre_install_probe_enabled()) {
+        return;
+    }
+
+    static bool logged;
+    if (logged) {
+        return;
+    }
+    logged = true;
+
+    uint64_t fw_ppi = env->fw_pei_ppi;
+    uint64_t r33 = env->r[33];
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_pre_install pc=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " r35=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
+                  " r1=%016" PRIx64 " fw_ppi=%016" PRIx64 "\n",
+                  pc, env->r[32], r33, env->r[34], env->r[35],
+                  env->r[12], env->r[13], env->r[1], fw_ppi);
+
+    if (fw_ppi) {
+        ia64_fw_dump_pei_ppi_list(env, fw_ppi);
+    }
+    if (r33 && r33 != fw_ppi) {
+        ia64_fw_dump_pei_ppi_list(env, r33);
+    }
+
+    CPUState *cs = env_cpu(env);
+    hwaddr sp = ia64_phys_mode_addr(env->r[12]);
+    uint8_t buf[256];
+    if (cpu_memory_rw_debug(cs, sp, buf, sizeof(buf), false) == 0) {
+        uint64_t fw_ppi_phys = fw_ppi & ((1ULL << 61) - 1);
+        for (size_t off = 0; off + 8 <= sizeof(buf); off += 8) {
+            uint64_t v = ldq_le_p(&buf[off]);
+            if (v == fw_ppi || (fw_ppi && (v & ((1ULL << 61) - 1)) == fw_ppi_phys)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_pre_install stack_hit sp=%016" HWADDR_PRIx
+                              " off=0x%zx val=%016" PRIx64 "\n",
+                              sp, off, v);
+            }
+        }
+    }
+#endif
+}
+
 static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint64_t pa, uint32_t rid, uint8_t ps,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,
@@ -9769,6 +9860,34 @@ void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 
     qemu_log_mask(LOG_GUEST_ERROR,
                   "store_watch pc=%016" PRIx64 " ri=%u"
+                  " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                  " addr=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
+                  pc, ri, env->ip, env->psr, env->cfm, addr, size, val);
+}
+
+void HELPER(dbg_load_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                            uint64_t addr, uint32_t size, uint64_t val)
+{
+    static int log_limit = -1;
+    static int log_count;
+
+    if (log_limit == -1) {
+        log_limit = 64;
+        const char *s = getenv("QEMU_IA64_WATCH_LOAD_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+
+    if (log_count++ >= log_limit) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "load_watch pc=%016" PRIx64 " ri=%u"
                   " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
                   " addr=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
                   pc, ri, env->ip, env->psr, env->cfm, addr, size, val);
