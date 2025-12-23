@@ -1,16 +1,18 @@
 # IA-64 firmware bringup TODO
 
 ## Current blockers
-- Firmware asserts in `AfterMemMP.c` line 161 after FakeMemMap; hang at `IP=0xffe737a0` with `r8=EFI_END_OF_MEDIA (0x1c)`.
-- Call chain at hang (from b0 trace): `0xffe73790 -> 0xffe74720 -> 0xffe70dc0`. Need to identify the callee and failing service.
-- SAL/ESAL break ABI uses r28.. for function/args; verify all callers match SKI/SAL spec (esp. PCI config, state info, freq base, update pal).
+- Firmware asserts in `AfterMemMP.c` line 161 after FakeMemMap; hang at `IP=0xffe737a0`.
+- Assertion path: `PeiServices->ReportStatusCode` (ip `0xffe22330`) returns `EFI_NOT_AVAILABLE_YET` (Tiano `0x1c`), causing `ASSERT_EFI_ERROR`.
+- `ReportStatusCode` calls `PeiServices->LocatePpi` (ip `0xffe26510`) for `PEI_STATUS_CODE_PPI_GUID` (`229832d3-7a30-4b36-b827-f40cb7d45436`) and gets `EFI_NOT_FOUND` (`0x0e`).
+- StatusCode PPI not installed; early `InstallPpi` calls (first 10) include SecPlatformInfo, etc., but not StatusCode.
 
 ## Investigation items
-- Decode the function at `0xffe70dc0` (plabel call) and identify the service returning `EFI_END_OF_MEDIA`.
-- Audit RSE/register stack handling around `br.call`/`br.ret` for pointer corruption or bad frame sizes.
+- Find why StatusCode PEIM never installs `PEI_STATUS_CODE_PPI_GUID` before `AfterMemMP`.
+- Trace `InstallPpi` calls to see if StatusCode is ever attempted; if not, trace PEI dispatcher/FV scan.
+- Probe `FfsFindNextVolume`/`FfsFindNextFile`/`FfsFindSectionData` for early errors that could skip StatusCode PEIM.
+- Audit RSE/register stack handling around `br.call`/`br.ret` to rule out corrupt arguments in PEI services.
 - Validate GFW HOB list contents and placement against expected firmware layout.
 - Re-check firmware FV layout and DXE core addresses against flash window mapping.
-- Confirm IOSAPIC/MMIO mapping and `0xfee00000` usage in firmware.
 
 ## Logging / tools
 - SAL trace: `QEMU_IA64_FW_SAL_TRACE=1` + `QEMU_IA64_FW_LOG=1`.
