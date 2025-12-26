@@ -4094,7 +4094,11 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 
     if (dump_enabled == -1) {
         const char *s = getenv("QEMU_IA64_FW_BREAK0_DUMP");
-        dump_enabled = (s && *s) ? 1 : 0;
+        if (s && *s) {
+            dump_enabled = (strcmp(s, "assert") == 0) ? 2 : 1;
+        } else {
+            dump_enabled = 0;
+        }
     }
     if (dump_len == -1) {
         dump_len = 4096;
@@ -4174,10 +4178,11 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                       " r8=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64
                       " r11=%016" PRIx64
                       " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
-                      " r35=%016" PRIx64 " r36=%016" PRIx64 "\n",
+                      " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64 "\n",
                       env->ip, pc, env->b[0], is_assert ? 1 : 0,
                       env->r[8], env->r[9], env->r[10], env->r[11],
-                      env->r[32], env->r[33], env->r[34], env->r[35], env->r[36]);
+                      env->r[32], env->r[33], env->r[34], env->r[35],
+                      env->r[36], env->r[37]);
         if (ia64_fw_status_code_valid(log_code_type, log_value)) {
             const char *class_open = class_name ? "(" : "";
             const char *class_close = class_name ? ")" : "";
@@ -4278,6 +4283,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             { "r34", env->r[34] },
             { "r35", env->r[35] },
             { "r36", env->r[36] },
+            { "r37", env->r[37] },
         };
 
         for (size_t i = 0; i < ARRAY_SIZE(probes); i++) {
@@ -4351,7 +4357,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         }
     }
 
-    if (dump_enabled && dump_len > 0) {
+    if (dump_enabled && dump_len > 0 && (dump_enabled == 1 || is_assert)) {
         CPUState *cs = env_cpu(env);
         static int dump_file_enabled = -1;
         static int dump_file_count;
@@ -4366,6 +4372,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             uint64_t addr;
         } candidates[] = {
             { "r36", env->r[36] },
+            { "r37", env->r[37] },
             { "r35", env->r[35] },
             { "r32", env->r[32] },
             { "r33", env->r[33] },
@@ -4463,6 +4470,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                 scan_len >= (size_t)status_header_size + 5) {
                 size_t base = status_header_size;
                 uint32_t line = ldl_le_p(&buf[base]);
+                bool assert_logged = false;
 
                 /*
                  * Some builds use a compact payload that stores pointers to the
@@ -4516,6 +4524,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 	                            qemu_log_mask(LOG_GUEST_ERROR,
 	                                          "IA64: fw_break0_assert_enc file=%s expr=%s\n",
 	                                          fn_enc, expr_enc);
+                                assert_logged = true;
 	                        } else {
 	                            uint8_t tmp[64] = { 0 };
 	                            if (!fn_enc &&
@@ -4553,6 +4562,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 	                                        qemu_log_mask(LOG_GUEST_ERROR,
 	                                                      "IA64: fw_break0_assert_file_ptr[%zu]=%016" PRIx64 " \"%s\"\n",
 	                                                      pi, p, fn);
+                                            assert_logged = true;
 	                                        if (++printed >= 4) {
 	                                            break;
 	                                        }
@@ -4562,6 +4572,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 	                                        qemu_log_mask(LOG_GUEST_ERROR,
 	                                                      "IA64: fw_break0_assert_file_ptr[%zu]=%016" PRIx64 " \"%s\" (ucs2)\n",
 	                                                      pi, p, fn);
+                                            assert_logged = true;
 	                                        if (++printed >= 4) {
 	                                            break;
 	                                        }
@@ -4581,6 +4592,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 	                                        qemu_log_mask(LOG_GUEST_ERROR,
 	                                                      "IA64: fw_break0_assert_expr_ptr[%zu]=%016" PRIx64 " \"%s\"\n",
 	                                                      pi, p, expr);
+                                            assert_logged = true;
 	                                        if (++printed >= 4) {
 	                                            break;
 	                                        }
@@ -4590,6 +4602,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 	                                        qemu_log_mask(LOG_GUEST_ERROR,
 	                                                      "IA64: fw_break0_assert_expr_ptr[%zu]=%016" PRIx64 " \"%s\" (ucs2)\n",
 	                                                      pi, p, expr);
+                                            assert_logged = true;
 	                                        if (++printed >= 4) {
 	                                            break;
 	                                        }
@@ -4629,6 +4642,78 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                         qemu_log_mask(LOG_GUEST_ERROR,
                                       "IA64: fw_break0_assert line=%u file=\"%s\" expr=\"%s\"\n",
                                       line, fn, expr);
+                        assert_logged = true;
+                    }
+                }
+
+                if (!assert_logged) {
+                    size_t file_off = 0;
+                    size_t file_len = 0;
+                    for (size_t i = base; i < scan_len; i++) {
+                        unsigned char c = buf[i];
+                        if (c < 0x20 || c >= 0x7f) {
+                            continue;
+                        }
+                        size_t j = i;
+                        while (j < scan_len) {
+                            unsigned char cj = buf[j];
+                            if (cj < 0x20 || cj >= 0x7f) {
+                                break;
+                            }
+                            j++;
+                        }
+                        size_t len = j - i;
+                        if (len >= 8) {
+                            const char *s = (const char *)&buf[i];
+                            bool has_path = false;
+                            bool has_source = false;
+                            for (size_t k = 0; k + 1 < len; k++) {
+                                if (s[k] == ':' && s[k + 1] == '\\') {
+                                    has_path = true;
+                                    break;
+                                }
+                            }
+                            for (size_t k = 0; k + 1 < len; k++) {
+                                if (s[k] == '.' && (s[k + 1] == 'c' || s[k + 1] == 'h')) {
+                                    has_source = true;
+                                    break;
+                                }
+                            }
+                            if (has_path || has_source) {
+                                file_off = i;
+                                file_len = len;
+                                break;
+                            }
+                        }
+                        i = j;
+                    }
+
+                    if (file_off) {
+                        uint32_t line_guess = 0;
+                        for (size_t back = 4; back <= 32 && file_off >= back; back += 4) {
+                            uint32_t cand = ldl_le_p(&buf[file_off - back]);
+                            if (cand && cand < 10000) {
+                                line_guess = cand;
+                                break;
+                            }
+                        }
+                        size_t desc_off = file_off + file_len + 1;
+                        size_t desc_len = 0;
+                        if (desc_off < scan_len) {
+                            const char *desc = (const char *)&buf[desc_off];
+                            desc_len = strnlen(desc, scan_len - desc_off);
+                        }
+                        char fn[256] = { 0 };
+                        char expr[256] = { 0 };
+                        size_t nfn = MIN(file_len, sizeof(fn) - 1);
+                        memcpy(fn, &buf[file_off], nfn);
+                        if (desc_len) {
+                            size_t nexpr = MIN(desc_len, sizeof(expr) - 1);
+                            memcpy(expr, &buf[desc_off], nexpr);
+                        }
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: fw_break0_assert line=%u file=\"%s\" expr=\"%s\"\n",
+                                      line_guess, fn, expr);
                     }
                 }
             } else if (status_guid_valid && has_status_header) {
