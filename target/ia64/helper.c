@@ -9579,11 +9579,11 @@ void HELPER(fw_pei_aftermem_trace)(CPUIA64State *env, uint64_t pc, uint32_t stag
         return;
     }
 
-    static int counts[4];
+    static int counts[8];
     const int limit = 16;
     uint32_t idx = stage;
     if (idx >= ARRAY_SIZE(counts)) {
-        idx = 0;
+        idx = ARRAY_SIZE(counts) - 1;
     }
     if (counts[idx]++ >= limit) {
         return;
@@ -10641,6 +10641,31 @@ static bool ia64_fw_r8_trace_enabled(void)
     return enabled;
 }
 
+static bool ia64_fw_r8_target_enabled(uint64_t *target)
+{
+    static int enabled = -1;
+    static uint64_t value;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_R8_TARGET");
+        if (!s || !*s) {
+            enabled = 0;
+        } else {
+            char *endp = NULL;
+            uint64_t parsed = strtoull(s, &endp, 0);
+            if (endp && endp != s) {
+                enabled = 1;
+                value = parsed;
+            } else {
+                enabled = 0;
+            }
+        }
+    }
+    if (enabled > 0 && target) {
+        *target = value;
+    }
+    return enabled > 0;
+}
+
 static bool ia64_fw_fvb_trace_enabled(void)
 {
     static int enabled = -1;
@@ -11200,7 +11225,16 @@ void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
         return;
     }
     env->dbg_fw_r8_last = r8;
-    if ((r8 & (1ULL << 63)) == 0) {
+    uint64_t target = 0;
+    bool target_enabled = ia64_fw_r8_target_enabled(&target);
+    if (target_enabled) {
+        if (r8 != target) {
+            return;
+        }
+        if (env->dbg_fw_r8_logged) {
+            return;
+        }
+    } else if ((r8 & (1ULL << 63)) == 0) {
         return;
     }
 
@@ -11261,7 +11295,9 @@ void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 #endif
         }
     }
-    env->dbg_fw_r8_logged = 1;
+    if (target_enabled) {
+        env->dbg_fw_r8_logged = 1;
+    }
 }
 
 static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
