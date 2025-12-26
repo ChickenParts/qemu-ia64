@@ -9607,6 +9607,116 @@ void HELPER(fw_pei_aftermem_trace)(CPUIA64State *env, uint64_t pc, uint32_t stag
 #endif
 }
 
+void HELPER(fw_pei_oor_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)stage;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    static int counts[2];
+    const int limit = 16;
+    uint32_t idx = (stage < ARRAY_SIZE(counts)) ? stage : 1;
+    if (counts[idx]++ >= limit) {
+        return;
+    }
+
+    if (stage == 0) {
+        env->dbg_fw_pei_oor_ptr30 = env->r[30];
+        env->dbg_fw_pei_oor_ptr31 = env->r[31];
+        env->dbg_fw_pei_oor_active = 1;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_oor pre pc=%016" PRIx64
+                      " r30_ptr=%016" PRIx64 " r31_ptr=%016" PRIx64
+                      " r12=%016" PRIx64 " r32=%016" PRIx64 " r33=%016" PRIx64
+                      " r34=%016" PRIx64 " r35=%016" PRIx64 "\n",
+                      pc, env->r[30], env->r[31], env->r[12],
+                      env->r[32], env->r[33], env->r[34], env->r[35]);
+        return;
+    }
+
+    uint64_t ptr30 = env->dbg_fw_pei_oor_ptr30;
+    uint64_t ptr31 = env->dbg_fw_pei_oor_ptr31;
+    bool mem30_ok = false;
+    bool mem31_ok = false;
+    uint64_t mem30 = 0;
+    uint16_t mem31 = 0;
+    CPUState *cs = env_cpu(env);
+    if (ptr30) {
+        uint8_t tmp[8];
+        if (cpu_memory_rw_debug(cs, ptr30, tmp, sizeof(tmp), false) == 0) {
+            mem30 = ldq_le_p(tmp);
+            mem30_ok = true;
+        }
+    }
+    if (ptr31) {
+        uint8_t tmp[2];
+        if (cpu_memory_rw_debug(cs, ptr31, tmp, sizeof(tmp), false) == 0) {
+            mem31 = lduw_le_p(tmp);
+            mem31_ok = true;
+        }
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_pei_oor post pc=%016" PRIx64
+                  " r30=%016" PRIx64 " r31=%016" PRIx64
+                  " ptr30=%016" PRIx64 " ptr31=%016" PRIx64
+                  " mem30=%016" PRIx64 "%s mem31=%04x%s\n",
+                  pc, env->r[30], env->r[31], ptr30, ptr31,
+                  mem30, mem30_ok ? "" : "(!)",
+                  mem31, mem31_ok ? "" : "(!)");
+#endif
+}
+
+void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)stage;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    static int counts[2];
+    const int limit = 16;
+    uint32_t idx = (stage < ARRAY_SIZE(counts)) ? stage : 1;
+    if (counts[idx]++ >= limit) {
+        return;
+    }
+
+    if (stage == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_call pre pc=%016" PRIx64
+                      " b7=%016" PRIx64 " b0=%016" PRIx64
+                      " r1=%016" PRIx64 " r12=%016" PRIx64
+                      " r30=%016" PRIx64 " r31=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64
+                      " r34=%016" PRIx64 " r35=%016" PRIx64 "\n",
+                      pc, env->b[7], env->b[0], env->r[1], env->r[12],
+                      env->r[30], env->r[31], env->r[32], env->r[33],
+                      env->r[34], env->r[35]);
+        if (env->b[7]) {
+            ia64_fw_dump_code(env, "pei_b7", env->b[7], 64);
+        }
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_pei_call post pc=%016" PRIx64
+                  " r8=%016" PRIx64 " b0=%016" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64 "\n",
+                  pc, env->r[8], env->b[0], env->r[1], env->r[12]);
+#endif
+}
+
 void HELPER(fw_pei_pre_install_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY

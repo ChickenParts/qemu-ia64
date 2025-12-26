@@ -171,6 +171,9 @@ typedef struct CPUArchState {
     uint64_t dbg_fw_call_ret_pc[8];
     uint64_t dbg_fw_call_entry_pc[8];
     uint32_t dbg_fw_call_depth;
+    uint64_t dbg_fw_pei_oor_ptr30;
+    uint64_t dbg_fw_pei_oor_ptr31;
+    uint8_t dbg_fw_pei_oor_active;
 
     /*
      * Firmware-preboot handoff state.

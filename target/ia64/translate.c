@@ -1595,6 +1595,43 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                          tcg_constant_i64(ctx->base.pc_next),
                                          tcg_constant_i32(3));
     }
+
+    /*
+     * xenipf/EDK firmware: trace PeiMain's indirect call that leads to
+     * PeiCreateHob, and the resulting OUT_OF_RESOURCES check.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 2 &&
+        (ctx->base.pc_next == 0x80000000ffe24d20ULL ||
+         ctx->base.pc_next == 0x00000000ffe24d20ULL)) {
+        gen_helper_fw_pei_indcall_probe(tcg_env,
+                                        tcg_constant_i64(ctx->base.pc_next),
+                                        tcg_constant_i32(0));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe24d30ULL ||
+         ctx->base.pc_next == 0x00000000ffe24d30ULL)) {
+        gen_helper_fw_pei_indcall_probe(tcg_env,
+                                        tcg_constant_i64(ctx->base.pc_next),
+                                        tcg_constant_i32(1));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe24e50ULL ||
+         ctx->base.pc_next == 0x00000000ffe24e50ULL)) {
+        gen_helper_fw_pei_oor_probe(tcg_env,
+                                    tcg_constant_i64(ctx->base.pc_next),
+                                    tcg_constant_i32(0));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe24e60ULL ||
+         ctx->base.pc_next == 0x00000000ffe24e60ULL)) {
+        gen_helper_fw_pei_oor_probe(tcg_env,
+                                    tcg_constant_i64(ctx->base.pc_next),
+                                    tcg_constant_i32(1));
+    }
 #endif
 
     if (ia64_watch_r33_match()) {
