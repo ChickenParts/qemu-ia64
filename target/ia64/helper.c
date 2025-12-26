@@ -9544,6 +9544,29 @@ void HELPER(fw_pei_ppi_dump)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_status_log)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    static bool logged;
+    if (logged || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    logged = true;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_pei_status pc=%016" PRIx64
+                  " r8=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64
+                  " r11=%016" PRIx64 " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64 "\n",
+                  pc,
+                  env->r[8], env->r[9], env->r[10], env->r[11],
+                  env->r[32], env->r[33], env->r[1], env->r[12]);
+#endif
+}
+
 void HELPER(fw_pei_pre_install_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY

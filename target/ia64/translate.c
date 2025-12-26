@@ -1539,6 +1539,18 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         gen_helper_fw_pei_ppi_dump(tcg_env,
                                    tcg_constant_i64(ctx->base.pc_next));
     }
+
+    /*
+     * xenipf/EDK firmware: log status after AfterMemMP call site to capture
+     * the failing EFI_STATUS that triggers the assert loop.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe73710ULL ||
+         ctx->base.pc_next == 0x00000000ffe73710ULL)) {
+        gen_helper_fw_pei_status_log(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next));
+    }
 #endif
 
     if (ia64_watch_r33_match()) {
