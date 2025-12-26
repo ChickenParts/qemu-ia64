@@ -128,6 +128,7 @@ struct IPFMachineState {
     MemoryRegion ram_high;
     MemoryRegion ram_slack;
     MemoryRegion fw_workram;
+    MemoryRegion fw_workram_alias;
     MemoryRegion dmamem;
     MemoryRegion bmapm1;
     MemoryRegion bmapm2;
@@ -1163,16 +1164,16 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
 
     const uint64_t bfv_phys = (uint64_t)fw_base + fv_off;
     const uint64_t bfv_size = fv_len;
+    const uint64_t temp_phys = IPF_FW_PEI_TEMP_BASE;
+    const uint64_t temp_size = IPF_FW_PEI_TEMP_SIZE;
     const uint64_t handoff_phys = IPF_FW_PEI_HANDOFF_BASE;
-    const uint64_t ppi_phys = IPF_FW_PEI_PPI_BASE;
+    const uint64_t ppi_phys = temp_phys;
     const uint64_t stub_phys = IPF_FW_PEI_STUB_BASE;
     const uint64_t plabel_phys = stub_phys + 0x20;
     const uint64_t ppi_iface_phys = stub_phys + 0x40;
     const uint64_t findfv_stub_phys = stub_phys + 0x60;
     const uint64_t findfv_plabel_phys = findfv_stub_phys + 0x20;
     const uint64_t findfv_iface_phys = findfv_stub_phys + 0x40;
-    const uint64_t temp_phys = IPF_FW_PEI_TEMP_BASE;
-    const uint64_t temp_size = IPF_FW_PEI_TEMP_SIZE;
     const uint64_t pei_temp_size = temp_size / 2;
     const uint64_t stack_size = temp_size - pei_temp_size;
     const uint64_t stack_base = temp_phys + temp_size;
@@ -3434,6 +3435,17 @@ static void ipf_init(MachineState *machine)
     memory_region_add_subregion(sysmem, IPF_FW_WORKRAM_BASE, &m->fw_workram);
     DPRINTF("FW work RAM: mapped at 0x%016" PRIx64 " size=%" PRIu64 "\n",
             (uint64_t)IPF_FW_WORKRAM_BASE, (uint64_t)IPF_FW_WORKRAM_SIZE);
+    /*
+     * EDK firmware sometimes flips bit 63 on temporary RAM pointers when
+     * switching to cache mode. Provide an alias so those region-4 addresses
+     * still resolve to the same backing RAM.
+     */
+    memory_region_init_alias(&m->fw_workram_alias, OBJECT(machine),
+                             "ipf.fw-workram.alias", &m->fw_workram, 0,
+                             IPF_FW_WORKRAM_SIZE);
+    memory_region_add_subregion(sysmem,
+                                IPF_FW_WORKRAM_BASE | (1ULL << 63),
+                                &m->fw_workram_alias);
 
     ipf_init_uart(m, sysmem);
     ipf_init_debugcon(m);
