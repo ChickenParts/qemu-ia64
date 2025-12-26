@@ -9567,6 +9567,46 @@ void HELPER(fw_pei_status_log)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_aftermem_trace)(CPUIA64State *env, uint64_t pc, uint32_t stage)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)stage;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    static int counts[4];
+    const int limit = 16;
+    uint32_t idx = stage;
+    if (idx >= ARRAY_SIZE(counts)) {
+        idx = 0;
+    }
+    if (counts[idx]++ >= limit) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_pei_aftermem stage=%u pc=%016" PRIx64
+                  " r8=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64
+                  " r11=%016" PRIx64 " r30=%016" PRIx64 " r31=%016" PRIx64
+                  " r39=%016" PRIx64 " r40=%016" PRIx64 " r41=%016" PRIx64
+                  " r42=%016" PRIx64 " r43=%016" PRIx64 " r44=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64 "\n",
+                  stage, pc,
+                  env->r[8], env->r[9], env->r[10], env->r[11],
+                  env->r[30], env->r[31],
+                  env->r[39], env->r[40], env->r[41],
+                  env->r[42], env->r[43], env->r[44],
+                  env->r[32], env->r[33],
+                  env->r[1], env->r[12]);
+#endif
+}
+
 void HELPER(fw_pei_pre_install_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY

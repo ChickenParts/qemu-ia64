@@ -1551,6 +1551,42 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         gen_helper_fw_pei_status_log(tcg_env,
                                      tcg_constant_i64(ctx->base.pc_next));
     }
+
+    /*
+     * xenipf/EDK firmware: trace AfterMemMP call chain and status stores.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe73700ULL ||
+         ctx->base.pc_next == 0x00000000ffe73700ULL)) {
+        gen_helper_fw_pei_aftermem_trace(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next),
+                                         tcg_constant_i32(0));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 2 &&
+        (ctx->base.pc_next == 0x80000000ffe74740ULL ||
+         ctx->base.pc_next == 0x00000000ffe74740ULL)) {
+        gen_helper_fw_pei_aftermem_trace(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next),
+                                         tcg_constant_i32(1));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe74790ULL ||
+         ctx->base.pc_next == 0x00000000ffe74790ULL)) {
+        gen_helper_fw_pei_aftermem_trace(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next),
+                                         tcg_constant_i32(2));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe747c0ULL ||
+         ctx->base.pc_next == 0x00000000ffe747c0ULL)) {
+        gen_helper_fw_pei_aftermem_trace(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next),
+                                         tcg_constant_i32(3));
+    }
 #endif
 
     if (ia64_watch_r33_match()) {
