@@ -1475,9 +1475,9 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     /*
-     * xenipf/EDK firmware: PEI startup path should hand off SecCoreData in r9
-     * and the initial PPI list in r10 before the PEI core copies them into
-     * r32/r33. The ROM stub leaves these zeroed; override with our data.
+     * xenipf/EDK firmware: PEI startup path should hand off the SEC handoff
+     * pointer in r9 and the PPI list in r10 before the PEI core copies them
+     * into r32/r33. The ROM stub leaves these zeroed; override with our data.
      */
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
@@ -1524,6 +1524,18 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe737a0ULL ||
          ctx->base.pc_next == 0x00000000ffe737a0ULL)) {
+        gen_helper_fw_pei_ppi_dump(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    /*
+     * xenipf/EDK firmware: dump PEI PPI database before the DXE IPL lookup
+     * to see whether MemoryDiscovered/DxeIpl PPIs were installed.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe215c0ULL ||
+         ctx->base.pc_next == 0x00000000ffe215c0ULL)) {
         gen_helper_fw_pei_ppi_dump(tcg_env,
                                    tcg_constant_i64(ctx->base.pc_next));
     }
