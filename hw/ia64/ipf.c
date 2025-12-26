@@ -1195,18 +1195,28 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     };
 
     /*
-     * EFI_PEI_STARTUP_DESCRIPTOR (framework PEI) with a BFV size extension:
-     *   0x00 BFV base
-     *   0x08 Cache-as-RAM size
-     *   0x10 BFV size (IPF firmware extension)
-     *   0x18 PPI dispatch table
+     * EFI_SEC_PEI_HAND_OFF (PI PEI core):
+     *   0x00 DataSize (UINT16)
+     *   0x08 BootFirmwareVolumeBase
+     *   0x10 BootFirmwareVolumeSize
+     *   0x18 TemporaryRamBase
+     *   0x20 TemporaryRamSize
+     *   0x28 PeiTemporaryRamBase
+     *   0x30 PeiTemporaryRamSize
+     *   0x38 StackBase
+     *   0x40 StackSize
      */
-    uint8_t handoff[0x20];
+    uint8_t handoff[0x48];
     memset(handoff, 0, sizeof(handoff));
-    stq_le_p(&handoff[0], ipf_fw_region8_addr(bfv_phys));
-    stq_le_p(&handoff[8], temp_size);
+    stw_le_p(&handoff[0], sizeof(handoff));
+    stq_le_p(&handoff[8], ipf_fw_region8_addr(bfv_phys));
     stq_le_p(&handoff[16], bfv_size);
-    stq_le_p(&handoff[24], ipf_fw_region8_addr(ppi_phys));
+    stq_le_p(&handoff[24], ipf_fw_region8_addr(temp_phys));
+    stq_le_p(&handoff[32], temp_size);
+    stq_le_p(&handoff[40], ipf_fw_region8_addr(temp_phys));
+    stq_le_p(&handoff[48], pei_temp_size);
+    stq_le_p(&handoff[56], ipf_fw_region8_addr(stack_base - stack_size));
+    stq_le_p(&handoff[64], stack_size);
     cpu_physical_memory_write(handoff_phys, handoff, sizeof(handoff));
 
     struct QEMU_PACKED {
@@ -1247,18 +1257,20 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
                               (const uint8_t *)&findfv_iface,
                               sizeof(findfv_iface));
 
-    uint8_t ppi[0x60];
+    const uint64_t status_guid_phys = ppi_phys + 0x30;
+    const uint64_t findfv_guid_phys = ppi_phys + 0x40;
+    uint8_t ppi[0x50];
     memset(ppi, 0, sizeof(ppi));
     uint64_t flags = 0x00000010ULL; /* PPI */
     stq_le_p(&ppi[0], flags);
-    stq_le_p(&ppi[8], ipf_fw_region8_addr(ppi_phys + 0x18));
+    stq_le_p(&ppi[8], ipf_fw_region8_addr(status_guid_phys));
     stq_le_p(&ppi[16], ipf_fw_region8_addr(ppi_iface_phys));
-    memcpy(&ppi[0x18], status_guid, sizeof(status_guid));
     flags = 0x80000000ULL | 0x00000010ULL; /* TERMINATE_LIST | PPI */
-    stq_le_p(&ppi[0x30], flags);
-    stq_le_p(&ppi[0x38], ipf_fw_region8_addr(ppi_phys + 0x48));
-    stq_le_p(&ppi[0x40], ipf_fw_region8_addr(findfv_iface_phys));
-    memcpy(&ppi[0x48], findfv_guid, sizeof(findfv_guid));
+    stq_le_p(&ppi[0x18], flags);
+    stq_le_p(&ppi[0x20], ipf_fw_region8_addr(findfv_guid_phys));
+    stq_le_p(&ppi[0x28], ipf_fw_region8_addr(findfv_iface_phys));
+    memcpy(&ppi[0x30], status_guid, sizeof(status_guid));
+    memcpy(&ppi[0x40], findfv_guid, sizeof(findfv_guid));
     cpu_physical_memory_write(ppi_phys, ppi, sizeof(ppi));
 
     ipf_boot_r9 = ipf_fw_region8_addr(handoff_phys);
@@ -1267,18 +1279,26 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     ipf_boot_findfv_stub = ipf_fw_region8_addr(findfv_stub_phys);
     ipf_boot_findfv_iface = ipf_fw_region8_addr(findfv_iface_phys);
     DPRINTF("PEI startup: bfv=%016" PRIx64 " bfv_size=%" PRIu64
-            " cache=%" PRIu64 " dispatch=%016" PRIx64
-            " r9=%016" PRIx64 " r10=%016" PRIx64 "\n",
-            bfv_phys, bfv_size, temp_size, ppi_phys,
-            ipf_boot_r9, ipf_boot_r10);
+            " temp=%016" PRIx64 " tsize=%" PRIu64
+            " pei_temp=%016" PRIx64 " pei_tsize=%" PRIu64
+            " stack=%016" PRIx64 " ssize=%" PRIu64
+            " ppi=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64 "\n",
+            bfv_phys, bfv_size, temp_phys, temp_size,
+            temp_phys, pei_temp_size,
+            stack_base - stack_size, stack_size,
+            ppi_phys, ipf_boot_r9, ipf_boot_r10);
 
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IPF: PEI startup: bfv=%016" PRIx64 " bfv_size=%" PRIu64
                       " startup=%016" PRIx64 " ppi=%016" PRIx64
-                      " cache=%" PRIu64 " r10=%016" PRIx64 "\n",
+                      " temp=%016" PRIx64 " tsize=%" PRIu64
+                      " pei_temp=%016" PRIx64 " pei_tsize=%" PRIu64
+                      " stack=%016" PRIx64 " ssize=%" PRIu64
+                      " r10=%016" PRIx64 "\n",
                       bfv_phys, bfv_size, handoff_phys, ppi_phys,
-                      temp_size, ipf_boot_r10);
+                      temp_phys, temp_size, temp_phys, pei_temp_size,
+                      stack_base - stack_size, stack_size, ipf_boot_r10);
     }
 }
 
