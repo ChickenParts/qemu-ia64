@@ -88,6 +88,7 @@ typedef struct CPUArchState {
         uint64_t ar_pfs;
         uint64_t cfm;
         uint64_t ret_addr;  /* caller return address (bundle PC) */
+        uint8_t share_outs; /* caller OUTs share physical regs with callee INs */
     } *rse_frames;
     uint32_t rse_depth;
     uint32_t rse_capacity;
@@ -112,6 +113,8 @@ typedef struct CPUArchState {
     uint64_t last_b0_write_insn;
     uint64_t last_b0_write_val;
     uint64_t last_b0_write_kind; /* 1=br.call/brl.call, 2=mov.b, 3=other */
+    uint64_t last_manual_call_pc;
+    uint64_t last_manual_call_b0;
     uint64_t prev_b0_write_pc;
     uint64_t prev_b0_write_insn;
     uint64_t prev_b0_write_val;
@@ -173,6 +176,7 @@ typedef struct CPUArchState {
     uint32_t dbg_fw_call_depth;
     uint64_t dbg_fw_pei_oor_ptr30;
     uint64_t dbg_fw_pei_oor_ptr31;
+    uint64_t dbg_fw_pei_oor_hob_ptr;
     uint8_t dbg_fw_pei_oor_active;
 
     /*
@@ -316,6 +320,7 @@ struct IA64CPUClass {
 #define IA64_AR_BSP       17
 #define IA64_AR_BSPSTORE  18
 #define IA64_AR_RNAT      19
+#define IA64_AR_K5        5
 #define IA64_AR_FPSR      40
 #define IA64_AR_ITC       44
 #define IA64_AR_PFS       64

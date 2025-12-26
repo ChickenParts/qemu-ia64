@@ -1489,6 +1489,14 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe20410ULL ||
+         ctx->base.pc_next == 0x00000000ffe20410ULL)) {
+        gen_helper_fw_pei_core_entry_probe(tcg_env,
+                                           tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe2e1c0ULL ||
          ctx->base.pc_next == 0x00000000ffe2e1c0ULL)) {
         gen_helper_fw_pei_rse_probe(tcg_env,
@@ -2261,6 +2269,8 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
     } else if (major == 0x0 && (x6 == 0x20 || x6 == 0x21)) {
         /* B4: br.cond/br.ia b2 (x6=0x20) and br.ret b2 (x6=0x21). */
         uint8_t b2 = extract64(insn, 13, 3);
+        TCGv_i64 tgt = tcg_temp_new_i64();
+        tcg_gen_andi_i64(tgt, cpu_b[b2], ~0xFULL);
         /*
          * Our simplified RSE model pushes a stacked-register snapshot on
          * br.call.  Some early-kernel PAL stubs return via br.ia b0 instead of
@@ -2268,13 +2278,29 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
          * PAL call paths that set b0 manually).  Unwind only when we can tell
          * b0 came from a call.
          */
+        if (ctx->mem_idx != MMU_USER_IDX && x6 == 0x20 && b2 == 6) {
+            TCGv_i64 k5 = gen_load_ar(IA64_AR_K5);
+            tcg_gen_andi_i64(k5, k5, ~0xFULL);
+            TCGLabel *no_pal = gen_new_label();
+            tcg_gen_brcond_i64(TCG_COND_NE, tgt, k5, no_pal);
+            gen_helper_fw_pal(tcg_env);
+            TCGv_i64 ret = tcg_temp_new_i64();
+            tcg_gen_andi_i64(ret, cpu_b[0], ~0xFULL);
+            tcg_gen_mov_i64(cpu_pc, ret);
+            gen_set_ri_const(0);
+            ctx->base.is_jmp = DISAS_NORETURN;
+            tcg_gen_exit_tb(NULL, 0);
+            gen_set_label(no_pal);
+        }
+        if (x6 == 0x20 && b2 != 0) {
+            gen_helper_manual_call_enter(tcg_env,
+                                          tcg_constant_i64(ctx->base.pc_next));
+        }
         if (x6 == 0x21) {
             gen_helper_ret_restore(tcg_env);
         } else if (b2 == 0) {
             gen_helper_ret_restore_b0(tcg_env);
         }
-        TCGv_i64 tgt = tcg_temp_new_i64();
-        tcg_gen_andi_i64(tgt, cpu_b[b2], ~0xFULL);
 
         /*
          * Firmware-preboot handoff: Xen/KVM GFW returns via br.ret b0 where
