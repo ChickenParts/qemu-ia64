@@ -1077,7 +1077,10 @@ void HELPER(rfi)(CPUIA64State *env)
      *
      * cr.ifs has a validity bit at 63 (set by cover when PSR.ic=0).
      */
-    env->cfm = env->cr_ifs & ~(1ULL << 63);
+    uint64_t ifs = env->cr_ifs;
+    if (ifs & (1ULL << 63)) {
+        env->cfm = ifs & ~(1ULL << 63);
+    }
 
     /*
      * Linux also uses rfi as a control transfer during early boot (to switch
@@ -6021,15 +6024,11 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
         ia64_rse_update_loadrs(env, bsp);
     }
 
-    if (new_sof > old_sof) {
-        /* New stacked regs are undefined; clear to avoid leaking old values. */
-        uint8_t start = MIN(old_sof, (uint8_t)96);
-        uint8_t end = MIN(new_sof, (uint8_t)96);
-        for (uint8_t i = start; i < end; i++) {
-            env->r[32 + i] = 0;
-            env->nat[32 + i] = 0;
-        }
-    }
+    /*
+     * New stacked regs are architecturally undefined. Preserve existing values
+     * so firmware entry paths that pre-seed stacked registers behave like real
+     * hardware (which does not zero them on alloc).
+     */
 
     return old_pfs;
 }
@@ -6835,9 +6834,11 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
             tmp[i] = env->r[32 + sol + i];
             tmp_nat[i] = env->nat[32 + sol + i];
         }
+        for (uint8_t i = 0; i < max_copy; i++) {
+            env->r[32 + i] = tmp[i];
+            env->nat[32 + i] = tmp_nat[i];
+        }
     }
-    memcpy(&env->r[32], tmp, sizeof(tmp));
-    memcpy(&env->nat[32], tmp_nat, sizeof(tmp_nat));
     if (dbg_pc) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "call_map pc=%016" PRIx64 " mapped in0..4=%016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 "\n",
@@ -9529,13 +9530,14 @@ void HELPER(fw_bootloop_log)(CPUIA64State *env, uint64_t pc, uint32_t stage)
                   " r8=%016" PRIx64 " r9=%016" PRIx64
                   " r10=%016" PRIx64 " r12=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64
-                  " ar.k3=%016" PRIx64 " ar.k4=%016" PRIx64
+                  " r34=%016" PRIx64 " ar.k3=%016" PRIx64
+                  " ar.k4=%016" PRIx64 " ar.k5=%016" PRIx64
                   " ar.lc=%016" PRIx64
                   " ar.bsp=%016" PRIx64 " ar.bspstore=%016" PRIx64
                   " psr=%016" PRIx64 " cfm=%016" PRIx64 "\n",
                   stage, pc, env->r[2], env->r[3], env->r[8], env->r[9],
-                  env->r[10], env->r[12], env->r[32], env->r[33],
-                  env->ar[3], env->ar[4], env->ar[65],
+                  env->r[10], env->r[12], env->r[32], env->r[33], env->r[34],
+                  env->ar[3], env->ar[4], env->ar[5], env->ar[65],
                   env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
                   env->psr, env->cfm);
 #endif
@@ -9584,23 +9586,7 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     if (clear_oldcore == -1) {
         clear_oldcore = getenv("QEMU_IA64_PEI_CLEAR_OLDCORE") ? 1 : 0;
     }
-    uint64_t oldcore = env->r[34];
-    bool oldcore_valid = false;
-    if (oldcore) {
-        uint8_t buf[16];
-        hwaddr phys = ia64_phys_mode_addr(oldcore);
-        if (cpu_memory_rw_debug(env_cpu(env), phys, buf, sizeof(buf), false) == 0) {
-            uint32_t sig = ldl_le_p(&buf[0]);
-            uint64_t ps_ptr = ldq_le_p(&buf[8]);
-            if (sig == 0x43696550u && ps_ptr) { /* "PeiC" */
-                oldcore_valid = true;
-            }
-        }
-    }
     if (clear_oldcore) {
-        oldcore_valid = false;
-    }
-    if (!oldcore_valid) {
         env->r[34] = 0;
     }
     uint64_t orig_r32 = env->r[32];
@@ -9636,9 +9622,8 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_entry_fix pc=%016" PRIx64
                       " handoff=%016" PRIx64 " ppi=%016" PRIx64
-                      " stack_count=%016" PRIx64 " old=%016" PRIx64
-                      " oldcore=%016" PRIx64 "\n",
-                      pc, handoff, ppi, stack_count, env->r[34], oldcore);
+                      " stack_count=%016" PRIx64 " old=%016" PRIx64 "\n",
+                      pc, handoff, ppi, stack_count, env->r[34]);
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_entry_fix orig r32=%016" PRIx64
                       " r33=%016" PRIx64 " r34=%016" PRIx64
