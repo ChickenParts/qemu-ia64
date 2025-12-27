@@ -416,7 +416,12 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_FW_PEI_HANDOFF_BASE (IPF_FW_WORKRAM_BASE + 0x1000)
 #define IPF_FW_PEI_PPI_BASE (IPF_FW_WORKRAM_BASE + 0x2000)
 #define IPF_FW_PEI_STUB_BASE (IPF_FW_WORKRAM_BASE + 0x3000)
-#define IPF_FW_PEI_TEMP_BASE (IPF_FW_WORKRAM_BASE + 0x4000)
+/*
+ * xenipf SEC stack setup uses 0x04000000 as the temporary RAM base when
+ * ar.k3 is 3. Keep the PEI temp RAM/HOB list in that window so PEI HOBs
+ * don't clobber the Xen GFW HOB list at 0xff200000.
+ */
+#define IPF_FW_PEI_TEMP_BASE 0x0000000004000000ULL
 #define IPF_FW_PEI_TEMP_SIZE (2ULL << 20)
 
 #define IPF_IOSAPIC_VERSION_REG 0x1
@@ -2404,7 +2409,11 @@ static void main_cpu_reset(void *opaque)
          * to size the temporary stack in 128KiB steps. Seed it so the stack
          * lands inside the fw-workram window.
          */
-        s->ar[3] = 0; /* ar.k3 */
+        /*
+         * ar.k3 controls the xenipf SEC stack base; set to 3 so it uses
+         * 0x04000000 and avoids overwriting the Xen GFW HOB list at 0xff200000.
+         */
+        s->ar[3] = 3; /* ar.k3 */
         s->ar[4] = ipf_boot_r10; /* ar.k4 */
         /*
          * EDK PAL call stubs fall back to ar.k5 when no PAL entry is passed.
@@ -2491,6 +2500,102 @@ static uint64_t ipf_debugcon_read(void *opaque, hwaddr addr, unsigned size)
     return 0;
 }
 
+static inline hwaddr ipf_phys_mode_addr(uint64_t addr)
+{
+    uint64_t hi32 = addr & 0xffffffff00000000ULL;
+    if (hi32 == 0 || hi32 == 0xffffffff00000000ULL) {
+        return (hwaddr)(uint32_t)addr;
+    }
+    return (hwaddr)(addr & ((1ULL << 61) - 1));
+}
+
+static void ipf_debugcon_log_hob(IPFMachineState *m, const char *tag,
+                                 const char *line)
+{
+    static int ctx_enabled = -1;
+    if (!m || !m->cpu || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    CPUIA64State *env = &m->cpu->env;
+    uint64_t ptrs[3] = { env->r[28], env->r[35], env->r[40] };
+    uint64_t ptr_sigs[3] = { 0 };
+    bool ptr_sig_ok[3] = { false, false, false };
+    uint64_t lists[3] = { 0 };
+    uint64_t list_sigs[3] = { 0 };
+    bool list_sig_ok[3] = { false, false, false };
+
+    for (size_t i = 0; i < 3; i++) {
+        if (!ptrs[i]) {
+            continue;
+        }
+        uint8_t tmp[8];
+        hwaddr phys = ipf_phys_mode_addr(ptrs[i]);
+        if (cpu_memory_rw_debug(env_cpu(env), phys, tmp, sizeof(tmp), false) == 0) {
+            ptr_sigs[i] = ldq_le_p(tmp);
+            ptr_sig_ok[i] = true;
+        }
+        if (cpu_memory_rw_debug(env_cpu(env), phys, tmp, sizeof(tmp), false) == 0) {
+            lists[i] = ldq_le_p(tmp);
+        }
+        if (lists[i]) {
+            phys = ipf_phys_mode_addr(lists[i]);
+            if (cpu_memory_rw_debug(env_cpu(env), phys, tmp, sizeof(tmp), false) == 0) {
+                list_sigs[i] = ldq_le_p(tmp);
+                list_sig_ok[i] = true;
+            }
+        }
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "FWDBG_HOB %s line=\"%s\" ip=%016" PRIx64
+                  " b0=%016" PRIx64 " cfm=%016" PRIx64
+                  " bsp=%016" PRIx64 " bspstore=%016" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64
+                  " r28=%016" PRIx64 " r35=%016" PRIx64 " r40=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " hob28=%016" PRIx64 "/%016" PRIx64 "/%d/%016" PRIx64 "/%d"
+                  " hob35=%016" PRIx64 "/%016" PRIx64 "/%d/%016" PRIx64 "/%d"
+                  " hob40=%016" PRIx64 "/%016" PRIx64 "/%d/%016" PRIx64 "/%d\n",
+                  tag, line, env->ip, env->b[0], env->cfm,
+                  env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
+                  env->r[1], env->r[12], env->r[28], env->r[35], env->r[40],
+                  env->r[32], env->r[33],
+                  ptr_sigs[0], lists[0], list_sig_ok[0] ? 1 : 0, list_sigs[0],
+                  ptr_sig_ok[0] ? 1 : 0,
+                  ptr_sigs[1], lists[1], list_sig_ok[1] ? 1 : 0, list_sigs[1],
+                  ptr_sig_ok[1] ? 1 : 0,
+                  ptr_sigs[2], lists[2], list_sig_ok[2] ? 1 : 0, list_sigs[2],
+                  ptr_sig_ok[2] ? 1 : 0);
+
+    if (ctx_enabled == -1) {
+        ctx_enabled = getenv("QEMU_IPF_DEBUGCON_CTX") ? 1 : 0;
+    }
+    if (ctx_enabled) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "FWDBG_CTX last_br from=%016" PRIx64 " to=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64
+                      " last_b0 pc=%016" PRIx64 " val=%016" PRIx64 " kind=%" PRIu64 "\n",
+                      env->last_branch_from, env->last_branch_to,
+                      env->last_branch_kind, env->last_branch_insn,
+                      env->last_b0_write_pc, env->last_b0_write_val,
+                      env->last_b0_write_kind & 0xff);
+        for (int i = 0; i < 16; i++) {
+            int idx = (env->b0_trace_idx + i) & 0xf;
+            if (!env->b0_trace_pc[idx]) {
+                continue;
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "FWDBG_CTX b0_trace[%02d] pc=%016" PRIx64
+                          " val=%016" PRIx64 " kind=%" PRIu64
+                          " insn=%011" PRIx64 "\n",
+                          i, env->b0_trace_pc[idx], env->b0_trace_val[idx],
+                          env->b0_trace_kind[idx] & 0xff,
+                          env->b0_trace_insn[idx]);
+        }
+    }
+}
+
 static bool ipf_debugcon_line_accum(IPFMachineState *m, uint8_t ch)
 {
     if (ch == '\r') {
@@ -2518,6 +2623,11 @@ static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
          strstr(line, "Status") ||
          strstr(line, "ASSERT"))) {
         ipf_log_dxe_status(m, line);
+    }
+    if (strstr(line, "FakeMemMap") ||
+        strstr(line, "hob signature") ||
+        strstr(line, "HOB signature")) {
+        ipf_debugcon_log_hob(m, "memmap", line);
     }
 
     if (!m->debugcon_trace_once &&

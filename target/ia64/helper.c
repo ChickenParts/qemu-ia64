@@ -10034,6 +10034,60 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    uint64_t handoff = env->fw_pei_handoff;
+    uint64_t hob_size = env->r[40] ? env->r[40] : env->r[34];
+    uint64_t temp_base = 0;
+    uint64_t temp_size = 0;
+
+    if (!handoff) {
+        return;
+    }
+
+    uint8_t buf[0x48];
+    hwaddr handoff_phys = ia64_phys_mode_addr(handoff);
+    if (cpu_memory_rw_debug(env_cpu(env), handoff_phys, buf, sizeof(buf), false) == 0) {
+        temp_base = ldq_le_p(&buf[24]);
+        temp_size = ldq_le_p(&buf[32]);
+    }
+
+    if (!temp_base || !temp_size) {
+        return;
+    }
+    if (!hob_size || hob_size > temp_size) {
+        hob_size = temp_size;
+    }
+
+    uint64_t hob_base = temp_base + (temp_size - hob_size);
+    env->r[39] = hob_base;
+    env->r[30] = hob_base;
+
+    if (env->r[32]) {
+        uint64_t hob_field_raw = env->r[32] + 0x2b0;
+        hwaddr hob_field_phys = ia64_phys_mode_addr(hob_field_raw);
+        uint64_t hob_le = cpu_to_le64(hob_base);
+        cpu_memory_rw_debug(env_cpu(env), hob_field_phys,
+                            (uint8_t *)&hob_le, sizeof(hob_le), true);
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                      " temp=%016" PRIx64 "/%016" PRIx64
+                      " hob_size=%016" PRIx64 " hob_base=%016" PRIx64
+                      " r30=%016" PRIx64 " r39=%016" PRIx64 "\n",
+                      pc, temp_base, temp_size, hob_size, hob_base,
+                      env->r[30], env->r[39]);
+    }
+#endif
+}
+
 void HELPER(fw_pei_oldcore_clear)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY

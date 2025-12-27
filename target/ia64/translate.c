@@ -1491,6 +1491,14 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe228a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe228a0ULL)) {
+        gen_helper_fw_pei_hob_init_fix(tcg_env,
+                                       tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe73770ULL ||
          ctx->base.pc_next == 0x00000000ffe73770ULL ||
          ctx->base.pc_next == 0x80000000ffe73790ULL ||
