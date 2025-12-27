@@ -1099,6 +1099,19 @@ static bool ia64_rse_pop_window(CPUIA64State *env)
     return true;
 }
 
+static inline void ia64_restore_ec_from_pfs(CPUIA64State *env)
+{
+    /*
+     * br.ret restores EC_CNT from the previous function state (ar.pfs).
+     * Keep the EC_CNT field in ar.ec synchronized with the caller's PFS.PEC.
+     */
+    uint64_t pec = (env->ar[IA64_AR_PFS] >> 52) & 0x3f;
+    uint64_t ec = env->ar[66];
+    ec &= ~(0x3fULL << 58);
+    ec |= (pec << 58);
+    env->ar[66] = ec;
+}
+
 void HELPER(bsw)(CPUIA64State *env, uint32_t bn)
 {
     bn &= 1;
@@ -7352,6 +7365,7 @@ void HELPER(ret_restore)(CPUIA64State *env)
     uint8_t sof = env->cfm & 0x7f;
     ia64_rse_store_frame(env, bsp, sof);
     if (ia64_rse_pop_window(env)) {
+        ia64_restore_ec_from_pfs(env);
         uint8_t sol = (env->cfm >> 7) & 0x7f;
         bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
         env->ar[IA64_AR_BSP] = bsp;
@@ -7479,10 +7493,11 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
         uint64_t bsp = ia64_rse_get_bsp(env);
         uint8_t sof = env->cfm & 0x7f;
         ia64_rse_store_frame(env, bsp, sof);
-        if (ia64_rse_pop_window(env)) {
-            uint8_t sol = (env->cfm >> 7) & 0x7f;
-            bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
-            env->ar[IA64_AR_BSP] = bsp;
+    if (ia64_rse_pop_window(env)) {
+        ia64_restore_ec_from_pfs(env);
+        uint8_t sol = (env->cfm >> 7) & 0x7f;
+        bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
+        env->ar[IA64_AR_BSP] = bsp;
             ia64_rse_update_loadrs(env, bsp);
         }
     }
