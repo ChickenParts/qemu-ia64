@@ -9562,16 +9562,9 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     uint64_t ppi = env->fw_pei_ppi;
     uint64_t stack_count = env->fw_pei_stack_count;
     static bool logged;
-    static int clear_oldcore = -1;
 
     if (!handoff && !ppi && !stack_count) {
         return;
-    }
-    if (clear_oldcore == -1) {
-        clear_oldcore = getenv("QEMU_IA64_PEI_CLEAR_OLDCORE") ? 1 : 0;
-    }
-    if (clear_oldcore) {
-        env->r[34] = 0;
     }
     uint64_t orig_r32 = env->r[32];
     uint64_t orig_r33 = env->r[33];
@@ -9648,6 +9641,85 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
             }
         }
     }
+#endif
+}
+
+void HELPER(fw_pei_oldcore_clear)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    static int clear_oldcore = -1;
+    if (clear_oldcore == -1) {
+        clear_oldcore = getenv("QEMU_IA64_PEI_CLEAR_OLDCORE") ? 1 : 0;
+    }
+
+    uint64_t oldcore = env->r[34];
+    uint64_t oldcore_phys = ia64_phys_mode_addr(oldcore);
+    if (!clear_oldcore &&
+        oldcore_phys != IA64_IPF_FW_PAL_PROC_ADDR &&
+        oldcore_phys != IA64_IPF_FW_PAL_LEGACY_ADDR) {
+        return;
+    }
+
+    env->r[34] = 0;
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_oldcore_clear pc=%016" PRIx64
+                      " old=%016" PRIx64 " ar.k5=%016" PRIx64 "\n",
+                      pc, oldcore, env->ar[5]);
+    }
+#endif
+}
+
+void HELPER(fw_ar_k5_store)(CPUIA64State *env, uint64_t pc, uint32_t src_reg,
+                            uint64_t value)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)src_reg;
+    (void)value;
+    return;
+#else
+    static int log_limit = -1;
+    static int log_count;
+    if (log_limit == -1) {
+        if (getenv("QEMU_IA64_LOG_K5")) {
+            log_limit = 64;
+            const char *s = getenv("QEMU_IA64_LOG_K5_LIMIT");
+            if (s && *s) {
+                log_limit = atoi(s);
+            }
+            if (log_limit < 0) {
+                log_limit = 0;
+            }
+        } else {
+            log_limit = 0;
+        }
+    }
+    if (log_limit && log_count < log_limit &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        const char *src_label = "imm";
+        char src_buf[16];
+        if (src_reg != UINT32_MAX) {
+            snprintf(src_buf, sizeof(src_buf), "r%u", src_reg);
+            src_label = src_buf;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: ar.k5 store pc=%016" PRIx64
+                      " src=%s val=%016" PRIx64
+                      " old=%016" PRIx64 " r34=%016" PRIx64
+                      " bsp=%016" PRIx64 " bspstore=%016" PRIx64
+                      " cfm=%016" PRIx64 "\n",
+                      pc, src_label, value, env->ar[5], env->r[34],
+                      env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
+                      env->cfm);
+        log_count++;
+    }
+    env->ar[5] = value;
 #endif
 }
 

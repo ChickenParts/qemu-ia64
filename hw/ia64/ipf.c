@@ -2374,10 +2374,12 @@ static void main_cpu_reset(void *opaque)
         s->r[10] = ipf_boot_r10;
         s->r[33] = ipf_boot_r10;
         /*
-         * The firmware entry stub copies r34 into ar.k5 as the PAL entry.
-         * Seed r34 so PAL calls branch into the synthetic PAL handler.
+         * Seed r34 with the PAL entry so the firmware stub can copy it into
+         * ar.k5. fw_pei_entry_fix() clears r34 before PEI core to keep
+         * OldCoreData NULL while preserving the PAL entry.
          */
         s->r[34] = IA64_IPF_FW_PAL_PROC_ADDR;
+        s->ar[5] = IA64_IPF_FW_PAL_PROC_ADDR;
         s->fw_pei_handoff = ipf_boot_r9;
         s->fw_pei_ppi = ipf_boot_ppi;
         s->fw_pei_stack_count = ipf_boot_r10;
