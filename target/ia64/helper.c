@@ -123,6 +123,9 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 #define IA64_IPF_FW_FLASH_BLOCKS      (IA64_IPF_FW_FLASH_SIZE / IA64_IPF_FW_FLASH_BLOCK_SIZE)
 #define IA64_IPF_FW_FLASH_ATTRS       0x00100C36U
 #define IA64_EFI_FVH_SIGNATURE        0x4856465fU /* "_FVH" */
+/* Match hw/ia64/ipf.c firmware work RAM window. */
+#define IA64_IPF_FW_WORKRAM_BASE      0x0000000100000000ULL
+#define IA64_IPF_FW_WORKRAM_SIZE      (16ULL << 20)
 
 static const uint8_t ia64_efi_ffs_guid[16] = {
     0xd9, 0x54, 0x93, 0x7a, 0x68, 0x04, 0x4a, 0x44,
@@ -3009,7 +3012,7 @@ static bool ia64_fw_find_pei_hob_list(CPUState *cs, uint64_t stack_phys,
         return false;
     }
 
-    const uint8_t sig[8] = { 'P', 'e', 'i', 'C', 0, 0, 0, 0 };
+    const uint8_t sig[4] = { 'P', 'e', 'i', 'C' };
     const uint64_t scan_span = 256ULL << 10;
     const uint64_t scan_base =
         (stack_phys > (scan_span / 2)) ? (stack_phys - (scan_span / 2)) : 0;
@@ -3038,8 +3041,11 @@ static bool ia64_fw_find_pei_hob_list(CPUState *cs, uint64_t stack_phys,
             }
             uint64_t ps_ptr = ldq_le_p(&hdr[8]);
             uint64_t ps_phys = ia64_phys_mode_addr(ps_ptr);
-            if (ps_phys < IA64_IPF_FW_FLASH_BASE ||
-                ps_phys >= IA64_IPF_FW_FLASH_BASE + IA64_IPF_FW_FLASH_SIZE) {
+            bool ps_in_flash = (ps_phys >= IA64_IPF_FW_FLASH_BASE &&
+                                ps_phys < IA64_IPF_FW_FLASH_BASE + IA64_IPF_FW_FLASH_SIZE);
+            bool ps_in_workram = (ps_phys >= IA64_IPF_FW_WORKRAM_BASE &&
+                                  ps_phys < IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE);
+            if (!ps_in_flash && !ps_in_workram) {
                 continue;
             }
 
@@ -3178,12 +3184,14 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
     }
 
     const uint8_t phit_magic[8] = { 0x01, 0x00, 0x38, 0x00, 0, 0, 0, 0 };
+    uint64_t stack_phys = ia64_phys_mode_addr(stack_hint);
     uint64_t candidates[] = {
         0x0000000002000000ULL, /* common xenipf PEI workspace */
         0x0000000000100000ULL,
         0x0000000001000000ULL,
         IA64_IPF_FW_FLASH_BASE,
-        stack_hint ? (stack_hint & ~0x00ffffffULL) : 0,
+        IA64_IPF_FW_WORKRAM_BASE,
+        stack_phys ? (stack_phys & ~0x00ffffffULL) : 0,
     };
 
     uint64_t hob_base = 0;
@@ -3191,43 +3199,53 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
     uint64_t hob_best_span = 0;
     bool hob_best_end_ok = false;
     int hob_best_count = 0;
+    bool hob_from_pei = false;
     uint8_t hdr[8];
-    for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
-        uint64_t addr = candidates[i];
-        if (!addr) {
-            continue;
-        }
-        if (cpu_memory_rw_debug(cs, addr, hdr, sizeof(hdr), false) != 0 ||
-            memcmp(hdr, phit_magic, sizeof(phit_magic)) != 0) {
-            continue;
-        }
+    if (stack_phys &&
+        ia64_fw_find_pei_hob_list(cs, stack_phys, &hob_base, &hob_end)) {
+        hob_best_span = hob_end - hob_base;
+        hob_best_end_ok = true;
+        hob_from_pei = true;
+        (void)ia64_fw_validate_efi_hob_list(cs, hob_base, NULL, &hob_best_count);
+    }
+    if (!hob_from_pei) {
+        for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
+            uint64_t addr = candidates[i];
+            if (!addr) {
+                continue;
+            }
+            if (cpu_memory_rw_debug(cs, addr, hdr, sizeof(hdr), false) != 0 ||
+                memcmp(hdr, phit_magic, sizeof(phit_magic)) != 0) {
+                continue;
+            }
 
-        uint8_t phit[0x38];
-        if (cpu_memory_rw_debug(cs, addr, phit, sizeof(phit), false) != 0) {
-            continue;
-        }
-        uint64_t mem_top = ldq_le_p(&phit[16]);
-        uint64_t mem_bottom = ldq_le_p(&phit[24]);
-        if (mem_top <= mem_bottom) {
-            continue;
-        }
+            uint8_t phit[0x38];
+            if (cpu_memory_rw_debug(cs, addr, phit, sizeof(phit), false) != 0) {
+                continue;
+            }
+            uint64_t mem_top = ldq_le_p(&phit[16]);
+            uint64_t mem_bottom = ldq_le_p(&phit[24]);
+            if (mem_top <= mem_bottom) {
+                continue;
+            }
 
-        uint64_t end;
-        int count;
-        if (!ia64_fw_validate_efi_hob_list(cs, addr, &end, &count)) {
-            continue;
-        }
-        uint64_t span = end - addr;
-        uint64_t phit_end = ia64_phys_mode_addr(ldq_le_p(&phit[48]));
-        bool end_ok = (phit_end >= addr && phit_end <= end);
-        if (!hob_base ||
-            (end_ok && !hob_best_end_ok) ||
-            (end_ok == hob_best_end_ok && span > hob_best_span)) {
-            hob_best_span = span;
-            hob_best_count = count;
-            hob_base = addr;
-            hob_end = end;
-            hob_best_end_ok = end_ok;
+            uint64_t end;
+            int count;
+            if (!ia64_fw_validate_efi_hob_list(cs, addr, &end, &count)) {
+                continue;
+            }
+            uint64_t span = end - addr;
+            uint64_t phit_end = ia64_phys_mode_addr(ldq_le_p(&phit[48]));
+            bool end_ok = (phit_end >= addr && phit_end <= end);
+            if (!hob_base ||
+                (end_ok && !hob_best_end_ok) ||
+                (end_ok == hob_best_end_ok && span > hob_best_span)) {
+                hob_best_span = span;
+                hob_best_count = count;
+                hob_base = addr;
+                hob_end = end;
+                hob_best_end_ok = end_ok;
+            }
         }
     }
 
@@ -3238,8 +3256,8 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
             { IA64_IPF_FW_FLASH_BASE, IA64_IPF_FW_FLASH_SIZE },
             { 0, 0 },
         };
-        if (stack_hint > (32ULL << 20)) {
-            scan_ranges[1][0] = stack_hint - (32ULL << 20);
+        if (stack_phys > (32ULL << 20)) {
+            scan_ranges[1][0] = stack_phys - (32ULL << 20);
             scan_ranges[1][1] = 64ULL << 20;
         }
 
@@ -3311,14 +3329,15 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
     }
 
     uint64_t mem_bottom = ldq_le_p(&phit[24]);
-    uint64_t mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
-    if (mem_bottom_phys && mem_bottom_phys != hob_base) {
+    uint64_t mem_bottom_phys_init = ia64_phys_mode_addr(mem_bottom);
+    if (mem_bottom_phys_init && mem_bottom_phys_init != hob_base) {
         uint64_t alt_end;
         int alt_count;
-        if (ia64_fw_validate_efi_hob_list(cs, mem_bottom_phys, &alt_end, &alt_count)) {
-            uint64_t alt_span = alt_end - mem_bottom_phys;
+        if (ia64_fw_validate_efi_hob_list(cs, mem_bottom_phys_init,
+                                          &alt_end, &alt_count)) {
+            uint64_t alt_span = alt_end - mem_bottom_phys_init;
             if (alt_span > hob_best_span) {
-                hob_base = mem_bottom_phys;
+                hob_base = mem_bottom_phys_init;
                 hob_end = alt_end;
                 hob_best_span = alt_span;
                 hob_best_count = alt_count;
@@ -3340,6 +3359,10 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
     uint64_t free_bottom = ldq_le_p(&phit[40]);
     uint64_t end_hob = ldq_le_p(&phit[48]);
     uint64_t end_hob_phys = ia64_phys_mode_addr(end_hob);
+    uint64_t mem_top_phys = ia64_phys_mode_addr(mem_top);
+    uint64_t mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
+    uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
+    uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64: efi_hob_dump: base=%016" PRIx64
                   " version=%u boot_mode=%u"
@@ -3350,6 +3373,12 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
                   hob_base, version, boot_mode,
                   mem_bottom, mem_top, free_bottom, free_top,
                   end_hob_phys, hob_end, hob_best_span, hob_best_count);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: efi_hob_dump: phys_mem=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " phys_free=[%016" PRIx64 "..%016" PRIx64 "] phys_end=%016" PRIx64 "\n",
+                  mem_bottom_phys, mem_top_phys,
+                  free_bottom_phys, free_top_phys,
+                  end_hob_phys);
 
     uint64_t cur = hob_base;
     for (int iter = 0; iter < 4096; iter++) {
@@ -10114,6 +10143,17 @@ void HELPER(fw_pei_oor_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage)
             }
         }
         ia64_fw_pei_log_phit(env, pc, hob_ptr);
+        {
+            static int hob_dump_enabled = -1;
+            static bool dumped;
+            if (hob_dump_enabled == -1) {
+                const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP");
+                hob_dump_enabled = (s && *s) ? 1 : 0;
+            }
+            if (hob_dump_enabled && !dumped) {
+                dumped = ia64_fw_dump_efi_hobs_force(cs, env->r[12]);
+            }
+        }
     }
 #endif
 }
