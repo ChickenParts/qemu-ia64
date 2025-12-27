@@ -1167,7 +1167,7 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     const uint64_t temp_phys = IPF_FW_PEI_TEMP_BASE;
     const uint64_t temp_size = IPF_FW_PEI_TEMP_SIZE;
     const uint64_t handoff_phys = IPF_FW_PEI_HANDOFF_BASE;
-    const uint64_t ppi_phys = IPF_FW_PEI_PPI_BASE;
+    const uint64_t ppi_phys = temp_phys;
     const uint64_t stub_phys = IPF_FW_PEI_STUB_BASE;
     const uint64_t plabel_phys = stub_phys + 0x20;
     const uint64_t ppi_iface_phys = stub_phys + 0x40;

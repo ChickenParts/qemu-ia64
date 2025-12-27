@@ -9856,14 +9856,14 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
     }
     /*
      * The PEI boot block copies r9/r10 into r32/r33 before calling the PEI
-     * core. r9 is the SEC handoff, r10 is the PPI list pointer. If the PPI
-     * list is not available, fall back to the boot stack count used by the
-     * firmware's early stack/BSP setup.
+     * core. r9 is the SEC handoff; r10 is consumed by early stack/BSP setup
+     * (boot count). Use the stack count when available, fall back to the PPI
+     * pointer for older firmware variants that repurpose r10.
      */
-    if (ppi) {
-        env->r[10] = ppi;
-    } else if (stack_count) {
+    if (stack_count) {
         env->r[10] = stack_count;
+    } else if (ppi) {
+        env->r[10] = ppi;
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
