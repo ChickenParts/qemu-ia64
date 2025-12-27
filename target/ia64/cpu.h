@@ -223,6 +223,9 @@ typedef struct CPUArchState {
     /* Firmware bringup: one-way SAL systab config-table install guard. */
     uint64_t fw_sal_systab_installed;
 
+    /* Firmware bringup: PAL platform address settings (type 0/1). */
+    uint64_t pal_platform_addr[2];
+
     /* Cache flush throttle: last page invalidated by fc/fc.i. */
     uint64_t fc_last_page;
 } CPUIA64State;
@@ -278,6 +281,7 @@ struct IA64CPUClass {
 #define IA64_IPF_FW_SAL_SYSTAB_ADDR 0x0000000000017000ULL
 #define IA64_IPF_FW_SAL_PROC_ADDR   0x0000000000018000ULL
 #define IA64_IPF_FW_PAL_PROC_ADDR   0x0000000000019000ULL
+#define IA64_IPF_FW_PAL_LEGACY_ADDR 0x00000000ffffff80ULL
 #define IA64_IPF_FW_SAL_GP_ADDR     0x000000000001A000ULL
 #define IA64_IPF_FW_PAL_SIZE        0x0000000000001000ULL
 

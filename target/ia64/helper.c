@@ -193,28 +193,12 @@ static inline void ia64_rse_update_loadrs(CPUIA64State *env, uint64_t bsp)
 
 static void ia64_rse_write_mem(CPUIA64State *env, uint64_t addr, uint64_t val)
 {
-    CPUState *cs = env_cpu(env);
-    uint8_t buf[8];
-    stq_le_p(buf, val);
-    if (cpu_memory_rw_debug(cs, addr, buf, sizeof(buf), true) != 0) {
-        cpu_abort(cs,
-                  "IA64: RSE backing store write failed addr=%016" PRIx64
-                  " ip=%016" PRIx64 "\n",
-                  addr, env->ip);
-    }
+    cpu_stq_data(env, addr, val);
 }
 
 static uint64_t ia64_rse_read_mem(CPUIA64State *env, uint64_t addr)
 {
-    CPUState *cs = env_cpu(env);
-    uint8_t buf[8];
-    if (cpu_memory_rw_debug(cs, addr, buf, sizeof(buf), false) != 0) {
-        cpu_abort(cs,
-                  "IA64: RSE backing store read failed addr=%016" PRIx64
-                  " ip=%016" PRIx64 "\n",
-                  addr, env->ip);
-    }
-    return ldq_le_p(buf);
+    return cpu_ldq_data(env, addr);
 }
 
 static void ia64_rse_store_frame(CPUIA64State *env, uint64_t bsp, uint8_t sof)
@@ -11426,9 +11410,11 @@ static void ia64_fw_trace_dump(void)
 #define IA64_PAL_VM_SUMMARY      8
 #define IA64_PAL_BUS_GET_FEATURES 9
 #define IA64_PAL_DEBUG_INFO      11
+#define IA64_PAL_FIXED_ADDR      12
 #define IA64_PAL_FREQ_BASE       13
 #define IA64_PAL_FREQ_RATIOS     14
 #define IA64_PAL_PERF_MON_INFO   15
+#define IA64_PAL_PLATFORM_ADDR   16
 #define IA64_PAL_PROC_GET_FEATURES 17
 #define IA64_PAL_VERSION         20
 #define IA64_PAL_RSE_INFO        19
@@ -11559,6 +11545,10 @@ void HELPER(fw_pal)(CPUIA64State *env)
         v0 = 4;
         v1 = 4;
         break;
+    case IA64_PAL_FIXED_ADDR:
+        /* Unique address on the processor bus (not modeled). */
+        v0 = 0;
+        break;
     case IA64_PAL_VM_PAGE_SIZE:
         v0 = 0x115557000ULL;
         v1 = 0x115557000ULL;
@@ -11573,6 +11563,22 @@ void HELPER(fw_pal)(CPUIA64State *env)
         v0 = (uint64_t)den | ((uint64_t)num << 32); /* proc ratio */
         v1 = (uint64_t)den | ((uint64_t)1 << 32);   /* bus ratio */
         v2 = (uint64_t)den | ((uint64_t)num << 32); /* itc ratio */
+        break;
+    }
+    case IA64_PAL_PLATFORM_ADDR: {
+        /*
+         * Set platform addresses (interrupt block or I/O port space).
+         *
+         * PAL spec: a1 = type, a2 = physical address.
+         */
+        uint64_t type = a1;
+        uint64_t phys = ia64_phys_mode_addr(a2);
+        if (type < ARRAY_SIZE(env->pal_platform_addr)) {
+            env->pal_platform_addr[type] = phys;
+            status = IA64_PAL_STATUS_SUCCESS;
+        } else {
+            status = IA64_PAL_STATUS_UNIMPLEMENTED;
+        }
         break;
     }
     case IA64_PAL_PERF_MON_INFO:
@@ -11966,6 +11972,8 @@ void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
 {
     uint8_t out0 = ia64_fw_out_base(env);
+    bool from_call = ((env->last_b0_write_kind & 0xff) == 1);
+    bool use_break_args = break_abi || !from_call;
 
     {
         static int trace_enabled = -1;
@@ -12024,24 +12032,24 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
 
     ia64_fw_try_install_sal_systab(env);
 
-    uint64_t func_raw = break_abi ? ia64_fw_arg_break(env, 0)
+    uint64_t func_raw = use_break_args ? ia64_fw_arg_break(env, 0)
                                   : ia64_fw_arg(env, out0, 0);
     uint64_t args_trace[4] = {
-        break_abi ? ia64_fw_arg_break(env, 1) : ia64_fw_arg(env, out0, 1),
-        break_abi ? ia64_fw_arg_break(env, 2) : ia64_fw_arg(env, out0, 2),
-        break_abi ? ia64_fw_arg_break(env, 3) : ia64_fw_arg(env, out0, 3),
-        break_abi ? ia64_fw_arg_break(env, 4) : ia64_fw_arg(env, out0, 4),
+        use_break_args ? ia64_fw_arg_break(env, 1) : ia64_fw_arg(env, out0, 1),
+        use_break_args ? ia64_fw_arg_break(env, 2) : ia64_fw_arg(env, out0, 2),
+        use_break_args ? ia64_fw_arg_break(env, 3) : ia64_fw_arg(env, out0, 3),
+        use_break_args ? ia64_fw_arg_break(env, 4) : ia64_fw_arg(env, out0, 4),
     };
     IA64EfiGuid guid;
     if (ia64_fw_read_guid(env, func_raw, &guid) &&
         ia64_fw_guid_equal(&guid, &ia64_efi_guid_esal_pci)) {
-        uint64_t func_id = break_abi ? ia64_fw_arg_break(env, 1)
+        uint64_t func_id = use_break_args ? ia64_fw_arg_break(env, 1)
                                      : ia64_fw_arg(env, out0, 1);
-        uint64_t pci_addr = break_abi ? ia64_fw_arg_break(env, 2)
+        uint64_t pci_addr = use_break_args ? ia64_fw_arg_break(env, 2)
                                       : ia64_fw_arg(env, out0, 2);
-        uint64_t size = break_abi ? ia64_fw_arg_break(env, 3)
+        uint64_t size = use_break_args ? ia64_fw_arg_break(env, 3)
                                   : ia64_fw_arg(env, out0, 3);
-        uint64_t value = break_abi ? ia64_fw_arg_break(env, 4)
+        uint64_t value = use_break_args ? ia64_fw_arg_break(env, 4)
                                    : ia64_fw_arg(env, out0, 4);
         int64_t status = 0;
         uint64_t v0 = 0, v1 = 0, v2 = 0;
@@ -12098,9 +12106,9 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
     if (ia64_fw_read_guid(env, func_raw, &guid) &&
         ia64_fw_guid_equal(&guid, &ia64_efi_guid_esal_fvb)) {
         CPUState *cs = env_cpu(env);
-        uint64_t func_id = break_abi ? ia64_fw_arg_break(env, 1)
+        uint64_t func_id = use_break_args ? ia64_fw_arg_break(env, 1)
                                      : ia64_fw_arg(env, out0, 1);
-        uint64_t instance = break_abi ? ia64_fw_arg_break(env, 2)
+        uint64_t instance = use_break_args ? ia64_fw_arg_break(env, 2)
                                       : ia64_fw_arg(env, out0, 2);
         int64_t status = 0;
         uint64_t v0 = 0, v1 = 0, v2 = 0;
@@ -12108,13 +12116,13 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
 
         switch (func_id) {
         case IA64_ESAL_FVB_READ: {
-            uint64_t lba = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t lba = use_break_args ? ia64_fw_arg_break(env, 3)
                                      : ia64_fw_arg(env, out0, 3);
-            uint64_t offset = break_abi ? ia64_fw_arg_break(env, 4)
+            uint64_t offset = use_break_args ? ia64_fw_arg_break(env, 4)
                                         : ia64_fw_arg(env, out0, 4);
-            uint64_t num_bytes_ptr = break_abi ? ia64_fw_arg_break(env, 5)
+            uint64_t num_bytes_ptr = use_break_args ? ia64_fw_arg_break(env, 5)
                                                : ia64_fw_arg(env, out0, 5);
-            uint64_t buf_ptr = break_abi ? ia64_fw_arg_break(env, 6)
+            uint64_t buf_ptr = use_break_args ? ia64_fw_arg_break(env, 6)
                                          : ia64_fw_arg(env, out0, 6);
             uint64_t req_bytes = 0;
             uint64_t pa = 0;
@@ -12173,13 +12181,13 @@ fvb_read_log:
             break;
         }
         case IA64_ESAL_FVB_WRITE: {
-            uint64_t lba = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t lba = use_break_args ? ia64_fw_arg_break(env, 3)
                                      : ia64_fw_arg(env, out0, 3);
-            uint64_t offset = break_abi ? ia64_fw_arg_break(env, 4)
+            uint64_t offset = use_break_args ? ia64_fw_arg_break(env, 4)
                                         : ia64_fw_arg(env, out0, 4);
-            uint64_t num_bytes_ptr = break_abi ? ia64_fw_arg_break(env, 5)
+            uint64_t num_bytes_ptr = use_break_args ? ia64_fw_arg_break(env, 5)
                                                : ia64_fw_arg(env, out0, 5);
-            uint64_t buf_ptr = break_abi ? ia64_fw_arg_break(env, 6)
+            uint64_t buf_ptr = use_break_args ? ia64_fw_arg_break(env, 6)
                                          : ia64_fw_arg(env, out0, 6);
             uint64_t req_bytes = 0;
             uint64_t pa = 0;
@@ -12238,7 +12246,7 @@ fvb_write_log:
             break;
         }
         case IA64_ESAL_FVB_ERASE_BLOCK: {
-            uint64_t lba = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t lba = use_break_args ? ia64_fw_arg_break(env, 3)
                                      : ia64_fw_arg(env, out0, 3);
             uint64_t pa = 0, avail = 0;
             g_autofree uint8_t *tmp = NULL;
@@ -12265,7 +12273,7 @@ fvb_erase_log:
         }
         case IA64_ESAL_FVB_GET_VOLUME_ATTRS:
         case IA64_ESAL_FVB_SET_VOLUME_ATTRS: {
-            uint64_t attrs_ptr = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t attrs_ptr = use_break_args ? ia64_fw_arg_break(env, 3)
                                            : ia64_fw_arg(env, out0, 3);
             if (!attrs_ptr) {
                 status = -1;
@@ -12286,7 +12294,7 @@ fvb_attr_log:
             break;
         }
         case IA64_ESAL_FVB_GET_PHYS_ADDR: {
-            uint64_t base_ptr = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t base_ptr = use_break_args ? ia64_fw_arg_break(env, 3)
                                           : ia64_fw_arg(env, out0, 3);
             if (!base_ptr) {
                 status = -1;
@@ -12309,11 +12317,11 @@ fvb_phys_log:
             break;
         }
         case IA64_ESAL_FVB_GET_BLOCK_SIZE: {
-            uint64_t lba = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t lba = use_break_args ? ia64_fw_arg_break(env, 3)
                                      : ia64_fw_arg(env, out0, 3);
-            uint64_t block_ptr = break_abi ? ia64_fw_arg_break(env, 4)
+            uint64_t block_ptr = use_break_args ? ia64_fw_arg_break(env, 4)
                                            : ia64_fw_arg(env, out0, 4);
-            uint64_t count_ptr = break_abi ? ia64_fw_arg_break(env, 5)
+            uint64_t count_ptr = use_break_args ? ia64_fw_arg_break(env, 5)
                                            : ia64_fw_arg(env, out0, 5);
             if (!block_ptr || !count_ptr) {
                 status = -1;
@@ -12344,13 +12352,13 @@ fvb_block_log:
             break;
         }
         case IA64_ESAL_FVB_ERASE_CUSTOM_RANGE: {
-            uint64_t start_lba = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t start_lba = use_break_args ? ia64_fw_arg_break(env, 3)
                                            : ia64_fw_arg(env, out0, 3);
-            uint64_t offset_start = break_abi ? ia64_fw_arg_break(env, 4)
+            uint64_t offset_start = use_break_args ? ia64_fw_arg_break(env, 4)
                                               : ia64_fw_arg(env, out0, 4);
-            uint64_t last_lba = break_abi ? ia64_fw_arg_break(env, 5)
+            uint64_t last_lba = use_break_args ? ia64_fw_arg_break(env, 5)
                                           : ia64_fw_arg(env, out0, 5);
-            uint64_t offset_last = break_abi ? ia64_fw_arg_break(env, 6)
+            uint64_t offset_last = use_break_args ? ia64_fw_arg_break(env, 6)
                                              : ia64_fw_arg(env, out0, 6);
             uint64_t start_off = start_lba * IA64_IPF_FW_FLASH_BLOCK_SIZE + offset_start;
             uint64_t end_off = last_lba * IA64_IPF_FW_FLASH_BLOCK_SIZE + offset_last;
@@ -12430,11 +12438,11 @@ fvb_range_log:
          * SAL_GET_STATE_INFO as fatal during early DXE init.
          */
         if (ia64_fw_log_enabled()) {
-            uint64_t a1 = break_abi ? ia64_fw_arg_break(env, 1)
+            uint64_t a1 = use_break_args ? ia64_fw_arg_break(env, 1)
                                     : ia64_fw_arg(env, out0, 1);
-            uint64_t a2 = break_abi ? ia64_fw_arg_break(env, 2)
+            uint64_t a2 = use_break_args ? ia64_fw_arg_break(env, 2)
                                     : ia64_fw_arg(env, out0, 2);
-            uint64_t a3 = break_abi ? ia64_fw_arg_break(env, 3)
+            uint64_t a3 = use_break_args ? ia64_fw_arg_break(env, 3)
                                     : ia64_fw_arg(env, out0, 3);
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: SAL_GET_STATE_INFO a1=%016" PRIx64
@@ -12447,9 +12455,9 @@ fvb_range_log:
     case IA64_SAL_GET_STATE_INFO_SIZE:
         /* SKI returns success and size 0. */
         if (ia64_fw_log_enabled()) {
-            uint64_t a1 = break_abi ? ia64_fw_arg_break(env, 1)
+            uint64_t a1 = use_break_args ? ia64_fw_arg_break(env, 1)
                                     : ia64_fw_arg(env, out0, 1);
-            uint64_t a2 = break_abi ? ia64_fw_arg_break(env, 2)
+            uint64_t a2 = use_break_args ? ia64_fw_arg_break(env, 2)
                                     : ia64_fw_arg(env, out0, 2);
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: SAL_GET_STATE_INFO_SIZE a1=%016" PRIx64
@@ -12504,11 +12512,11 @@ fvb_range_log:
             }
         }
 
-        uint64_t arg1 = break_abi ? ia64_fw_arg_break(env, 1)
+        uint64_t arg1 = use_break_args ? ia64_fw_arg_break(env, 1)
                                   : ia64_fw_arg(env, out0, 1);
-        uint64_t arg2 = break_abi ? ia64_fw_arg_break(env, 2)
+        uint64_t arg2 = use_break_args ? ia64_fw_arg_break(env, 2)
                                   : ia64_fw_arg(env, out0, 2);
-        uint64_t arg3 = break_abi ? ia64_fw_arg_break(env, 3)
+        uint64_t arg3 = use_break_args ? ia64_fw_arg_break(env, 3)
                                   : ia64_fw_arg(env, out0, 3);
         uint64_t pci_addr = break_abi ? arg2 : arg1;
         uint64_t size_raw = break_abi ? arg1 : arg2;
@@ -12666,13 +12674,13 @@ fvb_range_log:
             }
         }
 
-        uint64_t arg1 = break_abi ? ia64_fw_arg_break(env, 1)
+        uint64_t arg1 = use_break_args ? ia64_fw_arg_break(env, 1)
                                   : ia64_fw_arg(env, out0, 1);
-        uint64_t arg2 = break_abi ? ia64_fw_arg_break(env, 2)
+        uint64_t arg2 = use_break_args ? ia64_fw_arg_break(env, 2)
                                   : ia64_fw_arg(env, out0, 2);
-        uint64_t arg3 = break_abi ? ia64_fw_arg_break(env, 3)
+        uint64_t arg3 = use_break_args ? ia64_fw_arg_break(env, 3)
                                   : ia64_fw_arg(env, out0, 3);
-        uint64_t arg4 = break_abi ? ia64_fw_arg_break(env, 4)
+        uint64_t arg4 = use_break_args ? ia64_fw_arg_break(env, 4)
                                   : ia64_fw_arg(env, out0, 4);
         uint64_t pci_addr = break_abi ? arg2 : arg1;
         uint64_t size_raw = break_abi ? arg1 : arg2;
@@ -12829,7 +12837,7 @@ fvb_range_log:
     }
 
     ia64_fw_trace_record(IA64_FW_TRACE_SAL, env->ip, func_raw, func,
-                         args_trace, status, v0, v1, v2, break_abi);
+                         args_trace, status, v0, v1, v2, use_break_args);
 
     env->r[8] = (uint64_t)status;
     env->r[9] = v0;

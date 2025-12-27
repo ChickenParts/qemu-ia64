@@ -5872,7 +5872,9 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         uint64_t pc = ctx->base.pc_next;
         uint64_t pal_pc = IA64_RGN7_BASE | IA64_IPF_FW_PAL_PROC_ADDR;
         uint64_t sal_pc = IA64_RGN7_BASE | IA64_IPF_FW_SAL_PROC_ADDR;
-        bool is_pal = (pc == pal_pc) || (pc == IA64_IPF_FW_PAL_PROC_ADDR);
+        uint64_t pc_low61 = pc & ((1ULL << 61) - 1);
+        bool is_pal = (pc == pal_pc) || (pc == IA64_IPF_FW_PAL_PROC_ADDR) ||
+                      (pc_low61 == IA64_IPF_FW_PAL_LEGACY_ADDR);
         bool is_sal = (pc == sal_pc) || (pc == IA64_IPF_FW_SAL_PROC_ADDR);
 
         if (is_pal || is_sal) {
