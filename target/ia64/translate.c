@@ -1656,6 +1656,28 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         gen_helper_fw_pei_pre_install_probe(tcg_env,
                                             tcg_constant_i64(ctx->base.pc_next));
     }
+    /*
+     * xenipf/EDK firmware: trace PeiInstallPpi entry to confirm the
+     * DispatchTable pointer reaches the PPI database update.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        (ctx->base.pc_next == 0x80000000ffe25b90ULL ||
+         ctx->base.pc_next == 0x00000000ffe25b90ULL)) {
+        gen_helper_fw_pei_pre_install_probe(tcg_env,
+                                            tcg_constant_i64(ctx->base.pc_next));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        (ctx->base.pc_next == 0x80000000ffe22590ULL ||
+         ctx->base.pc_next == 0x00000000ffe22590ULL)) {
+        gen_helper_fw_pei_startup_dump(tcg_env,
+                                       tcg_constant_i64(ctx->base.pc_next));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        (ctx->base.pc_next == 0x80000000ffe22670ULL ||
+         ctx->base.pc_next == 0x00000000ffe22670ULL)) {
+        gen_helper_fw_pei_startup_dump(tcg_env,
+                                       tcg_constant_i64(ctx->base.pc_next));
+    }
 
     /*
      * xenipf/EDK firmware: dump PEI PPI database at the AfterMemMP assert loop
@@ -1677,6 +1699,17 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe215c0ULL ||
          ctx->base.pc_next == 0x00000000ffe215c0ULL)) {
+        gen_helper_fw_pei_ppi_dump(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next));
+    }
+    /*
+     * xenipf/EDK firmware: dump PEI PPI database when PeiLocatePpi returns
+     * NOT_FOUND for StatusCode PPI to verify PPI install state.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe268b0ULL ||
+         ctx->base.pc_next == 0x00000000ffe268b0ULL)) {
         gen_helper_fw_pei_ppi_dump(tcg_env,
                                    tcg_constant_i64(ctx->base.pc_next));
     }

@@ -10323,6 +10323,97 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+static bool ia64_fw_pei_startup_dump_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_STARTUP_DUMP");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static void ia64_fw_pei_dump_startup_desc(CPUIA64State *env, uint64_t ptr,
+                                          const char *tag, uint64_t pc)
+{
+    CPUState *cs = env_cpu(env);
+    if (!ptr) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_startup %s pc=%016" PRIx64 " ptr=0\n",
+                      tag, pc);
+        return;
+    }
+
+    hwaddr phys = ia64_phys_mode_addr(ptr);
+    uint8_t buf[24];
+    if (cpu_memory_rw_debug(cs, phys, buf, sizeof(buf), false) != 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_startup %s pc=%016" PRIx64
+                      " ptr=%016" PRIx64 " phys=%016" HWADDR_PRIx
+                      " unreadable\n",
+                      tag, pc, ptr, phys);
+        return;
+    }
+
+    uint64_t boot_fv = ldq_le_p(&buf[0]);
+    uint64_t car_size = ldq_le_p(&buf[8]);
+    uint64_t dispatch = ldq_le_p(&buf[16]);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_startup %s pc=%016" PRIx64
+                  " ptr=%016" PRIx64 " phys=%016" HWADDR_PRIx
+                  " boot_fv=%016" PRIx64 " car_size=%016" PRIx64
+                  " dispatch=%016" PRIx64 "\n",
+                  tag, pc, ptr, phys, boot_fv, car_size, dispatch);
+}
+
+void HELPER(fw_pei_startup_dump)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    if (!ia64_fw_pei_startup_dump_enabled()) {
+        return;
+    }
+    static int count;
+    const int limit = 2;
+    if (count++ >= limit) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_startup_dump pc=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r34=%016" PRIx64 " r1=%016" PRIx64
+                  " r12=%016" PRIx64 "\n",
+                  pc, env->r[32], env->r[33], env->r[34],
+                  env->r[1], env->r[12]);
+    ia64_fw_pei_dump_startup_desc(env, env->r[32], "r32", pc);
+    ia64_fw_pei_dump_startup_desc(env, env->r[33], "r33", pc);
+
+    if (env->r[32]) {
+        CPUState *cs = env_cpu(env);
+        uint64_t slot = env->r[32] + 0x2b0;
+        uint8_t tmp[8];
+        uint64_t val = 0;
+        if (cpu_memory_rw_debug(cs, ia64_phys_mode_addr(slot),
+                                tmp, sizeof(tmp), false) == 0) {
+            val = ldq_le_p(tmp);
+        } else {
+            val = UINT64_MAX;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_startup_dump ppi_slot=%016" PRIx64
+                      " val=%016" PRIx64 "\n",
+                      slot, val);
+    }
+#endif
+}
+
 void HELPER(fw_pei_ppi_dump)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
