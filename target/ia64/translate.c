@@ -44,6 +44,13 @@ static uint64_t ia64_bcall_log_max_pc;
 static int ia64_bcall_log_limit;
 static int ia64_bcall_log_count;
 
+enum {
+    IA64_B7_WRITE_MOV_M = 0,
+    IA64_B7_WRITE_MOV_I = 1,
+    IA64_B7_WRITE_BRCALL_REG = 2,
+    IA64_B7_WRITE_BRCALL_IMM = 3,
+};
+
 static void ia64_init_bcall_log(void)
 {
     if (ia64_bcall_log_inited) {
@@ -2470,6 +2477,13 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                                      tcg_constant_i32(ctx->ri),
                                      tcg_constant_i64(insn),
                                      tgt);
+        if (b1 == 7) {
+            gen_helper_fw_b7_write(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(IA64_B7_WRITE_BRCALL_REG),
+                                   tcg_constant_i32(b2),
+                                   tcg_constant_i64(ctx->base.pc_next + 16));
+        }
         tcg_gen_movi_i64(cpu_b[b1], ctx->base.pc_next + 16);
         if (b1 == 0) {
             gen_record_b0_write(ctx, insn, 1,
@@ -2674,6 +2688,13 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                                      tcg_constant_i32(ctx->ri),
                                      tcg_constant_i64(insn),
                                      tcg_constant_i64(tgt));
+        if (b1 == 7) {
+            gen_helper_fw_b7_write(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(IA64_B7_WRITE_BRCALL_IMM),
+                                   tcg_constant_i32(0),
+                                   tcg_constant_i64(ctx->base.pc_next + 16));
+        }
         tcg_gen_movi_i64(cpu_b[b1], ctx->base.pc_next + 16);
         if (b1 == 0) {
             gen_record_b0_write(ctx, insn, 1,
@@ -3457,6 +3478,13 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_movi_i64(t, 0);
                 } else {
                     tcg_gen_mov_i64(t, cpu_r[r2]);
+                }
+                if (b == 7) {
+                    gen_helper_fw_b7_write(tcg_env,
+                                           tcg_constant_i64(ctx->base.pc_next),
+                                           tcg_constant_i32(IA64_B7_WRITE_MOV_M),
+                                           tcg_constant_i32(r2),
+                                           t);
                 }
                 tcg_gen_mov_i64(cpu_b[b], t);
                 if (skip_label) {
@@ -4524,6 +4552,13 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                         tcg_constant_i32(b),
                                         tcg_constant_i32(r2),
                                         src);
+                }
+                if (b == 7) {
+                    gen_helper_fw_b7_write(tcg_env,
+                                           tcg_constant_i64(ctx->base.pc_next),
+                                           tcg_constant_i32(IA64_B7_WRITE_MOV_I),
+                                           tcg_constant_i32(r2),
+                                           src);
                 }
                 tcg_gen_mov_i64(cpu_b[b], src);
                 if (b == 0) {

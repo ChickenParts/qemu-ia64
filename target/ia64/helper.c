@@ -846,6 +846,13 @@ void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
               last_kind_id, last_ri, env->last_branch_insn);
 }
 
+enum {
+    IA64_B7_WRITE_MOV_M = 0,
+    IA64_B7_WRITE_MOV_I = 1,
+    IA64_B7_WRITE_BRCALL_REG = 2,
+    IA64_B7_WRITE_BRCALL_IMM = 3,
+};
+
 void HELPER(dbg_movb)(CPUIA64State *env, uint64_t pc, uint32_t b,
                       uint32_t r2, uint64_t val)
 {
@@ -904,6 +911,58 @@ void HELPER(dbg_movb)(CPUIA64State *env, uint64_t pc, uint32_t b,
         }
     }
     log_count++;
+}
+
+static const char *ia64_fw_b7_kind_name(uint32_t kind)
+{
+    switch (kind) {
+    case IA64_B7_WRITE_MOV_M:
+        return "mov.m";
+    case IA64_B7_WRITE_MOV_I:
+        return "mov.i";
+    case IA64_B7_WRITE_BRCALL_REG:
+        return "br.call(reg)";
+    case IA64_B7_WRITE_BRCALL_IMM:
+        return "br.call(imm)";
+    default:
+        return "unknown";
+    }
+}
+
+void HELPER(fw_b7_write)(CPUIA64State *env, uint64_t pc, uint32_t kind,
+                         uint32_t aux, uint64_t val)
+{
+    static int enabled = -1;
+    static int limit = -1;
+    static int count;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_B7_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    if (!enabled) {
+        return;
+    }
+    if (limit == -1) {
+        limit = 128;
+        const char *s = getenv("QEMU_IA64_B7_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    if (limit == 0 || count >= limit) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: b7_write pc=%016" PRIx64 " kind=%s aux=%u"
+                  " old=%016" PRIx64 " val=%016" PRIx64
+                  " cfm=%016" PRIx64 " bsp=%016" PRIx64 "\n",
+                  pc, ia64_fw_b7_kind_name(kind), aux, env->b[7], val,
+                  env->cfm, env->ar[IA64_AR_BSP]);
+    count++;
 }
 
 void HELPER(fc)(CPUIA64State *env, uint64_t va)
@@ -2343,6 +2402,13 @@ static bool ia64_fw_read_u64(CPUState *cs, uint64_t addr, uint64_t *out)
     return true;
 }
 
+static bool ia64_fw_read_fdesc(CPUState *cs, uint64_t addr,
+                               uint64_t *entry, uint64_t *gp)
+{
+    return ia64_fw_read_u64(cs, addr, entry) &&
+           ia64_fw_read_u64(cs, addr + 8, gp);
+}
+
 static bool ia64_fw_pei_get_ps_ptr(CPUIA64State *env, uint64_t arg0,
                                    uint64_t *ps_out)
 {
@@ -2434,11 +2500,16 @@ static void ia64_fw_pei_log_ps_entry(CPUState *cs, uint64_t ps_ptr,
                                      uint64_t target)
 {
     static int enabled = -1;
+    static int dump_table = -1;
     static uint64_t last_target;
     static bool dumped;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_PEI_CALL_TRACE");
         enabled = (s && *s) ? 1 : 0;
+    }
+    if (dump_table == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PS_DUMP_TABLE");
+        dump_table = (s && *s) ? 1 : 0;
     }
     if (!enabled || !ps_ptr || !target) {
         return;
@@ -2470,28 +2541,56 @@ static void ia64_fw_pei_log_ps_entry(CPUState *cs, uint64_t ps_ptr,
     }
 
     uint64_t target_phys = ia64_phys_mode_addr(target);
+    const uint64_t fd_table_lo = 0xffe2ee90ULL;
+    const uint64_t fd_table_hi = 0xffe2ef90ULL;
+    bool matched = false;
     for (size_t off = 0; off + 8 <= scan_len; off += 8) {
         uint64_t val = ldq_le_p(&buf[off]);
         if (!val || val == UINT64_MAX) {
             continue;
         }
         uint64_t phys = ia64_phys_mode_addr(val);
-        if (val == target || phys == target_phys) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: pei_ps_entry ps=%016" PRIx64 " idx=%zu"
-                          " off=0x%zx val=%016" PRIx64 " phys=%016" PRIx64 "\n",
-                          ps_ptr, off / 8, off, val, phys);
-            return;
+        uint64_t fd_entry = 0;
+        uint64_t fd_gp = 0;
+        bool fd_ok = ia64_fw_read_fdesc(cs, val, &fd_entry, &fd_gp);
+        uint64_t fd_entry_phys = fd_ok ? ia64_phys_mode_addr(fd_entry) : 0;
+        bool val_match = (val == target || phys == target_phys);
+        bool entry_match = (fd_ok &&
+                            (fd_entry == target || fd_entry_phys == target_phys));
+        if (val_match || entry_match) {
+            if (fd_ok) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ps_entry ps=%016" PRIx64 " idx=%zu"
+                              " off=0x%zx val=%016" PRIx64 " phys=%016" PRIx64
+                              " fd.entry=%016" PRIx64 " fd.gp=%016" PRIx64
+                              " fd.entry_phys=%016" PRIx64 "%s\n",
+                              ps_ptr, off / 8, off, val, phys, fd_entry, fd_gp,
+                              fd_entry_phys, entry_match ? " match=entry" : "");
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ps_entry ps=%016" PRIx64 " idx=%zu"
+                              " off=0x%zx val=%016" PRIx64 " phys=%016" PRIx64 "\n",
+                              ps_ptr, off / 8, off, val, phys);
+            }
+            if (!dump_table) {
+                return;
+            }
+            matched = true;
+            break;
         }
     }
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "IA64: pei_ps_entry ps=%016" PRIx64 " target=%016" PRIx64
-                  " not_found\n",
-                  ps_ptr, target);
-
-    if (dumped) {
+    if (!matched) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_ps_entry ps=%016" PRIx64 " target=%016" PRIx64
+                      " not_found\n",
+                      ps_ptr, target);
+        if (dumped) {
+            return;
+        }
+    } else if (dumped) {
         return;
     }
+
     dumped = true;
 
     const uint64_t target_window = 0x2000;
@@ -2501,25 +2600,46 @@ static void ia64_fw_pei_log_ps_entry(CPUState *cs, uint64_t ps_ptr,
     int logged = 0;
     const int log_limit = 32;
 
-    for (size_t off = 0; off + 8 <= scan_len && logged < log_limit; off += 8) {
+    for (size_t off = 0; off + 8 <= scan_len; off += 8) {
         uint64_t val = ldq_le_p(&buf[off]);
         if (!val || val == UINT64_MAX) {
             continue;
         }
         uint64_t phys = ia64_phys_mode_addr(val);
+        bool in_table = (phys >= fd_table_lo && phys <= fd_table_hi);
         bool in_flash = (phys >= IA64_IPF_FW_FLASH_BASE &&
                          phys < IA64_IPF_FW_FLASH_BASE + IA64_IPF_FW_FLASH_SIZE);
         bool in_workram = (phys >= IA64_IPF_FW_WORKRAM_BASE &&
                            phys < IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE);
         bool near_target = (phys >= target_lo && phys <= target_hi);
-        if (!in_flash && !in_workram && !near_target) {
+        if (!in_flash && !in_workram && !near_target && !in_table) {
             continue;
         }
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: pei_ps_entry cand ps=%016" PRIx64 " idx=%zu"
-                      " off=0x%zx val=%016" PRIx64 " phys=%016" PRIx64 "\n",
-                      ps_ptr, off / 8, off, val, phys);
-        logged++;
+        if (!in_table && logged >= log_limit) {
+            continue;
+        }
+        uint64_t fd_entry = 0;
+        uint64_t fd_gp = 0;
+        bool fd_ok = ia64_fw_read_fdesc(cs, val, &fd_entry, &fd_gp);
+        uint64_t fd_entry_phys = fd_ok ? ia64_phys_mode_addr(fd_entry) : 0;
+        if (fd_ok) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ps_entry cand ps=%016" PRIx64 " idx=%zu"
+                          " off=0x%zx val=%016" PRIx64 " phys=%016" PRIx64
+                          " fd.entry=%016" PRIx64 " fd.gp=%016" PRIx64
+                          " fd.entry_phys=%016" PRIx64 "%s\n",
+                          ps_ptr, off / 8, off, val, phys, fd_entry, fd_gp,
+                          fd_entry_phys, in_table ? " table=1" : "");
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ps_entry cand ps=%016" PRIx64 " idx=%zu"
+                          " off=0x%zx val=%016" PRIx64 " phys=%016" PRIx64 "%s\n",
+                          ps_ptr, off / 8, off, val, phys,
+                          in_table ? " table=1" : "");
+        }
+        if (!in_table) {
+            logged++;
+        }
     }
 }
 
