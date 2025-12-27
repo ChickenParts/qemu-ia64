@@ -9865,6 +9865,9 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
     } else if (stack_count) {
         env->r[10] = stack_count;
     }
+    /* OldCoreData must be NULL on the first PEI core entry. */
+    env->r[34] = 0;
+    env->nat[34] = 0;
 
     if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         logged = true;
