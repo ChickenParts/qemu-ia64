@@ -1620,6 +1620,13 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         gen_helper_fw_pei_core_entry_probe(tcg_env,
                                            tcg_constant_i64(ctx->base.pc_next));
     }
+    if (ctx->mem_idx != MMU_USER_IDX && ctx->ri == 0) {
+        uint32_t pc_lo = (uint32_t)ctx->base.pc_next;
+        if (pc_lo >= 0xffe20000u && pc_lo < 0xffe30000u) {
+            gen_helper_fw_pei_err_watch(tcg_env,
+                                        tcg_constant_i64(ctx->base.pc_next));
+        }
+    }
 
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&

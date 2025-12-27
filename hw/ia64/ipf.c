@@ -672,6 +672,21 @@ static bool ipf_fw_scan_enabled(void)
     return enabled;
 }
 
+static bool ipf_fw_pei_use_pi_handoff(void)
+{
+    static int use_pi = -1;
+    if (use_pi == -1) {
+        const char *s = getenv("QEMU_IPF_FW_PEI_PI");
+        if (s && *s) {
+            use_pi = (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 ||
+                      strcmp(s, "no") == 0) ? 0 : 1;
+        } else {
+            use_pi = 0;
+        }
+    }
+    return use_pi;
+}
+
 static bool ipf_fw_is_erased(const uint8_t *buf, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
@@ -1171,7 +1186,9 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     const uint64_t bfv_size = fv_len;
     const uint64_t temp_phys = IPF_FW_PEI_TEMP_BASE;
     const uint64_t temp_size = IPF_FW_PEI_TEMP_SIZE;
-    const uint64_t handoff_phys = IPF_FW_PEI_HANDOFF_BASE;
+    const uint64_t handoff_phys = ipf_fw_pei_use_pi_handoff() ?
+                                  IPF_FW_PEI_HANDOFF_BASE :
+                                  (temp_phys + 0x1000);
     const uint64_t ppi_phys = temp_phys;
     const uint64_t stub_phys = IPF_FW_PEI_STUB_BASE;
     const uint64_t plabel_phys = stub_phys + 0x20;
@@ -1200,30 +1217,45 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
         0xbd, 0x85, 0x05, 0xbf, 0x3c, 0x77, 0x00, 0xaa,
     };
 
-    /*
-     * EFI_SEC_PEI_HAND_OFF (PI PEI core):
-     *   0x00 DataSize (UINT16)
-     *   0x08 BootFirmwareVolumeBase
-     *   0x10 BootFirmwareVolumeSize
-     *   0x18 TemporaryRamBase
-     *   0x20 TemporaryRamSize
-     *   0x28 PeiTemporaryRamBase
-     *   0x30 PeiTemporaryRamSize
-     *   0x38 StackBase
-     *   0x40 StackSize
-     */
-    uint8_t handoff[0x48];
-    memset(handoff, 0, sizeof(handoff));
-    stw_le_p(&handoff[0], sizeof(handoff));
-    stq_le_p(&handoff[8], ipf_fw_region8_addr(bfv_phys));
-    stq_le_p(&handoff[16], bfv_size);
-    stq_le_p(&handoff[24], ipf_fw_region8_addr(temp_phys));
-    stq_le_p(&handoff[32], temp_size);
-    stq_le_p(&handoff[40], ipf_fw_region8_addr(temp_phys));
-    stq_le_p(&handoff[48], pei_temp_size);
-    stq_le_p(&handoff[56], ipf_fw_region8_addr(stack_base - stack_size));
-    stq_le_p(&handoff[64], stack_size);
-    cpu_physical_memory_write(handoff_phys, handoff, sizeof(handoff));
+    if (ipf_fw_pei_use_pi_handoff()) {
+        /*
+         * EFI_SEC_PEI_HAND_OFF (PI PEI core):
+         *   0x00 DataSize (UINT16)
+         *   0x08 BootFirmwareVolumeBase
+         *   0x10 BootFirmwareVolumeSize
+         *   0x18 TemporaryRamBase
+         *   0x20 TemporaryRamSize
+         *   0x28 PeiTemporaryRamBase
+         *   0x30 PeiTemporaryRamSize
+         *   0x38 StackBase
+         *   0x40 StackSize
+         */
+        uint8_t handoff[0x48];
+        memset(handoff, 0, sizeof(handoff));
+        stw_le_p(&handoff[0], sizeof(handoff));
+        stq_le_p(&handoff[8], ipf_fw_region8_addr(bfv_phys));
+        stq_le_p(&handoff[16], bfv_size);
+        stq_le_p(&handoff[24], ipf_fw_region8_addr(temp_phys));
+        stq_le_p(&handoff[32], temp_size);
+        stq_le_p(&handoff[40], ipf_fw_region8_addr(temp_phys));
+        stq_le_p(&handoff[48], pei_temp_size);
+        stq_le_p(&handoff[56], ipf_fw_region8_addr(stack_base - stack_size));
+        stq_le_p(&handoff[64], stack_size);
+        cpu_physical_memory_write(handoff_phys, handoff, sizeof(handoff));
+    } else {
+        /*
+         * EFI_PEI_STARTUP_DESCRIPTOR (framework/Tiano PEI core):
+         *   0x00 BootFirmwareVolume
+         *   0x08 SizeOfCacheAsRam
+         *   0x10 DispatchTable (PPI list)
+         */
+        uint8_t startup[0x18];
+        memset(startup, 0, sizeof(startup));
+        stq_le_p(&startup[0], ipf_fw_region8_addr(bfv_phys));
+        stq_le_p(&startup[8], temp_size);
+        stq_le_p(&startup[16], ipf_fw_region8_addr(ppi_phys));
+        cpu_physical_memory_write(handoff_phys, startup, sizeof(startup));
+    }
 
     struct QEMU_PACKED {
         uint64_t entry;
@@ -1295,14 +1327,15 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
             ppi_phys, ipf_boot_r9, ipf_boot_r10);
 
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        const char *handoff_kind = ipf_fw_pei_use_pi_handoff() ? "sec" : "startup";
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "IPF: PEI startup: bfv=%016" PRIx64 " bfv_size=%" PRIu64
-                      " startup=%016" PRIx64 " ppi=%016" PRIx64
-                      " temp=%016" PRIx64 " tsize=%" PRIu64
-                      " pei_temp=%016" PRIx64 " pei_tsize=%" PRIu64
-                      " stack=%016" PRIx64 " ssize=%" PRIu64
-                      " r10=%016" PRIx64 "\n",
-                      bfv_phys, bfv_size, handoff_phys, ppi_phys,
+                      "IPF: PEI startup (%s): bfv=%016" PRIx64
+                      " bfv_size=%" PRIu64 " startup=%016" PRIx64
+                      " ppi=%016" PRIx64 " temp=%016" PRIx64
+                      " tsize=%" PRIu64 " pei_temp=%016" PRIx64
+                      " pei_tsize=%" PRIu64 " stack=%016" PRIx64
+                      " ssize=%" PRIu64 " r10=%016" PRIx64 "\n",
+                      handoff_kind, bfv_phys, bfv_size, handoff_phys, ppi_phys,
                       temp_phys, temp_size, temp_phys, pei_temp_size,
                       stack_base - stack_size, stack_size, ipf_boot_r10);
     }

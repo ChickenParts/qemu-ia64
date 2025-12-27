@@ -7,6 +7,8 @@
   expression `!(((INTN) (Status)) < 0)` (truncated in buffer).
 - Status at assert entry appears to be `EFI_OUT_OF_RESOURCES`
   (`r8=0x8000000000000009` at `pc=0xffe73700`).
+- PEI startup ABI may be non-PI (`EFI_PEI_STARTUP_DESCRIPTOR`); mismatch with
+  `EFI_SEC_PEI_HAND_OFF` can corrupt HOB list and memory services.
 - `PEI_STATUS_CODE_PPI_GUID` is now installed and `LocatePpi` returns success
   in later traces; `ReportStatusCode` callgate is functional.
 - HOB/PHIT parsing still shows inconsistent data in `fw_pei_oor` (bogus mem ranges),
