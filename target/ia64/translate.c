@@ -1474,6 +1474,17 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                     tcg_constant_i32(0));
     }
 
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e3a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e3a0ULL)) {
+        gen_helper_fw_boot_k4_fix(tcg_env,
+                                  tcg_constant_i64(ctx->base.pc_next));
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(10));
+    }
+
     /*
      * xenipf/EDK firmware: PEI startup path should hand off the SEC handoff
      * pointer in r9 and the PPI list in r10 before the PEI core copies them
@@ -1485,6 +1496,87 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
          ctx->base.pc_next == 0x00000000ffe2e450ULL)) {
         gen_helper_fw_pei_startup_fix(tcg_env,
                                       tcg_constant_i64(ctx->base.pc_next));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e450ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e450ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(7));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 1 &&
+        (ctx->base.pc_next == 0x80000000ffe2e450ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e450ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(8));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 2 &&
+        (ctx->base.pc_next == 0x80000000ffe2e450ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e450ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(9));
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e4a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e4a0ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(3));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 1 &&
+        (ctx->base.pc_next == 0x80000000ffe2e4a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e4a0ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(4));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 2 &&
+        (ctx->base.pc_next == 0x80000000ffe2e4a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e4a0ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(5));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e4b0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e4b0ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(6));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e640ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e640ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(0));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e660ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e660ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(1));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e740ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e740ULL)) {
+        gen_helper_fw_bootloop_log(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next),
+                                   tcg_constant_i32(2));
     }
 
     if (ctx->mem_idx != MMU_USER_IDX &&

@@ -2391,6 +2391,15 @@ static void main_cpu_reset(void *opaque)
      */
     s->ar[0] = IPF_LEGACY_IO_BASE;
     s->ar[IA64_AR_FPSR] = IA64_FPSR_DEFAULT;
+    if (booting_firmware) {
+        /*
+         * xenipf SEC stack/BSP setup uses ar.k4 (boot r10) as a loop count
+         * to size the temporary stack in 128KiB steps. Seed it so the stack
+         * lands inside the fw-workram window.
+         */
+        s->ar[3] = 0; /* ar.k3 */
+        s->ar[4] = ipf_boot_r10; /* ar.k4 */
+    }
 
     /*
      * Provide a deterministic initial stack pointer and RSE backing store in
