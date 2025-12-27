@@ -324,6 +324,7 @@ struct IA64CPUClass {
 #define IA64_AR_BSP       17
 #define IA64_AR_BSPSTORE  18
 #define IA64_AR_RNAT      19
+#define IA64_AR_UNAT      36
 #define IA64_AR_K5        5
 #define IA64_AR_FPSR      40
 #define IA64_AR_ITC       44
