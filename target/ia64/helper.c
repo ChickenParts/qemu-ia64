@@ -10049,19 +10049,21 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
             } else {
                 uint64_t boot_fv = ldq_le_p(&handoff_buf[0]);
                 uint64_t car_size = ldq_le_p(&handoff_buf[8]);
-                uint64_t dispatch = ldq_le_p(&handoff_buf[16]);
+                uint64_t dispatch16 = ldq_le_p(&handoff_buf[16]);
+                uint64_t dispatch24 = ldq_le_p(&handoff_buf[24]);
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: fw_pei_entry_fix handoff(startup)"
                               " boot_fv=%016" PRIx64
                               " car_size=%016" PRIx64
-                              " dispatch=%016" PRIx64 "\n",
-                              boot_fv, car_size, dispatch);
+                              " dispatch16=%016" PRIx64
+                              " dispatch24=%016" PRIx64 "\n",
+                              boot_fv, car_size, dispatch16, dispatch24);
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: fw_pei_entry_fix handoff(startup)"
                               " boot_fv_phys=%016" PRIx64
                               " dispatch_phys=%016" PRIx64 "\n",
                               (uint64_t)ia64_phys_mode_addr(boot_fv),
-                              (uint64_t)ia64_phys_mode_addr(dispatch));
+                              (uint64_t)ia64_phys_mode_addr(dispatch24));
             }
         }
     }
@@ -10263,13 +10265,15 @@ void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
             } else {
                 uint64_t boot_fv = ldq_le_p(&buf[0]);
                 uint64_t car_size = ldq_le_p(&buf[8]);
-                uint64_t dispatch = ldq_le_p(&buf[16]);
+                uint64_t dispatch16 = ldq_le_p(&buf[16]);
+                uint64_t dispatch24 = ldq_le_p(&buf[24]);
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: fw_pei_core_entry handoff(startup)"
                               " boot_fv=%016" PRIx64
                               " car_size=%016" PRIx64
-                              " dispatch=%016" PRIx64 "\n",
-                              boot_fv, car_size, dispatch);
+                              " dispatch16=%016" PRIx64
+                              " dispatch24=%016" PRIx64 "\n",
+                              boot_fv, car_size, dispatch16, dispatch24);
             }
         }
     }

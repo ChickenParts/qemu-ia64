@@ -1247,13 +1247,15 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
          * EFI_PEI_STARTUP_DESCRIPTOR (framework/Tiano PEI core):
          *   0x00 BootFirmwareVolume
          *   0x08 SizeOfCacheAsRam
-         *   0x10 DispatchTable (PPI list)
+         *   0x10 Reserved/unused (observed firmware reads DispatchTable @ 0x18)
+         *   0x18 DispatchTable (PPI list)
          */
-        uint8_t startup[0x18];
+        uint8_t startup[0x20];
         memset(startup, 0, sizeof(startup));
         stq_le_p(&startup[0], ipf_fw_region8_addr(bfv_phys));
         stq_le_p(&startup[8], temp_size);
-        stq_le_p(&startup[16], ipf_fw_region8_addr(ppi_phys));
+        stq_le_p(&startup[16], 0);
+        stq_le_p(&startup[24], ipf_fw_region8_addr(ppi_phys));
         cpu_physical_memory_write(handoff_phys, startup, sizeof(startup));
     }
 
