@@ -1683,6 +1683,69 @@ static void ipf_add_text_watch(IPFMachineState *m, MemoryRegion *sysmem,
     fprintf(stderr, "IPF_TEXT_WATCH: no free watch slots for %s\n", label);
 }
 
+static void ipf_setup_ram_watches(IPFMachineState *m, MemoryRegion *sysmem,
+                                  IA64CPU *cpu, MemoryRegion *ram,
+                                  uint64_t kernel_bias, bool allow_named)
+{
+    const char *watch_data = getenv("QEMU_IA64_WATCH_DATA");
+    const char *watch_data2 = getenv("QEMU_IA64_WATCH_DATA2");
+    const struct {
+        const char *env;
+        const char *label;
+    } data_watches[] = {
+        { watch_data, "data_watch1" },
+        { watch_data2, "data_watch2" },
+    };
+
+    for (size_t wi = 0; wi < ARRAY_SIZE(data_watches); wi++) {
+        const char *w = data_watches[wi].env;
+        if (!w || !*w) {
+            continue;
+        }
+        hwaddr size = 0x20;
+        hwaddr pa = 0;
+        if (allow_named) {
+            if (strcmp(w, "console_srcu") == 0 ||
+                strcmp(w, "console_srcu+8") == 0) {
+                const uint64_t console_srcu_va = 0xa000000101f57678ULL;
+                pa = (console_srcu_va + 8) - kernel_bias;
+                ipf_add_text_watch(m, sysmem, cpu, ram, 0, pa, size,
+                                   data_watches[wi].label);
+                continue;
+            } else if (strcmp(w, "console_owner") == 0) {
+                if (!ipf_sym_console_owner) {
+                    fprintf(stderr,
+                            "IPF_TEXT_WATCH: symbol console_owner not found\n");
+                    continue;
+                }
+                pa = ipf_sym_console_owner - kernel_bias;
+                size = 8;
+                ipf_add_text_watch(m, sysmem, cpu, ram, 0, pa, size,
+                                   "console_owner");
+                continue;
+            } else if (strcmp(w, "console_waiter") == 0) {
+                if (!ipf_sym_console_waiter) {
+                    fprintf(stderr,
+                            "IPF_TEXT_WATCH: symbol console_waiter not found\n");
+                    continue;
+                }
+                pa = ipf_sym_console_waiter - kernel_bias;
+                size = 1;
+                ipf_add_text_watch(m, sysmem, cpu, ram, 0, pa, size,
+                                   "console_waiter");
+                continue;
+            }
+        }
+
+        char *endp = NULL;
+        pa = (hwaddr)strtoull(w, &endp, 0);
+        if (endp && endp != w) {
+            ipf_add_text_watch(m, sysmem, cpu, ram, 0, pa, size,
+                               data_watches[wi].label);
+        }
+    }
+}
+
 #define MAX_IDE_BUS 2
 #define MAX_IDE_DEVS 2
 #if !defined(kvm_enabled)
@@ -3872,6 +3935,7 @@ static void ipf_init(MachineState *machine)
         /* Firmware-only boot: enter Xen/KVM guest firmware entry point. */
         ipf_boot_ip = IPF_GFW_ENTRY;
         ipf_boot_r28 = GFW_HOB_START;
+        ipf_setup_ram_watches(m, sysmem, cpu, machine->ram, 0, false);
         qemu_register_reset(main_cpu_reset, cpu);
         return;
     }
@@ -3966,58 +4030,7 @@ static void ipf_init(MachineState *machine)
         }
     }
 
-    /* Optional RAM watchpoints for bringup debugging. */
-    const char *watch_data = getenv("QEMU_IA64_WATCH_DATA");
-    const char *watch_data2 = getenv("QEMU_IA64_WATCH_DATA2");
-    const struct {
-        const char *env;
-        const char *label;
-    } data_watches[] = {
-        { watch_data, "data_watch1" },
-        { watch_data2, "data_watch2" },
-    };
-
-    for (size_t wi = 0; wi < ARRAY_SIZE(data_watches); wi++) {
-        const char *w = data_watches[wi].env;
-        if (!w || !*w) {
-            continue;
-        }
-        hwaddr size = 0x20;
-        hwaddr pa = 0;
-        if (strcmp(w, "console_srcu") == 0 || strcmp(w, "console_srcu+8") == 0) {
-            const uint64_t console_srcu_va = 0xa000000101f57678ULL;
-            pa = (console_srcu_va + 8) - ipf_kernel_bias;
-            ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
-                               data_watches[wi].label);
-        } else if (strcmp(w, "console_owner") == 0) {
-            if (!ipf_sym_console_owner) {
-                fprintf(stderr,
-                        "IPF_TEXT_WATCH: symbol console_owner not found\n");
-                continue;
-            }
-            pa = ipf_sym_console_owner - ipf_kernel_bias;
-            size = 8;
-            ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
-                               "console_owner");
-        } else if (strcmp(w, "console_waiter") == 0) {
-            if (!ipf_sym_console_waiter) {
-                fprintf(stderr,
-                        "IPF_TEXT_WATCH: symbol console_waiter not found\n");
-                continue;
-            }
-            pa = ipf_sym_console_waiter - ipf_kernel_bias;
-            size = 1;
-            ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
-                               "console_waiter");
-        } else {
-            char *endp = NULL;
-            pa = (hwaddr)strtoull(w, &endp, 0);
-            if (endp && endp != w) {
-                ipf_add_text_watch(m, sysmem, cpu, machine->ram, 0, pa, size,
-                                   data_watches[wi].label);
-            }
-        }
-    }
+    ipf_setup_ram_watches(m, sysmem, cpu, machine->ram, ipf_kernel_bias, true);
 
     /* Initrd placement (optional). */
     if (initrd_filename) {
