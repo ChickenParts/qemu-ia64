@@ -364,6 +364,7 @@ struct IA64CPUClass {
 #define IA64_VEC_DATA_PAGE_NOT_P      0x5000
 #define IA64_VEC_INST_ACCESS_RIGHTS   0x5200
 #define IA64_VEC_DATA_ACCESS_RIGHTS   0x5300
+#define IA64_VEC_UNALIGNED_DATA_REFERENCE 0x5A00
 
 void ia64_cpu_list(void);
 void ia64_tcg_init(void);
@@ -372,6 +373,9 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb,
 bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool probe, uintptr_t retaddr);
+G_NORETURN void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
+                                             MMUAccessType access_type,
+                                             int mmu_idx, uintptr_t retaddr);
 void ia64_intr_push_window(CPUIA64State *env);
 #ifndef CONFIG_USER_ONLY
 void ia64_itm_update(CPUIA64State *env);

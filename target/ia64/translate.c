@@ -4452,6 +4452,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         break;
     case SLOT_I:
         /* I-unit instructions */
+        /* Allow A-unit ops that are legal in I-slots. */
+        if (major == 0x8 || major == 0x9 ||
+            major == 0xC || major == 0xD || major == 0xE) {
+            decode_a_unit(ctx, insn);
+            break;
+        }
         if (ia64_dbg_iunit_match(ctx->base.pc_next)) {
             uint8_t dbg_x3 = extract64(insn, 33, 3);
             uint8_t dbg_x6 = extract64(insn, 27, 6);

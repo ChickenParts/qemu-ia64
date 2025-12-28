@@ -561,6 +561,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .translate_code = ia64_translate_code,
     .tlb_fill = ia64_cpu_tlb_fill,
     .tlb_fill_align = NULL,
+    .do_unaligned_access = ia64_cpu_do_unaligned_access,
     .get_tb_cpu_state = ia64_get_tb_cpu_state,
     .restore_state_to_opc = ia64_restore_state_to_opc,
     .mmu_index = ia64_cpu_mmu_index,

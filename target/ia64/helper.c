@@ -544,6 +544,27 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     return false;
 }
 
+void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
+                                  MMUAccessType access_type,
+                                  int mmu_idx, uintptr_t retaddr)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)mmu_idx;
+    cpu_abort(cs, "IA64: unaligned access addr=%016" PRIx64, (uint64_t)addr);
+#else
+    (void)mmu_idx;
+    CPUIA64State *env = cpu_env(cs);
+    bool is_data = (access_type != MMU_INST_FETCH);
+    bool is_write = (access_type == MMU_DATA_STORE);
+
+    env->cr_ifa = addr;
+    env->cr_iha = helper_thash(env);
+    ia64_fault(cs, env, is_data, is_write,
+               IA64_VEC_UNALIGNED_DATA_REFERENCE, 0, retaddr);
+#endif
+    g_assert_not_reached();
+}
+
 /*
  * Access rights enforcement.
  *
