@@ -657,6 +657,14 @@ static void ipf_fill_fw_window_erased(void)
 #define IPF_FW_STATUS_CALLER_ID_ADDR      0x00000000ffe00076ULL
 #define IPF_FW_STATUS_REPORT_PLABEL_ADDR  0x00000000ffe011b6ULL
 
+/*
+ * xenipf SPad scratchpad area. The SPad PEIM initializes the lock table at
+ * SPAD_BASE+0x10 but leaves the base pointer (SPAD_BASE+0x8) unset. Seed that
+ * pointer so later PEIMs can find the lock array.
+ */
+#define IPF_SPAD_BASE             0x00000000ff37fc00ULL
+#define IPF_SPAD_LOCK_PTR_OFFSET  0x8ULL
+
 /* Firmware volume / file type values from EDK1 headers. */
 #define EFI_FVH_SIGNATURE                  0x4856465fU /* "_FVH" */
 #define EFI_FV_FILETYPE_PEI_CORE           0x04
@@ -698,6 +706,28 @@ static bool ipf_fw_is_erased(const uint8_t *buf, size_t len)
         }
     }
     return true;
+}
+
+static void ipf_fw_seed_spad(void)
+{
+    uint8_t cur[8];
+    MemTxResult res = address_space_read(&address_space_memory,
+                                         IPF_SPAD_BASE + IPF_SPAD_LOCK_PTR_OFFSET,
+                                         MEMTXATTRS_UNSPECIFIED,
+                                         cur, sizeof(cur));
+    if (res != MEMTX_OK) {
+        return;
+    }
+    if (!ipf_fw_is_erased(cur, sizeof(cur))) {
+        return;
+    }
+
+    uint8_t out[8];
+    stq_le_p(out, IPF_SPAD_BASE);
+    address_space_write(&address_space_memory,
+                        IPF_SPAD_BASE + IPF_SPAD_LOCK_PTR_OFFSET,
+                        MEMTXATTRS_UNSPECIFIED,
+                        out, sizeof(out));
 }
 
 static size_t ipf_fw_align_up(size_t val, size_t align)
@@ -3712,6 +3742,9 @@ static void ipf_init(MachineState *machine)
                             MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
         cpu_flush_icache_range(fw_offset, (size_t)image_size);
         DPRINTF("Loaded firmware '%s' at 0x%lx\n", bios_name, fw_offset);
+        if (run_firmware) {
+            ipf_fw_seed_spad();
+        }
         if (run_firmware) {
             ipf_fw_setup_pei_handoff(buf, (size_t)image_size, fw_offset);
         }
