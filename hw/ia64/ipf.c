@@ -664,6 +664,9 @@ static void ipf_fill_fw_window_erased(void)
  */
 #define IPF_SPAD_BASE             0x00000000ff37fc00ULL
 #define IPF_SPAD_LOCK_PTR_OFFSET  0x8ULL
+#define IPF_SPAD_MP_RECORD_OFFSET 0x168ULL
+#define IPF_SPAD_MP_RECORD_SIZE   0x100ULL
+#define IPF_SPAD_MP_RECORD_SIG_OFFSET 0x20ULL
 
 /* Firmware volume / file type values from EDK1 headers. */
 #define EFI_FVH_SIGNATURE                  0x4856465fU /* "_FVH" */
@@ -730,6 +733,33 @@ static void ipf_fw_seed_spad(void)
                         out, sizeof(out));
 }
 
+static void ipf_fw_seed_spad_mp(void)
+{
+    hwaddr record_base = IPF_SPAD_BASE + IPF_SPAD_MP_RECORD_OFFSET;
+    hwaddr sig_addr = record_base + IPF_SPAD_MP_RECORD_SIG_OFFSET;
+    uint8_t cur[8];
+    MemTxResult res = address_space_read(&address_space_memory, sig_addr,
+                                         MEMTXATTRS_UNSPECIFIED,
+                                         cur, sizeof(cur));
+    if (res != MEMTX_OK) {
+        return;
+    }
+    if (!ipf_fw_is_erased(cur, sizeof(cur))) {
+        return;
+    }
+
+    uint8_t rec[IPF_SPAD_MP_RECORD_SIZE];
+    memset(rec, 0, sizeof(rec));
+    address_space_write(&address_space_memory, record_base,
+                        MEMTXATTRS_UNSPECIFIED, rec, sizeof(rec));
+
+    static const uint8_t sig[8] = {
+        0x20, 0x5f, 0x5f, 0x42, 0x53, 0x50, 0x5f, 0x5f,
+    };
+    address_space_write(&address_space_memory, sig_addr,
+                        MEMTXATTRS_UNSPECIFIED, sig, sizeof(sig));
+}
+
 static size_t ipf_fw_align_up(size_t val, size_t align)
 {
     if (align == 0) {
@@ -768,7 +798,8 @@ static uint64_t ipf_fw_boot_r10_count(void)
     /*
      * The firmware stack/BSP setup at 0xffe2e630 walks forward from a fixed
      * base (0xff300000) in 128KiB steps using ar.k4 (boot r10). The firmware
-     * uses 0x80 (16MiB/128KiB) in its later paths, so match that sizing.
+     * expects a count of 0x7e for a 16MiB window, leaving two 128KiB slots
+     * reserved for firmware metadata near the top of the GFW window.
      */
     const uint64_t stride = 0x20000ULL;
     if ((IPF_FW_WORKRAM_SIZE % stride) != 0) {
@@ -776,11 +807,11 @@ static uint64_t ipf_fw_boot_r10_count(void)
         exit(EXIT_FAILURE);
     }
     const uint64_t count = IPF_FW_WORKRAM_SIZE / stride;
-    if (count == 0) {
+    if (count < 3) {
         error_report("IPF: fw-workram size too small for firmware stack");
         exit(EXIT_FAILURE);
     }
-    return count;
+    return count - 2;
 }
 
 static void ipf_fw_guid_to_str(char *out, size_t out_len, const uint8_t *guid)
@@ -3744,6 +3775,7 @@ static void ipf_init(MachineState *machine)
         DPRINTF("Loaded firmware '%s' at 0x%lx\n", bios_name, fw_offset);
         if (run_firmware) {
             ipf_fw_seed_spad();
+            ipf_fw_seed_spad_mp();
         }
         if (run_firmware) {
             ipf_fw_setup_pei_handoff(buf, (size_t)image_size, fw_offset);

@@ -10995,13 +10995,14 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
     }
     /*
      * The PEI boot block copies r9/r10 into r32/r33 before calling the PEI
-     * core. r9 is the SEC handoff; r10 holds the PPI list for PI PEI cores.
-     * Keep the stack count available for firmware that still uses it.
+     * core. Some xenipf/EDK firmware still expects r10 to hold the stack
+     * count for ar.k4-based stack sizing; prefer that when available and
+     * provide the PPI list later via fw_pei_entry_fix()/fw_pei_ppi_fix().
      */
-    if (ppi) {
-        env->r[10] = ppi;
-    } else if (stack_count) {
+    if (stack_count) {
         env->r[10] = stack_count;
+    } else if (ppi) {
+        env->r[10] = ppi;
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
@@ -11118,11 +11119,13 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
             have_handoff_buf = true;
         }
         env->r[32] = handoff;
-        if (ppi) {
-            env->r[33] = ppi;
-        }
     }
-    (void)stack_count;
+    if (stack_count) {
+        env->r[10] = stack_count;
+        env->r[33] = stack_count;
+    } else if (ppi) {
+        env->r[33] = ppi;
+    }
     if (ia64_fw_r33_watch_enabled()) {
         env->fw_pei_r33_watch_active = 1;
         env->fw_pei_r33_last = env->r[33];
