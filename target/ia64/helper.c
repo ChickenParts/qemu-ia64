@@ -5057,6 +5057,28 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             }
             ia64_fw_statuscode_dump(env, data_ptr, log_code_type, log_value);
         }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: assert_ctx last_br from=%016" PRIx64
+                      " to=%016" PRIx64 " kind=%" PRIu64
+                      " last_b0 pc=%016" PRIx64 " val=%016" PRIx64
+                      " kind=%" PRIu64 "\n",
+                      env->last_branch_from, env->last_branch_to,
+                      env->last_branch_kind & 0xff,
+                      env->last_b0_write_pc, env->last_b0_write_val,
+                      env->last_b0_write_kind & 0xff);
+        for (int i = 0; i < 8; i++) {
+            int idx = (env->b0_trace_idx + i) & 0xf;
+            if (!env->b0_trace_pc[idx]) {
+                continue;
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: assert_ctx b0_trace[%02d] pc=%016" PRIx64
+                          " val=%016" PRIx64 " kind=%" PRIu64
+                          " insn=%011" PRIx64 "\n",
+                          i, env->b0_trace_pc[idx], env->b0_trace_val[idx],
+                          env->b0_trace_kind[idx] & 0xff,
+                          env->b0_trace_insn[idx]);
+        }
     }
 
     if (dump_enabled == -1) {
@@ -5807,32 +5829,48 @@ static void ia64_dbg_peimage_probe(CPUIA64State *env, uint64_t pc)
     }
     last_pc = pc;
 
-    if (env->psr & IA64_PSR_DT) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "dbg_peimage pc=%016" PRIx64 " skip (DT=1)\n", pc);
-        return;
-    }
-
     CPUState *cs = env_cpu(env);
-    hwaddr phys_pc = ia64_phys_mode_addr(pc);
-    hwaddr base = phys_pc & ~0xfffULL;
-    hwaddr min = (phys_pc > (2ULL << 20)) ? (phys_pc - (2ULL << 20)) : 0;
+    uint64_t base = pc & ~0xfffULL;
+    uint64_t min = (base > (2ULL << 20)) ? (base - (2ULL << 20)) : 0;
 
     uint8_t hdr[0x200];
-    for (hwaddr probe = base; probe >= min; probe -= 0x1000) {
-        if (cpu_memory_rw_debug(cs, probe, hdr, sizeof(hdr), false) != 0) {
+    uint8_t page[0x1000];
+    for (uint64_t probe = base; probe >= min; probe -= 0x1000) {
+        if (!ia64_fw_read_bytes_any(cs, probe, page, sizeof(page))) {
             if (probe == min) {
                 break;
             }
+            continue;
+        }
+        uint64_t pe_base = 0;
+        uint32_t pe_off = 0;
+        for (size_t off = 0; off + 0x40 <= sizeof(page); off++) {
+            if (page[off] != 'M' || page[off + 1] != 'Z') {
+                continue;
+            }
+            uint32_t cand_pe = ldl_le_p(&page[off + 0x3c]);
+            if (cand_pe + 0x40 > sizeof(page) - off) {
+                continue;
+            }
+            if (ldl_le_p(&page[off + cand_pe]) != 0x00004550) { /* "PE\0\0" */
+                continue;
+            }
+            pe_base = probe + off;
+            pe_off = cand_pe;
+            break;
+        }
+        if (!pe_base) {
+            if (probe == min) {
+                break;
+            }
+            continue;
+        }
+        if (!ia64_fw_read_bytes_any(cs, pe_base, hdr, sizeof(hdr))) {
             continue;
         }
         if (hdr[0] != 'M' || hdr[1] != 'Z') {
-            if (probe == min) {
-                break;
-            }
             continue;
         }
-        uint32_t pe_off = ldl_le_p(&hdr[0x3c]);
         if (pe_off + 0x40 > sizeof(hdr)) {
             continue;
         }
@@ -5872,16 +5910,16 @@ static void ia64_dbg_peimage_probe(CPUIA64State *env, uint64_t pc)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "dbg_peimage pc=%016" PRIx64 " base=%016" PRIx64
                       " image_base=%016" PRIx64 " size=0x%x entry=0x%x machine=0x%x\n",
-                      pc, (uint64_t)probe, image_base, size_of_image, entry, machine);
+                      pc, pe_base, image_base, size_of_image, entry, machine);
 
-        if (dump_enabled && size_of_image > 0 && probe != last_dump_base) {
+        if (dump_enabled && size_of_image > 0 && pe_base != last_dump_base) {
             g_mkdir_with_parents("scratch/ia64_logs", 0755);
             g_autofree uint8_t *img = g_malloc(size_of_image);
-            if (cpu_memory_rw_debug(cs, probe, img, size_of_image, false) == 0) {
+            if (ia64_fw_read_bytes_any(cs, pe_base, img, size_of_image)) {
                 char path[256];
                 snprintf(path, sizeof(path),
                          "scratch/ia64_logs/peimage_%016" PRIx64 ".bin",
-                         (uint64_t)probe);
+                         pe_base);
                 FILE *fp = fopen(path, "wb");
                 if (fp) {
                     fwrite(img, 1, size_of_image, fp);
@@ -5889,22 +5927,22 @@ static void ia64_dbg_peimage_probe(CPUIA64State *env, uint64_t pc)
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "dbg_peimage_dump pc=%016" PRIx64
                                   " base=%016" PRIx64 " size=0x%x file=%s\n",
-                                  pc, (uint64_t)probe, size_of_image, path);
-                    last_dump_base = probe;
+                                  pc, pe_base, size_of_image, path);
+                    last_dump_base = pe_base;
                 }
             }
         }
 
         if (debug_rva && debug_size && debug_rva < size_of_image) {
             uint8_t dbghdr[0x1c];
-            hwaddr dbg_va = probe + debug_rva;
-            if (cpu_memory_rw_debug(cs, dbg_va, dbghdr, sizeof(dbghdr), false) == 0) {
+            uint64_t dbg_va = pe_base + debug_rva;
+            if (ia64_fw_read_bytes_any(cs, dbg_va, dbghdr, sizeof(dbghdr))) {
                 uint32_t dbg_type = ldl_le_p(&dbghdr[12]);
                 uint32_t dbg_rva = ldl_le_p(&dbghdr[20]);
                 if (dbg_type == 2) { /* IMAGE_DEBUG_TYPE_CODEVIEW */
                     uint8_t cvhdr[256];
-                    hwaddr cv_va = probe + dbg_rva;
-                    if (cpu_memory_rw_debug(cs, cv_va, cvhdr, sizeof(cvhdr), false) == 0 &&
+                    uint64_t cv_va = pe_base + dbg_rva;
+                    if (ia64_fw_read_bytes_any(cs, cv_va, cvhdr, sizeof(cvhdr)) &&
                         memcmp(cvhdr, "RSDS", 4) == 0) {
                         char pdb[128];
                         size_t max = sizeof(pdb) - 1;
@@ -7231,6 +7269,7 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                     env->fw_pei_locate_ret_pc = pc + 16;
                     env->fw_pei_locate_instance = call_a2;
                     env->fw_pei_locate_desc_ptr = call_a3;
+                    env->fw_pei_locate_ppi_ptr = call_a4;
                     if (ia64_fw_pei_ps_dump_enabled()) {
                         ia64_fw_pei_dump_ps(env, ps_ptr, pc);
                     }
@@ -7241,9 +7280,10 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                                       " tgt=%016" PRIx64 " ps=%016" PRIx64
                                       " plabel=%016" PRIx64 " entry=%016" PRIx64
                                       " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
+                                      " ppi_ptr=%016" PRIx64
                                       " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
                                       pc, tgt, ps_ptr, plabel, entry,
-                                      call_a2, call_a3,
+                                      call_a2, call_a3, call_a4,
                                       guid.data1, guid.data2, guid.data3,
                                       guid.data4[0], guid.data4[1],
                                       guid.data4[2], guid.data4[3],
@@ -7255,9 +7295,10 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                                       " tgt=%016" PRIx64 " ps=%016" PRIx64
                                       " plabel=%016" PRIx64 " entry=%016" PRIx64
                                       " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
+                                      " ppi_ptr=%016" PRIx64
                                       " guid_ptr=%016" PRIx64 "\n",
                                       pc, tgt, ps_ptr, plabel, entry,
-                                      call_a2, call_a3, call_a1);
+                                      call_a2, call_a3, call_a4, call_a1);
                     }
                     pei_trace_count++;
                 }
@@ -8155,6 +8196,10 @@ void HELPER(ret_restore)(CPUIA64State *env)
         bool out_ok = env->fw_pei_locate_desc_ptr &&
                       ia64_fw_read_u64(cs, env->fw_pei_locate_desc_ptr,
                                        &out_desc);
+        uint64_t out_ppi = 0;
+        bool out_ppi_ok = env->fw_pei_locate_ppi_ptr &&
+                          ia64_fw_read_u64(cs, env->fw_pei_locate_ppi_ptr,
+                                           &out_ppi);
         if (env->fw_pei_locate_guid_valid) {
             IA64EfiGuid guid;
             ia64_fw_guid_from_bytes(env->fw_pei_locate_guid, &guid);
@@ -8163,11 +8208,14 @@ void HELPER(ret_restore)(CPUIA64State *env)
                           " b0=%016" PRIx64 " status=%016" PRIx64
                           " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
                           " desc=%016" PRIx64
+                          " ppi_ptr=%016" PRIx64 " ppi=%016" PRIx64
                           " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
                           env->ip, env->b[0], env->r[8],
                           env->fw_pei_locate_instance,
                           env->fw_pei_locate_desc_ptr,
                           out_ok ? out_desc : 0,
+                          env->fw_pei_locate_ppi_ptr,
+                          out_ppi_ok ? out_ppi : 0,
                           guid.data1, guid.data2, guid.data3,
                           guid.data4[0], guid.data4[1],
                           guid.data4[2], guid.data4[3],
@@ -8178,14 +8226,18 @@ void HELPER(ret_restore)(CPUIA64State *env)
                           "IA64: pei_locate_ret ip=%016" PRIx64
                           " b0=%016" PRIx64 " status=%016" PRIx64
                           " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
-                          " desc=%016" PRIx64 "\n",
+                          " desc=%016" PRIx64 " ppi_ptr=%016" PRIx64
+                          " ppi=%016" PRIx64 "\n",
                           env->ip, env->b[0], env->r[8],
                           env->fw_pei_locate_instance,
                           env->fw_pei_locate_desc_ptr,
-                          out_ok ? out_desc : 0);
+                          out_ok ? out_desc : 0,
+                          env->fw_pei_locate_ppi_ptr,
+                          out_ppi_ok ? out_ppi : 0);
         }
         env->fw_pei_locate_ret_pc = 0;
         env->fw_pei_locate_guid_valid = 0;
+        env->fw_pei_locate_ppi_ptr = 0;
     }
     if (ia64_fw_pei_install_trace_enabled() &&
         env->fw_pei_install_ret_pc &&
@@ -8282,6 +8334,10 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
         bool out_ok = env->fw_pei_locate_desc_ptr &&
                       ia64_fw_read_u64(cs, env->fw_pei_locate_desc_ptr,
                                        &out_desc);
+        uint64_t out_ppi = 0;
+        bool out_ppi_ok = env->fw_pei_locate_ppi_ptr &&
+                          ia64_fw_read_u64(cs, env->fw_pei_locate_ppi_ptr,
+                                           &out_ppi);
         if (env->fw_pei_locate_guid_valid) {
             IA64EfiGuid guid;
             ia64_fw_guid_from_bytes(env->fw_pei_locate_guid, &guid);
@@ -8290,11 +8346,14 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
                           " b0=%016" PRIx64 " status=%016" PRIx64
                           " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
                           " desc=%016" PRIx64
+                          " ppi_ptr=%016" PRIx64 " ppi=%016" PRIx64
                           " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
                           env->ip, env->b[0], env->r[8],
                           env->fw_pei_locate_instance,
                           env->fw_pei_locate_desc_ptr,
                           out_ok ? out_desc : 0,
+                          env->fw_pei_locate_ppi_ptr,
+                          out_ppi_ok ? out_ppi : 0,
                           guid.data1, guid.data2, guid.data3,
                           guid.data4[0], guid.data4[1],
                           guid.data4[2], guid.data4[3],
@@ -8305,14 +8364,18 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
                           "IA64: pei_locate_ret_b0 ip=%016" PRIx64
                           " b0=%016" PRIx64 " status=%016" PRIx64
                           " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
-                          " desc=%016" PRIx64 "\n",
+                          " desc=%016" PRIx64 " ppi_ptr=%016" PRIx64
+                          " ppi=%016" PRIx64 "\n",
                           env->ip, env->b[0], env->r[8],
                           env->fw_pei_locate_instance,
                           env->fw_pei_locate_desc_ptr,
-                          out_ok ? out_desc : 0);
+                          out_ok ? out_desc : 0,
+                          env->fw_pei_locate_ppi_ptr,
+                          out_ppi_ok ? out_ppi : 0);
         }
         env->fw_pei_locate_ret_pc = 0;
         env->fw_pei_locate_guid_valid = 0;
+        env->fw_pei_locate_ppi_ptr = 0;
     }
     if (ia64_fw_pei_install_trace_enabled() &&
         env->fw_pei_install_ret_pc &&

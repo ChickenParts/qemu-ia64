@@ -877,6 +877,17 @@ static const uint8_t template_table[32][3] = {
     { SLOT_RES, SLOT_RES, SLOT_RES }, /* 1F */
 };
 
+/*
+ * Stop bits per template (matches SKI's templates[] SB_Stop entries).
+ * Bit 0: stop after slot0, bit 1: stop after slot1, bit 2: stop after slot2.
+ */
+static const uint8_t template_stop_mask[32] = {
+    0x0, 0x4, 0x2, 0x6, 0x0, 0x4, 0x0, 0x0,
+    0x0, 0x4, 0x1, 0x5, 0x0, 0x4, 0x0, 0x4,
+    0x0, 0x4, 0x0, 0x4, 0x0, 0x0, 0x0, 0x4,
+    0x0, 0x4, 0x0, 0x0, 0x0, 0x4, 0x0, 0x0,
+};
+
 static TCGLabel *gen_qp_skip(uint8_t qp);
 
 static bool ia64_pc_in_fw(uint64_t pc)
@@ -5978,6 +5989,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     slot0 = (low >> 5) & 0x1ffffffffffULL;
     slot1 = ((low >> 46) | (high << 18)) & 0x1ffffffffffULL;
     slot2 = (high >> 23) & 0x1ffffffffffULL;
+    uint8_t stop_mask = template_stop_mask[template];
 
     if (ctx->ri == 0) {
         ctx->extra_bits = 0;
@@ -6104,6 +6116,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
                            "IA64: pc=%016" PRIx64 " ri=%d tmpl=%02x slot=%d insn=%011" PRIx64 "\n",
                            ctx->base.pc_next, ctx->ri, template, type, insn);
 
+    uint8_t cur_ri = ctx->ri;
     if (ia64_dbg_probe_match(ctx->base.pc_next, ctx->ri)) {
         gen_helper_dbg_probe(tcg_env,
                              tcg_constant_i64(ctx->base.pc_next),
@@ -6128,8 +6141,8 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     }
     
     if (ctx->base.is_jmp == DISAS_NEXT) {
-        if (ctx->ri == 0) {
-            /* End of bundle, check for stops or just continue */
+        if (stop_mask & (1U << cur_ri)) {
+            ctx->base.is_jmp = DISAS_TOO_MANY;
         }
     }
 }
