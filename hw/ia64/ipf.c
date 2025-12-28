@@ -179,6 +179,9 @@ static uint64_t ipf_boot_r10;
 static uint64_t ipf_boot_ppi;
 static uint64_t ipf_boot_findfv_stub;
 static uint64_t ipf_boot_findfv_iface;
+static uint64_t ipf_boot_secinfo_stub;
+static uint64_t ipf_boot_memmap_stub;
+static uint64_t ipf_boot_mem_size;
 static uint64_t ipf_ram_size;
 static uint64_t ipf_kernel_low;
 static uint64_t ipf_kernel_high;
@@ -681,7 +684,7 @@ static bool ipf_fw_pei_use_pi_handoff(void)
             use_pi = (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 ||
                       strcmp(s, "no") == 0) ? 0 : 1;
         } else {
-            use_pi = 0;
+            use_pi = 1;
         }
     }
     return use_pi;
@@ -1196,6 +1199,12 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     const uint64_t findfv_stub_phys = stub_phys + 0x60;
     const uint64_t findfv_plabel_phys = findfv_stub_phys + 0x20;
     const uint64_t findfv_iface_phys = findfv_stub_phys + 0x40;
+    const uint64_t secinfo_stub_phys = findfv_stub_phys + 0x60;
+    const uint64_t secinfo_plabel_phys = secinfo_stub_phys + 0x20;
+    const uint64_t secinfo_iface_phys = secinfo_stub_phys + 0x40;
+    const uint64_t memmap_stub_phys = secinfo_stub_phys + 0x60;
+    const uint64_t memmap_plabel_phys = memmap_stub_phys + 0x20;
+    const uint64_t memmap_iface_phys = memmap_stub_phys + 0x40;
     const uint64_t pei_temp_size = temp_size / 2;
     const uint64_t stack_size = temp_size - pei_temp_size;
     const uint64_t stack_base = temp_phys + temp_size;
@@ -1215,6 +1224,14 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     static const uint8_t findfv_guid[16] = {
         0x12, 0x48, 0x16, 0x36, 0x23, 0xa0, 0xe5, 0x44,
         0xbd, 0x85, 0x05, 0xbf, 0x3c, 0x77, 0x00, 0xaa,
+    };
+    static const uint8_t secinfo_guid[16] = {
+        0x35, 0x2b, 0x8c, 0x6f, 0xf4, 0xfe, 0x8d, 0x44,
+        0x82, 0x56, 0xe1, 0x1b, 0x19, 0xd6, 0x10, 0x77,
+    };
+    static const uint8_t memmap_guid[16] = {
+        0x8a, 0x59, 0xb1, 0xd0, 0x66, 0xee, 0xd5, 0x11,
+        0xaf, 0x1d, 0x00, 0xa0, 0xc9, 0x44, 0xa0, 0x5b,
     };
 
     if (ipf_fw_pei_use_pi_handoff()) {
@@ -1247,15 +1264,13 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
          * EFI_PEI_STARTUP_DESCRIPTOR (framework/Tiano PEI core):
          *   0x00 BootFirmwareVolume
          *   0x08 SizeOfCacheAsRam
-         *   0x10 Reserved/unused (observed firmware reads DispatchTable @ 0x18)
-         *   0x18 DispatchTable (PPI list)
+         *   0x10 DispatchTable (PPI list)
          */
-        uint8_t startup[0x20];
+        uint8_t startup[0x18];
         memset(startup, 0, sizeof(startup));
         stq_le_p(&startup[0], ipf_fw_region8_addr(bfv_phys));
         stq_le_p(&startup[8], temp_size);
-        stq_le_p(&startup[16], 0);
-        stq_le_p(&startup[24], ipf_fw_region8_addr(ppi_phys));
+        stq_le_p(&startup[16], ipf_fw_region8_addr(ppi_phys));
         cpu_physical_memory_write(handoff_phys, startup, sizeof(startup));
     }
 
@@ -1283,6 +1298,33 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
                               sizeof(findfv_plabel));
     cpu_flush_icache_range(findfv_stub_phys, sizeof(findfv_stub));
 
+    struct QEMU_PACKED {
+        uint64_t entry;
+        uint64_t gp;
+    } secinfo_plabel = {
+        .entry = cpu_to_le64(ipf_fw_region8_addr(secinfo_stub_phys)),
+        .gp = 0,
+    };
+    cpu_physical_memory_write(secinfo_stub_phys, findfv_stub,
+                              sizeof(findfv_stub));
+    cpu_physical_memory_write(secinfo_plabel_phys,
+                              (const uint8_t *)&secinfo_plabel,
+                              sizeof(secinfo_plabel));
+    cpu_flush_icache_range(secinfo_stub_phys, sizeof(findfv_stub));
+
+    struct QEMU_PACKED {
+        uint64_t entry;
+        uint64_t gp;
+    } memmap_plabel = {
+        .entry = cpu_to_le64(ipf_fw_region8_addr(memmap_stub_phys)),
+        .gp = 0,
+    };
+    cpu_physical_memory_write(memmap_stub_phys, findfv_stub,
+                              sizeof(findfv_stub));
+    cpu_physical_memory_write(memmap_plabel_phys,
+                              (const uint8_t *)&memmap_plabel,
+                              sizeof(memmap_plabel));
+    cpu_flush_icache_range(memmap_stub_phys, sizeof(findfv_stub));
     /*
      * PPI interface: a single function pointer (plabel) to the status hook.
      * The descriptor points at this struct, not at the plabel itself.
@@ -1296,21 +1338,39 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     cpu_physical_memory_write(findfv_iface_phys,
                               (const uint8_t *)&findfv_iface,
                               sizeof(findfv_iface));
+    uint64_t secinfo_iface = cpu_to_le64(ipf_fw_region8_addr(secinfo_plabel_phys));
+    cpu_physical_memory_write(secinfo_iface_phys,
+                              (const uint8_t *)&secinfo_iface,
+                              sizeof(secinfo_iface));
+    uint64_t memmap_iface = cpu_to_le64(ipf_fw_region8_addr(memmap_plabel_phys));
+    cpu_physical_memory_write(memmap_iface_phys,
+                              (const uint8_t *)&memmap_iface,
+                              sizeof(memmap_iface));
 
-    const uint64_t status_guid_phys = ppi_phys + 0x30;
-    const uint64_t findfv_guid_phys = ppi_phys + 0x40;
-    uint8_t ppi[0x50];
+    const uint64_t status_guid_phys = ppi_phys + 0x60;
+    const uint64_t findfv_guid_phys = ppi_phys + 0x70;
+    const uint64_t secinfo_guid_phys = ppi_phys + 0x80;
+    const uint64_t memmap_guid_phys = ppi_phys + 0x90;
+    uint8_t ppi[0xa0];
     memset(ppi, 0, sizeof(ppi));
     uint64_t flags = 0x00000010ULL; /* PPI */
-    stq_le_p(&ppi[0], flags);
-    stq_le_p(&ppi[8], ipf_fw_region8_addr(status_guid_phys));
-    stq_le_p(&ppi[16], ipf_fw_region8_addr(ppi_iface_phys));
-    flags = 0x80000000ULL | 0x00000010ULL; /* TERMINATE_LIST | PPI */
+    stq_le_p(&ppi[0x00], flags);
+    stq_le_p(&ppi[0x08], ipf_fw_region8_addr(status_guid_phys));
+    stq_le_p(&ppi[0x10], ipf_fw_region8_addr(ppi_iface_phys));
     stq_le_p(&ppi[0x18], flags);
     stq_le_p(&ppi[0x20], ipf_fw_region8_addr(findfv_guid_phys));
     stq_le_p(&ppi[0x28], ipf_fw_region8_addr(findfv_iface_phys));
-    memcpy(&ppi[0x30], status_guid, sizeof(status_guid));
-    memcpy(&ppi[0x40], findfv_guid, sizeof(findfv_guid));
+    stq_le_p(&ppi[0x30], flags);
+    stq_le_p(&ppi[0x38], ipf_fw_region8_addr(secinfo_guid_phys));
+    stq_le_p(&ppi[0x40], ipf_fw_region8_addr(secinfo_iface_phys));
+    flags = 0x80000000ULL | 0x00000010ULL; /* TERMINATE_LIST | PPI */
+    stq_le_p(&ppi[0x48], flags);
+    stq_le_p(&ppi[0x50], ipf_fw_region8_addr(memmap_guid_phys));
+    stq_le_p(&ppi[0x58], ipf_fw_region8_addr(memmap_iface_phys));
+    memcpy(&ppi[0x60], status_guid, sizeof(status_guid));
+    memcpy(&ppi[0x70], findfv_guid, sizeof(findfv_guid));
+    memcpy(&ppi[0x80], secinfo_guid, sizeof(secinfo_guid));
+    memcpy(&ppi[0x90], memmap_guid, sizeof(memmap_guid));
     cpu_physical_memory_write(ppi_phys, ppi, sizeof(ppi));
 
     ipf_boot_r9 = ipf_fw_region8_addr(handoff_phys);
@@ -1318,6 +1378,8 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     ipf_boot_r10 = ipf_fw_boot_r10_count();
     ipf_boot_findfv_stub = ipf_fw_region8_addr(findfv_stub_phys);
     ipf_boot_findfv_iface = ipf_fw_region8_addr(findfv_iface_phys);
+    ipf_boot_secinfo_stub = ipf_fw_region8_addr(secinfo_stub_phys);
+    ipf_boot_memmap_stub = ipf_fw_region8_addr(memmap_stub_phys);
     DPRINTF("PEI startup: bfv=%016" PRIx64 " bfv_size=%" PRIu64
             " temp=%016" PRIx64 " tsize=%" PRIu64
             " pei_temp=%016" PRIx64 " pei_tsize=%" PRIu64
@@ -2425,12 +2487,18 @@ static void main_cpu_reset(void *opaque)
         s->fw_pei_stack_count = ipf_boot_r10;
         s->fw_pei_findfv_stub = ipf_boot_findfv_stub;
         s->fw_pei_findfv_iface = ipf_boot_findfv_iface;
+        s->fw_pei_secinfo_stub = ipf_boot_secinfo_stub;
+        s->fw_pei_memmap_stub = ipf_boot_memmap_stub;
+        s->fw_mem_size = ipf_boot_mem_size;
     } else {
         s->fw_pei_handoff = 0;
         s->fw_pei_ppi = 0;
         s->fw_pei_stack_count = 0;
         s->fw_pei_findfv_stub = 0;
         s->fw_pei_findfv_iface = 0;
+        s->fw_pei_secinfo_stub = 0;
+        s->fw_pei_memmap_stub = 0;
+        s->fw_mem_size = 0;
     }
     /*
      * Seed ar.k0 (AR.KR0) with the legacy I/O port space base so that Linux
@@ -3701,6 +3769,7 @@ static void ipf_init(MachineState *machine)
             error_report("Unable to build GFW HOB list");
             exit(1);
         }
+        ipf_boot_mem_size = machine->ram_size;
         if (run_firmware) {
             ipf_dump_gfw_hob("boot");
         }

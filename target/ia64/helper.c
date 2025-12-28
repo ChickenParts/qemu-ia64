@@ -2411,6 +2411,20 @@ static const IA64EfiGuid ia64_efi_guid_status_assert = {
     .data4 = { 0x82, 0x7c, 0x26, 0x22, 0x67, 0x7d, 0x33, 0x07 },
 };
 
+static const IA64EfiGuid ia64_efi_guid_status_string = {
+    .data1 = 0x92d11080,
+    .data2 = 0x496f,
+    .data3 = 0x4d95,
+    .data4 = { 0xbe, 0x7e, 0x03, 0x74, 0x88, 0x38, 0x2b, 0x0a },
+};
+
+static const IA64EfiGuid ia64_efi_guid_status_debug = {
+    .data1 = 0x9a4e9246,
+    .data2 = 0xd553,
+    .data3 = 0x11d5,
+    .data4 = { 0x87, 0xe2, 0x00, 0x06, 0x29, 0x45, 0xc3, 0xb9 },
+};
+
 static bool ia64_fw_guid_equal(const IA64EfiGuid *a, const IA64EfiGuid *b)
 {
     return a->data1 == b->data1 && a->data2 == b->data2 && a->data3 == b->data3 &&
@@ -4317,6 +4331,125 @@ static bool ia64_fw_statuscode_try_ptrs(CPUState *cs, uint32_t line,
     return false;
 }
 
+static bool ia64_fw_statuscode_try_string_data(CPUState *cs, uint32_t line,
+                                               uint64_t data_ptr)
+{
+    uint8_t hdr[32];
+    if (!ia64_fw_read_bytes_any(cs, data_ptr, hdr, sizeof(hdr))) {
+        return false;
+    }
+
+    uint16_t header_size = lduw_le_p(&hdr[0]);
+    uint16_t size = lduw_le_p(&hdr[2]);
+    IA64EfiGuid guid;
+    ia64_fw_guid_from_bytes(&hdr[4], &guid);
+    if (!ia64_fw_guid_equal(&guid, &ia64_efi_guid_status_string)) {
+        return false;
+    }
+    if (header_size < 20 || header_size > 64 ||
+        (size_t)header_size + (size_t)size < header_size) {
+        return false;
+    }
+
+    uint32_t string_type = ldl_le_p(&hdr[20]);
+    uint64_t string_ptr = ldq_le_p(&hdr[24]);
+    if (!string_ptr) {
+        return false;
+    }
+
+    char fn[256] = { 0 };
+    const char *enc = NULL;
+    if (string_type == 0) {
+        if (ia64_fw_read_ascii_string(cs, string_ptr, fn, sizeof(fn)) != 0) {
+            enc = "ascii";
+        }
+    } else if (string_type == 1) {
+        if (ia64_fw_read_ucs2le_string(cs, string_ptr, fn, sizeof(fn)) != 0) {
+            enc = "ucs2";
+        }
+    }
+
+    if (enc) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: statuscode assert line=%u file=\"%s\" (%s)\n",
+                      line, fn, enc);
+        return true;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: statuscode assert_str ptr=%016" PRIx64
+                  " type=%u\n",
+                  data_ptr, string_type);
+    return false;
+}
+
+static bool ia64_fw_statuscode_try_debug_data(CPUState *cs, const uint8_t *buf,
+                                              size_t read_len, size_t base)
+{
+    if (read_len < base + 16 + 24) {
+        return false;
+    }
+
+    IA64EfiGuid inner;
+    ia64_fw_guid_from_bytes(&buf[base], &inner);
+    if (!ia64_fw_guid_equal(&inner, &ia64_efi_guid_status_debug)) {
+        return false;
+    }
+
+    uint32_t error_level = ldl_le_p(&buf[base + 16]);
+    uint64_t arg0 = ldq_le_p(&buf[base + 20]);
+    uint64_t arg1 = ldq_le_p(&buf[base + 28]);
+    uint32_t line = (uint32_t)arg0;
+
+    if (arg1 >= 0x1000) {
+        char fn[256] = { 0 };
+        if (ia64_fw_read_ascii_string(cs, arg1, fn, sizeof(fn)) != 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: statuscode assert line=%u file=\"%s\""
+                          " (debug level=0x%x)\n",
+                          line, fn, error_level);
+            return true;
+        }
+    }
+
+    /* Fall back to scanning for an inline ASCII file path. */
+    const uint8_t *scan = &buf[base + 20];
+    size_t scan_len = read_len - (base + 20);
+    size_t best_len = 0;
+    const char *best = NULL;
+    size_t cur_len = 0;
+    for (size_t i = 0; i < scan_len; i++) {
+        uint8_t c = scan[i];
+        if (c >= 0x20 && c < 0x7f) {
+            cur_len++;
+            if (cur_len >= 8 && cur_len > best_len) {
+                best_len = cur_len;
+                best = (const char *)&scan[i + 1 - cur_len];
+            }
+        } else {
+            cur_len = 0;
+        }
+    }
+
+    if (best && best_len >= 8) {
+        char fn[256] = { 0 };
+        size_t n = MIN(best_len, sizeof(fn) - 1);
+        memcpy(fn, best, n);
+        fn[n] = '\0';
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: statuscode assert line=%u file=\"%s\""
+                      " (debug level=0x%x)\n",
+                      line, fn, error_level);
+        return true;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: statuscode assert_debug line=%u error=0x%x"
+                  " arg0=%016" PRIx64 " arg1=%016" PRIx64 "\n",
+                  line, error_level, arg0, arg1);
+    return false;
+}
+
 static void ia64_fw_statuscode_dump(CPUIA64State *env, uint64_t data_ptr,
                                     uint64_t code_type, uint64_t value)
 {
@@ -4403,25 +4536,28 @@ static void ia64_fw_statuscode_dump(CPUIA64State *env, uint64_t data_ptr,
     uint32_t line = ldl_le_p(&buf[base]);
     bool logged = false;
 
-    if (read_len >= base + 4 + 16) {
+    if (!logged) {
+        logged = ia64_fw_statuscode_try_debug_data(cs, buf, read_len, base);
+    }
+
+    if (!logged && read_len >= base + 4 + 12) {
+        uint32_t file_size = ldl_le_p(&buf[base + 4]);
+        uint64_t file_ptr = ldq_le_p(&buf[base + 8]);
+        if (file_ptr) {
+            logged = ia64_fw_statuscode_try_string_data(cs, line, file_ptr);
+        }
+        if (!logged && file_size > 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: statuscode assert_ptr2 line=%u file_size=%u\n",
+                          line, file_size);
+        }
+    }
+
+    if (!logged && read_len >= base + 4 + 16) {
         uint64_t file_ptr = ldq_le_p(&buf[base + 4]);
         uint64_t desc_ptr = ldq_le_p(&buf[base + 12]);
         if (file_ptr || desc_ptr) {
             logged = ia64_fw_statuscode_try_ptrs(cs, line, file_ptr, desc_ptr);
-        }
-    }
-
-    if (!logged && read_len >= base + 4 + 24) {
-        uint32_t file_size = ldl_le_p(&buf[base + 4]);
-        uint64_t file_ptr = ldq_le_p(&buf[base + 8]);
-        uint64_t desc_ptr = ldq_le_p(&buf[base + 16]);
-        if (file_ptr || desc_ptr) {
-            logged = ia64_fw_statuscode_try_ptrs(cs, line, file_ptr, desc_ptr);
-            if (!logged) {
-                qemu_log_mask(LOG_GUEST_ERROR,
-                              "IA64: statuscode assert_ptr2 line=%u file_size=%u\n",
-                              line, file_size);
-            }
         }
     }
 
@@ -4695,6 +4831,150 @@ static void ia64_fw_handle_findfv(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+static void ia64_fw_handle_sec_platform_info(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    CPUState *cs = env_cpu(env);
+    uint64_t size_ptr = env->r[33];
+    uint64_t rec_ptr = env->r[34];
+    uint64_t size = 0;
+    uint64_t status = 0;
+    uint32_t health = 0;
+
+    if (!size_ptr) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 2; /* EFI_INVALID_PARAMETER */
+        return;
+    }
+    if (!ia64_fw_read_bytes_any(cs, size_ptr,
+                                (uint8_t *)&size, sizeof(size))) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+        return;
+    }
+    size = le64_to_cpu(size);
+
+    const uint64_t need = sizeof(health);
+    if (size < need) {
+        uint64_t out = cpu_to_le64(need);
+        ia64_fw_write_bytes_any(cs, size_ptr,
+                                (const uint8_t *)&out, sizeof(out));
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 5; /* EFI_BUFFER_TOO_SMALL */
+        return;
+    }
+
+    if (rec_ptr) {
+        uint32_t out = cpu_to_le32(health);
+        if (!ia64_fw_write_bytes_any(cs, rec_ptr,
+                                     (const uint8_t *)&out, sizeof(out))) {
+            env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            return;
+        }
+    }
+
+    uint64_t out = cpu_to_le64(need);
+    ia64_fw_write_bytes_any(cs, size_ptr,
+                            (const uint8_t *)&out, sizeof(out));
+    env->r[8] = status; /* EFI_SUCCESS */
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_sec_platform_info pc=%016" PRIx64
+                      " size_ptr=%016" PRIx64 " rec_ptr=%016" PRIx64 "\n",
+                      pc, size_ptr, rec_ptr);
+    }
+#endif
+}
+
+static bool ia64_fw_memmap_region(CPUIA64State *env, uint64_t index,
+                                  uint64_t *base, uint64_t *size)
+{
+    const uint64_t mem = env->fw_mem_size;
+    const uint64_t vga_start = 0x000a0000ULL;
+    const uint64_t vga_size = 0x00020000ULL;
+    const uint64_t low_limit = 0xC0000000ULL;
+
+    if (!mem) {
+        return false;
+    }
+    if (index == 0) {
+        *base = 0;
+        if (mem < vga_start) {
+            *size = mem;
+        } else {
+            uint64_t lo = mem + vga_size;
+            *size = (lo < low_limit) ? lo : low_limit;
+        }
+        return *size > 0;
+    }
+    if (index == 1 && mem > low_limit) {
+        *base = 0x100000000ULL;
+        *size = mem + vga_size - low_limit;
+        return *size > 0;
+    }
+    return false;
+}
+
+static void ia64_fw_handle_memmap_autoscan(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    CPUState *cs = env_cpu(env);
+    uint64_t a0 = env->r[32];
+    uint64_t a1 = env->r[33];
+    uint64_t a2 = env->r[34];
+    uint64_t a3 = env->r[35];
+    uint64_t index = 0;
+    uint64_t base_ptr = 0;
+    uint64_t size_ptr = 0;
+
+    /*
+     * Autoscan-style PPIs typically use (Index, &Base, &Size). Some variants
+     * include PeiServices as the first argument; detect that by checking for
+     * a high pointer-like a0 and shift arguments if needed.
+     */
+    if (a0 >= 0x100000000ULL && a1 < 0x1000) {
+        index = a1;
+        base_ptr = a2;
+        size_ptr = a3;
+    } else {
+        index = a0;
+        base_ptr = a1;
+        size_ptr = a2;
+    }
+
+    uint64_t base = 0;
+    uint64_t size = 0;
+    if (!base_ptr || !size_ptr || !ia64_fw_memmap_region(env, index, &base, &size)) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 3; /* EFI_UNSUPPORTED */
+        return;
+    }
+
+    uint64_t out_base = cpu_to_le64(base);
+    uint64_t out_size = cpu_to_le64(size);
+    if (!ia64_fw_write_bytes_any(cs, base_ptr,
+                                 (const uint8_t *)&out_base, sizeof(out_base)) ||
+        !ia64_fw_write_bytes_any(cs, size_ptr,
+                                 (const uint8_t *)&out_size, sizeof(out_size))) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+        return;
+    }
+
+    env->r[8] = 0; /* EFI_SUCCESS */
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_autoscan pc=%016" PRIx64
+                      " idx=%" PRIu64 " base=%016" PRIx64 " size=%016" PRIx64 "\n",
+                      pc, index, base, size);
+    }
+#endif
+}
+
 void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 {
     /*
@@ -4723,6 +5003,16 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     if (env->fw_pei_findfv_stub &&
         ((pc ^ env->fw_pei_findfv_stub) & ~0xFULL) == 0) {
         ia64_fw_handle_findfv(env, pc);
+        return;
+    }
+    if (env->fw_pei_secinfo_stub &&
+        ((pc ^ env->fw_pei_secinfo_stub) & ~0xFULL) == 0) {
+        ia64_fw_handle_sec_platform_info(env, pc);
+        return;
+    }
+    if (env->fw_pei_memmap_stub &&
+        ((pc ^ env->fw_pei_memmap_stub) & ~0xFULL) == 0) {
+        ia64_fw_handle_memmap_autoscan(env, pc);
         return;
     }
 
@@ -4754,6 +5044,19 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         ia64_fw_status_code_valid(ppi_code_type, ppi_value)) {
         log_code_type = ppi_code_type;
         log_value = ppi_value;
+    }
+    if (is_assert && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        uint64_t data_ptrs[3] = { env->r[36], env->r[37], env->r[35] };
+        for (size_t i = 0; i < ARRAY_SIZE(data_ptrs); i++) {
+            uint64_t data_ptr = data_ptrs[i];
+            if (!data_ptr || data_ptr == UINT64_MAX) {
+                continue;
+            }
+            if (i > 0 && data_ptr == data_ptrs[0]) {
+                continue;
+            }
+            ia64_fw_statuscode_dump(env, data_ptr, log_code_type, log_value);
+        }
     }
 
     if (dump_enabled == -1) {
@@ -10427,14 +10730,13 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
     }
     /*
      * The PEI boot block copies r9/r10 into r32/r33 before calling the PEI
-     * core. r9 is the SEC handoff; r10 is consumed by early stack/BSP setup
-     * (boot count). Use the stack count when available, fall back to the PPI
-     * pointer for older firmware variants that repurpose r10.
+     * core. r9 is the SEC handoff; r10 holds the PPI list for PI PEI cores.
+     * Keep the stack count available for firmware that still uses it.
      */
-    if (stack_count) {
-        env->r[10] = stack_count;
-    } else if (ppi) {
+    if (ppi) {
         env->r[10] = ppi;
+    } else if (stack_count) {
+        env->r[10] = stack_count;
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
@@ -10537,7 +10839,6 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     uint8_t sol = (env->cfm >> 7) & 0x7f;
     uint8_t sor = (env->cfm >> 14) & 0x0f;
     if (handoff) {
-        env->r[32] = handoff;
         hwaddr handoff_phys = ia64_phys_mode_addr(handoff);
         if (cpu_memory_rw_debug(env_cpu(env), handoff_phys,
                                 handoff_buf, sizeof(handoff_buf), false) == 0) {
@@ -10551,8 +10852,11 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
                                       IA64_IPF_FW_FLASH_SIZE);
             have_handoff_buf = true;
         }
-        if (sec_handoff && ppi) {
-            env->r[33] = ppi;
+        if (!sec_handoff) {
+            env->r[32] = handoff;
+            if (ppi) {
+                env->r[33] = ppi;
+            }
         }
     }
     (void)stack_count;

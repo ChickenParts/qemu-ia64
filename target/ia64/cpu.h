@@ -196,6 +196,9 @@ typedef struct CPUArchState {
     uint64_t fw_pei_stack_count;
     uint64_t fw_pei_findfv_stub;
     uint64_t fw_pei_findfv_iface;
+    uint64_t fw_pei_secinfo_stub;
+    uint64_t fw_pei_memmap_stub;
+    uint64_t fw_mem_size;
     uint64_t fw_pei_ps;
     uint64_t fw_pei_locate_ret_pc;
     uint64_t fw_pei_locate_instance;
