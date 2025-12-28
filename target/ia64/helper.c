@@ -7467,58 +7467,62 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                 if (ia64_fw_read_u64(cs, ps_ptr + 0x28, &plabel) &&
                     plabel != 0 &&
                     ia64_fw_read_u64(cs, plabel, &entry) &&
-                    entry != 0 &&
-                    ((entry ^ tgt) & ~0xFULL) == 0) {
-                    uint8_t guid_bytes[16];
-                    IA64EfiGuid guid;
-                    bool guid_ok = false;
-                    if (call_a1 &&
-                        ia64_fw_read_bytes_any(cs, call_a1,
-                                               guid_bytes, sizeof(guid_bytes))) {
-                        ia64_fw_guid_from_bytes(guid_bytes, &guid);
-                        memcpy(env->fw_pei_locate_guid,
-                               guid_bytes, sizeof(guid_bytes));
-                        env->fw_pei_locate_guid_valid = 1;
-                        guid_ok = true;
-                    } else {
-                        env->fw_pei_locate_guid_valid = 0;
-                    }
-                    env->fw_pei_ps = ps_ptr;
-                    env->fw_pei_locate_ret_pc = pc + 16;
-                    env->fw_pei_locate_instance = call_a2;
-                    env->fw_pei_locate_desc_ptr = call_a3;
-                    env->fw_pei_locate_ppi_ptr = call_a4;
-                    if (ia64_fw_pei_ps_dump_enabled()) {
-                        ia64_fw_pei_dump_ps(env, ps_ptr, pc);
-                    }
+                    entry != 0) {
+                    uint64_t entry_phys = ia64_phys_mode_addr(entry);
+                    bool entry_match = ((entry ^ tgt) & ~0xFULL) == 0 ||
+                                       ((entry_phys ^ tgt) & ~0xFULL) == 0;
+                    if (entry_match) {
+                        uint8_t guid_bytes[16];
+                        IA64EfiGuid guid;
+                        bool guid_ok = false;
+                        if (call_a1 &&
+                            ia64_fw_read_bytes_any(cs, call_a1,
+                                                   guid_bytes, sizeof(guid_bytes))) {
+                            ia64_fw_guid_from_bytes(guid_bytes, &guid);
+                            memcpy(env->fw_pei_locate_guid,
+                                   guid_bytes, sizeof(guid_bytes));
+                            env->fw_pei_locate_guid_valid = 1;
+                            guid_ok = true;
+                        } else {
+                            env->fw_pei_locate_guid_valid = 0;
+                        }
+                        env->fw_pei_ps = ps_ptr;
+                        env->fw_pei_locate_ret_pc = pc + 16;
+                        env->fw_pei_locate_instance = call_a2;
+                        env->fw_pei_locate_desc_ptr = call_a3;
+                        env->fw_pei_locate_ppi_ptr = call_a4;
+                        if (ia64_fw_pei_ps_dump_enabled()) {
+                            ia64_fw_pei_dump_ps(env, ps_ptr, pc);
+                        }
 
-                    if (guid_ok) {
-                        qemu_log_mask(LOG_GUEST_ERROR,
-                                      "IA64: pei_locate_call pc=%016" PRIx64
-                                      " tgt=%016" PRIx64 " ps=%016" PRIx64
-                                      " plabel=%016" PRIx64 " entry=%016" PRIx64
-                                      " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
-                                      " ppi_ptr=%016" PRIx64
-                                      " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
-                                      pc, tgt, ps_ptr, plabel, entry,
-                                      call_a2, call_a3, call_a4,
-                                      guid.data1, guid.data2, guid.data3,
-                                      guid.data4[0], guid.data4[1],
-                                      guid.data4[2], guid.data4[3],
-                                      guid.data4[4], guid.data4[5],
-                                      guid.data4[6], guid.data4[7]);
-                    } else {
-                        qemu_log_mask(LOG_GUEST_ERROR,
-                                      "IA64: pei_locate_call pc=%016" PRIx64
-                                      " tgt=%016" PRIx64 " ps=%016" PRIx64
-                                      " plabel=%016" PRIx64 " entry=%016" PRIx64
-                                      " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
-                                      " ppi_ptr=%016" PRIx64
-                                      " guid_ptr=%016" PRIx64 "\n",
-                                      pc, tgt, ps_ptr, plabel, entry,
-                                      call_a2, call_a3, call_a4, call_a1);
+                        if (guid_ok) {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: pei_locate_call pc=%016" PRIx64
+                                          " tgt=%016" PRIx64 " ps=%016" PRIx64
+                                          " plabel=%016" PRIx64 " entry=%016" PRIx64
+                                          " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
+                                          " ppi_ptr=%016" PRIx64
+                                          " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                          pc, tgt, ps_ptr, plabel, entry,
+                                          call_a2, call_a3, call_a4,
+                                          guid.data1, guid.data2, guid.data3,
+                                          guid.data4[0], guid.data4[1],
+                                          guid.data4[2], guid.data4[3],
+                                          guid.data4[4], guid.data4[5],
+                                          guid.data4[6], guid.data4[7]);
+                        } else {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: pei_locate_call pc=%016" PRIx64
+                                          " tgt=%016" PRIx64 " ps=%016" PRIx64
+                                          " plabel=%016" PRIx64 " entry=%016" PRIx64
+                                          " inst=%016" PRIx64 " desc_ptr=%016" PRIx64
+                                          " ppi_ptr=%016" PRIx64
+                                          " guid_ptr=%016" PRIx64 "\n",
+                                          pc, tgt, ps_ptr, plabel, entry,
+                                          call_a2, call_a3, call_a4, call_a1);
+                        }
+                        pei_trace_count++;
                     }
-                    pei_trace_count++;
                 }
             }
         }
