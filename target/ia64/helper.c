@@ -12938,6 +12938,7 @@ void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
 {
     static int log_limit = -1;
     static int log_count;
+    static int src_dump_count;
 
     if (log_limit == -1) {
         log_limit = 64;
@@ -12959,6 +12960,35 @@ void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
                   " addr=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
                   pc, ri, env->ip, env->psr, env->cfm, addr, size, val);
+
+    if (pc == 0xffe2cc20ULL &&
+        addr >= 0x1f020000ULL && addr < 0x1f030000ULL &&
+        src_dump_count++ < 4) {
+        uint64_t src = env->r[31];
+        hwaddr src_pa = (env->psr & IA64_PSR_DT) ?
+            helper_tpa(env, src) : ia64_phys_mode_addr(src);
+        uint8_t buf[32];
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "store_watch_src pc=%016" PRIx64
+                      " r30=%016" PRIx64 " r31=%016" PRIx64
+                      " src_pa=%016" HWADDR_PRIx "\n",
+                      pc, env->r[30], src, src_pa);
+        if (cpu_memory_rw_debug(env_cpu(env), src_pa, buf, sizeof(buf), false) == 0) {
+            char line[128];
+            int pos = 0;
+            pos += snprintf(line + pos, sizeof(line) - pos,
+                            "  src %016" HWADDR_PRIx ":", src_pa);
+            for (size_t i = 0; i < sizeof(buf); i++) {
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                                " %02x", buf[i]);
+            }
+            qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "  src %016" HWADDR_PRIx ": <read failed>\n",
+                          src_pa);
+        }
+    }
 }
 
 void HELPER(dbg_load_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
