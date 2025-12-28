@@ -717,7 +717,8 @@ static TCGv_i64 gen_phys_mode_addr(TCGv_i64 addr)
     /*
      * Mirror ia64_phys_mode_addr() for debugging instrumentation.
      *
-     * - If canonically sign-extended 32-bit, treat as 32-bit physical address.
+     * - If canonically sign-extended 32-bit, or the firmware's 0x7fffffff
+     *   prefix pattern, treat as 32-bit physical address.
      * - Otherwise mask off region bits (low 61 bits).
      */
     TCGv_i64 hi32 = tcg_temp_new_i64();
@@ -728,6 +729,7 @@ static TCGv_i64 gen_phys_mode_addr(TCGv_i64 addr)
     TCGLabel *done = gen_new_label();
     tcg_gen_brcondi_i64(TCG_COND_EQ, hi32, 0, use_low32);
     tcg_gen_brcondi_i64(TCG_COND_EQ, hi32, 0xffffffff00000000ULL, use_low32);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, hi32, 0x7fffffff00000000ULL, use_low32);
     tcg_gen_andi_i64(out, addr, (1ULL << 61) - 1);
     tcg_gen_br(done);
     gen_set_label(use_low32);
@@ -803,6 +805,14 @@ typedef struct DisasContext {
     uint64_t extra_bits;
     int mem_idx;
 } DisasContext;
+
+static TCGv_i64 gen_mem_addr(DisasContext *ctx, TCGv_i64 addr)
+{
+    if (ctx->mem_idx == MMU_PHYS_IDX) {
+        return gen_phys_mode_addr(addr);
+    }
+    return addr;
+}
 
 static void gen_load_watch(DisasContext *ctx, TCGv_i64 addr, TCGv_i64 val,
                            uint32_t size)
@@ -1510,6 +1520,22 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe66020ULL ||
+         ctx->base.pc_next == 0x00000000ffe66020ULL)) {
+        gen_helper_fw_pei_install_mem_fix(tcg_env,
+                                          tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe66200ULL ||
+         ctx->base.pc_next == 0x00000000ffe66200ULL)) {
+        gen_helper_fw_autoscan_memtop_fix(tcg_env,
+                                          tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe73770ULL ||
          ctx->base.pc_next == 0x00000000ffe73770ULL ||
          ctx->base.pc_next == 0x80000000ffe73790ULL ||
@@ -1742,6 +1768,13 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe268b0ULL ||
          ctx->base.pc_next == 0x00000000ffe268b0ULL)) {
+        gen_helper_fw_pei_ppi_dump(tcg_env,
+                                   tcg_constant_i64(ctx->base.pc_next));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2bc70ULL ||
+         ctx->base.pc_next == 0x00000000ffe2bc70ULL)) {
         gen_helper_fw_pei_ppi_dump(tcg_env,
                                    tcg_constant_i64(ctx->base.pc_next));
     }
@@ -3657,6 +3690,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 tcg_gen_mov_i64(addr, t);
             }
+            TCGv_i64 mem_addr = gen_mem_addr(ctx, addr);
 
             if (!handled && x_mem == 1 && !is_imm && !m) {
                 if (x6 <= 0x7) {
@@ -3671,10 +3705,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                     TCGv_i64 old = tcg_temp_new_i64();
                     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
-                    tcg_gen_atomic_cmpxchg_i64(old, addr, cmp, val,
+                    tcg_gen_atomic_cmpxchg_i64(old, mem_addr, cmp, val,
                                                ctx->mem_idx, mop);
                     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
-                    gen_helper_alat_invalidate(tcg_env, addr,
+                    gen_helper_alat_invalidate(tcg_env, mem_addr,
                                                tcg_constant_i32(1U << (x6 & 0x3)));
                     if (r1 != 0) {
                         tcg_gen_mov_i64(cpu_r[r1], old);
@@ -3691,10 +3725,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                     TCGv_i64 old = tcg_temp_new_i64();
                     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
-                    tcg_gen_atomic_xchg_i64(old, addr, val,
+                    tcg_gen_atomic_xchg_i64(old, mem_addr, val,
                                             ctx->mem_idx, mop);
                     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
-                    gen_helper_alat_invalidate(tcg_env, addr,
+                    gen_helper_alat_invalidate(tcg_env, mem_addr,
                                                tcg_constant_i32(1U << (x6 & 0x3)));
                     if (r1 != 0) {
                         tcg_gen_mov_i64(cpu_r[r1], old);
@@ -3713,10 +3747,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_movi_i64(inc, inc3);
                     TCGv_i64 old = tcg_temp_new_i64();
                     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
-                    tcg_gen_atomic_fetch_add_i64(old, addr, inc,
+                    tcg_gen_atomic_fetch_add_i64(old, mem_addr, inc,
                                                  ctx->mem_idx, mop);
                     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
-                    gen_helper_alat_invalidate(tcg_env, addr,
+                    gen_helper_alat_invalidate(tcg_env, mem_addr,
                                                tcg_constant_i32(1U << (x6 & 0x3)));
                     if (r1 != 0) {
                         tcg_gen_mov_i64(cpu_r[r1], old);
@@ -3727,14 +3761,14 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 /* ld8.fill: load + NaT from ar.unat */
                 if (r1 != 0) {
                     TCGv_i64 val = tcg_temp_new_i64();
-                    tcg_gen_qemu_ld_i64(val, addr, ctx->mem_idx, MO_TE | MO_64);
-                    gen_load_watch(ctx, addr, val, 8);
+                    tcg_gen_qemu_ld_i64(val, mem_addr, ctx->mem_idx, MO_TE | MO_64);
+                    gen_load_watch(ctx, mem_addr, val, 8);
                     tcg_gen_mov_i64(cpu_r[r1], val);
 
                     TCGv_i64 unat = gen_load_ar(IA64_AR_UNAT);
                     TCGv_i64 pos = tcg_temp_new_i64();
                     TCGv_i64 nat = tcg_temp_new_i64();
-                    tcg_gen_shri_i64(pos, addr, 3);
+                    tcg_gen_shri_i64(pos, mem_addr, 3);
                     tcg_gen_andi_i64(pos, pos, 0x3f);
                     tcg_gen_shr_i64(nat, unat, pos);
                     tcg_gen_andi_i64(nat, nat, 1);
@@ -3758,7 +3792,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                         tcg_constant_i32(size),
                                         tcg_constant_i32(r1),
                                         tcg_constant_i32(advanced ? 1 : 0));
-                        gen_load_watch(ctx, addr, val, size);
+                        gen_load_watch(ctx, mem_addr, val, size);
                         tcg_gen_mov_i64(cpu_r[r1], val);
                     }
                 } else {
@@ -3767,17 +3801,17 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         if (ia64_get_watch_load_addr() ||
                             ia64_load_watch_range_match()) {
                             TCGv_i64 val = tcg_temp_new_i64();
-                            tcg_gen_qemu_ld_i64(val, addr, ctx->mem_idx, mop);
-                            gen_load_watch(ctx, addr, val, size);
+                            tcg_gen_qemu_ld_i64(val, mem_addr, ctx->mem_idx, mop);
+                            gen_load_watch(ctx, mem_addr, val, size);
                             tcg_gen_mov_i64(cpu_r[r1], val);
                         } else {
-                            tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx, mop);
+                            tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx, mop);
                         }
                     }
                     if (r1 != 0 && advanced) {
                         gen_helper_alat_record_gr(tcg_env,
                                                   tcg_constant_i32(r1),
-                                                  addr,
+                                                  mem_addr,
                                                   tcg_constant_i32(size));
                     }
                 }
@@ -3792,12 +3826,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     if (ia64_get_watch_load_addr() ||
                         ia64_load_watch_range_match()) {
                         TCGv_i64 val = tcg_temp_new_i64();
-                        tcg_gen_qemu_ld_i64(val, addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(val, mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UB);
-                        gen_load_watch(ctx, addr, val, 1);
+                        gen_load_watch(ctx, mem_addr, val, 1);
                         tcg_gen_mov_i64(cpu_r[r1], val);
                     } else {
-                        tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UB);
                     }
                 }
@@ -3811,12 +3845,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     if (ia64_get_watch_load_addr() ||
                         ia64_load_watch_range_match()) {
                         TCGv_i64 val = tcg_temp_new_i64();
-                        tcg_gen_qemu_ld_i64(val, addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(val, mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UW);
-                        gen_load_watch(ctx, addr, val, 2);
+                        gen_load_watch(ctx, mem_addr, val, 2);
                         tcg_gen_mov_i64(cpu_r[r1], val);
                     } else {
-                        tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UW);
                     }
                 }
@@ -3830,12 +3864,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     if (ia64_get_watch_load_addr() ||
                         ia64_load_watch_range_match()) {
                         TCGv_i64 val = tcg_temp_new_i64();
-                        tcg_gen_qemu_ld_i64(val, addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(val, mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UL);
-                        gen_load_watch(ctx, addr, val, 4);
+                        gen_load_watch(ctx, mem_addr, val, 4);
                         tcg_gen_mov_i64(cpu_r[r1], val);
                     } else {
-                        tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UL);
                     }
                 }
@@ -3846,7 +3880,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             } else if (x_mem == 0 && (x6 == 0x23 || x6 == 0x2b)) {
                 /* ld8.c.clr{,.acq}: treat as normal 64-bit load (NaT not modeled) */
                 if (r1 != 0) {
-                    tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                    tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                         MO_TE | MO_64);
                 }
                 if (is_imm && r3 != 0 && imm9) {
@@ -3856,7 +3890,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             } else if (x_mem == 0 && x6 == 0x26) {
                 /* ld4.c.nc: treat as zero-extended 32-bit load (NaT/advanced checks not modeled) */
                 if (r1 != 0) {
-                    tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                    tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                         MO_TE | MO_UL);
                 }
                 if (is_imm && r3 != 0 && imm9) {
@@ -3866,7 +3900,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             } else if (x_mem == 0 && x6 == 0x24) {
                 /* ld1.c.nc variants: treat as zero-extended byte load */
                 if (r1 != 0) {
-                    tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                    tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                         MO_TE | MO_UB);
                 }
                 if (is_imm && r3 != 0 && imm9) {
@@ -3876,7 +3910,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             } else if (x_mem == 0 && x6 == 0x25) {
                 /* ld2.c.nc variants: treat as zero-extended 16-bit load */
                 if (r1 != 0) {
-                    tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                    tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                         MO_TE | MO_UW);
                 }
                 if (is_imm && r3 != 0 && imm9) {
@@ -3886,7 +3920,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             } else if (x_mem == 0 && x6 == 0x27) {
                 /* ld8.c.nc variants: treat as normal 64-bit load */
                 if (r1 != 0) {
-                    tcg_gen_qemu_ld_i64(cpu_r[r1], addr, ctx->mem_idx,
+                    tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                         MO_TE | MO_64);
                 }
                 if (is_imm && r3 != 0 && imm9) {
@@ -3906,7 +3940,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         gen_helper_gr_nat(nat, tcg_env, tcg_constant_i32(r2));
                     }
                     TCGv_i64 pos = tcg_temp_new_i64();
-                    tcg_gen_shri_i64(pos, addr, 3);
+                    tcg_gen_shri_i64(pos, mem_addr, 3);
                     tcg_gen_andi_i64(pos, pos, 0x3f);
 
                     TCGv_i64 mask = tcg_temp_new_i64();
@@ -3926,10 +3960,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(src, cpu_r[r2]);
                 }
-                TCGv_i64 watch_addr = addr;
-                if (ctx->mem_idx == MMU_PHYS_IDX) {
-                    watch_addr = gen_phys_mode_addr(addr);
-                }
+                TCGv_i64 watch_addr = mem_addr;
                 if (ia64_store_watch_match()) {
                     TCGLabel *skip_watch = gen_new_label();
                     tcg_gen_brcondi_i64(TCG_COND_NE, watch_addr,
@@ -3979,12 +4010,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         gen_set_label(skip_watch);
                     }
                 }
-                tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, mop);
+                tcg_gen_qemu_st_i64(src, mem_addr, ctx->mem_idx, mop);
                 if (new_unat) {
                     gen_store_ar(IA64_AR_UNAT, new_unat);
                 }
                 {
-                    gen_helper_alat_invalidate(tcg_env, addr,
+                    gen_helper_alat_invalidate(tcg_env, mem_addr,
                                                tcg_constant_i32(size));
                 }
                 if (is_imm && r3 != 0 && imm9) {
@@ -4064,8 +4095,9 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     } else {
                         tcg_gen_mov_i64(addr, cpu_r[r3]);
                     }
+                    TCGv_i64 mem_addr = gen_mem_addr(ctx, addr);
                     TCGv_i64 tmp = tcg_temp_new_i64();
-                    tcg_gen_qemu_ld_i64(tmp, addr, ctx->mem_idx, MO_TE | MO_UB);
+                    tcg_gen_qemu_ld_i64(tmp, mem_addr, ctx->mem_idx, MO_TE | MO_UB);
                 }
                 if (r3 != 0) {
                     if (major == 0x6 && m && post_inc) {
@@ -4107,6 +4139,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     } else {
                         tcg_gen_mov_i64(addr, cpu_r[r3]);
                     }
+                    TCGv_i64 mem_addr = gen_mem_addr(ctx, addr);
 
                     TCGv_i64 mant = tcg_temp_new_i64();
                     TCGv_i64 expw = tcg_temp_new_i64();
@@ -4115,7 +4148,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
 
                     if (is_ldf8) {
                         /* dword -> FP significand */
-                        tcg_gen_qemu_ld_i64(mant, addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(mant, mem_addr, ctx->mem_idx,
                                             MO_TE | MO_64);
                         tcg_gen_movi_i64(expw, IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER));
                     } else if (is_ldfe) {
@@ -4125,11 +4158,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                          * - high: sign at bit48, exponent(15) at bits63:49
                          */
                         TCGv_i64 hi = tcg_temp_new_i64();
-                        tcg_gen_qemu_ld_i64(mant, addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(mant, mem_addr, ctx->mem_idx,
                                             MO_TE | MO_64);
                         TCGv_i64 addr2 = tcg_temp_new_i64();
                         tcg_gen_addi_i64(addr2, addr, 8);
-                        tcg_gen_qemu_ld_i64(hi, addr2, ctx->mem_idx,
+                        TCGv_i64 mem_addr2 = gen_mem_addr(ctx, addr2);
+                        tcg_gen_qemu_ld_i64(hi, mem_addr2, ctx->mem_idx,
                                             MO_TE | MO_64);
 
                         TCGv_i64 sign = tcg_temp_new_i64();
@@ -4150,7 +4184,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     } else if (is_ldfs) {
                         /* IEEE single (32-bit) */
                         TCGv_i64 bits32 = tcg_temp_new_i64();
-                        tcg_gen_qemu_ld_i64(bits32, addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(bits32, mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UL);
                         tcg_gen_andi_i64(bits32, bits32, 0xffffffffULL);
 
@@ -4184,7 +4218,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     } else {
                         /* IEEE double (64-bit) */
                         TCGv_i64 bits64 = tcg_temp_new_i64();
-                        tcg_gen_qemu_ld_i64(bits64, addr, ctx->mem_idx,
+                        tcg_gen_qemu_ld_i64(bits64, mem_addr, ctx->mem_idx,
                                             MO_TE | MO_64);
 
                         TCGv_i64 sign = tcg_temp_new_i64();
@@ -4260,11 +4294,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(addr, cpu_r[r3]);
                 }
+                TCGv_i64 mem_addr = gen_mem_addr(ctx, addr);
 
                 TCGv_i64 lo = tcg_temp_new_i64();
                 gen_fr_load_lo(lo, f2);
-                tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
-                gen_helper_alat_invalidate(tcg_env, addr,
+                tcg_gen_qemu_st_i64(lo, mem_addr, ctx->mem_idx, MO_TE | MO_64);
+                gen_helper_alat_invalidate(tcg_env, mem_addr,
                                            tcg_constant_i32(8));
 
                 if (r3 != 0 && imm8 != 0) {
@@ -4298,13 +4333,15 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(addr, cpu_r[r3]);
                 }
+                TCGv_i64 mem_addr = gen_mem_addr(ctx, addr);
 
                 TCGv_i64 lo = tcg_temp_new_i64();
                 TCGv_i64 hi = tcg_temp_new_i64();
-                tcg_gen_qemu_ld_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
+                tcg_gen_qemu_ld_i64(lo, mem_addr, ctx->mem_idx, MO_TE | MO_64);
                 TCGv_i64 addr2 = tcg_temp_new_i64();
                 tcg_gen_addi_i64(addr2, addr, 8);
-                tcg_gen_qemu_ld_i64(hi, addr2, ctx->mem_idx, MO_TE | MO_64);
+                TCGv_i64 mem_addr2 = gen_mem_addr(ctx, addr2);
+                tcg_gen_qemu_ld_i64(hi, mem_addr2, ctx->mem_idx, MO_TE | MO_64);
 
                 if (f1 > 1) {
                     gen_fr_store_lo(f1, lo);
@@ -4345,16 +4382,18 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 } else {
                     tcg_gen_mov_i64(addr, cpu_r[r3]);
                 }
+                TCGv_i64 mem_addr = gen_mem_addr(ctx, addr);
 
                 TCGv_i64 lo = tcg_temp_new_i64();
                 TCGv_i64 hi = tcg_temp_new_i64();
                 gen_fr_load_lo(lo, f2);
                 gen_fr_load_hi(hi, f2);
 
-                tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TE | MO_64);
+                tcg_gen_qemu_st_i64(lo, mem_addr, ctx->mem_idx, MO_TE | MO_64);
                 TCGv_i64 addr2 = tcg_temp_new_i64();
                 tcg_gen_addi_i64(addr2, addr, 8);
-                tcg_gen_qemu_st_i64(hi, addr2, ctx->mem_idx, MO_TE | MO_64);
+                TCGv_i64 mem_addr2 = gen_mem_addr(ctx, addr2);
+                tcg_gen_qemu_st_i64(hi, mem_addr2, ctx->mem_idx, MO_TE | MO_64);
 
                 if (r3 != 0 && imm != 0) {
                     tcg_gen_addi_i64(cpu_r[r3], cpu_r[r3], imm);

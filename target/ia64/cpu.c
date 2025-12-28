@@ -370,8 +370,10 @@ static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
     /*
      * Minimal debug translation for cpu_memory_rw_debug() / gdb access.
      *
-     * - In physical mode (DT off), treat the low 61 bits as a physical
-     *   address (ignore the region number), matching ia64_cpu_tlb_fill().
+     * - In physical mode (DT off), treat canonically sign-extended 32-bit
+     *   or 0x7fffffff-prefixed addresses as 32-bit physical, otherwise
+     *   use the low 61 bits (ignore the region number), matching
+     *   ia64_cpu_tlb_fill().
      * - In translated mode, support the common identity-mapped regions used
      *   by Linux (region 6/7 direct maps).
      *
@@ -379,7 +381,9 @@ static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
      */
     if (!(env->psr & IA64_PSR_DT)) {
         uint64_t hi32 = addr & 0xffffffff00000000ULL;
-        if (hi32 == 0 || hi32 == 0xffffffff00000000ULL) {
+        if (hi32 == 0 ||
+            hi32 == 0xffffffff00000000ULL ||
+            hi32 == 0x7fffffff00000000ULL) {
             return (hwaddr)(uint32_t)addr;
         }
         return addr & ((1ULL << 61) - 1);

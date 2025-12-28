@@ -31,12 +31,15 @@ static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
      * Firmware also commonly forms sign-extended 32-bit addresses (e.g.
      * 0xffffffffffE00000) via addl/adds from a small GP value.
      *
-     * - If the address is canonically sign-extended 32-bit, treat it as a
-     *   32-bit physical address.
+     * - If the address is canonically sign-extended 32-bit, or matches the
+     *   common firmware pattern that clears bit63 but leaves bits 62..32 set
+     *   (0x7fffffffXXXXXXXX), treat it as a 32-bit physical address.
      * - Otherwise fall back to the low 61 bits (ignore the region number).
      */
     uint64_t hi32 = addr & 0xffffffff00000000ULL;
-    if (hi32 == 0 || hi32 == 0xffffffff00000000ULL) {
+    if (hi32 == 0 ||
+        hi32 == 0xffffffff00000000ULL ||
+        hi32 == 0x7fffffff00000000ULL) {
         return (hwaddr)(uint32_t)addr;
     }
     return (hwaddr)(addr & ((1ULL << 61) - 1));
@@ -46,7 +49,9 @@ static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
 static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 {
     uint64_t hi32 = template & 0xffffffff00000000ULL;
-    if (hi32 == 0 || hi32 == 0xffffffff00000000ULL) {
+    if (hi32 == 0 ||
+        hi32 == 0xffffffff00000000ULL ||
+        hi32 == 0x7fffffff00000000ULL) {
         if (phys > 0xffffffffULL) {
             return phys;
         }
@@ -4917,6 +4922,147 @@ static bool ia64_fw_memmap_region(CPUIA64State *env, uint64_t index,
     return false;
 }
 
+void HELPER(fw_autoscan_memtop_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    uint64_t base = 0;
+    uint64_t size = 0;
+    if (!ia64_fw_memmap_region(env, 0, &base, &size)) {
+        return;
+    }
+    uint64_t mem_top = base + size;
+    if (!mem_top) {
+        return;
+    }
+    uint64_t old = env->r[35];
+    if (old != mem_top) {
+        env->r[35] = mem_top;
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_autoscan_memtop_fix pc=%016" PRIx64
+                          " r35=%016" PRIx64 " -> %016" PRIx64 "\n",
+                          pc, old, mem_top);
+        }
+    }
+#endif
+}
+
+void HELPER(fw_pei_install_mem_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    uint64_t ram_base = 0;
+    uint64_t ram_size = 0;
+    if (!ia64_fw_memmap_region(env, 0, &ram_base, &ram_size)) {
+        return;
+    }
+    uint64_t mem_top = ram_base + ram_size;
+    if (mem_top <= ram_base) {
+        return;
+    }
+
+    uint8_t sof = env->cfm & 0x7f;
+    uint8_t sol = (env->cfm >> 7) & 0x7f;
+    uint8_t outs = (sof > sol) ? (sof - sol) : 0;
+    uint8_t out0 = 32 + sol;
+    if (outs < 3 || out0 + 2 >= 128) {
+        return;
+    }
+
+    uint64_t base_raw = env->r[out0 + 1];
+    uint64_t size = env->r[out0 + 2];
+    if (!size) {
+        size = 0x01000000ULL;
+    }
+
+    uint64_t base_phys = ia64_phys_mode_addr(base_raw);
+    uint64_t new_phys = base_phys;
+    bool fix = false;
+
+    if (base_phys < ram_base || base_phys >= mem_top ||
+        base_phys + size > mem_top) {
+        if (mem_top < size) {
+            return;
+        }
+        new_phys = mem_top - size;
+        new_phys &= ~((1ULL << 20) - 1);
+        if (new_phys < ram_base) {
+            new_phys = ram_base;
+        }
+        fix = true;
+    }
+
+    uint64_t new_base = ia64_fw_encode_addr(base_raw, new_phys);
+    if (fix || new_base != base_raw || size != env->r[out0 + 2]) {
+        env->r[out0 + 1] = new_base;
+        env->r[out0 + 2] = size;
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_pei_install_mem_fix pc=%016" PRIx64
+                          " base=%016" PRIx64 " -> %016" PRIx64
+                          " size=%016" PRIx64 " mem_top=%016" PRIx64 "\n",
+                          pc, base_raw, new_base, size, mem_top);
+        }
+    }
+#endif
+}
+
+static void ia64_fw_try_write_memmap_table(CPUIA64State *env)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    return;
+#else
+    static bool logged;
+    const uint64_t table_base = 0x0000000002000000ULL;
+    const uint64_t max_entries = 16;
+
+    if (!env->fw_mem_size) {
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    uint64_t size0 = 0;
+    if (ia64_fw_read_u64(cs, table_base + 8, &size0) && size0 != 0) {
+        return;
+    }
+
+    for (uint64_t idx = 0; idx < max_entries; idx++) {
+        uint64_t base = 0;
+        uint64_t size = 0;
+        uint64_t base_mb = 0;
+        uint64_t size_mb = 0;
+        if (ia64_fw_memmap_region(env, idx, &base, &size)) {
+            base_mb = base >> 20;
+            size_mb = size >> 20;
+        }
+
+        uint8_t out[16];
+        stq_le_p(out, base_mb);
+        stq_le_p(out + 8, size_mb);
+        if (!ia64_fw_write_bytes_any(cs, table_base + idx * sizeof(out),
+                                     out, sizeof(out))) {
+            return;
+        }
+    }
+
+    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_memmap_table base=%016" PRIx64
+                      " entries=%" PRIu64 " mem=%" PRIu64 "\n",
+                      table_base, max_entries, env->fw_mem_size);
+    }
+#endif
+}
+
 static void ia64_fw_handle_memmap_autoscan(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
@@ -4929,23 +5075,48 @@ static void ia64_fw_handle_memmap_autoscan(CPUIA64State *env, uint64_t pc)
     uint64_t a1 = env->r[33];
     uint64_t a2 = env->r[34];
     uint64_t a3 = env->r[35];
+    uint64_t a4 = env->r[36];
     uint64_t index = 0;
     uint64_t base_ptr = 0;
     uint64_t size_ptr = 0;
+    uint64_t ps_ptr = 0;
+    bool has_ps = ia64_fw_pei_get_ps_ptr(env, a0, &ps_ptr);
 
     /*
      * Autoscan-style PPIs typically use (Index, &Base, &Size). Some variants
-     * include PeiServices as the first argument; detect that by checking for
-     * a high pointer-like a0 and shift arguments if needed.
+     * include PeiServices and/or "This" as leading arguments; detect those
+     * and shift arguments if needed.
      */
-    if (a0 >= 0x100000000ULL && a1 < 0x1000) {
+    if (has_ps && a1 < 0x1000) {
         index = a1;
         base_ptr = a2;
         size_ptr = a3;
+    } else if (has_ps && a3 < 0x1000 && a2 && a4) {
+        index = a3;
+        base_ptr = a2;
+        size_ptr = a4;
+    } else if (a0 < 0x1000) {
+        index = a0;
+        base_ptr = a1;
+        size_ptr = a2;
     } else {
         index = a0;
         base_ptr = a1;
         size_ptr = a2;
+    }
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_autoscan_args pc=%016" PRIx64
+                      " a0=%016" PRIx64 " a1=%016" PRIx64
+                      " a2=%016" PRIx64 " a3=%016" PRIx64
+                      " a4=%016" PRIx64 " a5=%016" PRIx64
+                      " a6=%016" PRIx64 " a7=%016" PRIx64
+                      " has_ps=%d ps=%016" PRIx64
+                      " idx=%" PRIu64 " base_ptr=%016" PRIx64
+                      " size_ptr=%016" PRIx64 "\n",
+                      pc, a0, a1, a2, a3, a4,
+                      env->r[37], env->r[38], env->r[39],
+                      has_ps ? 1 : 0, ps_ptr, index, base_ptr, size_ptr);
     }
 
     uint64_t base = 0;
@@ -4954,6 +5125,8 @@ static void ia64_fw_handle_memmap_autoscan(CPUIA64State *env, uint64_t pc)
         env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 3; /* EFI_UNSUPPORTED */
         return;
     }
+
+    ia64_fw_try_write_memmap_table(env);
 
     uint64_t out_base = cpu_to_le64(base);
     uint64_t out_size = cpu_to_le64(size);
@@ -4967,10 +5140,15 @@ static void ia64_fw_handle_memmap_autoscan(CPUIA64State *env, uint64_t pc)
 
     env->r[8] = 0; /* EFI_SUCCESS */
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        uint64_t rb = 0;
+        uint64_t rs = 0;
+        (void)ia64_fw_read_u64(cs, base_ptr, &rb);
+        (void)ia64_fw_read_u64(cs, size_ptr, &rs);
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_autoscan pc=%016" PRIx64
-                      " idx=%" PRIu64 " base=%016" PRIx64 " size=%016" PRIx64 "\n",
-                      pc, index, base, size);
+                      " idx=%" PRIu64 " base=%016" PRIx64 " size=%016" PRIx64
+                      " base_ptr=%016" PRIx64 " size_ptr=%016" PRIx64 "\n",
+                      pc, index, rb, rs, base_ptr, size_ptr);
     }
 #endif
 }
@@ -11053,6 +11231,69 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
     env->r[39] = hob_base;
     env->r[30] = hob_base;
 
+    /*
+     * The PEI core loads the HOB list base from a pointer in its stack
+     * frame; if that pointer still targets the Xen GFW HOB list (0xff200000),
+     * the firmware builds the PHIT inside the GFW window and reports only
+     * that 1MB region as usable memory. Redirect the pointer into temp RAM
+     * so the PEI HOB list lives in the CAR window instead.
+     */
+    CPUState *cs = env_cpu(env);
+    uint64_t hob_ptr = env->r[31];
+    if (hob_ptr) {
+        uint64_t cur = 0;
+        if (ia64_fw_read_u64(cs, hob_ptr, &cur)) {
+            bool cur_in_temp = (cur >= temp_base &&
+                                cur < (temp_base + temp_size));
+            if (!cur_in_temp && cur != hob_base) {
+                uint8_t out[8];
+                stq_le_p(out, hob_base);
+                if (ia64_fw_write_bytes_any(cs, hob_ptr, out, sizeof(out)) &&
+                    qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                                  " hob_ptr=%016" PRIx64
+                                  " old=%016" PRIx64 " new=%016" PRIx64 "\n",
+                                  pc, hob_ptr, cur, hob_base);
+                }
+            }
+        }
+    }
+
+    /*
+     * Some PEI core paths cache the PHIT base in gp-relative globals
+     * (gp+0x20/gp+0x28). Seed those with the CAR HOB base so later free
+     * memory calculations read the correct list.
+     */
+    uint64_t gp = env->r[1];
+    if (gp) {
+        uint64_t free_top = hob_base + hob_size;
+        uint64_t free_bottom = hob_base + 0x40;
+        uint64_t vars[] = { gp + 0x20, gp + 0x28 };
+        uint64_t vals[] = { free_top, free_bottom };
+        for (size_t i = 0; i < ARRAY_SIZE(vars); i++) {
+            uint64_t addr = vars[i];
+            uint64_t cur = 0;
+            if (!ia64_fw_read_u64(cs, addr, &cur)) {
+                continue;
+            }
+            bool cur_in_temp = (cur >= temp_base &&
+                                cur < (temp_base + temp_size));
+            if (!cur_in_temp && cur != vals[i]) {
+                uint8_t out[8];
+                stq_le_p(out, vals[i]);
+                if (ia64_fw_write_bytes_any(cs, addr, out, sizeof(out)) &&
+                    qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                                  " gp_var=%016" PRIx64
+                                  " old=%016" PRIx64 " new=%016" PRIx64 "\n",
+                                  pc, addr, cur, vals[i]);
+                }
+            }
+        }
+    }
+
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
@@ -11524,11 +11765,16 @@ void HELPER(fw_pei_ppi_dump)(CPUIA64State *env, uint64_t pc)
 #else
     static int enabled = -1;
     static bool dumped;
+    static int dump_always = -1;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_PEI_PPI_DUMP");
         enabled = (s && *s) ? 1 : 0;
     }
-    if (!enabled || dumped) {
+    if (dump_always == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PPI_DUMP_ALWAYS");
+        dump_always = (s && *s) ? 1 : 0;
+    }
+    if (!enabled || (!dump_always && dumped)) {
         return;
     }
     dumped = true;
