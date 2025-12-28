@@ -115,6 +115,7 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 /* ar.rsc loadrs field: bits 16..29, in bytes (see SKI ssDSym.c). */
 #define IA64_RSC_LOADRS_SHIFT 16
 #define IA64_RSC_LOADRS_MASK  0x3fffULL
+#define IA64_RSC_MODE_MASK    0x3ULL
 
 /* Linux/ia64 canonical per-cpu range: [-PERCPU_PAGE_SIZE, 0). */
 #define IA64_PERCPU_VA_BASE   0xfffffffffffc0000ULL
@@ -143,6 +144,16 @@ static const uint8_t ia64_efi_ffs_guid[16] = {
 static inline uint64_t ia64_rsc_get_loadrs(uint64_t rsc)
 {
     return (rsc >> IA64_RSC_LOADRS_SHIFT) & IA64_RSC_LOADRS_MASK;
+}
+
+static inline uint64_t ia64_rsc_get_mode(uint64_t rsc)
+{
+    return rsc & IA64_RSC_MODE_MASK;
+}
+
+static inline bool ia64_rse_is_lazy(const CPUIA64State *env)
+{
+    return ia64_rsc_get_mode(env->ar[IA64_AR_RSC]) == 0;
 }
 
 static inline uint64_t ia64_rsc_set_loadrs(uint64_t rsc, uint64_t loadrs_bytes)
@@ -197,6 +208,11 @@ static inline uint64_t ia64_rse_get_bsp(const CPUIA64State *env)
 
 static inline void ia64_rse_update_loadrs(CPUIA64State *env, uint64_t bsp)
 {
+    uint64_t rsc = env->ar[IA64_AR_RSC];
+    if (ia64_rsc_get_mode(rsc) != 0) {
+        env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, 0);
+        return;
+    }
     uint64_t bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
     uint64_t bytes = (bsp > bspstore) ? (bsp - bspstore) : 0;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], bytes);
@@ -8298,7 +8314,9 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
      * matches the extracted CFM (SOF at bits 6:0, ... RRB* at 45:18), so we
      * can reuse caller_cfm directly here.
      */
-    ia64_rse_store_frame(env, bsp, sof);
+    if (!ia64_rse_is_lazy(env)) {
+        ia64_rse_store_frame(env, bsp, sof);
+    }
     bsp = ia64_rse_skip_regs(bsp, sol);
     env->ar[IA64_AR_BSP] = bsp;
     ia64_rse_update_loadrs(env, bsp);
@@ -8491,7 +8509,9 @@ void HELPER(ret_restore)(CPUIA64State *env)
     }
     uint64_t bsp = ia64_rse_get_bsp(env);
     uint8_t sof = env->cfm & 0x7f;
-    ia64_rse_store_frame(env, bsp, sof);
+    if (!ia64_rse_is_lazy(env)) {
+        ia64_rse_store_frame(env, bsp, sof);
+    }
     if (ia64_rse_pop_window(env)) {
         ia64_restore_ec_from_pfs(env);
         uint8_t sol = (env->cfm >> 7) & 0x7f;
@@ -8631,12 +8651,14 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
     if (do_pop) {
         uint64_t bsp = ia64_rse_get_bsp(env);
         uint8_t sof = env->cfm & 0x7f;
-        ia64_rse_store_frame(env, bsp, sof);
-    if (ia64_rse_pop_window(env)) {
-        ia64_restore_ec_from_pfs(env);
-        uint8_t sol = (env->cfm >> 7) & 0x7f;
-        bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
-        env->ar[IA64_AR_BSP] = bsp;
+        if (!ia64_rse_is_lazy(env)) {
+            ia64_rse_store_frame(env, bsp, sof);
+        }
+        if (ia64_rse_pop_window(env)) {
+            ia64_restore_ec_from_pfs(env);
+            uint8_t sol = (env->cfm >> 7) & 0x7f;
+            bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
+            env->ar[IA64_AR_BSP] = bsp;
             ia64_rse_update_loadrs(env, bsp);
         }
     }
@@ -11410,6 +11432,64 @@ void HELPER(fw_ar_k5_store)(CPUIA64State *env, uint64_t pc, uint32_t src_reg,
 #endif
 }
 
+void HELPER(fw_ar_k3_store)(CPUIA64State *env, uint64_t pc, uint32_t src_reg,
+                            uint64_t value)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)src_reg;
+    (void)value;
+    return;
+#else
+    static int log_limit = -1;
+    static int log_count;
+    static int force_k3 = -2;
+    if (force_k3 == -2) {
+        const char *s = getenv("QEMU_IA64_FORCE_K3");
+        if (s && *s) {
+            force_k3 = (int)strtol(s, NULL, 0);
+        } else {
+            force_k3 = -1;
+        }
+    }
+    if (log_limit == -1) {
+        if (getenv("QEMU_IA64_LOG_K3")) {
+            log_limit = 64;
+            const char *s = getenv("QEMU_IA64_LOG_K3_LIMIT");
+            if (s && *s) {
+                log_limit = atoi(s);
+            }
+            if (log_limit < 0) {
+                log_limit = 0;
+            }
+        } else {
+            log_limit = 0;
+        }
+    }
+    if (log_limit && log_count < log_limit &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        const char *src_label = "imm";
+        char src_buf[16];
+        if (src_reg != UINT32_MAX) {
+            snprintf(src_buf, sizeof(src_buf), "r%u", src_reg);
+            src_label = src_buf;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: ar.k3 store pc=%016" PRIx64
+                      " src=%s val=%016" PRIx64
+                      " old=%016" PRIx64
+                      " r12=%016" PRIx64 " cfm=%016" PRIx64 "\n",
+                      pc, src_label, value, env->ar[3], env->r[12], env->cfm);
+        log_count++;
+    }
+    if (force_k3 >= 0) {
+        value = (uint64_t)force_k3;
+    }
+    env->ar[3] = value;
+#endif
+}
+
 void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
@@ -12356,15 +12436,30 @@ void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage
             uint64_t ps_ptr_reg = env->r[39];
             uint64_t core = ps_ptr_reg - 8;
             uint64_t hob_raw = 0;
+            uint64_t hob_phys_val = 0;
             uint8_t hob_tmp[8];
-            hwaddr hob_phys = ia64_phys_mode_addr(core + 0x260);
+            hwaddr hob_va = core + 0x260;
+            hwaddr hob_phys = ia64_phys_mode_addr(hob_va);
+            hwaddr hob_tpa = 0;
+            bool hob_tpa_ok = ia64_try_translate(env, hob_va, &hob_tpa);
             if (cpu_memory_rw_debug(cs, hob_phys, hob_tmp, sizeof(hob_tmp), false) == 0) {
                 hob_raw = ldq_le_p(hob_tmp);
             }
+            if (address_space_read(&address_space_memory,
+                                   hob_tpa_ok ? hob_tpa : hob_phys,
+                                   MEMTXATTRS_UNSPECIFIED,
+                                   hob_tmp, sizeof(hob_tmp)) == MEMTX_OK) {
+                hob_phys_val = ldq_le_p(hob_tmp);
+            }
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: fw_pei_call pre ps_ptr=%016" PRIx64
-                          " core=%016" PRIx64 " hob_raw=%016" PRIx64 "\n",
-                          ps_ptr_reg, core, hob_raw);
+                          " core=%016" PRIx64 " hob_raw=%016" PRIx64
+                          " hob_va=%016" PRIx64
+                          " hob_tpa=%016" PRIx64 " tpa_ok=%d"
+                          " hob_phys=%016" PRIx64 " phys_val=%016" PRIx64 "\n",
+                          ps_ptr_reg, core, hob_raw, hob_va,
+                          hob_tpa, hob_tpa_ok ? 1 : 0,
+                          (uint64_t)hob_phys, hob_phys_val);
         }
         if (env->b[7]) {
             ia64_fw_dump_code(env, "pei_b7", env->b[7], 64);
@@ -12961,18 +13056,76 @@ void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " addr=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
                   pc, ri, env->ip, env->psr, env->cfm, addr, size, val);
 
+    if (pc == 0xffe226d0ULL || pc == 0xffe22830ULL) {
+        uint64_t sp = env->r[12];
+        hwaddr sp_pa = (env->psr & IA64_PSR_DT) ?
+            helper_tpa(env, sp) : ia64_phys_mode_addr(sp);
+        hwaddr addr_pa = (env->psr & IA64_PSR_DT) ?
+            helper_tpa(env, addr) : ia64_phys_mode_addr(addr);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "store_watch_hob pc=%016" PRIx64
+                      " addr_pa=%016" HWADDR_PRIx
+                      " r1=%016" PRIx64 " r12=%016" PRIx64
+                      " r30=%016" PRIx64 " r31=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64
+                      " r34=%016" PRIx64 " r35=%016" PRIx64
+                      " ar.k3=%016" PRIx64 " ar.k4=%016" PRIx64
+                      " ar.k5=%016" PRIx64
+                      " ar.bsp=%016" PRIx64 " ar.bspstore=%016" PRIx64
+                      " b0=%016" PRIx64 " b7=%016" PRIx64 "\n",
+                      pc, addr_pa, env->r[1], env->r[12],
+                      env->r[30], env->r[31], env->r[32], env->r[33],
+                      env->r[34], env->r[35],
+                      env->ar[3], env->ar[4], env->ar[5],
+                      env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
+                      env->b[0], env->b[7]);
+        if (sp_pa) {
+            uint8_t mem[32];
+            if (cpu_memory_rw_debug(env_cpu(env), sp_pa, mem, sizeof(mem), false) == 0) {
+                char line[128];
+                int pos = 0;
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                                "  sp  %016" HWADDR_PRIx ":", sp_pa);
+                for (size_t i = 0; i < sizeof(mem); i++) {
+                    pos += snprintf(line + pos, sizeof(line) - pos,
+                                    " %02x", mem[i]);
+                }
+                qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "  sp  %016" HWADDR_PRIx ": <read failed>\n",
+                              sp_pa);
+            }
+        }
+    }
+
     if (pc == 0xffe2cc20ULL &&
         addr >= 0x1f020000ULL && addr < 0x1f030000ULL &&
         src_dump_count++ < 4) {
         uint64_t src = env->r[31];
         hwaddr src_pa = (env->psr & IA64_PSR_DT) ?
             helper_tpa(env, src) : ia64_phys_mode_addr(src);
+        uint64_t sp = env->r[12];
+        hwaddr sp_pa = (env->psr & IA64_PSR_DT) ?
+            helper_tpa(env, sp) : ia64_phys_mode_addr(sp);
         uint8_t buf[32];
+        uint64_t sp_slot1 = 0;
         qemu_log_mask(LOG_GUEST_ERROR,
                       "store_watch_src pc=%016" PRIx64
                       " r30=%016" PRIx64 " r31=%016" PRIx64
-                      " src_pa=%016" HWADDR_PRIx "\n",
-                      pc, env->r[30], src, src_pa);
+                      " r12=%016" PRIx64
+                      " src_pa=%016" HWADDR_PRIx " sp_pa=%016" HWADDR_PRIx
+                      " b0=%016" PRIx64 " b7=%016" PRIx64
+                      " last_b0_pc=%016" PRIx64 " last_b0_val=%016" PRIx64
+                      " last_br_from=%016" PRIx64 " last_br_to=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64
+                      " r34=%016" PRIx64 " r35=%016" PRIx64 "\n",
+                      pc, env->r[30], src, env->r[12],
+                      src_pa, sp_pa,
+                      env->b[0], env->b[7],
+                      env->last_b0_write_pc, env->last_b0_write_val,
+                      env->last_branch_from, env->last_branch_to,
+                      env->r[32], env->r[33], env->r[34], env->r[35]);
         if (cpu_memory_rw_debug(env_cpu(env), src_pa, buf, sizeof(buf), false) == 0) {
             char line[128];
             int pos = 0;
@@ -12987,6 +13140,42 @@ void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
             qemu_log_mask(LOG_GUEST_ERROR,
                           "  src %016" HWADDR_PRIx ": <read failed>\n",
                           src_pa);
+        }
+        if (cpu_memory_rw_debug(env_cpu(env), sp_pa, buf, sizeof(buf), false) == 0) {
+            char line[128];
+            int pos = 0;
+            pos += snprintf(line + pos, sizeof(line) - pos,
+                            "  sp  %016" HWADDR_PRIx ":", sp_pa);
+            for (size_t i = 0; i < sizeof(buf); i++) {
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                                " %02x", buf[i]);
+            }
+            qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+            sp_slot1 = ldq_le_p(&buf[8]);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "  sp  %016" HWADDR_PRIx ": <read failed>\n",
+                          sp_pa);
+        }
+        if (sp_slot1) {
+            hwaddr sp_slot1_pa = (env->psr & IA64_PSR_DT) ?
+                helper_tpa(env, sp_slot1) : ia64_phys_mode_addr(sp_slot1);
+            if (cpu_memory_rw_debug(env_cpu(env), sp_slot1_pa, buf, sizeof(buf),
+                                    false) == 0) {
+                char line[128];
+                int pos = 0;
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                                "  sp+8 %016" HWADDR_PRIx ":", sp_slot1_pa);
+                for (size_t i = 0; i < sizeof(buf); i++) {
+                    pos += snprintf(line + pos, sizeof(line) - pos,
+                                    " %02x", buf[i]);
+                }
+                qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "  sp+8 %016" HWADDR_PRIx ": <read failed>\n",
+                              sp_slot1_pa);
+            }
         }
     }
 }
@@ -15519,7 +15708,9 @@ void HELPER(flushrs)(CPUIA64State *env)
      */
     uint64_t bsp = ia64_rse_get_bsp(env);
     uint8_t sof = env->cfm & 0x7f;
-    ia64_rse_store_frame(env, bsp, sof);
+    if (!ia64_rse_is_lazy(env)) {
+        ia64_rse_store_frame(env, bsp, sof);
+    }
     env->ar[IA64_AR_BSP] = bsp;
     env->ar[IA64_AR_BSPSTORE] = bsp;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);
@@ -15589,6 +15780,25 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
      * ar.rsc.loadrs.
      */
     bspstore &= ~0x7ULL;
+    static int log_bspstore = -1;
+    if (log_bspstore == -1) {
+        log_bspstore = getenv("QEMU_IA64_LOG_BSPSTORE") ? 1 : 0;
+    }
+    if (log_bspstore && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: set_bspstore pc=%016" PRIx64
+                      " old=%016" PRIx64 " new=%016" PRIx64
+                      " r1=%016" PRIx64 " r3=%016" PRIx64
+                      " r8=%016" PRIx64 " r10=%016" PRIx64
+                      " r12=%016" PRIx64
+                      " ar.k3=%016" PRIx64
+                      " ar.rsc=%016" PRIx64 " ar.lc=%016" PRIx64
+                      " ar.ec=%016" PRIx64 " cfm=%016" PRIx64 "\n",
+                      env->ip, env->ar[IA64_AR_BSPSTORE], bspstore,
+                      env->r[1], env->r[3], env->r[8], env->r[10],
+                      env->r[12], env->ar[3], env->ar[IA64_AR_RSC],
+                      env->ar[65], env->ar[66], env->cfm);
+    }
 #ifndef CONFIG_USER_ONLY
     if (ia64_is_task_switch_pc(env, env->ip)) {
         ia64_rse_switch_bspstore(env, bspstore);

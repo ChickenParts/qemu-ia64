@@ -30,6 +30,8 @@ firmware path. Items are grouped by status.
   (`target/ia64/helper.c:6262`).
 - Default-disable firmware memcpy/memset fastpath so translation bugs show up
   (`target/ia64/translate.c:109`, `scripts/run-ia64-firmware.sh:19`).
+- Respect ar.rsc.mode=0 (lazy) by skipping eager RSE spills so the PEI core's
+  HOB pointer is not clobbered by backing-store writes (`target/ia64/helper.c`).
 
 ## Open issues (needs work)
 
@@ -54,6 +56,8 @@ firmware path. Items are grouped by status.
 - ALAT/advanced load modeling is minimal; advanced load exceptions and NaT
   handling are not fully implemented (ld.a/chk.a paths in `target/ia64/translate.c`
   and `target/ia64/helper.c`).
+- RSE dirty/clean partition tracking is still incomplete; we avoid eager spills
+  in lazy mode, but loadrs/flushrs semantics are not yet fully modeled.
 - EFI system table scanning is heuristic and may miss firmware layouts; verify
   search ranges for your Flash.fd and consider using firmware-provided pointers
   instead of wide scans (`target/ia64/helper.c:2046`).

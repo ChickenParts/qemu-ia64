@@ -2574,8 +2574,8 @@ static void main_cpu_reset(void *opaque)
          * lands inside the fw-workram window.
          */
         /*
-         * ar.k3 controls the xenipf SEC stack base; set to 3 so it uses
-         * 0x04000000 and avoids overwriting the Xen GFW HOB list at 0xff200000.
+         * ar.k3 controls the xenipf SEC stack base; firmware overwrites it
+         * from r20 early, but keep the expected seed value.
          */
         s->ar[3] = 3; /* ar.k3 */
         s->ar[4] = ipf_boot_r10; /* ar.k4 */

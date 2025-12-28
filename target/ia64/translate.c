@@ -3615,6 +3615,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_andi_i64(ec, t, 0x3f);
                     tcg_gen_shli_i64(ec, ec, 58);
                     gen_store_ar(ar, ec);
+                } else if (ar == 3) {
+                    gen_helper_fw_ar_k3_store(tcg_env,
+                                              tcg_constant_i64(ctx->base.pc_next),
+                                              tcg_constant_i32(r2),
+                                              t);
                 } else if (ar == IA64_AR_K5) {
                     gen_helper_fw_ar_k5_store(tcg_env,
                                               tcg_constant_i64(ctx->base.pc_next),
