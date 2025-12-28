@@ -109,6 +109,9 @@ static size_t ia64_dbg_call_pc_count;
 
 static bool ia64_hang_abort_inited;
 static uint64_t ia64_hang_abort_threshold;
+static bool ia64_fw_dump_pc_inited;
+static uint64_t ia64_fw_dump_pc;
+static uint32_t ia64_fw_dump_bundles;
 static bool ia64_watch_load_inited;
 static uint64_t ia64_watch_load_addr;
 static bool ia64_load_watch_range_inited;
@@ -229,6 +232,39 @@ static uint64_t ia64_get_hang_abort_threshold(void)
         ia64_hang_abort_threshold = 1000000;
     }
     return ia64_hang_abort_threshold;
+}
+
+static bool ia64_get_fw_dump_pc(uint64_t *pc, uint32_t *bundles)
+{
+    if (!ia64_fw_dump_pc_inited) {
+        ia64_fw_dump_pc_inited = true;
+        ia64_fw_dump_pc = 0;
+        ia64_fw_dump_bundles = 64;
+
+        const char *s = getenv("QEMU_IA64_FW_DUMP_PC");
+        if (s && *s) {
+            char *endp = NULL;
+            uint64_t v = strtoull(s, &endp, 0);
+            if (endp && endp != s) {
+                ia64_fw_dump_pc = v & ~0xFULL;
+            }
+        }
+        s = getenv("QEMU_IA64_FW_DUMP_BUNDLES");
+        if (s && *s) {
+            int v = atoi(s);
+            if (v > 0) {
+                ia64_fw_dump_bundles = (uint32_t)v;
+            }
+        }
+    }
+
+    if (pc) {
+        *pc = ia64_fw_dump_pc;
+    }
+    if (bundles) {
+        *bundles = ia64_fw_dump_bundles;
+    }
+    return ia64_fw_dump_pc != 0;
 }
 
 static uint64_t ia64_get_watch_load_addr(void)
@@ -1456,6 +1492,17 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     tcg_gen_insn_start(ctx->base.pc_next, ctx->ri);
 
 #ifndef CONFIG_USER_ONLY
+    if (ctx->ri == 0) {
+        uint64_t dump_pc = 0;
+        uint32_t dump_bundles = 0;
+        if (ia64_get_fw_dump_pc(&dump_pc, &dump_bundles) &&
+            ctx->base.pc_next == dump_pc) {
+            gen_helper_fw_dump_pc(tcg_env,
+                                  tcg_constant_i64(ctx->base.pc_next),
+                                  tcg_constant_i32(dump_bundles));
+        }
+    }
+
     /*
      * xenipf/EDK firmware quirk: MP init assumes an MP buffer base pointer is
      * present on the stack; when missing it treats CPU0 as an AP and calls a

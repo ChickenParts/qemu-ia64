@@ -24,6 +24,9 @@
 #include <math.h>
 #include <zlib.h>
 
+static bool ia64_fw_log_enabled(void);
+static bool ia64_env_truthy(const char *s);
+
 static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
 {
     /*
@@ -11114,11 +11117,9 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
                                       IA64_IPF_FW_FLASH_SIZE);
             have_handoff_buf = true;
         }
-        if (!sec_handoff) {
-            env->r[32] = handoff;
-            if (ppi) {
-                env->r[33] = ppi;
-            }
+        env->r[32] = handoff;
+        if (ppi) {
+            env->r[33] = ppi;
         }
     }
     (void)stack_count;
@@ -11561,13 +11562,14 @@ static void ia64_fw_pei_dump_ps(CPUIA64State *env, uint64_t ps_ptr, uint64_t pc)
     uint64_t install_ppi = 0, locate_ppi = 0;
     uint64_t ffs_find_vol = 0, ffs_find_file = 0, ffs_find_sec = 0;
     uint64_t install_pei_mem = 0, report_status = 0;
-    uint64_t create_hob = 0;
+    uint64_t get_hob_list = 0, create_hob = 0;
     uint64_t entry = 0, gp = 0;
 
     /* Offsets based on EFI_PEI_SERVICES (Framework, PI < 1.0). */
     ia64_fw_read_u64(cs, ps_ptr + 0x18, &install_ppi);
     ia64_fw_read_u64(cs, ps_ptr + 0x28, &locate_ppi);
-    ia64_fw_read_u64(cs, ps_ptr + 0x48, &create_hob);
+    ia64_fw_read_u64(cs, ps_ptr + 0x48, &get_hob_list);
+    ia64_fw_read_u64(cs, ps_ptr + 0x50, &create_hob);
     ia64_fw_read_u64(cs, ps_ptr + 0x58, &ffs_find_vol);
     ia64_fw_read_u64(cs, ps_ptr + 0x60, &ffs_find_file);
     ia64_fw_read_u64(cs, ps_ptr + 0x68, &ffs_find_sec);
@@ -11579,8 +11581,9 @@ static void ia64_fw_pei_dump_ps(CPUIA64State *env, uint64_t ps_ptr, uint64_t pc)
                   pc, ps_ptr);
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64: pei_ps_dump install_ppi=%016" PRIx64
-                  " locate_ppi=%016" PRIx64 " create_hob=%016" PRIx64 "\n",
-                  install_ppi, locate_ppi, create_hob);
+                  " locate_ppi=%016" PRIx64 " get_hob_list=%016" PRIx64
+                  " create_hob=%016" PRIx64 "\n",
+                  install_ppi, locate_ppi, get_hob_list, create_hob);
     if (install_ppi && ia64_fw_read_fdesc(cs, install_ppi, &entry, &gp)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_ps_dump install_ppi fd.entry=%016" PRIx64
@@ -11590,6 +11593,12 @@ static void ia64_fw_pei_dump_ps(CPUIA64State *env, uint64_t ps_ptr, uint64_t pc)
     if (locate_ppi && ia64_fw_read_fdesc(cs, locate_ppi, &entry, &gp)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_ps_dump locate_ppi fd.entry=%016" PRIx64
+                      " fd.gp=%016" PRIx64 "\n",
+                      entry, gp);
+    }
+    if (get_hob_list && ia64_fw_read_fdesc(cs, get_hob_list, &entry, &gp)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_ps_dump get_hob_list fd.entry=%016" PRIx64
                       " fd.gp=%016" PRIx64 "\n",
                       entry, gp);
     }
@@ -11681,7 +11690,7 @@ void HELPER(fw_pei_startup_dump)(CPUIA64State *env, uint64_t pc)
     (void)pc;
     return;
 #else
-    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR) || !ia64_fw_log_enabled()) {
         return;
     }
     if (!ia64_fw_pei_startup_dump_enabled()) {
@@ -12189,7 +12198,13 @@ void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage
     (void)stage;
     return;
 #else
-    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+    static int pei_log_enabled = -1;
+    if (pei_log_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_PEI_LOG");
+        pei_log_enabled = ia64_env_truthy(s) ? 1 : 0;
+    }
+
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR) || !pei_log_enabled) {
         return;
     }
 
@@ -12202,8 +12217,22 @@ void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage
     }
 
     if (stage == 0) {
+        uint8_t sof = env->cfm & 0x7f;
+        uint8_t sol = (env->cfm >> 7) & 0x7f;
+        uint8_t sor = (env->cfm >> 14) & 0x0f;
+        uint8_t outs = (sof > sol) ? (sof - sol) : 0;
+        uint8_t out0 = 32 + sol;
+        uint64_t call_a0 = (out0 < 128) ? env->r[out0] : 0;
+        uint64_t call_a1 = (out0 + 1 < 128) ? env->r[out0 + 1] : 0;
+        uint64_t call_a2 = (out0 + 2 < 128) ? env->r[out0 + 2] : 0;
+        uint64_t call_a3 = (out0 + 3 < 128) ? env->r[out0 + 3] : 0;
+        uint64_t call_a4 = (out0 + 4 < 128) ? env->r[out0 + 4] : 0;
+        uint64_t call_a5 = (out0 + 5 < 128) ? env->r[out0 + 5] : 0;
+        uint64_t call_a6 = (out0 + 6 < 128) ? env->r[out0 + 6] : 0;
+        uint64_t call_a7 = (out0 + 7 < 128) ? env->r[out0 + 7] : 0;
         uint64_t ps_ptr = 0;
-        (void)ia64_fw_pei_get_ps_ptr(env, env->r[32], &ps_ptr);
+        uint64_t ps_arg = call_a0 ? call_a0 : env->r[32];
+        (void)ia64_fw_pei_get_ps_ptr(env, ps_arg, &ps_ptr);
         if (ps_ptr) {
             uint64_t ps_phys = ia64_phys_mode_addr(ps_ptr);
             bool ps_in_flash = (ps_phys >= IA64_IPF_FW_FLASH_BASE &&
@@ -12222,14 +12251,12 @@ void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage
                 ps_ptr = ps_scan;
             }
         }
-        uint8_t sof = env->cfm & 0x7f;
-        uint8_t sol = (env->cfm >> 7) & 0x7f;
-        uint8_t sor = (env->cfm >> 14) & 0x0f;
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_call pre pc=%016" PRIx64
                       " b7=%016" PRIx64 " b0=%016" PRIx64
                       " r1=%016" PRIx64 " r12=%016" PRIx64
                       " cfm=%016" PRIx64 " sof=%u sol=%u sor=%u"
+                      " outs=%u out0=r%u"
                       " r30=%016" PRIx64 " r31=%016" PRIx64
                       " r32=%016" PRIx64 " r33=%016" PRIx64
                       " r34=%016" PRIx64 " r35=%016" PRIx64
@@ -12239,32 +12266,63 @@ void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage
                       " r45=%016" PRIx64 " r46=%016" PRIx64
                       " r47=%016" PRIx64 "\n",
                       pc, env->b[7], env->b[0], env->r[1], env->r[12],
-                      env->cfm, sof, sol, sor,
+                      env->cfm, sof, sol, sor, outs, out0,
                       env->r[30], env->r[31], env->r[32], env->r[33],
                       env->r[34], env->r[35], env->r[39], env->r[40],
                       env->r[41], env->r[42], env->r[43], env->r[44],
                       env->r[45], env->r[46], env->r[47]);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_call args out0=r%u outs=%u"
+                      " a0=%016" PRIx64 " a1=%016" PRIx64
+                      " a2=%016" PRIx64 " a3=%016" PRIx64
+                      " a4=%016" PRIx64 " a5=%016" PRIx64
+                      " a6=%016" PRIx64 " a7=%016" PRIx64 "\n",
+                      out0, outs,
+                      call_a0, call_a1, call_a2, call_a3,
+                      call_a4, call_a5, call_a6, call_a7);
         if (ps_ptr) {
             ia64_fw_pei_log_ps_entry(cs, ps_ptr, env->b[7]);
         }
-        if (env->r[33] >= 0x100000 && env->r[34] >= 0x100000 &&
-            (env->r[34] & 0xfffULL) == 0) {
+        if (call_a1 >= 0x100000 && call_a2 >= 0x100000 &&
+            (call_a2 & 0xfffULL) == 0) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_mem_call base=%016" PRIx64
                           " size=%016" PRIx64 " ps=%016" PRIx64
                           " pc=%016" PRIx64 "\n",
-                          env->r[33], env->r[34], ps_ptr, pc);
+                          call_a1, call_a2, ps_ptr, pc);
         }
-        if (env->b[7] == 0x00000000ffe24b90ULL ||
-            env->b[7] == 0x80000000ffe24b90ULL) {
+        const uint64_t get_hob_list_entry = 0x00000000ffe24b90ULL;
+        const uint64_t get_hob_list_entry_hi = 0x80000000ffe24b90ULL;
+        const uint64_t create_hob_entry = 0x00000000ffe24c70ULL;
+        const uint64_t create_hob_entry_hi = 0x80000000ffe24c70ULL;
+        if (env->b[7] == get_hob_list_entry ||
+            env->b[7] == get_hob_list_entry_hi) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_get_hob_list hob_ptr=%016" PRIx64
+                          " ps=%016" PRIx64 "\n",
+                          call_a1, ps_ptr);
+            if (call_a1) {
+                uint8_t tmp[8];
+                uint64_t hob_val = 0;
+                hwaddr hob_ptr_phys = ia64_phys_mode_addr(call_a1);
+                if (cpu_memory_rw_debug(cs, hob_ptr_phys, tmp, sizeof(tmp), false) == 0) {
+                    hob_val = ldq_le_p(tmp);
+                }
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_get_hob_list hob_val=%016" PRIx64 "\n",
+                              hob_val);
+            }
+        }
+        if (env->b[7] == create_hob_entry ||
+            env->b[7] == create_hob_entry_hi) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_create_hob type=%" PRIu64 " len=%" PRIu64
                           " hob_ptr=%016" PRIx64 " ps=%016" PRIx64 "\n",
-                          env->r[33], env->r[34], env->r[35], ps_ptr);
-            if (env->r[35]) {
+                          call_a1, call_a2, call_a3, ps_ptr);
+            if (call_a3) {
                 uint8_t tmp[8];
                 uint64_t hob_val = 0;
-                hwaddr hob_ptr_phys = ia64_phys_mode_addr(env->r[35]);
+                hwaddr hob_ptr_phys = ia64_phys_mode_addr(call_a3);
                 if (cpu_memory_rw_debug(cs, hob_ptr_phys, tmp, sizeof(tmp), false) == 0) {
                     hob_val = ldq_le_p(tmp);
                 }
@@ -13337,7 +13395,7 @@ static bool ia64_fw_log_enabled(void)
     static int enabled = -1;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_FW_LOG");
-        enabled = (s && *s) ? 1 : 0;
+        enabled = ia64_env_truthy(s) ? 1 : 0;
     }
     return enabled;
 }
@@ -14045,6 +14103,55 @@ static void ia64_fw_dump_code(CPUIA64State *env, const char *tag,
                   "IA64: SAL_PCI dump pc=%016" PRIx64 " start=%016" PRIx64
                   " bundles=%d file=%s\n",
                   base, start, bundles, path);
+}
+
+void HELPER(fw_dump_pc)(CPUIA64State *env, uint64_t pc, uint32_t bundles)
+{
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
+    ia64_fw_dump_code(env, "pc", pc, bundles ? (int)bundles : 64);
+
+    CPUState *cs = env_cpu(env);
+    uint64_t r12 = env->r[12];
+    uint64_t ptr_raw = 0;
+    uint8_t tmp[8];
+    hwaddr r12_phys = ia64_phys_mode_addr(r12);
+    if (cpu_memory_rw_debug(cs, r12_phys, tmp, sizeof(tmp), false) == 0) {
+        ptr_raw = ldq_le_p(tmp);
+    }
+    hwaddr ptr_phys = ia64_phys_mode_addr(ptr_raw);
+    uint16_t entries[16];
+    bool entries_ok = false;
+    if (ptr_raw &&
+        cpu_memory_rw_debug(cs, ptr_phys, entries, sizeof(entries), false) == 0) {
+        entries_ok = true;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_dump_pc pc=%016" PRIx64 " r12=%016" PRIx64
+                  " ptr=%016" PRIx64 " ptr_phys=%016" PRIx64
+                  " entries_ok=%d\n",
+                  pc, r12, ptr_raw, (uint64_t)ptr_phys, entries_ok ? 1 : 0);
+    if (entries_ok) {
+        char line[128];
+        char *p = line;
+        size_t left = sizeof(line);
+        for (size_t i = 0; i < ARRAY_SIZE(entries); i++) {
+            uint16_t val = lduw_le_p((uint8_t *)&entries[i]);
+            int n = snprintf(p, left, "%s%04x",
+                             i ? " " : "", val);
+            if (n < 0 || (size_t)n >= left) {
+                break;
+            }
+            p += n;
+            left -= (size_t)n;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_dump_pc table16=%s\n", line);
+    }
 }
 
 void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
