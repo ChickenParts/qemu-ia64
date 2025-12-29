@@ -1593,6 +1593,16 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
             gen_helper_fw_sal_call_probe(tcg_env,
                                          tcg_constant_i64(ctx->base.pc_next));
         }
+        if (pc_low == 0x1fffffff1ff3e770ULL ||
+            pc_low == 0x1fffffff1ff3e780ULL ||
+            pc_low == 0x1fffffff1ff3e7e0ULL ||
+            pc_low == 0x1fffffff1ff3d1c0ULL ||
+            pc_low == 0x1fffffff1ff3d1d0ULL ||
+            pc_low == 0x1fffffff1ff3d420ULL ||
+            pc_low == 0x1fffffff1ff4f420ULL) {
+            gen_helper_fw_sal_call_probe(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next));
+        }
         if (pc_low == 0x1fffffff1fff5bf0ULL) {
             gen_helper_fw_sal_ret_probe(tcg_env,
                                         tcg_constant_i64(ctx->base.pc_next));
