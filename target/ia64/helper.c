@@ -7193,6 +7193,17 @@ void HELPER(dbg_bunit_pred)(CPUIA64State *env, uint64_t pc, uint32_t qp)
                   pc, qp, qp_val, pr);
 }
 
+void HELPER(dbg_bret)(CPUIA64State *env, uint64_t pc, uint32_t b2)
+{
+    uint64_t tgt = env->b[b2] & ~0xFULL;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_bret pc=%016" PRIx64 " b%u=%016" PRIx64
+                  " kind=%" PRIu64 " depth=%u cfm=%016" PRIx64
+                  " pfs=%016" PRIx64 "\n",
+                  pc, b2, tgt, env->last_b0_write_kind & 0xff,
+                  env->rse_depth, env->cfm, env->ar[64]);
+}
+
 void HELPER(record_b0_trace)(CPUIA64State *env, uint64_t pc, uint64_t insn,
                              uint64_t kind, uint64_t val)
 {
@@ -8589,6 +8600,10 @@ void HELPER(manual_call_enter)(CPUIA64State *env, uint64_t pc)
 void HELPER(ret_restore)(CPUIA64State *env)
 {
     static int log_count;
+    static int unwind_enabled = -1;
+    if (unwind_enabled == -1) {
+        unwind_enabled = getenv("QEMU_IA64_RET_UNWIND_PFS") ? 1 : 0;
+    }
     static uint64_t watch_b0;
     static bool watch_b0_inited;
     if (!watch_b0_inited) {
@@ -8728,6 +8743,26 @@ void HELPER(ret_restore)(CPUIA64State *env)
     uint8_t sof = env->cfm & 0x7f;
     if (!ia64_rse_is_lazy(env)) {
         ia64_rse_store_frame(env, bsp, sof);
+    }
+    uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 46) - 1);
+    uint64_t b0 = env->b[0] & ~0xFULL;
+    if (unwind_enabled && env->rse_depth > 0) {
+        int unwind = 0;
+        while (env->rse_depth > 0) {
+            const struct IA64RSEFrame *frame =
+                &env->rse_frames[env->rse_depth - 1];
+            if (frame->ret_addr == b0 || frame->cfm == pfs_cfm) {
+                break;
+            }
+            ia64_rse_pop_window(env);
+            unwind++;
+        }
+        if (unwind && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ret_unwind pfs_cfm=%016" PRIx64 " b0=%016" PRIx64
+                          " dropped=%d depth=%u\n",
+                          pfs_cfm, b0, unwind, env->rse_depth);
+        }
     }
     if (ia64_rse_pop_window(env)) {
         ia64_restore_ec_from_pfs(env);

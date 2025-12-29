@@ -406,6 +406,9 @@ static bool ia64_dbg_bunit_pc_set;
 static int ia64_dbg_munit_enabled = -1;
 static uint64_t ia64_dbg_munit_pc;
 static bool ia64_dbg_munit_pc_set;
+static int ia64_dbg_bret_enabled = -1;
+static uint64_t ia64_dbg_bret_pc;
+static bool ia64_dbg_bret_pc_set;
 
 static bool ia64_dbg_cmp_match(uint64_t pc)
 {
@@ -509,6 +512,32 @@ static bool ia64_dbg_bunit_match(uint64_t pc)
         return true;
     }
     return pc == ia64_dbg_bunit_pc;
+}
+
+static bool ia64_dbg_bret_match(uint64_t pc)
+{
+    if (ia64_dbg_bret_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DBG_BRET");
+        ia64_dbg_bret_enabled = (s && *s) ? 1 : 0;
+        ia64_dbg_bret_pc_set = false;
+        ia64_dbg_bret_pc = 0;
+        const char *p = getenv("QEMU_IA64_DBG_BRET_PC");
+        if (p && *p) {
+            char *endp = NULL;
+            uint64_t v = strtoull(p, &endp, 0);
+            if (endp && endp != p) {
+                ia64_dbg_bret_pc_set = true;
+                ia64_dbg_bret_pc = v;
+            }
+        }
+    }
+    if (!ia64_dbg_bret_enabled) {
+        return false;
+    }
+    if (!ia64_dbg_bret_pc_set) {
+        return true;
+    }
+    return pc == ia64_dbg_bret_pc;
 }
 
 static bool ia64_dbg_munit_match(uint64_t pc)
@@ -2580,6 +2609,11 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         uint8_t b2 = extract64(insn, 13, 3);
         TCGv_i64 tgt = tcg_temp_new_i64();
         tcg_gen_andi_i64(tgt, cpu_b[b2], ~0xFULL);
+        if (x6 == 0x21 && ia64_dbg_bret_match(ctx->base.pc_next)) {
+            gen_helper_dbg_bret(tcg_env,
+                                tcg_constant_i64(ctx->base.pc_next),
+                                tcg_constant_i32(b2));
+        }
         /*
          * Our simplified RSE model pushes a stacked-register snapshot on
          * br.call.  Some early-kernel PAL stubs return via br.ia b0 instead of
