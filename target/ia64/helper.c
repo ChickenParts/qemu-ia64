@@ -12914,6 +12914,33 @@ void HELPER(fw_pei_ptr_chain_post_probe)(CPUIA64State *env, uint64_t pc)
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_ptr_chain_post mem[%016" PRIx64 "]: %s\n",
                           (uint64_t)phys, hex);
+            char ascii[sizeof(buf) + 1];
+            for (size_t i = 0; i < sizeof(buf); i++) {
+                uint8_t c = buf[i];
+                ascii[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+            }
+            ascii[sizeof(buf)] = '\0';
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain_post ascii: %s\n", ascii);
+            char utf16[sizeof(buf) / 2 + 1];
+            size_t ulen = 0;
+            for (size_t i = 0; i + 1 < sizeof(buf); i += 2) {
+                uint8_t lo = buf[i];
+                uint8_t hi = buf[i + 1];
+                if (hi != 0) {
+                    utf16[ulen++] = '.';
+                } else {
+                    utf16[ulen++] = (lo >= 0x20 && lo < 0x7f) ? (char)lo : '.';
+                }
+            }
+            utf16[ulen] = '\0';
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain_post utf16: %s\n", utf16);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain_post qwords=%016" PRIx64
+                          " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 "\n",
+                          ldq_le_p(&buf[0]), ldq_le_p(&buf[8]),
+                          ldq_le_p(&buf[16]), ldq_le_p(&buf[24]));
         } else {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_ptr_chain_post mem[%016" PRIx64
