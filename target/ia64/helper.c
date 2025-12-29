@@ -12614,6 +12614,68 @@ void HELPER(fw_pei_callsite_pre_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_callsite_post_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_post pc=%016" PRIx64
+                  " r8=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " r35=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                  " p6=%u p7=%u\n",
+                  pc, env->r[8], env->r[33], env->r[34], env->r[35],
+                  env->r[39], env->r[40],
+                  (uint32_t)((env->pr >> 6) & 1),
+                  (uint32_t)((env->pr >> 7) & 1));
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_post state b0=%016" PRIx64
+                  " cfm=%016" PRIx64 " ar.pfs=%016" PRIx64
+                  " r12=%016" PRIx64 " r1=%016" PRIx64 "\n",
+                  env->b[0], env->cfm, env->ar[IA64_AR_PFS],
+                  env->r[12], env->r[1]);
+#endif
+}
+
+void HELPER(fw_pei_callsite_use_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_use pc=%016" PRIx64
+                  " r33=%016" PRIx64 " r34=%016" PRIx64 " r35=%016" PRIx64
+                  " r37=%016" PRIx64 " r39=%016" PRIx64
+                  " r8=%016" PRIx64 " p6=%u p7=%u\n",
+                  pc, env->r[33], env->r[34], env->r[35],
+                  env->r[37], env->r[39], env->r[8],
+                  (uint32_t)((env->pr >> 6) & 1),
+                  (uint32_t)((env->pr >> 7) & 1));
+#endif
+}
+
 void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
@@ -12647,7 +12709,9 @@ void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
                   pc, fit_ptr_addr, fit_ptr);
 
     uint8_t fit_dump[64];
-    if (cpu_memory_rw_debug(cs, fit_ptr, fit_dump, sizeof(fit_dump), false) == 0) {
+    bool fit_dump_ok =
+        cpu_memory_rw_debug(cs, fit_ptr, fit_dump, sizeof(fit_dump), false) == 0;
+    if (fit_dump_ok) {
         char hex[3 * sizeof(fit_dump) + 1];
         size_t pos = 0;
         for (size_t i = 0; i < sizeof(fit_dump); i++) {
@@ -12666,8 +12730,16 @@ void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
                       fit_ptr);
     }
 
-    const int max_entries = 16;
-    for (int i = 0; i < max_entries; i++) {
+    uint32_t fit_entries = 0;
+    if (fit_dump_ok) {
+        fit_entries = fit_dump[8] | (fit_dump[9] << 8) | (fit_dump[10] << 16);
+    }
+    const int max_entries = 64;
+    uint32_t entries = fit_entries ? fit_entries : max_entries;
+    if (entries > max_entries) {
+        entries = max_entries;
+    }
+    for (uint32_t i = 0; i < entries; i++) {
         uint8_t entry[16];
         uint64_t ent_addr = fit_ptr + (uint64_t)i * sizeof(entry);
         if (cpu_memory_rw_debug(cs, ent_addr, entry, sizeof(entry), false) != 0) {
