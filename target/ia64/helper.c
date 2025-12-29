@@ -12532,6 +12532,40 @@ void HELPER(fw_pei_callsite_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_callsite_pre_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_pre pc=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
+                  " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                  "\n",
+                  pc, env->r[32], env->r[33], env->r[34], env->r[35],
+                  env->r[36], env->r[37], env->r[38], env->r[39],
+                  env->r[40]);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_pre state b0=%016" PRIx64
+                  " cfm=%016" PRIx64 " ar.pfs=%016" PRIx64
+                  " r12=%016" PRIx64 " r1=%016" PRIx64 "\n",
+                  env->b[0], env->cfm, env->ar[IA64_AR_PFS],
+                  env->r[12], env->r[1]);
+#endif
+}
+
 void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
