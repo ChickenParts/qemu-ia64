@@ -14718,6 +14718,43 @@ void HELPER(fw_sal_call_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_sal_ret_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    static int abort_enabled = -1;
+    if (abort_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_SAL_RET_ABORT");
+        abort_enabled = (s && *s) ? 1 : 0;
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: sal_ret_probe pc=%016" PRIx64
+                      " b0=%016" PRIx64 " b7=%016" PRIx64
+                      " ar.pfs=%016" PRIx64 " ar.rsc=%016" PRIx64
+                      " r12=%016" PRIx64 " r1=%016" PRIx64
+                      " psr=%016" PRIx64 " pr=%016" PRIx64 "\n",
+                      pc, env->b[0], env->b[7],
+                      env->ar[IA64_AR_PFS], env->ar[IA64_AR_RSC],
+                      env->r[12], env->r[1],
+                      env->psr, env->pr);
+    }
+
+    ia64_fw_dump_code(env, "sal_ret_pc", pc, 64);
+    ia64_fw_dump_code(env, "sal_ret_b0", env->b[0], 64);
+
+    if (abort_enabled) {
+        CPUState *cs = env_cpu(env);
+        cpu_abort(cs, "IA64: sal_ret_probe pc=%016" PRIx64 " b0=%016" PRIx64,
+                  pc, env->b[0]);
+    }
+#endif
+}
+
 void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                          uint64_t insn)
 {
