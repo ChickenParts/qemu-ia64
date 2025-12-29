@@ -2112,10 +2112,11 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: breaki iim=%016" PRIx64 " ip=%016" PRIx64
                       " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64
+                      " iva=%016" PRIx64
                       " r8=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64
                       " r11=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
                       " r15=%016" PRIx64 " b0=%016" PRIx64 " b7=%016" PRIx64 "\n",
-                      iim, env->ip, env->psr, env->cfm, env->pr,
+                      iim, env->ip, env->psr, env->cfm, env->pr, env->cr[2],
                       env->r[8], env->r[9], env->r[10], env->r[11],
                       env->r[12], env->r[13], env->r[15], env->b[0], env->b[7]);
     }
