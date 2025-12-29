@@ -26,6 +26,9 @@
 
 static bool ia64_fw_log_enabled(void);
 static bool ia64_env_truthy(const char *s);
+static uint64_t ia64_fw_pei_cached_hob_base;
+static uint64_t ia64_fw_pei_cached_temp_base;
+static uint64_t ia64_fw_pei_cached_temp_size;
 
 static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
 {
@@ -11335,6 +11338,9 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
     uint64_t hob_base = temp_base + (temp_size - hob_size);
     env->r[39] = hob_base;
     env->r[30] = hob_base;
+    ia64_fw_pei_cached_hob_base = hob_base;
+    ia64_fw_pei_cached_temp_base = temp_base;
+    ia64_fw_pei_cached_temp_size = temp_size;
 
     /*
      * The PEI core loads the HOB list base from a pointer in its stack
@@ -11425,6 +11431,40 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                                   " hob_ptr=%016" PRIx64
                                   " old=%016" PRIx64 " new=%016" PRIx64 "\n",
                                   pc, hob_ptr, cur, hob_base);
+                }
+            }
+        }
+    }
+
+    /*
+     * The PEI core also caches the HOB list base in its private core
+     * structure (offset 0x260). If it still points at a low/flash list,
+     * update it to the CAR list so PEIMs see the same list as the stack
+     * hob_ptr.
+     */
+    {
+        uint64_t core = 0;
+        uint64_t ps_ptr = 0;
+        hwaddr sp_phys = ia64_phys_mode_addr(env->r[12]);
+        if (ia64_fw_pei_scan_core(cs, sp_phys, &core, &ps_ptr)) {
+            uint64_t hob_raw = 0;
+            if (ia64_fw_read_u64(cs, core + 0x260, &hob_raw)) {
+                uint64_t hob_phys = ia64_phys_mode_addr(hob_raw);
+                bool hob_in_temp = (hob_phys >= temp_base &&
+                                    hob_phys < (temp_base + temp_size));
+                if (!hob_in_temp && hob_phys != hob_base) {
+                    uint64_t enc = ia64_fw_encode_addr(hob_raw, hob_base);
+                    uint8_t out[8];
+                    stq_le_p(out, enc);
+                    if (ia64_fw_write_bytes_any(cs, core + 0x260, out, sizeof(out)) &&
+                        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                                      " core=%016" PRIx64
+                                      " hob_raw=%016" PRIx64 " new=%016" PRIx64
+                                      " ps_ptr=%016" PRIx64 "\n",
+                                      pc, core, hob_raw, enc, ps_ptr);
+                    }
                 }
             }
         }
@@ -12455,6 +12495,37 @@ void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage
             hwaddr sp_phys = ia64_phys_mode_addr(env->r[12]);
             if (ia64_fw_pei_scan_core(cs, sp_phys, &core, &ps_scan)) {
                 ps_ptr = ps_scan;
+            }
+        }
+        if (ps_ptr && ia64_fw_pei_cached_hob_base &&
+            ia64_fw_pei_cached_temp_base && ia64_fw_pei_cached_temp_size) {
+            uint64_t core = 0;
+            if (ia64_fw_pei_find_core_from_ps(env, ps_ptr, &core)) {
+                uint64_t hob_raw = 0;
+                if (ia64_fw_read_u64(cs, core + 0x260, &hob_raw)) {
+                    uint64_t hob_phys = ia64_phys_mode_addr(hob_raw);
+                    bool hob_in_temp =
+                        (hob_phys >= ia64_fw_pei_cached_temp_base &&
+                         hob_phys < (ia64_fw_pei_cached_temp_base +
+                                     ia64_fw_pei_cached_temp_size));
+                    if (!hob_in_temp &&
+                        hob_phys != ia64_fw_pei_cached_hob_base) {
+                        uint64_t enc =
+                            ia64_fw_encode_addr(hob_raw,
+                                                ia64_fw_pei_cached_hob_base);
+                        uint8_t out[8];
+                        stq_le_p(out, enc);
+                        if (ia64_fw_write_bytes_any(cs, core + 0x260, out,
+                                                    sizeof(out)) &&
+                            qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: fw_pei_call patch core=%016" PRIx64
+                                          " hob_raw=%016" PRIx64 " new=%016" PRIx64
+                                          " ps_ptr=%016" PRIx64 "\n",
+                                          core, hob_raw, enc, ps_ptr);
+                        }
+                    }
+                }
             }
         }
         qemu_log_mask(LOG_GUEST_ERROR,
