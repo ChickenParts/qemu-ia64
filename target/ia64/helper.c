@@ -12748,9 +12748,9 @@ void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
         uint64_t addr = ldq_le_p(&entry[0]);
         uint32_t size = entry[8] | (entry[9] << 8) | (entry[10] << 16);
         uint8_t rev = entry[12];
-        uint8_t type = entry[13] & 0x7f;
-        uint8_t csum_valid = (entry[13] >> 7) & 1;
-        uint8_t csum = entry[14];
+        uint8_t type = entry[14] & 0x7f;
+        uint8_t csum_valid = (entry[14] >> 7) & 1;
+        uint8_t csum = entry[15];
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_fit_probe entry%d addr=%016" PRIx64
                       " size=0x%06x rev=%u type=0x%02x csum_valid=%u csum=0x%02x\n",
