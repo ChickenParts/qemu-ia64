@@ -12521,6 +12521,61 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
                   " r1=%016" PRIx64 " r12=%016" PRIx64 "\n",
                   pc, r8, env->r[32], env->r[33], env->r[34],
                   env->r[1], env->r[12]);
+    {
+        CPUState *cs = env_cpu(env);
+        uint64_t arg0 = env->r[32];
+        hwaddr arg0_phys = ia64_phys_mode_addr(arg0);
+        uint8_t arg0_buf[64];
+        if (arg0 &&
+            cpu_memory_rw_debug(cs, arg0_phys, arg0_buf, sizeof(arg0_buf),
+                                false) == 0) {
+            char hex[3 * sizeof(arg0_buf) + 1];
+            size_t pos = 0;
+            for (size_t i = 0; i < sizeof(arg0_buf); i++) {
+                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ",
+                                arg0_buf[i]);
+            }
+            if (pos > 0) {
+                hex[pos - 1] = '\0';
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_pei_err arg0_mem [%016" PRIx64
+                          "]: %s\n",
+                          (uint64_t)arg0_phys, hex);
+        } else if (arg0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_pei_err arg0_mem [%016" PRIx64
+                          "] unreadable\n",
+                          (uint64_t)arg0_phys);
+        }
+        uint64_t arg0_ptr = 0;
+        if (arg0 &&
+            ia64_fw_read_u64(cs, arg0, &arg0_ptr) && arg0_ptr) {
+            hwaddr arg0_ptr_phys = ia64_phys_mode_addr(arg0_ptr);
+            uint8_t ptr_buf[64];
+            if (cpu_memory_rw_debug(cs, arg0_ptr_phys, ptr_buf, sizeof(ptr_buf),
+                                    false) == 0) {
+                char hex[3 * sizeof(ptr_buf) + 1];
+                size_t pos = 0;
+                for (size_t i = 0; i < sizeof(ptr_buf); i++) {
+                    pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ",
+                                    ptr_buf[i]);
+                }
+                if (pos > 0) {
+                    hex[pos - 1] = '\0';
+                }
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_pei_err arg0_ptr [%016" PRIx64
+                              " -> %016" PRIx64 "]: %s\n",
+                              (uint64_t)arg0_phys, (uint64_t)arg0_ptr, hex);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_pei_err arg0_ptr [%016" PRIx64
+                              " -> %016" PRIx64 "] unreadable\n",
+                              (uint64_t)arg0_phys, (uint64_t)arg0_ptr);
+            }
+        }
+    }
     if (!dumped_ppi) {
         dumped_ppi = true;
         uint64_t ps_ptr = env->fw_pei_ps;
