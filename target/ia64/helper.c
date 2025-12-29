@@ -2079,6 +2079,8 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
 {
     static int log_enabled = -1;
     static int abort_enabled = -1;
+    static int dump_enabled = -1;
+    static int dump_bundles = -1;
     if (log_enabled == -1) {
         const char *s = getenv("QEMU_IA64_BREAK_LOG");
         log_enabled = (s && *s) ? 1 : 0;
@@ -2086,6 +2088,23 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
     if (abort_enabled == -1) {
         const char *s = getenv("QEMU_IA64_BREAK_ABORT");
         abort_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dump_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_BREAK_DUMP");
+        dump_enabled = (s && *s) ? 1 : 0;
+    }
+    if (dump_bundles == -1) {
+        dump_bundles = 64;
+        const char *s = getenv("QEMU_IA64_BREAK_DUMP_BUNDLES");
+        if (s && *s) {
+            dump_bundles = atoi(s);
+        }
+        if (dump_bundles < 0) {
+            dump_bundles = 0;
+        }
+        if (dump_bundles > 512) {
+            dump_bundles = 512;
+        }
     }
 
     CPUState *cs = env_cpu(env);
@@ -2099,6 +2118,15 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
                       iim, env->ip, env->psr, env->cfm, env->pr,
                       env->r[8], env->r[9], env->r[10], env->r[11],
                       env->r[12], env->r[13], env->r[15], env->b[0], env->b[7]);
+    }
+    if (dump_enabled && dump_bundles > 0) {
+        uint64_t iva = env->cr[2];
+        ia64_fw_dump_code(env, "break_ip", env->ip, dump_bundles);
+        ia64_fw_dump_code(env, "break_from", env->last_branch_from, dump_bundles);
+        ia64_fw_dump_code(env, "break_b0w", env->last_b0_write_pc, dump_bundles);
+        if (iva) {
+            ia64_fw_dump_code(env, "break_vec", iva + IA64_VEC_BREAK, dump_bundles);
+        }
     }
     if (abort_enabled) {
         cpu_abort(cs, "IA64: breaki iim=%016" PRIx64 " ip=%016" PRIx64,
