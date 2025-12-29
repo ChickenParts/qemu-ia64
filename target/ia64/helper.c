@@ -2077,7 +2077,33 @@ uint64_t HELPER(umodsi3)(CPUIA64State *env, uint64_t a, uint64_t b)
 
 void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
 {
+    static int log_enabled = -1;
+    static int abort_enabled = -1;
+    if (log_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_BREAK_LOG");
+        log_enabled = (s && *s) ? 1 : 0;
+    }
+    if (abort_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_BREAK_ABORT");
+        abort_enabled = (s && *s) ? 1 : 0;
+    }
+
     CPUState *cs = env_cpu(env);
+    if (log_enabled && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: breaki iim=%016" PRIx64 " ip=%016" PRIx64
+                      " psr=%016" PRIx64 " cfm=%016" PRIx64 " pr=%016" PRIx64
+                      " r8=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64
+                      " r11=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
+                      " r15=%016" PRIx64 " b0=%016" PRIx64 " b7=%016" PRIx64 "\n",
+                      iim, env->ip, env->psr, env->cfm, env->pr,
+                      env->r[8], env->r[9], env->r[10], env->r[11],
+                      env->r[12], env->r[13], env->r[15], env->b[0], env->b[7]);
+    }
+    if (abort_enabled) {
+        cpu_abort(cs, "IA64: breaki iim=%016" PRIx64 " ip=%016" PRIx64,
+                  iim, env->ip);
+    }
     ia64_fault(cs, env, false, false, IA64_VEC_BREAK, iim, GETPC());
 }
 
