@@ -12816,9 +12816,40 @@ void HELPER(fw_pei_ptr_chain_probe)(CPUIA64State *env, uint64_t pc)
         if (pos > 0) {
             hex[pos - 1] = '\0';
         }
+        uint64_t entry = ldq_le_p(&buf[0]);
+        uint64_t gp = ldq_le_p(&buf[8]);
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_ptr_chain mem[%016" PRIx64 "]: %s\n",
                       addr, hex);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_ptr_chain fdesc entry=%016" PRIx64
+                      " gp=%016" PRIx64 "\n",
+                      entry, gp);
+        if (entry) {
+            uint8_t code[32];
+            hwaddr entry_phys = ia64_phys_mode_addr(entry);
+            if (cpu_memory_rw_debug(cs, entry_phys, code, sizeof(code),
+                                    false) == 0) {
+                char chex[3 * sizeof(code) + 1];
+                size_t pos = 0;
+                for (size_t i = 0; i < sizeof(code); i++) {
+                    pos += snprintf(chex + pos, sizeof(chex) - pos, "%02x ",
+                                    code[i]);
+                }
+                if (pos > 0) {
+                    chex[pos - 1] = '\0';
+                }
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ptr_chain fdesc_code[%016" PRIx64
+                              "]: %s\n",
+                              (uint64_t)entry_phys, chex);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ptr_chain fdesc_code[%016" PRIx64
+                              "] unreadable\n",
+                              (uint64_t)entry_phys);
+            }
+        }
     } else {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_ptr_chain mem[%016" PRIx64 "] unreadable\n",
