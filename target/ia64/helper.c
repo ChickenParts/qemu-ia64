@@ -12831,13 +12831,13 @@ void HELPER(fw_pei_ptr_chain_probe)(CPUIA64State *env, uint64_t pc)
             if (cpu_memory_rw_debug(cs, entry_phys, code, sizeof(code),
                                     false) == 0) {
                 char chex[3 * sizeof(code) + 1];
-                size_t pos = 0;
+                size_t cpos = 0;
                 for (size_t i = 0; i < sizeof(code); i++) {
-                    pos += snprintf(chex + pos, sizeof(chex) - pos, "%02x ",
-                                    code[i]);
+                    cpos += snprintf(chex + cpos, sizeof(chex) - cpos, "%02x ",
+                                     code[i]);
                 }
-                if (pos > 0) {
-                    chex[pos - 1] = '\0';
+                if (cpos > 0) {
+                    chex[cpos - 1] = '\0';
                 }
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: pei_ptr_chain fdesc_code[%016" PRIx64
