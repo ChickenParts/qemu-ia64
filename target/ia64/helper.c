@@ -12773,6 +12773,98 @@ void HELPER(fw_pei_callsite_use_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_ptr_chain_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    CPUState *cs = env_cpu(env);
+    uint64_t r8 = env->r[8];
+    uint64_t r1 = env->r[1];
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_ptr_chain pc=%016" PRIx64
+                  " r8=%016" PRIx64 " r1=%016" PRIx64 "\n",
+                  pc, r8, r1);
+
+    uint8_t buf[32];
+    uint64_t addr = 0xffe2ee30ULL;
+    if (ia64_fw_read_bytes_any(cs, addr, buf, sizeof(buf))) {
+        char hex[3 * sizeof(buf) + 1];
+        size_t pos = 0;
+        for (size_t i = 0; i < sizeof(buf); i++) {
+            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", buf[i]);
+        }
+        if (pos > 0) {
+            hex[pos - 1] = '\0';
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_ptr_chain mem[%016" PRIx64 "]: %s\n",
+                      addr, hex);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_ptr_chain mem[%016" PRIx64 "] unreadable\n",
+                      addr);
+    }
+
+    if (r8) {
+        uint8_t r8buf[32];
+        hwaddr r8_phys = ia64_phys_mode_addr(r8);
+        if (cpu_memory_rw_debug(cs, r8_phys, r8buf, sizeof(r8buf), false) == 0) {
+            char hex[3 * sizeof(r8buf) + 1];
+            size_t pos = 0;
+            for (size_t i = 0; i < sizeof(r8buf); i++) {
+                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", r8buf[i]);
+            }
+            if (pos > 0) {
+                hex[pos - 1] = '\0';
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain r8_mem[%016" PRIx64 "]: %s\n",
+                          (uint64_t)r8_phys, hex);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain r8_mem[%016" PRIx64
+                          "] unreadable\n",
+                          (uint64_t)r8_phys);
+        }
+    }
+
+    if (r1) {
+        uint8_t r1buf[32];
+        hwaddr r1_phys = ia64_phys_mode_addr(r1);
+        if (cpu_memory_rw_debug(cs, r1_phys, r1buf, sizeof(r1buf), false) == 0) {
+            char hex[3 * sizeof(r1buf) + 1];
+            size_t pos = 0;
+            for (size_t i = 0; i < sizeof(r1buf); i++) {
+                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", r1buf[i]);
+            }
+            if (pos > 0) {
+                hex[pos - 1] = '\0';
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain r1_mem[%016" PRIx64 "]: %s\n",
+                          (uint64_t)r1_phys, hex);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain r1_mem[%016" PRIx64
+                          "] unreadable\n",
+                          (uint64_t)r1_phys);
+        }
+    }
+#endif
+}
+
 void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
