@@ -12485,6 +12485,7 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
     static int limit = -1;
     static int count;
     static int abort_on_err = -1;
+    static uint64_t abort_skip_pc = UINT64_MAX;
     if (limit == -1) {
         limit = 64;
         const char *s = getenv("QEMU_IA64_PEI_ERR_LIMIT");
@@ -12497,6 +12498,13 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
     }
     if (abort_on_err == -1) {
         abort_on_err = getenv("QEMU_IA64_PEI_ERR_ABORT") ? 1 : 0;
+    }
+    if (abort_skip_pc == UINT64_MAX) {
+        abort_skip_pc = 0;
+        const char *s = getenv("QEMU_IA64_PEI_ERR_ABORT_PC");
+        if (s && *s) {
+            abort_skip_pc = strtoull(s, NULL, 0) & ~0xFULL;
+        }
     }
     if (limit == 0 || count >= limit) {
         return;
@@ -12594,7 +12602,7 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
         }
         helper_fw_pei_ppi_dump(env, pc);
     }
-    if (abort_on_err) {
+    if (abort_on_err && (!abort_skip_pc || ((pc ^ abort_skip_pc) & ~0xFULL))) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_err abort pc=%016" PRIx64 "\n",
                       pc);
@@ -12912,6 +12920,12 @@ void HELPER(fw_pei_ptr_chain_post_probe)(CPUIA64State *env, uint64_t pc)
                           "] unreadable\n",
                           (uint64_t)phys);
         }
+    }
+    if (getenv("QEMU_IA64_PEI_PTR_CHAIN_POST_ABORT")) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_ptr_chain_post abort pc=%016" PRIx64 "\n",
+                      pc);
+        abort();
     }
 #endif
 }
