@@ -12557,7 +12557,8 @@ void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
                       fit_ptr);
     }
 
-    for (int i = 0; i < 4; i++) {
+    const int max_entries = 16;
+    for (int i = 0; i < max_entries; i++) {
         uint8_t entry[16];
         uint64_t ent_addr = fit_ptr + (uint64_t)i * sizeof(entry);
         if (cpu_memory_rw_debug(cs, ent_addr, entry, sizeof(entry), false) != 0) {
@@ -12574,6 +12575,28 @@ void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
                       " size=0x%06x rev=%u type=0x%02x csum_valid=%u csum=0x%02x\n",
                       i, addr, size, rev, type, csum_valid, csum);
     }
+#endif
+}
+
+void HELPER(fw_pei_fit_compare_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_fit_compare pc=%016" PRIx64
+                  " r33=%016" PRIx64 " r40=%016" PRIx64 " r39=%016" PRIx64 "\n",
+                  pc, env->r[33], env->r[40], env->r[39]);
 #endif
 }
 
