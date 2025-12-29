@@ -14683,6 +14683,41 @@ void HELPER(fw_dump_pc)(CPUIA64State *env, uint64_t pc, uint32_t bundles)
     }
 }
 
+void HELPER(fw_sal_call_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    static int abort_enabled = -1;
+    if (abort_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_SAL_CALL_ABORT");
+        abort_enabled = (s && *s) ? 1 : 0;
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: sal_call_probe pc=%016" PRIx64
+                      " r30=%016" PRIx64 " b7=%016" PRIx64
+                      " r31=%016" PRIx64 " r12=%016" PRIx64
+                      " r1=%016" PRIx64 " psr=%016" PRIx64 " pr=%016" PRIx64 "\n",
+                      pc, env->r[30], env->b[7],
+                      env->r[31], env->r[12],
+                      env->r[1], env->psr, env->pr);
+    }
+
+    ia64_fw_dump_code(env, "sal_call_pc", pc, 64);
+    ia64_fw_dump_code(env, "sal_call_b7", env->b[7], 64);
+
+    if (abort_enabled) {
+        CPUState *cs = env_cpu(env);
+        cpu_abort(cs, "IA64: sal_call_probe pc=%016" PRIx64 " b7=%016" PRIx64,
+                  pc, env->b[7]);
+    }
+#endif
+}
+
 void HELPER(fw_r8_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                          uint64_t insn)
 {
