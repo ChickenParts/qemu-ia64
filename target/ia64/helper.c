@@ -135,6 +135,9 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 /* Match hw/ia64/ipf.c firmware work RAM window. */
 #define IA64_IPF_FW_WORKRAM_BASE      0x0000000100000000ULL
 #define IA64_IPF_FW_WORKRAM_SIZE      (16ULL << 20)
+/* Match hw/ia64/gfw.h GFW_HOB_START/GFW_HOB_SIZE. */
+#define IA64_IPF_GFW_HOB_BASE         0x00000000ff200000ULL
+#define IA64_IPF_GFW_HOB_SIZE         (1ULL << 20)
 
 static const uint8_t ia64_efi_ffs_guid[16] = {
     0xd9, 0x54, 0x93, 0x7a, 0x68, 0x04, 0x4a, 0x44,
@@ -3622,6 +3625,57 @@ static bool ia64_fw_clone_hob_list_ram(CPUState *cs,
     cpu_physical_memory_write(dst_base + sizeof(phit),
                               buf + sizeof(phit),
                               (size_t)(list_len - sizeof(phit)));
+    return true;
+}
+
+static bool ia64_fw_find_hob_list_in_range(CPUState *cs,
+                                           uint64_t base, uint64_t len,
+                                           uint64_t *hob_base_out,
+                                           uint64_t *hob_end_out)
+{
+    const uint8_t phit_magic[8] = { 0x01, 0x00, 0x38, 0x00, 0, 0, 0, 0 };
+    const size_t chunk = 64 * 1024;
+    g_autofree uint8_t *buf = g_malloc(chunk);
+    uint64_t best_base = 0;
+    uint64_t best_end = 0;
+    uint64_t best_span = 0;
+
+    for (uint64_t off = 0; off < len; off += chunk - 8) {
+        uint64_t addr = base + off;
+        if (cpu_memory_rw_debug(cs, addr, buf, chunk, false) != 0) {
+            continue;
+        }
+        for (size_t j = 0; j + sizeof(phit_magic) <= chunk; j++) {
+            if (buf[j] != 0x01) {
+                continue;
+            }
+            if (memcmp(&buf[j], phit_magic, sizeof(phit_magic)) != 0) {
+                continue;
+            }
+            uint64_t cand = addr + j;
+            uint64_t end = 0;
+            int count = 0;
+            if (!ia64_fw_validate_efi_hob_list(cs, cand, &end, &count)) {
+                continue;
+            }
+            uint64_t span = end - cand;
+            if (!best_base || span > best_span) {
+                best_base = cand;
+                best_end = end;
+                best_span = span;
+            }
+        }
+    }
+
+    if (!best_base) {
+        return false;
+    }
+    if (hob_base_out) {
+        *hob_base_out = best_base;
+    }
+    if (hob_end_out) {
+        *hob_end_out = best_end;
+    }
     return true;
 }
 
@@ -11296,6 +11350,71 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
         if (ia64_fw_read_u64(cs, hob_ptr, &cur)) {
             bool cur_in_temp = (cur >= temp_base &&
                                 cur < (temp_base + temp_size));
+            if (!cur_in_temp) {
+                uint64_t cur_phys = ia64_phys_mode_addr(cur);
+                uint64_t cur_end = 0;
+                int count = 0;
+                bool have_src = ia64_fw_validate_efi_hob_list(cs, cur_phys,
+                                                              &cur_end, &count);
+                if (!have_src) {
+                    uint64_t alt_base = 0;
+                    uint64_t alt_end = 0;
+                    if (ia64_fw_validate_efi_hob_list(cs,
+                                                      IA64_IPF_GFW_HOB_BASE,
+                                                      &alt_end, &count)) {
+                        alt_base = IA64_IPF_GFW_HOB_BASE;
+                    } else if (ia64_fw_find_pei_hob_list(cs,
+                                                         ia64_phys_mode_addr(env->r[12]),
+                                                         &alt_base, &alt_end) &&
+                               alt_base && alt_base != cur_phys) {
+                        /* Found an alternative HOB list elsewhere. */
+                    } else if (ia64_fw_find_hob_list_in_range(cs,
+                                                              IA64_IPF_FW_FLASH_BASE,
+                                                              IA64_IPF_FW_FLASH_SIZE,
+                                                              &alt_base, &alt_end) &&
+                               alt_base && alt_base != cur_phys) {
+                        /* Found a HOB list in the GFW/flash window. */
+                    } else {
+                        alt_base = 0;
+                    }
+                    if (alt_base && alt_base != cur_phys) {
+                        cur_phys = alt_base;
+                        cur_end = alt_end;
+                        have_src = true;
+                        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                                          " fallback_hob %016" PRIx64 " len=%" PRIu64 "\n",
+                                          pc, alt_base, (alt_end - alt_base));
+                        }
+                    }
+                }
+                if (have_src) {
+                    uint8_t phit[0x38];
+                    if (cpu_memory_rw_debug(cs, cur_phys, phit,
+                                            sizeof(phit), false) == 0) {
+                        uint64_t mem_top_raw = ldq_le_p(&phit[16]);
+                        uint64_t mem_bottom_raw = ldq_le_p(&phit[24]);
+                        uint64_t mem_top_phys = ia64_phys_mode_addr(mem_top_raw);
+                        uint64_t mem_bottom_phys =
+                            ia64_phys_mode_addr(mem_bottom_raw);
+                        uint64_t stack_phys = ia64_phys_mode_addr(env->r[12]);
+                        if (ia64_fw_clone_hob_list_ram(cs, cur_phys, cur_end,
+                                                       hob_base,
+                                                       mem_bottom_phys,
+                                                       mem_top_phys,
+                                                       stack_phys) &&
+                            qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                                          " cloned_hob %016" PRIx64
+                                          " -> %016" PRIx64 " len=%" PRIu64 "\n",
+                                          pc, cur_phys, hob_base,
+                                          (cur_end - cur_phys));
+                        }
+                    }
+                }
+            }
             if (!cur_in_temp && cur != hob_base) {
                 uint8_t out[8];
                 stq_le_p(out, hob_base);
@@ -13788,6 +13907,21 @@ static void ia64_fw_call_trace_step(CPUIA64State *env, uint64_t pc)
                   env->r[28], env->r[29], env->r[30], env->r[31],
                   env->r[32], env->r[33], env->r[34], env->r[35],
                   env->r[36], env->r[37], env->r[38]);
+
+    uint8_t sol = (env->cfm >> 7) & 0x7f;
+    uint8_t out0 = 32 + sol;
+    uint64_t a0 = (out0 < 128) ? env->r[out0] : 0;
+    uint64_t a1 = (out0 + 1 < 128) ? env->r[out0 + 1] : 0;
+    uint64_t a2 = (out0 + 2 < 128) ? env->r[out0 + 2] : 0;
+    uint64_t a3 = (out0 + 3 < 128) ? env->r[out0 + 3] : 0;
+    uint64_t a4 = (out0 + 4 < 128) ? env->r[out0 + 4] : 0;
+    uint64_t a5 = (out0 + 5 < 128) ? env->r[out0 + 5] : 0;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_call args out0=r%u"
+                  " a0=%016" PRIx64 " a1=%016" PRIx64
+                  " a2=%016" PRIx64 " a3=%016" PRIx64
+                  " a4=%016" PRIx64 " a5=%016" PRIx64 "\n",
+                  out0, a0, a1, a2, a3, a4, a5);
 }
 
 #define IA64_FW_TRACE_RING_SIZE 64
