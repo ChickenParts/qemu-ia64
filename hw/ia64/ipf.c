@@ -822,6 +822,7 @@ static void ipf_fill_fw_window_erased(void)
 #define EFI_TE_IMAGE_HEADER_SIGNATURE      0x5A56
 
 #define COMP_TYPE_FIT_PEICORE 0x10
+#define COMP_TYPE_FIT_BFV     0x7E
 #define COMP_TYPE_FIT_UNUSED  0x7F
 #define FIT_TYPE_MASK         0x7F
 #define CHECKSUM_BIT_MASK     0x80
@@ -1151,6 +1152,15 @@ static void ipf_fw_patch_fit(uint8_t *fw, size_t fw_size, hwaddr fw_base)
                       "IPF: FIT patch: PEI core entry not found\n");
         return;
     }
+    size_t bfv_off = 0;
+    uint64_t bfv_len = 0;
+    if (!ipf_fw_find_pei_core_fv(fw, fw_size, &bfv_off, &bfv_len)) {
+        bfv_off = 0;
+        bfv_len = fw_size;
+    }
+    uint64_t bfv_phys = fw_base + bfv_off;
+    uint32_t bfv_size = (uint32_t)MIN(bfv_len, 0x20000U);
+    bfv_phys |= 0x8000000000000000ULL;
 
     for (size_t i = 1; i < entry_count; i++) {
         uint8_t *ent = fw + fit_off + i * 16;
@@ -1173,6 +1183,14 @@ static void ipf_fw_patch_fit(uint8_t *fw, size_t fw_size, hwaddr fw_base)
         pal[14] = EFI_SAL_FIT_PALB_TYPE;
         pal[15] = 0;
     }
+    if (entry_count > 3) {
+        uint8_t *bfv = fw + fit_off + 48;
+        stq_le_p(bfv, bfv_phys);
+        stl_le_p(bfv + 8, bfv_size);
+        stw_le_p(bfv + 12, 0);
+        bfv[14] = COMP_TYPE_FIT_BFV;
+        bfv[15] = 0;
+    }
 
     if (fw[fit_off + 14] & 0x80) {
         uint8_t *fit = fw + fit_off;
@@ -1181,8 +1199,9 @@ static void ipf_fw_patch_fit(uint8_t *fw, size_t fw_size, hwaddr fw_base)
     }
 
     qemu_log_mask(LOG_GUEST_ERROR,
-                  "IPF: FIT patch: PEI core entry=%016" PRIx64 "\n",
-                  pei_entry);
+                  "IPF: FIT patch: PEI core entry=%016" PRIx64
+                  " bfv=%016" PRIx64 " bfv_size=0x%x\n",
+                  pei_entry, bfv_phys, bfv_size);
 }
 
 static void ipf_fw_seed_spad(void)
