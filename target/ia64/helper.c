@@ -12512,6 +12512,16 @@ void HELPER(fw_pei_callsite_probe)(CPUIA64State *env, uint64_t pc)
                   " r12=%016" PRIx64 " r1=%016" PRIx64 "\n",
                   env->r[33], env->r[38], env->r[39], env->r[40],
                   env->r[12], env->r[1]);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_probe regs2 r32=%016" PRIx64
+                  " r34=%016" PRIx64 " r35=%016" PRIx64 " r36=%016" PRIx64
+                  " r37=%016" PRIx64 "\n",
+                  env->r[32], env->r[34], env->r[35], env->r[36],
+                  env->r[37]);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_probe state b0=%016" PRIx64
+                  " cfm=%016" PRIx64 " ar.pfs=%016" PRIx64 "\n",
+                  env->b[0], env->cfm, env->ar[IA64_AR_PFS]);
     if (should_abort) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_callsite_probe abort pc=%016" PRIx64
