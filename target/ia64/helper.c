@@ -12505,6 +12505,78 @@ void HELPER(fw_pei_callsite_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    CPUState *cs = env_cpu(env);
+    const uint64_t fit_ptr_addr = 0x100000000ULL - 0x20;
+    uint64_t fit_ptr = 0;
+    if (!ia64_fw_read_u64(cs, fit_ptr_addr, &fit_ptr) || !fit_ptr) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_fit_probe pc=%016" PRIx64
+                      " fit_ptr_addr=%016" PRIx64 " unreadable\n",
+                      pc, fit_ptr_addr);
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_fit_probe pc=%016" PRIx64
+                  " fit_ptr_addr=%016" PRIx64 " fit_ptr=%016" PRIx64 "\n",
+                  pc, fit_ptr_addr, fit_ptr);
+
+    uint8_t fit_dump[64];
+    if (cpu_memory_rw_debug(cs, fit_ptr, fit_dump, sizeof(fit_dump), false) == 0) {
+        char hex[3 * sizeof(fit_dump) + 1];
+        size_t pos = 0;
+        for (size_t i = 0; i < sizeof(fit_dump); i++) {
+            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", fit_dump[i]);
+        }
+        if (pos > 0) {
+            hex[pos - 1] = '\0';
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_fit_probe fit_dump[%016" PRIx64 "]: %s\n",
+                      fit_ptr, hex);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_fit_probe fit_dump[%016" PRIx64
+                      "] unreadable\n",
+                      fit_ptr);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t entry[16];
+        uint64_t ent_addr = fit_ptr + (uint64_t)i * sizeof(entry);
+        if (cpu_memory_rw_debug(cs, ent_addr, entry, sizeof(entry), false) != 0) {
+            break;
+        }
+        uint64_t addr = ldq_le_p(&entry[0]);
+        uint32_t size = entry[8] | (entry[9] << 8) | (entry[10] << 16);
+        uint8_t rev = entry[12];
+        uint8_t type = entry[13] & 0x7f;
+        uint8_t csum_valid = (entry[13] >> 7) & 1;
+        uint8_t csum = entry[14];
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_fit_probe entry%d addr=%016" PRIx64
+                      " size=0x%06x rev=%u type=0x%02x csum_valid=%u csum=0x%02x\n",
+                      i, addr, size, rev, type, csum_valid, csum);
+    }
+#endif
+}
+
 static bool ia64_fw_pei_startup_dump_enabled(void)
 {
     static int enabled = -1;
