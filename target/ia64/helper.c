@@ -12470,15 +12470,16 @@ void HELPER(fw_pei_callsite_probe)(CPUIA64State *env, uint64_t pc)
     }
     static bool dumped;
     bool abort_on_a1 = getenv("QEMU_IA64_PEI_ABORT_A1_7E") != NULL;
+    bool should_abort = abort_on_a1 && env->r[33] == 0x7e;
 
-    if (abort_on_a1 && env->r[33] == 0x7e) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: pei_callsite_probe abort pc=%016" PRIx64
-                      " r33=%016" PRIx64 "\n",
-                      pc, env->r[33]);
-        abort();
-    }
     if (dumped) {
+        if (should_abort) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_callsite_probe abort pc=%016" PRIx64
+                          " r33=%016" PRIx64 "\n",
+                          pc, env->r[33]);
+            abort();
+        }
         return;
     }
     dumped = true;
@@ -12511,6 +12512,13 @@ void HELPER(fw_pei_callsite_probe)(CPUIA64State *env, uint64_t pc)
                   " r12=%016" PRIx64 " r1=%016" PRIx64 "\n",
                   env->r[33], env->r[38], env->r[39], env->r[40],
                   env->r[12], env->r[1]);
+    if (should_abort) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_callsite_probe abort pc=%016" PRIx64
+                      " r33=%016" PRIx64 "\n",
+                      pc, env->r[33]);
+        abort();
+    }
 #endif
 }
 
