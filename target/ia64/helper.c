@@ -135,6 +135,10 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 #define IA64_IPF_FW_FLASH_BLOCKS      (IA64_IPF_FW_FLASH_SIZE / IA64_IPF_FW_FLASH_BLOCK_SIZE)
 #define IA64_IPF_FW_FLASH_ATTRS       0x00100C36U
 #define IA64_EFI_FVH_SIGNATURE        0x4856465fU /* "_FVH" */
+#define IA64_EFI_VARSTORE_SIGNATURE   0x53535624U /* "$VSS" */
+#define IA64_EFI_FLASH_SUBFV          0x0002U
+#define IA64_EFI_FLASH_MEMMAPPED_FV   0x0004U
+#define IA64_EFI_FLASH_EFI_VARIABLES  0x0b
 /* Match hw/ia64/ipf.c firmware work RAM window. */
 #define IA64_IPF_FW_WORKRAM_BASE      0x0000000100000000ULL
 #define IA64_IPF_FW_WORKRAM_SIZE      (16ULL << 20)
@@ -2535,6 +2539,13 @@ static const IA64EfiGuid ia64_efi_guid_status_debug = {
     .data4 = { 0x87, 0xe2, 0x00, 0x06, 0x29, 0x45, 0xc3, 0xb9 },
 };
 
+static const IA64EfiGuid ia64_efi_guid_flashmap_hob = {
+    .data1 = 0xb091e7d2,
+    .data2 = 0x05a0,
+    .data3 = 0x4198,
+    .data4 = { 0x94, 0xf0, 0x74, 0xb7, 0xb8, 0xc5, 0x54, 0x59 },
+};
+
 static bool ia64_fw_guid_equal(const IA64EfiGuid *a, const IA64EfiGuid *b)
 {
     return a->data1 == b->data1 && a->data2 == b->data2 && a->data3 == b->data3 &&
@@ -2562,6 +2573,16 @@ static bool ia64_fw_read_u64(CPUState *cs, uint64_t addr, uint64_t *out)
         return false;
     }
     *out = ldq_le_p(buf);
+    return true;
+}
+
+static bool ia64_fw_read_u32(CPUState *cs, uint64_t addr, uint32_t *out)
+{
+    uint8_t buf[4];
+    if (!ia64_fw_read_bytes_any(cs, addr, buf, sizeof(buf))) {
+        return false;
+    }
+    *out = ldl_le_p(buf);
     return true;
 }
 
@@ -4071,6 +4092,25 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
                               len,
                               guid0, guid1, guid2,
                               g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
+                {
+                    IA64EfiGuid guid;
+                    ia64_fw_guid_from_bytes(&gh[8], &guid);
+                    if (ia64_fw_guid_equal(&guid, &ia64_efi_guid_flashmap_hob) &&
+                        len >= 0x18 + 0x40) {
+                        uint8_t data[0x40];
+                        if (cpu_memory_rw_debug(cs, cur + 0x18, data,
+                                                sizeof(data), false) == 0) {
+                            uint8_t area_type = data[3];
+                            uint64_t base = ldq_le_p(&data[32]);
+                            uint64_t hlen = ldq_le_p(&data[40]);
+                            uint32_t attrs = ldl_le_p(&data[24]);
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: efi_hob_dump: FLASHMAP area=0x%02x base=%016" PRIx64
+                                          " len=%016" PRIx64 " attrs=0x%08x\n",
+                                          area_type, base, hlen, attrs);
+                        }
+                    }
+                }
             }
         }
 
@@ -4912,6 +4952,74 @@ static int ia64_fw_scan_flash_fvs(CPUState *cs, IA64FwFvInfo *out, int max)
     return count;
 }
 #endif
+
+static bool ia64_fw_find_varstore_region(CPUState *cs, uint64_t *out_base,
+                                         uint64_t *out_len)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)cs;
+    (void)out_base;
+    (void)out_len;
+    return false;
+#else
+    IA64FwFvInfo fv_flash[8] = { 0 };
+    int fv_count = ia64_fw_scan_flash_fvs(cs, fv_flash, ARRAY_SIZE(fv_flash));
+    for (int i = 0; i < fv_count; i++) {
+        uint8_t hdr[0x38];
+        if (cpu_memory_rw_debug(cs, fv_flash[i].base, hdr, sizeof(hdr), false) != 0) {
+            continue;
+        }
+        if (ldl_le_p(&hdr[0x28]) != IA64_EFI_FVH_SIGNATURE) {
+            continue;
+        }
+        uint64_t fv_len = ldq_le_p(&hdr[0x20]);
+        uint16_t hdr_len = lduw_le_p(&hdr[0x30]);
+        if (fv_len < sizeof(hdr) || fv_len > fv_flash[i].len) {
+            continue;
+        }
+        if (hdr_len < sizeof(hdr) || hdr_len > fv_len) {
+            continue;
+        }
+        uint64_t var_base = fv_flash[i].base + hdr_len;
+        uint32_t sig = 0;
+        if (ia64_fw_read_u32(cs, var_base, &sig) && sig == IA64_EFI_VARSTORE_SIGNATURE) {
+            uint32_t vsz = 0;
+            if (!ia64_fw_read_u32(cs, var_base + 4, &vsz) || vsz == 0 ||
+                vsz > fv_len - hdr_len) {
+                vsz = (uint32_t)(fv_len - hdr_len);
+            }
+            if (out_base) {
+                *out_base = var_base;
+            }
+            if (out_len) {
+                *out_len = vsz;
+            }
+            return true;
+        }
+    }
+
+    {
+        const uint64_t fallback_fv_base = 0x00000000ffe00000ULL;
+        uint8_t hdr[0x38];
+        if (cpu_memory_rw_debug(cs, fallback_fv_base, hdr, sizeof(hdr), false) == 0 &&
+            ldl_le_p(&hdr[0x28]) == IA64_EFI_FVH_SIGNATURE) {
+            uint64_t fv_len = ldq_le_p(&hdr[0x20]);
+            uint16_t hdr_len = lduw_le_p(&hdr[0x30]);
+            if (fv_len >= sizeof(hdr) && hdr_len >= sizeof(hdr) &&
+                hdr_len < fv_len) {
+                if (out_base) {
+                    *out_base = fallback_fv_base + hdr_len;
+                }
+                if (out_len) {
+                    *out_len = fv_len - hdr_len;
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+#endif
+}
 
 static bool ia64_fw_find_fv_by_index(CPUIA64State *env, uint8_t index,
                                      uint64_t *out_addr)
@@ -9074,6 +9182,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static uint64_t fixed_sysmem_rdesc_base;
     static bool fixed_fv_hobs;
     static uint64_t fixed_fv_hobs_base;
+    static bool fixed_flashmap_vars;
+    static uint64_t fixed_flashmap_base;
     static bool fixed_attr;
     static bool fixed_pei_span;
     static bool fixed_free_bottom;
@@ -9164,6 +9274,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         EFI_HOB_TYPE_HANDOFF = 0x0001,
         EFI_HOB_TYPE_MEMORY_ALLOCATION = 0x0002,
         EFI_HOB_TYPE_RESOURCE_DESCRIPTOR = 0x0003,
+        EFI_HOB_TYPE_GUID_EXTENSION = 0x0004,
         EFI_HOB_TYPE_FV = 0x0005,
         EFI_HOB_TYPE_END_OF_HOB_LIST = 0xffff,
     };
@@ -9717,6 +9828,120 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         } else if (fv_hob_count > 0 || fv_flash_count == 0) {
             fixed_fv_hobs = true;
             fixed_fv_hobs_base = hob_base;
+        }
+    }
+
+    if (fixed_flashmap_vars && fixed_flashmap_base && fixed_flashmap_base != hob_base) {
+        fixed_flashmap_vars = false;
+    }
+    if (!fixed_flashmap_vars && !in_flash) {
+        bool have_vars = false;
+        uint64_t cur = hob_base;
+        for (int iter = 0; iter < 4096 && cur < hob_end; iter++) {
+            uint8_t h[8];
+            if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+                break;
+            }
+            uint16_t type = lduw_le_p(&h[0]);
+            uint16_t len = lduw_le_p(&h[2]);
+            if (len < sizeof(h)) {
+                break;
+            }
+            if (type == EFI_HOB_TYPE_END_OF_HOB_LIST) {
+                break;
+            }
+            if (type == EFI_HOB_TYPE_GUID_EXTENSION && len >= 0x18) {
+                uint8_t gh[0x20];
+                if (cpu_memory_rw_debug(cs, cur, gh, sizeof(gh), false) == 0) {
+                    IA64EfiGuid guid;
+                    ia64_fw_guid_from_bytes(&gh[8], &guid);
+                    if (ia64_fw_guid_equal(&guid, &ia64_efi_guid_flashmap_hob)) {
+                        uint8_t data[0x20];
+                        if (cpu_memory_rw_debug(cs, cur + 0x18, data,
+                                                sizeof(data), false) == 0) {
+                            uint8_t area_type = data[3];
+                            if (area_type == IA64_EFI_FLASH_EFI_VARIABLES) {
+                                have_vars = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            cur += len;
+            if (cur - hob_base > (16ULL << 20)) {
+                break;
+            }
+        }
+
+        if (have_vars) {
+            fixed_flashmap_vars = true;
+            fixed_flashmap_base = hob_base;
+        } else {
+            uint64_t var_base = 0;
+            uint64_t var_len = 0;
+            if (ia64_fw_find_varstore_region(cs, &var_base, &var_len) && end_hob) {
+                uint8_t gh[0x58];
+                const uint16_t hob_len = sizeof(gh);
+                uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
+                uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
+                uint64_t new_end_hob = end_hob + hob_len;
+                uint64_t new_free_bottom_phys = free_bottom_phys + hob_len;
+
+                if (new_free_bottom_phys < free_top_phys &&
+                    new_free_bottom_phys > free_bottom_phys) {
+                    memset(gh, 0, sizeof(gh));
+                    stw_le_p(&gh[0], EFI_HOB_TYPE_GUID_EXTENSION);
+                    stw_le_p(&gh[2], hob_len);
+                    stl_le_p(&gh[4], 0);
+                    stl_le_p(&gh[8], ia64_efi_guid_flashmap_hob.data1);
+                    stw_le_p(&gh[12], ia64_efi_guid_flashmap_hob.data2);
+                    stw_le_p(&gh[14], ia64_efi_guid_flashmap_hob.data3);
+                    memcpy(&gh[16], ia64_efi_guid_flashmap_hob.data4, 8);
+
+                    uint8_t *data = &gh[0x18];
+                    data[3] = IA64_EFI_FLASH_EFI_VARIABLES;
+                    stl_le_p(&data[20], 1);
+                    stl_le_p(&data[24], IA64_EFI_FLASH_SUBFV |
+                                         IA64_EFI_FLASH_MEMMAPPED_FV);
+                    stl_le_p(&data[28], 0);
+                    stq_le_p(&data[32], var_base);
+                    stq_le_p(&data[40], var_len);
+
+                    cpu_physical_memory_write(end_hob, gh, sizeof(gh));
+
+                    uint8_t endhdr[8] = { 0 };
+                    stw_le_p(&endhdr[0], EFI_HOB_TYPE_END_OF_HOB_LIST);
+                    stw_le_p(&endhdr[2], sizeof(endhdr));
+                    cpu_physical_memory_write(new_end_hob, endhdr, sizeof(endhdr));
+
+                    uint64_t end_hob_tmpl = ldq_le_p(&phit[48]);
+                    uint64_t free_bottom_tmpl = ldq_le_p(&phit[40]);
+                    if (!end_hob_tmpl) {
+                        end_hob_tmpl = mem_bottom;
+                    }
+                    if (!free_bottom_tmpl) {
+                        free_bottom_tmpl = mem_bottom;
+                    }
+                    free_bottom = ia64_fw_encode_addr(free_bottom_tmpl,
+                                                      new_free_bottom_phys);
+                    stq_le_p(&phit[48], ia64_fw_encode_addr(end_hob_tmpl, new_end_hob));
+                    stq_le_p(&phit[40], free_bottom);
+                    cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+
+                    end_hob = new_end_hob;
+                    hob_end = new_end_hob + sizeof(endhdr);
+                    env->fw_phit_free_bottom = free_bottom;
+                    env->fw_phit_free_top = free_top;
+                    fixed_flashmap_vars = true;
+                    fixed_flashmap_base = hob_base;
+
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: hob_patch: inserted flashmap vars"
+                                  " base=%016" PRIx64 " len=%016" PRIx64 "\n",
+                                  var_base, var_len);
+                }
+            }
         }
     }
 

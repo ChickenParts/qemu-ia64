@@ -76,6 +76,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPFMachineState, IPF_MACHINE)
 
 
 #define FIRMWARE_FILE    "Flash.fd"
+
 /*
  * Xen's IA-64 HVM builder enters guest firmware at a pseudo-reset entry point
  * within the GFW window (see xc_ia64_hvm_build.c). This is a region-encoded
@@ -149,6 +150,146 @@ struct IPFMachineState {
     /* I/O tracing state (QEMU_IPF_TRACE_* env vars). */
     uint32_t trace_pci_cfgaddr;
 };
+
+#define IPF_VARSTORE_SIGNATURE 0x53535624U /* "$VSS" */
+#define IPF_VARSTORE_FORMATTED 0x5a
+#define IPF_VARSTORE_HEALTHY   0xfe
+
+static bool ipf_fw_nvram_blank(const uint8_t *buf, size_t size)
+{
+    bool all_ff = true;
+    bool all_00 = true;
+    for (size_t i = 0; i < size; i++) {
+        if (buf[i] != 0xff) {
+            all_ff = false;
+        }
+        if (buf[i] != 0x00) {
+            all_00 = false;
+        }
+        if (!all_ff && !all_00) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ipf_fw_nvram_header_ok(const uint8_t *buf, size_t size,
+                                   uint32_t *out_size)
+{
+    if (size < 16) {
+        return false;
+    }
+    uint32_t sig = ldl_le_p(buf);
+    uint32_t vsz = ldl_le_p(buf + 4);
+    uint8_t fmt = buf[8];
+    uint8_t st = buf[9];
+    if (out_size) {
+        *out_size = vsz;
+    }
+    return sig == IPF_VARSTORE_SIGNATURE &&
+           vsz <= size && vsz >= 16 &&
+           fmt == IPF_VARSTORE_FORMATTED &&
+           st == IPF_VARSTORE_HEALTHY;
+}
+
+static bool ipf_fw_fvh_parse(const uint8_t *fv, size_t limit,
+                             uint32_t *hdr_len, uint64_t *fv_len)
+{
+    if (limit < 0x38) {
+        return false;
+    }
+    uint64_t len = ldq_le_p(fv + 0x20);
+    uint32_t sig = ldl_le_p(fv + 0x28);
+    uint16_t hlen = lduw_le_p(fv + 0x30);
+    if (sig != 0x4856465fU) { /* "_FVH" */
+        return false;
+    }
+    if (hlen < 0x38 || len < hlen || len > limit) {
+        return false;
+    }
+    if (hdr_len) {
+        *hdr_len = hlen;
+    }
+    if (fv_len) {
+        *fv_len = len;
+    }
+    return true;
+}
+
+static void ipf_fw_init_varstore(IPFMachineState *m)
+{
+    const uint64_t var_base = 0x00000000ffe00000ULL;
+    if (var_base < GFW_START || var_base >= GFW_START + GFW_SIZE) {
+        return;
+    }
+    uint64_t off = var_base - GFW_START;
+    uint8_t *fw = memory_region_get_ram_ptr(&m->rom);
+    if (!fw || off >= GFW_SIZE) {
+        return;
+    }
+
+    uint8_t *fv = fw + off;
+    uint32_t hdr_len = 0;
+    uint64_t fv_len = 0;
+    if (!ipf_fw_fvh_parse(fv, GFW_SIZE - off, &hdr_len, &fv_len)) {
+        return;
+    }
+
+    uint8_t *vs = fv + hdr_len;
+    size_t vs_limit = (size_t)(fv_len - hdr_len);
+    uint32_t vsz = 0;
+    bool force = getenv("QEMU_IPF_VARSTORE_FORCE") != NULL;
+    bool blank = ipf_fw_nvram_blank(vs, vs_limit);
+    bool ok = ipf_fw_nvram_header_ok(vs, vs_limit, &vsz);
+    uint32_t vsz_report = vsz;
+    if (force || blank || !ok) {
+        memset(vs, 0xff, vs_limit);
+        stl_le_p(vs, IPF_VARSTORE_SIGNATURE);
+        stl_le_p(vs + 4, (uint32_t)vs_limit);
+        vs[8] = IPF_VARSTORE_FORMATTED;
+        vs[9] = IPF_VARSTORE_HEALTHY;
+        vs[10] = 0;
+        vs[11] = 0;
+        stl_le_p(vs + 12, 0);
+        vsz_report = (uint32_t)vs_limit;
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: VARSTORE init force=%d blank=%d ok=%d size=0x%x\n",
+                      force ? 1 : 0, blank ? 1 : 0, ok ? 1 : 0, vsz_report);
+    }
+}
+
+static void ipf_fw_init_nvram(IPFMachineState *m)
+{
+    uint8_t *fw = memory_region_get_ram_ptr(&m->rom);
+    if (!fw || NVRAM_OFFSET + NVRAM_SIZE > GFW_SIZE) {
+        return;
+    }
+
+    uint8_t *nv = fw + NVRAM_OFFSET;
+    uint32_t vsz = 0;
+    bool force = getenv("QEMU_IPF_NVRAM_FORCE") != NULL;
+    bool blank = ipf_fw_nvram_blank(nv, NVRAM_SIZE);
+    bool ok = ipf_fw_nvram_header_ok(nv, NVRAM_SIZE, &vsz);
+    if (force || blank || !ok) {
+        memset(nv, 0xff, NVRAM_SIZE);
+        stl_le_p(nv, IPF_VARSTORE_SIGNATURE);
+        stl_le_p(nv + 4, NVRAM_SIZE);
+        nv[8] = IPF_VARSTORE_FORMATTED;
+        nv[9] = IPF_VARSTORE_HEALTHY;
+        nv[10] = 0;
+        nv[11] = 0;
+        stl_le_p(nv + 12, 0);
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: NVRAM init force=%d blank=%d ok=%d size=0x%x\n",
+                      force ? 1 : 0, blank ? 1 : 0, ok ? 1 : 0, vsz);
+    }
+}
 
 #define TYPE_IPF_PC "ipf-pc"
 OBJECT_DECLARE_SIMPLE_TYPE(IPFPC, IPF_PC)
@@ -3926,6 +4067,8 @@ static void ipf_init(MachineState *machine)
         }
         if (run_firmware) {
             ipf_fw_setup_pei_handoff(buf, (size_t)image_size, fw_offset);
+            ipf_fw_init_nvram(m);
+            ipf_fw_init_varstore(m);
         }
         if (run_firmware) {
             const char *dxe_dump = getenv("QEMU_IPF_FW_DXE_DUMP");
