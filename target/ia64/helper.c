@@ -2620,6 +2620,7 @@ static bool ia64_fw_pei_get_ps_ptr(CPUIA64State *env, uint64_t arg0,
     CPUState *cs = env_cpu(env);
     uint64_t tmp = 0;
     const uint32_t core_sig = 0x43696550u; /* "PeiC" */
+    static bool logged;
 
     if (!arg0) {
         return false;
@@ -2627,12 +2628,27 @@ static bool ia64_fw_pei_get_ps_ptr(CPUIA64State *env, uint64_t arg0,
 
     if (ia64_fw_pei_is_ps_table(cs, arg0)) {
         *ps_out = arg0;
+        if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            logged = true;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ps_ptr ip=%016" PRIx64
+                          " arg0=%016" PRIx64 " src=arg0\n",
+                          env->ip, arg0);
+        }
         return true;
     }
 
     if (ia64_fw_read_u64(cs, arg0, &tmp) && tmp != 0) {
         if (ia64_fw_pei_is_ps_table(cs, tmp)) {
             *ps_out = tmp;
+            if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                logged = true;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ps_ptr ip=%016" PRIx64
+                              " arg0=%016" PRIx64 " src=arg0_ptr ps=%016"
+                              PRIx64 "\n",
+                              env->ip, arg0, tmp);
+            }
             return true;
         }
         uint8_t sig_buf[4];
@@ -2642,6 +2658,14 @@ static bool ia64_fw_pei_get_ps_ptr(CPUIA64State *env, uint64_t arg0,
             ia64_fw_read_u64(cs, tmp + 8, &ps_ptr) &&
             ia64_fw_pei_is_ps_table(cs, ps_ptr)) {
             *ps_out = ps_ptr;
+            if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                logged = true;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ps_ptr ip=%016" PRIx64
+                              " arg0=%016" PRIx64 " src=arg0_ptr_peicore"
+                              " peicore=%016" PRIx64 " ps=%016" PRIx64 "\n",
+                              env->ip, arg0, tmp, ps_ptr);
+            }
             return true;
         }
     }
@@ -2654,6 +2678,14 @@ static bool ia64_fw_pei_get_ps_ptr(CPUIA64State *env, uint64_t arg0,
             ia64_fw_read_u64(cs, arg0 + 8, &ps_ptr) &&
             ia64_fw_pei_is_ps_table(cs, ps_ptr)) {
             *ps_out = ps_ptr;
+            if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                logged = true;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ps_ptr ip=%016" PRIx64
+                              " arg0=%016" PRIx64 " src=arg0_peicore"
+                              " ps=%016" PRIx64 "\n",
+                              env->ip, arg0, ps_ptr);
+            }
             return true;
         }
     }
