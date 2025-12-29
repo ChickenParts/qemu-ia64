@@ -1589,6 +1589,10 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
             gen_helper_fw_sal_call_probe(tcg_env,
                                          tcg_constant_i64(ctx->base.pc_next));
         }
+        if (pc_low == 0x1fffffff1fff5b00ULL) {
+            gen_helper_fw_sal_call_probe(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next));
+        }
     }
 
     if (ctx->mem_idx != MMU_USER_IDX &&
