@@ -380,6 +380,7 @@ void ia64_intr_push_window(CPUIA64State *env);
 #ifndef CONFIG_USER_ONLY
 void ia64_itm_update(CPUIA64State *env);
 void ia64_rse_switch_bspstore(CPUIA64State *env, uint64_t new_bspstore);
+void ia64_fw_dump_hobs_and_gcd(CPUIA64State *env);
 #endif
 
 #define cpu_signal_handler cpu_ia64_signal_handler

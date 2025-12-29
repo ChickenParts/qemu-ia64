@@ -3909,6 +3909,15 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
                   free_bottom_phys, free_top_phys,
                   end_hob_phys);
 
+    {
+        IA64CPU *cpu = IA64_CPU(cs);
+        CPUIA64State *env = &cpu->env;
+        env->fw_phit_mem_bottom = mem_bottom;
+        env->fw_phit_mem_top = mem_top;
+        env->fw_phit_free_bottom = free_bottom;
+        env->fw_phit_free_top = free_top;
+    }
+
     uint64_t cur = hob_base;
     for (int iter = 0; iter < 4096; iter++) {
         uint8_t h[8];
@@ -4041,6 +4050,21 @@ static bool ia64_fw_dump_efi_hobs_force(CPUState *cs, uint64_t stack_hint)
 }
 
 #ifndef CONFIG_USER_ONLY
+static void ia64_fw_dump_gcd_map_candidates(CPUIA64State *env);
+
+void ia64_fw_dump_hobs_and_gcd(CPUIA64State *env)
+{
+    if (!env) {
+        return;
+    }
+    CPUState *cs = env_cpu(env);
+    hwaddr stack_phys = ia64_phys_mode_addr(env->r[12]);
+    if (stack_phys) {
+        (void)ia64_fw_dump_efi_hobs_force(cs, stack_phys);
+    }
+    ia64_fw_dump_gcd_map_candidates(env);
+}
+
 static void ia64_fw_dump_gcd_map_candidates(CPUIA64State *env)
 {
     /*
@@ -5108,6 +5132,8 @@ void HELPER(fw_pei_install_mem_fix)(CPUIA64State *env, uint64_t pc)
                           pc, base_raw, new_base, size, mem_top);
         }
     }
+
+    ia64_fw_try_patch_efi_hobs(env);
 #endif
 }
 
@@ -9703,7 +9729,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                     stw_le_p(&rh[2], 0x30);
                     stl_le_p(&rh[24], 0 /* EFI_RESOURCE_SYSTEM_MEMORY */);
                     stl_le_p(&rh[28], (uint32_t)attr);
-                    stq_le_p(&rh[32], segs[i].start);
+                    stq_le_p(&rh[32], ia64_fw_encode_addr(mem_bottom, segs[i].start));
                     stq_le_p(&rh[40], segs[i].len);
                     cpu_physical_memory_write(end_hob + (uint64_t)i * 0x30ULL, rh, sizeof(rh));
                 }
@@ -13484,10 +13510,24 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     CPUState *cs = env_cpu(env);
     cpu_restore_state(cs, GETPC());
 
+    {
+        static int dump_enabled = -1;
+        static bool dumped;
+        if (dump_enabled == -1) {
+            const char *s = getenv("QEMU_IA64_HANG_DUMP_GCD");
+            dump_enabled = (s && *s) ? 1 : 0;
+        }
+        if (dump_enabled && !dumped) {
+            dumped = true;
+            ia64_fw_dump_hobs_and_gcd(env);
+        }
+    }
+
     ia64_fw_trace_dump();
     ia64_fw_dump_code(env, "hang_pc", pc, 64);
     ia64_fw_dump_code(env, "hang_from", env->last_branch_from, 64);
     ia64_fw_dump_code(env, "hang_to", env->last_branch_to, 64);
+    ia64_fw_dump_code(env, "hang_b7", env->b[7], 64);
     {
         static int extra_dump_inited;
         static uint64_t extra_dump_pc;
@@ -13594,14 +13634,16 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " r1=%016" PRIx64 " r12=%016" PRIx64 " r13=%016" PRIx64
                   " r24=%016" PRIx64 " r27=%016" PRIx64
                   " r28=%016" PRIx64 " r29=%016" PRIx64
-                  " r31=%016" PRIx64 " r35=%016" PRIx64 " r36=%016" PRIx64
+                  " r30=%016" PRIx64 " r31=%016" PRIx64
+                  " r35=%016" PRIx64 " r36=%016" PRIx64
                   " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " r37=%016" PRIx64 " r38=%016" PRIx64 " r39=%016" PRIx64
                   " r52=%016" PRIx64 " r53=%016" PRIx64
                   " kbias=%016" PRIx64
                   " con_waiter_va=%016" PRIx64 " con_waiter=%02x"
                   " con_owner_va=%016" PRIx64 " con_owner=%016" PRIx64
                   " con_ok=%u"
-                  " b0=%016" PRIx64 " b6=%016" PRIx64 "\n",
+                  " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64 "\n",
                   threshold, env->dbg_tb_total, pc, ri,
                   env->dbg_tb_same1, env->dbg_tb_same2,
                   env->ip, env->psr, env->cfm, env->pr,
@@ -13611,14 +13653,15 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   env->r[8], env->r[9], env->r[10], env->r[11],
                   env->r[1], env->r[12], env->r[13],
                   env->r[24], env->r[27], env->r[28], env->r[29],
-                  env->r[31], env->r[35], env->r[36],
+                  env->r[30], env->r[31], env->r[35], env->r[36],
                   env->r[32], env->r[33], env->r[34],
+                  env->r[37], env->r[38], env->r[39],
                   env->r[52], env->r[53],
                   env->kernel_bias,
                   con_waiter_va, (unsigned)con_waiter,
                   con_owner_va, con_owner,
                   con_ok,
-                  env->b[0], env->b[6]);
+                  env->b[0], env->b[6], env->b[7]);
     cpu_abort(cs, "IA64: hang detected at tbpc=%016" PRIx64 " ri=%u", pc, ri);
 }
 

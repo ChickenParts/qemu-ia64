@@ -34,6 +34,51 @@
 
 static bool serial_mm_trace_inited;
 static int serial_mm_trace_left;
+static SerialMMLineHook serial_mm_line_hook;
+static void *serial_mm_line_opaque;
+static char serial_mm_line_buf[512];
+static size_t serial_mm_line_len;
+static int serial_mm_line_trace = -1;
+
+void serial_mm_set_line_hook(SerialMMLineHook hook, void *opaque)
+{
+    serial_mm_line_hook = hook;
+    serial_mm_line_opaque = opaque;
+    serial_mm_line_len = 0;
+    serial_mm_line_buf[0] = '\0';
+}
+
+static inline void serial_mm_hook_char(uint8_t ch)
+{
+    if (!serial_mm_line_hook) {
+        return;
+    }
+    if (ch == '\r') {
+        return;
+    }
+    if (ch != '\n' && serial_mm_line_len + 1 < sizeof(serial_mm_line_buf)) {
+        serial_mm_line_buf[serial_mm_line_len++] = (char)ch;
+        serial_mm_line_buf[serial_mm_line_len] = '\0';
+        if (strstr(serial_mm_line_buf, "ASSERT in") &&
+            strstr(serial_mm_line_buf, "Gcd.c")) {
+            serial_mm_line_hook(serial_mm_line_buf, serial_mm_line_opaque);
+        }
+        return;
+    }
+    if (serial_mm_line_len > 0) {
+        if (serial_mm_line_trace == -1) {
+            const char *s = getenv("QEMU_SERIAL_MM_LINE_TRACE");
+            serial_mm_line_trace = (s && *s) ? 1 : 0;
+        }
+        if (serial_mm_line_trace && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "serial-mm line=\"%s\"\n", serial_mm_line_buf);
+        }
+        serial_mm_line_hook(serial_mm_line_buf, serial_mm_line_opaque);
+    }
+    serial_mm_line_len = 0;
+    serial_mm_line_buf[0] = '\0';
+}
 
 static inline bool serial_mm_trace_enabled(void)
 {
@@ -76,8 +121,12 @@ static void serial_mm_write(void *opaque, hwaddr addr,
                             uint64_t value, unsigned size)
 {
     SerialMM *s = SERIAL_MM(opaque);
+    hwaddr reg = addr >> s->regshift;
     value &= 255;
     serial_mm_trace_op("wr", s, addr, size, value);
+    if (reg == 0) {
+        serial_mm_hook_char((uint8_t)value);
+    }
     serial_io_ops.write(&s->serial, addr >> s->regshift, value, 1);
 }
 

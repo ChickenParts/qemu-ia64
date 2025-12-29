@@ -44,6 +44,9 @@ struct SerialMM {
     uint8_t endianness;
 };
 
+typedef void (*SerialMMLineHook)(const char *line, void *opaque);
+void serial_mm_set_line_hook(SerialMMLineHook hook, void *opaque);
+
 SerialMM *serial_mm_init(MemoryRegion *address_space,
                          hwaddr base, int regshift,
                          qemu_irq irq, int baudbase,

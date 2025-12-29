@@ -122,6 +122,7 @@ struct IPFMachineState {
     char debugcon_line[512];
     bool debugcon_trace_once;
     bool debugcon_line_traced;
+    bool debugcon_gcd_dumped;
 
     MemoryRegion rom;
     MemoryRegion ram_low;
@@ -2840,6 +2841,14 @@ static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
                                     int log_to_qemu_log, int dxe_trace_enabled,
                                     int hob_on_assert_enabled)
 {
+    if (!m || !line) {
+        return;
+    }
+    if (!m->debugcon_gcd_dumped &&
+        strstr(line, "ASSERT in") && strstr(line, "Gcd.c") && m->cpu) {
+        m->debugcon_gcd_dumped = true;
+        ia64_fw_dump_hobs_and_gcd(&m->cpu->env);
+    }
     if (!log_to_qemu_log || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         return;
     }
@@ -2855,6 +2864,13 @@ static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
         strstr(line, "hob signature") ||
         strstr(line, "HOB signature")) {
         ipf_debugcon_log_hob(m, "memmap", line);
+    }
+    if (!m->debugcon_gcd_dumped &&
+        strstr(line, "ASSERT in") && strstr(line, "Gcd.c")) {
+        m->debugcon_gcd_dumped = true;
+        if (m->cpu) {
+            ia64_fw_dump_hobs_and_gcd(&m->cpu->env);
+        }
     }
 
     if (!m->debugcon_trace_once &&
@@ -2892,6 +2908,64 @@ static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
     }
 }
 
+static void ipf_uart_line_hook(const char *line, void *opaque)
+{
+    IPFMachineState *m = opaque;
+    if (!m || !line) {
+        return;
+    }
+    if (m->debugcon_gcd_dumped) {
+        return;
+    }
+    if (strstr(line, "ASSERT in") && strstr(line, "Gcd.c")) {
+        m->debugcon_gcd_dumped = true;
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: UART ASSERT line=\"%s\"\n", line);
+        }
+        if (m->cpu) {
+            ia64_fw_dump_hobs_and_gcd(&m->cpu->env);
+        }
+    }
+}
+
+static IPFMachineState *ipf_uart_line_owner;
+
+static void ipf_uart_line_feed(IPFMachineState *m, uint8_t ch)
+{
+    static char buf[512];
+    static size_t len;
+    static int trace_enabled = -1;
+
+    if (!m) {
+        return;
+    }
+    if (ch == '\r') {
+        return;
+    }
+    if (ch != '\n' && len + 1 < sizeof(buf)) {
+        buf[len++] = (char)ch;
+        buf[len] = '\0';
+        if (strstr(buf, "ASSERT in") && strstr(buf, "Gcd.c")) {
+            ipf_uart_line_hook(buf, m);
+        }
+        return;
+    }
+    if (len > 0) {
+        if (trace_enabled == -1) {
+            const char *s = getenv("QEMU_IPF_UART_LINE_TRACE");
+            trace_enabled = (s && *s) ? 1 : 0;
+        }
+        if (trace_enabled && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ipf-uart line=\"%s\"\n", buf);
+        }
+        ipf_uart_line_hook(buf, m);
+    }
+    len = 0;
+    buf[0] = '\0';
+}
+
 static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
                                unsigned size)
 {
@@ -2900,9 +2974,14 @@ static void ipf_debugcon_write(void *opaque, hwaddr addr, uint64_t data,
     static int log_to_qemu_log = -1;
     static int dxe_trace_enabled = -1;
     static int hob_on_assert_enabled = -1;
+    static bool debugcon_seen;
 
     if (size != 1) {
         return;
+    }
+    if (!debugcon_seen && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        debugcon_seen = true;
+        qemu_log_mask(LOG_GUEST_ERROR, "IPF: debugcon active\n");
     }
 
     if (log_to_qemu_log == -1) {
@@ -3047,6 +3126,9 @@ static void ipf_uart_ioport_write(void *opaque, hwaddr addr, uint64_t data,
     if (size != 1 || addr >= 8) {
         return;
     }
+    if (addr == 0) {
+        ipf_uart_line_feed(ipf_uart_line_owner, (uint8_t)data);
+    }
     serial_io_ops.write(s, addr, data & 0xff, 1);
 }
 
@@ -3078,6 +3160,8 @@ static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(uart), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(uart), 0, irq);
     m->uart_mm = uart;
+    ipf_uart_line_owner = m;
+    serial_mm_set_line_hook(ipf_uart_line_hook, m);
 
     /* Overlay the UART on top of the GFW RAM window. */
     MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
