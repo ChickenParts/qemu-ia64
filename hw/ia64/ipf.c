@@ -853,6 +853,86 @@ static bool ipf_fw_is_erased(const uint8_t *buf, size_t len)
     return true;
 }
 
+static bool ipf_fw_probe_fit_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IPF_FW_PROBE_FIT");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
+{
+    if (!ipf_fw_probe_fit_enabled()) {
+        return;
+    }
+
+    const uint8_t sig[8] = { '_', 'F', 'I', 'T', '_', ' ', ' ', ' ' };
+    size_t fit_off = SIZE_MAX;
+    for (size_t i = 0; i + sizeof(sig) <= fw_size; i++) {
+        if (memcmp(fw + i, sig, sizeof(sig)) == 0) {
+            fit_off = i;
+            break;
+        }
+    }
+    if (fit_off == SIZE_MAX) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: FIT probe: signature not found in firmware\n");
+        return;
+    }
+
+    if (fit_off + 16 > fw_size) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: FIT probe: header truncated at off=0x%zx\n",
+                      fit_off);
+        return;
+    }
+
+    const uint8_t *hdr = fw + fit_off;
+    uint32_t entry_count = hdr[8] | (hdr[9] << 8) | (hdr[10] << 16);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IPF: FIT probe: off=0x%zx addr=%016" PRIx64
+                  " entries=%u type=0x%02x\n",
+                  fit_off, (uint64_t)(fw_base + fit_off), entry_count,
+                  hdr[14] & 0x7f);
+
+    if (entry_count == 0) {
+        return;
+    }
+    size_t max_entries = MIN((size_t)entry_count, 16UL);
+    bool any_nonzero = false;
+    for (size_t i = 1; i < max_entries; i++) {
+        size_t ent_off = fit_off + i * 16;
+        if (ent_off + 16 > fw_size) {
+            break;
+        }
+        const uint8_t *ent = fw + ent_off;
+        bool all_zero = true;
+        for (size_t j = 0; j < 16; j++) {
+            if (ent[j] != 0) {
+                all_zero = false;
+                break;
+            }
+        }
+        if (!all_zero) {
+            any_nonzero = true;
+            uint64_t addr = ldq_le_p(&ent[0]);
+            uint32_t size = ent[8] | (ent[9] << 8) | (ent[10] << 16);
+            uint8_t type = ent[13] & 0x7f;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: FIT probe: entry%zu addr=%016" PRIx64
+                          " size=0x%06x type=0x%02x\n",
+                          i, addr, size, type);
+        }
+    }
+    if (!any_nonzero) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: FIT probe: entries appear empty\n");
+    }
+}
+
 static void ipf_fw_seed_spad(void)
 {
     uint8_t cur[8];
@@ -4057,6 +4137,7 @@ static void ipf_init(MachineState *machine)
         if (ipf_fw_scan_enabled()) {
             ipf_fw_scan_firmware(buf, (size_t)image_size, fw_offset);
         }
+        ipf_fw_probe_fit(buf, (size_t)image_size, fw_offset);
         address_space_write(&address_space_memory, fw_offset,
                             MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
         cpu_flush_icache_range(fw_offset, (size_t)image_size);
