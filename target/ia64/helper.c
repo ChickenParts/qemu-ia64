@@ -9205,6 +9205,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static bool dumped_reloc_hob;
     static uint64_t hob_ptr_stack_page;
     static int hob_patch_trace = -1;
+    static int hob_force_ram = -1;
 
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_EFI_HOB_PATCH");
@@ -9256,6 +9257,17 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         const char *s = getenv("QEMU_IA64_EFI_HOB_PATCH_TRACE");
         hob_patch_trace = (s && *s) ? 1 : 0;
     }
+    if (hob_force_ram == -1) {
+        const char *s = getenv("QEMU_IA64_EFI_HOB_FORCE_RAM");
+        if (!s || !*s) {
+            hob_force_ram = 1;
+        } else if (!strcmp(s, "0") || !strcmp(s, "off") ||
+                   !strcmp(s, "false") || !strcmp(s, "no")) {
+            hob_force_ram = 0;
+        } else {
+            hob_force_ram = 1;
+        }
+    }
     if (dump_enabled && !dumped_hobs) {
         if ((dump_throttle++ & 0xff) == 0) {
             if (ia64_fw_dump_efi_hobs(cs, stack_phys)) {
@@ -9266,7 +9278,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     hwaddr ip_phys = ia64_phys_mode_addr(env->ip);
     bool in_flash = (ip_phys >= 0xff000000ULL);
     bool in_hob_loop = (env->ip >= 0x11b80 && env->ip < 0x11d80);
-    if ((throttle++ & 0x7f) != 0 && !in_hob_loop) {
+    if (!hob_force_ram && (throttle++ & 0x7f) != 0 && !in_hob_loop) {
         return;
     }
 
@@ -9533,11 +9545,20 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         }
     }
 
+    const uint64_t vga_start = 0x000a0000ULL;
+    const uint64_t vga_size = 0x00020000ULL;
+    uint64_t ram_size = current_machine ? current_machine->ram_size : 0;
+    if (!ram_size && env->fw_mem_size) {
+        ram_size = env->fw_mem_size;
+    }
+    uint64_t ram_base = 0;
+    uint64_t ram_limit = ram_size;
+    uint64_t ram_top = ram_limit;
+    if (ram_limit >= vga_start) {
+        ram_top += vga_size;
+    }
     {
         uint64_t addr_tag = mem_bottom;
-        uint64_t ram_size = current_machine ? current_machine->ram_size : 0;
-        uint64_t ram_base = 0;
-        uint64_t ram_limit = ram_size;
         uint64_t mem_bottom_phys_local = ia64_phys_mode_addr(mem_bottom);
         uint64_t mem_top_phys_local = ia64_phys_mode_addr(mem_top);
         uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
@@ -9589,6 +9610,10 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             if (sysmem_max > sysmem_min) {
                 ram_base = sysmem_min;
                 ram_limit = sysmem_max;
+                ram_top = ram_limit;
+                if (ram_limit >= vga_start) {
+                    ram_top += vga_size;
+                }
             }
         }
 
@@ -9602,9 +9627,38 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                           mem_bad ? 1 : 0, ram_size, ram_limit);
         }
 
-        if (ram_limit && (mem_bad || mem_top_phys_local > ram_limit)) {
+        if (ram_limit && mem_bottom_phys_local != ram_base) {
             uint64_t new_mem_bottom = ram_base;
-            uint64_t new_mem_top = ram_limit;
+            uint64_t new_mem_top = ram_top;
+            uint64_t new_free_bottom = new_mem_bottom;
+            uint64_t new_free_top = new_mem_top;
+
+            if (end_hob >= new_mem_bottom && end_hob < new_mem_top) {
+                new_free_bottom = (end_hob + 0x1fULL) & ~0x1fULL;
+            }
+            if (new_free_bottom >= new_free_top) {
+                new_free_bottom = new_mem_bottom;
+                new_free_top = new_mem_top;
+            }
+
+            mem_bottom = ia64_fw_encode_addr(addr_tag, new_mem_bottom);
+            mem_top = ia64_fw_encode_addr(addr_tag, new_mem_top);
+            free_bottom = ia64_fw_encode_addr(addr_tag, new_free_bottom);
+            free_top = ia64_fw_encode_addr(addr_tag, new_free_top);
+
+            stq_le_p(&phit[16], mem_top);
+            stq_le_p(&phit[24], mem_bottom);
+            stq_le_p(&phit[32], free_top);
+            stq_le_p(&phit[40], free_bottom);
+            cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: realign PHIT mem/free to mem=%016" PRIx64
+                          "-%016" PRIx64 " free=%016" PRIx64 "-%016" PRIx64 "\n",
+                          mem_bottom, mem_top, free_bottom, free_top);
+        } else if (ram_limit && (mem_bad || mem_top_phys_local > ram_top)) {
+            uint64_t new_mem_bottom = ram_base;
+            uint64_t new_mem_top = ram_top;
             uint64_t new_free_bottom = new_mem_bottom;
             uint64_t new_free_top = new_mem_top;
 
@@ -9644,6 +9698,36 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                               "-%016" PRIx64 " free=%016" PRIx64 "-%016" PRIx64 "\n",
                               mem_bottom, mem_top, free_bottom, free_top);
             }
+        } else if (ram_limit && mem_top_phys_local < ram_top) {
+            uint64_t new_mem_top = ram_top;
+            uint64_t free_bottom_phys_local = ia64_phys_mode_addr(free_bottom);
+            uint64_t free_top_phys_local = ia64_phys_mode_addr(free_top);
+            uint64_t new_free_bottom = free_bottom_phys_local;
+            uint64_t new_free_top = free_top_phys_local;
+
+            if (end_hob && (end_hob + 0x1fULL) > new_free_bottom) {
+                new_free_bottom = (end_hob + 0x1fULL) & ~0x1fULL;
+            }
+            if (new_free_top < new_mem_top) {
+                new_free_top = new_mem_top;
+            }
+            if (new_free_bottom >= new_free_top) {
+                new_free_bottom = mem_bottom_phys_local;
+                new_free_top = new_mem_top;
+            }
+
+            mem_top = ia64_fw_encode_addr(addr_tag, new_mem_top);
+            free_bottom = ia64_fw_encode_addr(addr_tag, new_free_bottom);
+            free_top = ia64_fw_encode_addr(addr_tag, new_free_top);
+            stq_le_p(&phit[16], mem_top);
+            stq_le_p(&phit[32], free_top);
+            stq_le_p(&phit[40], free_bottom);
+            cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: expand PHIT mem_top to %016" PRIx64
+                          " free=%016" PRIx64 "-%016" PRIx64 "\n",
+                          mem_top, free_bottom, free_top);
         } else {
             if (free_bottom_phys < mem_bottom_phys_local ||
                 free_bottom_phys > mem_top_phys_local ||
@@ -10263,22 +10347,35 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             uint64_t rlen = ldq_le_p(&rh[40]);
             uint32_t rattr = ldl_le_p(&rh[28]);
 
-            if (!fixed_pei_span &&
-                start == mem_bottom_phys_local &&
-                (orig_mem_top_phys > mem_bottom_phys_local) &&
-                rlen == (orig_mem_top_phys - mem_bottom_phys_local)) {
-                uint64_t extra = slack_size ? slack_size : (8ULL << 20);
-                uint64_t new_len = rlen + extra;
+        if (!fixed_pei_span &&
+            start == mem_bottom_phys_local &&
+            (orig_mem_top_phys > mem_bottom_phys_local) &&
+            rlen == (orig_mem_top_phys - mem_bottom_phys_local)) {
+            uint64_t extra = slack_size ? slack_size : (8ULL << 20);
+            uint64_t new_len = rlen + extra;
                 stq_le_p(&rh[40], new_len);
                 cpu_physical_memory_write(cur, rh, sizeof(rh));
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: hob_patch: PEI mem len %016" PRIx64 " -> %016" PRIx64
                               " at hob=%016" PRIx64 "\n",
                               rlen, new_len, cur);
-                fixed_pei_span = true;
-                /* Refresh rlen for subsequent matches in this iteration. */
-                rlen = new_len;
-            }
+            fixed_pei_span = true;
+            /* Refresh rlen for subsequent matches in this iteration. */
+            rlen = new_len;
+        }
+        if (ram_top &&
+            start == mem_bottom_phys_local &&
+            ram_top > mem_bottom_phys_local &&
+            rlen < (ram_top - mem_bottom_phys_local)) {
+            uint64_t new_len = ram_top - mem_bottom_phys_local;
+            stq_le_p(&rh[40], new_len);
+            cpu_physical_memory_write(cur, rh, sizeof(rh));
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: hob_patch: expand sysmem len %016" PRIx64 " -> %016" PRIx64
+                          " at hob=%016" PRIx64 "\n",
+                          rlen, new_len, cur);
+            rlen = new_len;
+        }
 
             if (start == mem_bottom_phys_local &&
                 (rattr & (EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE |
@@ -11955,6 +12052,58 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                                   " gp_var=%016" PRIx64
                                   " old=%016" PRIx64 " new=%016" PRIx64 "\n",
                                   pc, addr, cur, vals[i]);
+                }
+            }
+        }
+    }
+
+    {
+        const uint64_t vga_start = 0x000a0000ULL;
+        const uint64_t vga_size = 0x00020000ULL;
+        uint64_t ram_size = env->fw_mem_size;
+        if (!ram_size && current_machine) {
+            ram_size = current_machine->ram_size;
+        }
+        if (!ram_size && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                          " PHIT patch skipped (ram_size=0)\n",
+                          pc);
+        }
+        if (ram_size) {
+            uint8_t phit[0x38];
+            if (cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), false) == 0) {
+                uint16_t htype = lduw_le_p(&phit[0]);
+                uint16_t hlen = lduw_le_p(&phit[2]);
+                if (htype == 0x0001 && hlen >= sizeof(phit)) {
+                    uint64_t mem_top_raw = ldq_le_p(&phit[16]);
+                    uint64_t mem_bottom_raw = ldq_le_p(&phit[24]);
+                    uint64_t end_hob_raw = ldq_le_p(&phit[48]);
+                    uint64_t end_hob_phys = ia64_phys_mode_addr(end_hob_raw);
+                    uint64_t ram_top = ram_size;
+                    if (ram_size >= vga_start) {
+                        ram_top += vga_size;
+                    }
+                    uint64_t free_bottom_phys = (end_hob_phys + 0x1fULL) & ~0x1fULL;
+                    if (free_bottom_phys > ram_top) {
+                        free_bottom_phys = 0;
+                    }
+                    stq_le_p(&phit[16], ia64_fw_encode_addr(mem_top_raw, ram_top));
+                    stq_le_p(&phit[24], ia64_fw_encode_addr(mem_bottom_raw, 0));
+                    stq_le_p(&phit[32], ia64_fw_encode_addr(mem_top_raw, ram_top));
+                    stq_le_p(&phit[40], ia64_fw_encode_addr(mem_bottom_raw, free_bottom_phys));
+                    cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+                    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                                      " PHIT mem_top=%016" PRIx64 " free_bottom=%016" PRIx64 "\n",
+                                      pc, ram_top, free_bottom_phys);
+                    }
+                } else if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_pei_hob_init_fix pc=%016" PRIx64
+                                  " PHIT header invalid (type=%u len=%u)\n",
+                                  pc, htype, hlen);
                 }
             }
         }
