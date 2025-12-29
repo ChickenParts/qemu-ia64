@@ -12865,6 +12865,57 @@ void HELPER(fw_pei_ptr_chain_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_ptr_chain_post_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    CPUState *cs = env_cpu(env);
+    uint64_t r8 = env->r[8];
+    uint64_t r1 = env->r[1];
+    uint64_t target = r1 ? (r1 - 2096704ULL) : 0;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_ptr_chain_post pc=%016" PRIx64
+                  " r1=%016" PRIx64 " r8=%016" PRIx64
+                  " target=%016" PRIx64 "\n",
+                  pc, r1, r8, target);
+
+    if (target) {
+        uint8_t buf[32];
+        hwaddr phys = ia64_phys_mode_addr(target);
+        if (cpu_memory_rw_debug(cs, phys, buf, sizeof(buf), false) == 0) {
+            char hex[3 * sizeof(buf) + 1];
+            size_t pos = 0;
+            for (size_t i = 0; i < sizeof(buf); i++) {
+                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", buf[i]);
+            }
+            if (pos > 0) {
+                hex[pos - 1] = '\0';
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain_post mem[%016" PRIx64 "]: %s\n",
+                          (uint64_t)phys, hex);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ptr_chain_post mem[%016" PRIx64
+                          "] unreadable\n",
+                          (uint64_t)phys);
+        }
+    }
+#endif
+}
+
 void HELPER(fw_pei_fit_probe)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
