@@ -12458,6 +12458,53 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_callsite_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    CPUState *cs = env_cpu(env);
+    const uint64_t probe_base = 0x100000000ULL - 0x80;
+    uint8_t buf[0x80];
+    if (cpu_memory_rw_debug(cs, probe_base, buf, sizeof(buf), false) == 0) {
+        char hex[3 * sizeof(buf) + 1];
+        size_t pos = 0;
+        for (size_t i = 0; i < sizeof(buf); i++) {
+            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", buf[i]);
+        }
+        if (pos > 0) {
+            hex[pos - 1] = '\0';
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_callsite_probe pc=%016" PRIx64
+                      " mem[%016" PRIx64 "..%016" PRIx64 "]: %s\n",
+                      pc, probe_base, probe_base + sizeof(buf) - 1, hex);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_callsite_probe pc=%016" PRIx64
+                      " mem[%016" PRIx64 "..%016" PRIx64 "] unreadable\n",
+                      pc, probe_base, probe_base + sizeof(buf) - 1);
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callsite_probe regs r33=%016" PRIx64
+                  " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                  " r12=%016" PRIx64 " r1=%016" PRIx64 "\n",
+                  env->r[33], env->r[38], env->r[39], env->r[40],
+                  env->r[12], env->r[1]);
+#endif
+}
+
 static bool ia64_fw_pei_startup_dump_enabled(void)
 {
     static int enabled = -1;

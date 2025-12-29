@@ -1798,6 +1798,15 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                     tcg_constant_i64(ctx->base.pc_next),
                                     tcg_constant_i32(1));
     }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2e9b0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e9b0ULL ||
+         ctx->base.pc_next == 0x80000000ffe2e8f0ULL ||
+         ctx->base.pc_next == 0x00000000ffe2e8f0ULL)) {
+        gen_helper_fw_pei_callsite_probe(tcg_env,
+                                         tcg_constant_i64(ctx->base.pc_next));
+    }
 
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
