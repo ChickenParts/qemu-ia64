@@ -7750,6 +7750,39 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
     uint64_t call_a5 = (call_out0 + 5 < 128) ? env->r[call_out0 + 5] : 0;
     uint64_t call_a6 = (call_out0 + 6 < 128) ? env->r[call_out0 + 6] : 0;
     uint64_t call_a7 = (call_out0 + 7 < 128) ? env->r[call_out0 + 7] : 0;
+    static uint64_t trace_pc;
+    static bool trace_pc_inited;
+    static bool trace_pc_logged;
+    if (!trace_pc_inited) {
+        const char *s = getenv("QEMU_IA64_CALL_TRACE_PC");
+        if (s && *s) {
+            trace_pc = strtoull(s, NULL, 0) & ~0xFULL;
+        }
+        trace_pc_inited = true;
+    }
+    bool trace_hit = trace_pc && (((pc ^ trace_pc) & ~0xFULL) == 0);
+    if (trace_hit && !trace_pc_logged) {
+        trace_pc_logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: call_trace pre pc=%016" PRIx64 " tgt=%016" PRIx64
+                      " cfm=%016" PRIx64 " sof=%u sol=%u outs=%u out0=r%u"
+                      " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                      " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
+                      " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
+                      " a0=%016" PRIx64 " a1=%016" PRIx64 " a2=%016" PRIx64
+                      " a3=%016" PRIx64 " a4=%016" PRIx64 " a5=%016" PRIx64
+                      " a6=%016" PRIx64 " a7=%016" PRIx64
+                      " b0=%016" PRIx64 " r1=%016" PRIx64 " r12=%016" PRIx64
+                      " bsp=%016" PRIx64 " ar.pfs=%016" PRIx64 "\n",
+                      pc, tgt, caller_cfm, sof, sol, outs, call_out0,
+                      env->r[32], env->r[33], env->r[34], env->r[35],
+                      env->r[36], env->r[37], env->r[38], env->r[39],
+                      env->r[40],
+                      call_a0, call_a1, call_a2, call_a3,
+                      call_a4, call_a5, call_a6, call_a7,
+                      env->b[0], env->r[1], env->r[12],
+                      env->ar[IA64_AR_BSP], env->ar[IA64_AR_PFS]);
+    }
 
     if (ia64_fw_pei_locate_trace_enabled()) {
         static int pei_trace_count;
@@ -8673,6 +8706,21 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                       "call_map pc=%016" PRIx64 " mapped in0..4=%016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 "\n",
                       dbg_pc, env->r[32], env->r[33], env->r[34], env->r[35], env->r[36]);
         ia64_dbg_next_call_pc = 0;
+    }
+    if (trace_hit) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: call_trace post pc=%016" PRIx64 " tgt=%016" PRIx64
+                      " cfm=%016" PRIx64 " r32=%016" PRIx64 " r33=%016" PRIx64
+                      " r34=%016" PRIx64 " r35=%016" PRIx64 " r36=%016" PRIx64
+                      " r37=%016" PRIx64 " r38=%016" PRIx64 " r39=%016" PRIx64
+                      " r40=%016" PRIx64 " b0=%016" PRIx64 " r1=%016" PRIx64
+                      " r12=%016" PRIx64 " bsp=%016" PRIx64 " ar.pfs=%016" PRIx64
+                      "\n",
+                      pc, tgt, env->cfm,
+                      env->r[32], env->r[33], env->r[34], env->r[35],
+                      env->r[36], env->r[37], env->r[38], env->r[39],
+                      env->r[40], env->b[0], env->r[1], env->r[12],
+                      env->ar[IA64_AR_BSP], env->ar[IA64_AR_PFS]);
     }
 
     /*
