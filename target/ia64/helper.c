@@ -13093,6 +13093,58 @@ void HELPER(fw_pei_fit_compare_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_err268_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_err268 pc=%016" PRIx64
+                  " r8=%016" PRIx64 " r32=%016" PRIx64
+                  " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " r35=%016" PRIx64 " r36=%016" PRIx64
+                  " r1=%016" PRIx64 " r12=%016" PRIx64
+                  " b0=%016" PRIx64 "\n",
+                  pc, env->r[8], env->r[32], env->r[33], env->r[34],
+                  env->r[35], env->r[36], env->r[1], env->r[12], env->b[0]);
+
+    CPUState *cs = env_cpu(env);
+    uint8_t stack[128];
+    hwaddr sp = ia64_phys_mode_addr(env->r[12]);
+    if (cpu_memory_rw_debug(cs, sp, stack, sizeof(stack), false) == 0) {
+        char hex[3 * sizeof(stack) + 1];
+        size_t pos = 0;
+        for (size_t i = 0; i < sizeof(stack); i++) {
+            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", stack[i]);
+        }
+        if (pos > 0) {
+            hex[pos - 1] = '\0';
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_err268 stack[%016" PRIx64 "]: %s\n",
+                      (uint64_t)sp, hex);
+    }
+
+    uint64_t ps_ptr = 0;
+    if (ia64_fw_pei_get_ps_ptr(env, env->r[32], &ps_ptr) ||
+        ia64_fw_pei_get_ps_ptr(env, env->r[33], &ps_ptr) ||
+        ia64_fw_pei_get_ps_ptr(env, env->r[34], &ps_ptr)) {
+        ia64_fw_pei_dump_ps(env, ps_ptr, pc);
+    }
+#endif
+}
+
 static bool ia64_fw_pei_startup_dump_enabled(void)
 {
     static int enabled = -1;
