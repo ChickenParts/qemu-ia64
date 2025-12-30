@@ -6773,6 +6773,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     static int dbg_loop_limit = -1;
     static uint32_t loop_hits_11ac0;
     static uint32_t loop_hits_12180;
+    static uint32_t loop_hits_dxe;
 
     bool abort_panic = false;
     uint32_t idx;
@@ -6837,6 +6838,18 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                               env->ar[65], env->pr,
                               (unsigned)((env->pr >> 14) & 1),
                               (unsigned)((env->pr >> 15) & 1));
+            }
+        } else if (pc >= 0xffe256a0ULL && pc <= 0xffe2572cULL) {
+            if (loop_hits_dxe++ < (uint32_t)dbg_loop_limit) {
+                uint64_t ptr = env->r[12];
+                uint8_t val = cpu_ldub_data(env, ptr);
+                uint64_t next = cpu_ldq_data(env, ptr + 8);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "dbg_loop_dxe pc=%016" PRIx64 " hit=%u"
+                              " r12=%016" PRIx64 " byte=%02x next=%016" PRIx64
+                              " ar.lc=%016" PRIx64 " pr=%016" PRIx64 "\n",
+                              pc, loop_hits_dxe, ptr, val, next,
+                              env->ar[65], env->pr);
             }
         }
     }

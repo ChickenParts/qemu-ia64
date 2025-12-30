@@ -387,6 +387,10 @@ typedef struct IA64DbgProbePoint {
 static bool ia64_dbg_probe_inited;
 static IA64DbgProbePoint ia64_dbg_probes[IA64_MAX_DBG_PROBES];
 static size_t ia64_dbg_probe_count;
+static bool ia64_dbg_probe_range_inited;
+static bool ia64_dbg_probe_range_enabled;
+static uint64_t ia64_dbg_probe_range_lo;
+static uint64_t ia64_dbg_probe_range_hi;
 
 static int ia64_dbg_cmp_enabled = -1;
 static uint64_t ia64_dbg_cmp_pc;
@@ -627,6 +631,56 @@ static void ia64_init_dbg_probes(void)
     }
 }
 
+static void ia64_init_dbg_probe_range(void)
+{
+    if (ia64_dbg_probe_range_inited) {
+        return;
+    }
+    ia64_dbg_probe_range_inited = true;
+
+    const char *s = getenv("QEMU_IA64_DBG_PROBE_RANGE");
+    if (!s || !*s) {
+        return;
+    }
+
+    char *endp = NULL;
+    uint64_t lo = strtoull(s, &endp, 0);
+    if (!endp || endp == s) {
+        return;
+    }
+    while (*endp && (isspace((unsigned char)*endp) || *endp == ',')) {
+        endp++;
+    }
+    if (*endp == ':' || *endp == '-') {
+        endp++;
+    } else if (*endp == '.' && endp[1] == '.') {
+        endp += 2;
+    }
+    while (*endp && isspace((unsigned char)*endp)) {
+        endp++;
+    }
+    if (!*endp) {
+        return;
+    }
+    char *endp2 = NULL;
+    uint64_t hi = strtoull(endp, &endp2, 0);
+    if (!endp2 || endp2 == endp) {
+        return;
+    }
+
+    lo &= ~0xFULL;
+    hi &= ~0xFULL;
+    if (hi < lo) {
+        uint64_t tmp = lo;
+        lo = hi;
+        hi = tmp;
+    }
+
+    ia64_dbg_probe_range_lo = lo;
+    ia64_dbg_probe_range_hi = hi;
+    ia64_dbg_probe_range_enabled = true;
+}
+
 static bool ia64_dbg_probe_match(uint64_t pc, int ri)
 {
     ia64_init_dbg_probes();
@@ -637,6 +691,12 @@ static bool ia64_dbg_probe_match(uint64_t pc, int ri)
         if (ia64_dbg_probes[i].ri == -1 || ia64_dbg_probes[i].ri == ri) {
             return true;
         }
+    }
+    ia64_init_dbg_probe_range();
+    if (ia64_dbg_probe_range_enabled &&
+        pc >= ia64_dbg_probe_range_lo &&
+        pc <= ia64_dbg_probe_range_hi) {
+        return true;
     }
     return false;
 }
