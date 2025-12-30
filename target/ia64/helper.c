@@ -10453,7 +10453,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         if (fixed_memtype_hob && fixed_memtype_base && fixed_memtype_base != hob_base) {
             fixed_memtype_hob = false;
         }
-        if (!fixed_memtype_hob && !in_flash) {
+        if (!fixed_memtype_hob && hob_low) {
             bool have_memtype = false;
             uint64_t cur = hob_base;
             for (int iter = 0; iter < 4096 && cur < hob_end; iter++) {
@@ -10484,6 +10484,18 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 if (cur - hob_base > (16ULL << 20)) {
                     break;
                 }
+            }
+
+            if (hob_patch_trace) {
+                uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
+                uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: memtype scan base=%016" PRIx64
+                              " end=%016" PRIx64 " free=%016" PRIx64 "-%016" PRIx64
+                              " have=%d\n",
+                              hob_base, hob_end,
+                              free_bottom_phys, free_top_phys,
+                              have_memtype ? 1 : 0);
             }
 
             if (have_memtype) {
@@ -12146,6 +12158,23 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
         return;
     }
 
+    bool sec_handoff = false;
+    if (handoff) {
+        uint8_t handoff_buf[0x48];
+        hwaddr handoff_phys = ia64_phys_mode_addr(handoff);
+        if (cpu_memory_rw_debug(env_cpu(env), handoff_phys,
+                                handoff_buf, sizeof(handoff_buf), false) == 0) {
+            uint16_t data_size = lduw_le_p(&handoff_buf[0]);
+            uint64_t bfv_base = ldq_le_p(&handoff_buf[8]);
+            hwaddr bfv_phys = ia64_phys_mode_addr(bfv_base);
+            sec_handoff = (data_size >= sizeof(handoff_buf) &&
+                           data_size <= 0x80 &&
+                           bfv_phys >= IA64_IPF_FW_FLASH_BASE &&
+                           bfv_phys < IA64_IPF_FW_FLASH_BASE +
+                                      IA64_IPF_FW_FLASH_SIZE);
+        }
+    }
+
     if (handoff) {
         env->r[9] = handoff;
     }
@@ -12159,6 +12188,9 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
         env->r[10] = stack_count;
     } else if (ppi) {
         env->r[10] = ppi;
+    }
+    if (sec_handoff && ppi) {
+        env->r[33] = ppi;
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
@@ -12278,8 +12310,8 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     }
     if (stack_count) {
         env->r[10] = stack_count;
-        env->r[33] = stack_count;
-    } else if (ppi) {
+    }
+    if (ppi) {
         env->r[33] = ppi;
     }
     if (ia64_fw_r33_watch_enabled()) {
@@ -12805,10 +12837,7 @@ void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
     return;
 #else
     static bool logged;
-    if (logged || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
-        return;
-    }
-    logged = true;
+    bool log_enabled = qemu_loglevel_mask(LOG_GUEST_ERROR);
 
     uint64_t r32 = env->r[32];
     uint64_t r33 = env->r[33];
@@ -12816,11 +12845,13 @@ void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
     uint8_t sof = env->cfm & 0x7f;
     uint8_t sol = (env->cfm >> 7) & 0x7f;
     uint8_t sor = (env->cfm >> 14) & 0x0f;
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "IA64: fw_pei_core_entry pc=%016" PRIx64
-                  " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
-                  " cfm=%016" PRIx64 " sof=%u sol=%u sor=%u\n",
-                  pc, r32, r33, r34, env->cfm, sof, sol, sor);
+    if (log_enabled) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_core_entry pc=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
+                      " cfm=%016" PRIx64 " sof=%u sol=%u sor=%u\n",
+                      pc, r32, r33, r34, env->cfm, sof, sol, sor);
+    }
 
     if (r32) {
         uint8_t buf[0x48];
@@ -12842,31 +12873,48 @@ void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
                 uint64_t pei_size = ldq_le_p(&buf[48]);
                 uint64_t stack_base = ldq_le_p(&buf[56]);
                 uint64_t stack_size = ldq_le_p(&buf[64]);
-                qemu_log_mask(LOG_GUEST_ERROR,
-                              "IA64: fw_pei_core_entry handoff(sec) size=%u"
-                              " bfv=%016" PRIx64 "/%016" PRIx64
-                              " temp=%016" PRIx64 "/%016" PRIx64
-                              " pei=%016" PRIx64 "/%016" PRIx64
-                              " stack=%016" PRIx64 "/%016" PRIx64 "\n",
-                              data_size, bfv_base, bfv_size,
-                              temp_base, temp_size,
-                              pei_base, pei_size,
-                              stack_base, stack_size);
+                if (env->fw_pei_ppi && env->r[33] != env->fw_pei_ppi) {
+                    env->r[33] = env->fw_pei_ppi;
+                    if (log_enabled) {
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: fw_pei_core_entry fix r33 -> %016" PRIx64 "\n",
+                                      env->fw_pei_ppi);
+                    }
+                }
+                if (log_enabled) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_pei_core_entry handoff(sec) size=%u"
+                                  " bfv=%016" PRIx64 "/%016" PRIx64
+                                  " temp=%016" PRIx64 "/%016" PRIx64
+                                  " pei=%016" PRIx64 "/%016" PRIx64
+                                  " stack=%016" PRIx64 "/%016" PRIx64 "\n",
+                                  data_size, bfv_base, bfv_size,
+                                  temp_base, temp_size,
+                                  pei_base, pei_size,
+                                  stack_base, stack_size);
+                }
             } else {
                 uint64_t boot_fv = ldq_le_p(&buf[0]);
                 uint64_t car_size = ldq_le_p(&buf[8]);
                 uint64_t dispatch16 = ldq_le_p(&buf[16]);
                 uint64_t dispatch24 = ldq_le_p(&buf[24]);
-                qemu_log_mask(LOG_GUEST_ERROR,
-                              "IA64: fw_pei_core_entry handoff(startup)"
-                              " boot_fv=%016" PRIx64
-                              " car_size=%016" PRIx64
-                              " dispatch16=%016" PRIx64
-                              " dispatch24=%016" PRIx64 "\n",
-                              boot_fv, car_size, dispatch16, dispatch24);
+                if (log_enabled) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_pei_core_entry handoff(startup)"
+                                  " boot_fv=%016" PRIx64
+                                  " car_size=%016" PRIx64
+                                  " dispatch16=%016" PRIx64
+                                  " dispatch24=%016" PRIx64 "\n",
+                                  boot_fv, car_size, dispatch16, dispatch24);
+                }
             }
         }
     }
+
+    if (logged || !log_enabled) {
+        return;
+    }
+    logged = true;
 #endif
 }
 
