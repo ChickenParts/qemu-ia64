@@ -13138,6 +13138,13 @@ void HELPER(fw_pei_err268_probe)(CPUIA64State *env, uint64_t pc)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: pei_err268 stack[%016" PRIx64 "]: %s\n",
                       (uint64_t)sp, hex);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_err268 stack_qw +0x30=%016" PRIx64
+                      " +0x38=%016" PRIx64 " +0x40=%016" PRIx64
+                      " +0x48=%016" PRIx64 " +0x50=%016" PRIx64 "\n",
+                      ldq_le_p(&stack[0x30]), ldq_le_p(&stack[0x38]),
+                      ldq_le_p(&stack[0x40]), ldq_le_p(&stack[0x48]),
+                      ldq_le_p(&stack[0x50]));
     }
     if (env->r[33]) {
         uint8_t buf[64];
