@@ -13155,6 +13155,18 @@ void HELPER(fw_pei_err268_probe)(CPUIA64State *env, uint64_t pc)
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_err268 r33_mem[%016" PRIx64 "]: %s\n",
                           (uint64_t)p, hex);
+            for (size_t i = 0; i < 4; i++) {
+                IA64EfiGuid guid;
+                ia64_fw_guid_from_bytes(&buf[i * 16], &guid);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_err268 r33_guid%zu="
+                              "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                              i,
+                              guid.data1, guid.data2, guid.data3,
+                              guid.data4[0], guid.data4[1], guid.data4[2],
+                              guid.data4[3], guid.data4[4], guid.data4[5],
+                              guid.data4[6], guid.data4[7]);
+            }
         }
     }
 
