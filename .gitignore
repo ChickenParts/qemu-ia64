@@ -3,6 +3,7 @@ scratch/
 .cache/
 .vscode/
 build/
+third_party/
 GNUmakefile
 **/__pycache__/
 scripts/meson-buildoptions.sh.tmp

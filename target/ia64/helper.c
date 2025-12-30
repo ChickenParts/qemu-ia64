@@ -2550,6 +2550,20 @@ static const IA64EfiGuid ia64_efi_guid_status_debug = {
     .data4 = { 0x87, 0xe2, 0x00, 0x06, 0x29, 0x45, 0xc3, 0xb9 },
 };
 
+static const IA64EfiGuid ia64_efi_guid_status_code_ppi = {
+    .data1 = 0x229832d3,
+    .data2 = 0x7a30,
+    .data3 = 0x4b36,
+    .data4 = { 0xb8, 0x27, 0xf4, 0x0c, 0xb7, 0xd4, 0x54, 0x36 },
+};
+
+static const IA64EfiGuid ia64_efi_guid_memory_discovered_ppi = {
+    .data1 = 0xf894643d,
+    .data2 = 0xc449,
+    .data3 = 0x42d1,
+    .data4 = { 0x8e, 0xa8, 0x85, 0xbd, 0xd8, 0xc6, 0x5b, 0xde },
+};
+
 static const IA64EfiGuid ia64_efi_guid_flashmap_hob = {
     .data1 = 0xb091e7d2,
     .data2 = 0x05a0,
@@ -14124,6 +14138,236 @@ void HELPER(fw_pei_status_log)(CPUIA64State *env, uint64_t pc)
                   pc,
                   env->r[8], env->r[9], env->r[10], env->r[11],
                   env->r[32], env->r[33], env->r[1], env->r[12]);
+#endif
+}
+
+static bool ia64_fw_pei_addr_in_cached_temp(uint64_t phys)
+{
+    return ia64_fw_pei_cached_temp_base &&
+           ia64_fw_pei_cached_temp_size &&
+           phys >= ia64_fw_pei_cached_temp_base &&
+           phys < (ia64_fw_pei_cached_temp_base +
+                   ia64_fw_pei_cached_temp_size);
+}
+
+void HELPER(fw_pei_install_mem_trace)(CPUIA64State *env, uint64_t pc, uint32_t stage)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)stage;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    static bool logged[2];
+    if (stage < 2 && logged[stage]) {
+        return;
+    }
+    if (stage < 2) {
+        logged[stage] = true;
+    }
+
+    const char *tag = (stage == 0) ? "pre" : (stage == 1) ? "post" : "stage";
+    uint64_t ps_ptr = env->fw_pei_ps;
+    CPUState *cs = env_cpu(env);
+    if (ps_ptr && !ia64_fw_pei_is_ps_table(cs, ps_ptr)) {
+        ps_ptr = 0;
+        env->fw_pei_ps = 0;
+    }
+    if (!ps_ptr) {
+        if (!ia64_fw_pei_get_ps_ptr(env, env->r[32], &ps_ptr) &&
+            !ia64_fw_pei_get_ps_ptr(env, env->r[33], &ps_ptr) &&
+            !ia64_fw_pei_get_ps_ptr(env, env->r[34], &ps_ptr)) {
+            ps_ptr = 0;
+        }
+    }
+    if (ps_ptr) {
+        env->fw_pei_ps = ps_ptr;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_install_mem_trace %s pc=%016" PRIx64
+                  " ps=%016" PRIx64 " r8=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r34=%016" PRIx64 " r12=%016" PRIx64
+                  " r1=%016" PRIx64 "\n",
+                  tag, pc, ps_ptr, env->r[8], env->r[32], env->r[33],
+                  env->r[34], env->r[12], env->r[1]);
+
+    if (!ps_ptr) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_trace %s missing PeiServices\n",
+                      tag);
+        return;
+    }
+
+    uint64_t core = 0;
+    if (!ia64_fw_pei_find_core_from_ps(env, ps_ptr, &core)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_trace %s ps=%016" PRIx64
+                      " missing core\n",
+                      tag, ps_ptr);
+        return;
+    }
+
+    const uint64_t ppi_base = core + 16;
+    uint8_t hdr[40];
+    if (!ia64_fw_read_bytes_any(cs, ppi_base, hdr, sizeof(hdr))) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_trace %s ps=%016" PRIx64
+                      " core=%016" PRIx64 " ppi_hdr unreadable\n",
+                      tag, ps_ptr, core);
+        return;
+    }
+
+    int64_t ppi_end = (int64_t)ldq_le_p(&hdr[0]);
+    int64_t notify_end = (int64_t)ldq_le_p(&hdr[8]);
+    int64_t dispatch_end = (int64_t)ldq_le_p(&hdr[16]);
+
+    uint64_t core_phys = ia64_phys_mode_addr(core);
+    uint64_t ppi_phys = ia64_phys_mode_addr(ppi_base);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_install_mem_trace %s core=%016" PRIx64
+                  " core_phys=%016" PRIx64 " ppi_base=%016" PRIx64
+                  " ppi_phys=%016" PRIx64 " ppi_end=%" PRIi64
+                  " notify_end=%" PRIi64 " dispatch_end=%" PRIi64
+                  " temp=%016" PRIx64 "+%016" PRIx64 "\n",
+                  tag, core, core_phys, ppi_base, ppi_phys,
+                  ppi_end, notify_end, dispatch_end,
+                  ia64_fw_pei_cached_temp_base,
+                  ia64_fw_pei_cached_temp_size);
+
+    if (ppi_end < 0) {
+        ppi_end = 0;
+    }
+    const int64_t max_ppi = 256;
+    if (ppi_end > max_ppi) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_trace %s clamp ppi_end=%" PRIi64
+                      " -> %d\n",
+                      tag, ppi_end, (int)max_ppi);
+        ppi_end = max_ppi;
+    }
+
+    const uint64_t list_base = ppi_base + 40;
+    bool dump_all = (stage == 1);
+    bool found_status = false;
+    bool found_mem = false;
+    for (int64_t i = 0; i < ppi_end; i++) {
+        uint64_t desc_ptr = 0;
+        if (!ia64_fw_read_u64(cs, list_base + (uint64_t)i * 8, &desc_ptr)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_trace %s idx=%" PRIi64
+                          " desc_ptr unreadable\n",
+                          tag, i);
+            break;
+        }
+        if (!desc_ptr) {
+            if (dump_all) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_mem_trace %s entry idx=%" PRIi64
+                              " desc=0\n",
+                              tag, i);
+            }
+            continue;
+        }
+        uint8_t desc[24];
+        if (!ia64_fw_read_bytes_any(cs, desc_ptr, desc, sizeof(desc))) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_trace %s idx=%" PRIi64
+                          " desc=%016" PRIx64 " unreadable\n",
+                          tag, i, desc_ptr);
+            continue;
+        }
+        uint64_t flags = ldq_le_p(&desc[0]);
+        uint64_t guid_ptr = ldq_le_p(&desc[8]);
+        uint64_t ppi_ptr = ldq_le_p(&desc[16]);
+        if (!guid_ptr) {
+            if (dump_all) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_mem_trace %s entry idx=%" PRIi64
+                              " desc=%016" PRIx64 " flags=%016" PRIx64
+                              " guid_ptr=0 ppi=%016" PRIx64 "\n",
+                              tag, i, desc_ptr, flags, ppi_ptr);
+            }
+            continue;
+        }
+        uint64_t desc_phys = ia64_phys_mode_addr(desc_ptr);
+        uint64_t guid_phys = ia64_phys_mode_addr(guid_ptr);
+        bool desc_temp = ia64_fw_pei_addr_in_cached_temp(desc_phys);
+        bool guid_temp = ia64_fw_pei_addr_in_cached_temp(guid_phys);
+        if (desc_temp || guid_temp) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_trace %s temp_ppi idx=%" PRIi64
+                          " desc=%016" PRIx64 " guid_ptr=%016" PRIx64
+                          " ppi=%016" PRIx64 " desc_temp=%d guid_temp=%d\n",
+                          tag, i, desc_ptr, guid_ptr, ppi_ptr,
+                          desc_temp ? 1 : 0, guid_temp ? 1 : 0);
+        }
+        IA64EfiGuid guid;
+        bool guid_ok = ia64_fw_read_guid(env, guid_ptr, &guid);
+        if (!guid_ok) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_trace %s idx=%" PRIi64
+                          " guid_ptr=%016" PRIx64 " unreadable\n",
+                          tag, i, guid_ptr);
+            if (dump_all) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_mem_trace %s entry idx=%" PRIi64
+                              " desc=%016" PRIx64 " guid_ptr=%016" PRIx64
+                              " ppi=%016" PRIx64 "\n",
+                              tag, i, desc_ptr, guid_ptr, ppi_ptr);
+            }
+            continue;
+        }
+        if (dump_all) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_trace %s entry idx=%" PRIi64
+                          " desc=%016" PRIx64 " guid_ptr=%016" PRIx64
+                          " ppi=%016" PRIx64
+                          " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                          tag, i, desc_ptr, guid_ptr, ppi_ptr,
+                          guid.data1, guid.data2, guid.data3,
+                          guid.data4[0], guid.data4[1], guid.data4[2],
+                          guid.data4[3], guid.data4[4], guid.data4[5],
+                          guid.data4[6], guid.data4[7]);
+        }
+        if (ia64_fw_guid_equal(&guid, &ia64_efi_guid_status_code_ppi)) {
+            uint64_t ppi_ptr_phys = ia64_phys_mode_addr(ppi_ptr);
+            bool in_temp = ia64_fw_pei_addr_in_cached_temp(desc_phys) ||
+                           ia64_fw_pei_addr_in_cached_temp(ppi_ptr_phys);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_trace %s status_ppi"
+                          " idx=%" PRIi64 " desc=%016" PRIx64
+                          " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
+                          " desc_phys=%016" PRIx64 " ppi_phys=%016" PRIx64
+                          " temp=%d\n",
+                          tag, i, desc_ptr, ppi_ptr, guid_ptr,
+                          desc_phys, ppi_ptr_phys, in_temp ? 1 : 0);
+            found_status = true;
+        } else if (ia64_fw_guid_equal(&guid, &ia64_efi_guid_memory_discovered_ppi)) {
+            uint64_t ppi_ptr_phys = ia64_phys_mode_addr(ppi_ptr);
+            bool in_temp = ia64_fw_pei_addr_in_cached_temp(desc_phys) ||
+                           ia64_fw_pei_addr_in_cached_temp(ppi_ptr_phys);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_trace %s memdisc_ppi"
+                          " idx=%" PRIi64 " desc=%016" PRIx64
+                          " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
+                          " desc_phys=%016" PRIx64 " ppi_phys=%016" PRIx64
+                          " temp=%d\n",
+                          tag, i, desc_ptr, ppi_ptr, guid_ptr,
+                          desc_phys, ppi_ptr_phys, in_temp ? 1 : 0);
+            found_mem = true;
+        }
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_install_mem_trace %s found_status=%d"
+                  " found_mem=%d\n",
+                  tag, found_status ? 1 : 0, found_mem ? 1 : 0);
 #endif
 }
 
