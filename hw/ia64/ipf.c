@@ -323,6 +323,8 @@ static uint64_t ipf_boot_findfv_stub;
 static uint64_t ipf_boot_findfv_iface;
 static uint64_t ipf_boot_secinfo_stub;
 static uint64_t ipf_boot_memmap_stub;
+static uint64_t ipf_boot_security_stub;
+static uint64_t ipf_boot_loadfile_stub;
 static uint64_t ipf_boot_mem_size;
 static uint64_t ipf_ram_size;
 static uint64_t ipf_kernel_low;
@@ -1797,6 +1799,12 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     const uint64_t memmap_stub_phys = secinfo_stub_phys + 0x60;
     const uint64_t memmap_plabel_phys = memmap_stub_phys + 0x20;
     const uint64_t memmap_iface_phys = memmap_stub_phys + 0x40;
+    const uint64_t security_stub_phys = memmap_stub_phys + 0x60;
+    const uint64_t security_plabel_phys = security_stub_phys + 0x20;
+    const uint64_t security_iface_phys = security_stub_phys + 0x40;
+    const uint64_t loadfile_stub_phys = security_stub_phys + 0x60;
+    const uint64_t loadfile_plabel_phys = loadfile_stub_phys + 0x20;
+    const uint64_t loadfile_iface_phys = loadfile_stub_phys + 0x40;
     const uint64_t pei_temp_size = temp_size / 2;
     const uint64_t stack_size = temp_size - pei_temp_size;
     const uint64_t stack_base = temp_phys + temp_size;
@@ -1824,6 +1832,14 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     static const uint8_t memmap_guid[16] = {
         0x8a, 0x59, 0xb1, 0xd0, 0x66, 0xee, 0xd5, 0x11,
         0xaf, 0x1d, 0x00, 0xa0, 0xc9, 0x44, 0xa0, 0x5b,
+    };
+    static const uint8_t security_guid[16] = {
+        0x6e, 0x06, 0x88, 0x13, 0x57, 0x3a, 0xfa, 0x4e,
+        0x98, 0xf3, 0xc1, 0x2f, 0x3a, 0x95, 0x8a, 0x29,
+    };
+    static const uint8_t loadfile_guid[16] = {
+        0x85, 0x0d, 0x1f, 0x7e, 0xff, 0x04, 0xb2, 0x4b,
+        0x86, 0x6a, 0x31, 0xa2, 0x99, 0x6a, 0x48, 0xa8,
     };
 
     if (ipf_fw_pei_use_pi_handoff()) {
@@ -1917,6 +1933,34 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
                               (const uint8_t *)&memmap_plabel,
                               sizeof(memmap_plabel));
     cpu_flush_icache_range(memmap_stub_phys, sizeof(findfv_stub));
+
+    struct QEMU_PACKED {
+        uint64_t entry;
+        uint64_t gp;
+    } security_plabel = {
+        .entry = cpu_to_le64(ipf_fw_region8_addr(security_stub_phys)),
+        .gp = 0,
+    };
+    cpu_physical_memory_write(security_stub_phys, findfv_stub,
+                              sizeof(findfv_stub));
+    cpu_physical_memory_write(security_plabel_phys,
+                              (const uint8_t *)&security_plabel,
+                              sizeof(security_plabel));
+    cpu_flush_icache_range(security_stub_phys, sizeof(findfv_stub));
+
+    struct QEMU_PACKED {
+        uint64_t entry;
+        uint64_t gp;
+    } loadfile_plabel = {
+        .entry = cpu_to_le64(ipf_fw_region8_addr(loadfile_stub_phys)),
+        .gp = 0,
+    };
+    cpu_physical_memory_write(loadfile_stub_phys, findfv_stub,
+                              sizeof(findfv_stub));
+    cpu_physical_memory_write(loadfile_plabel_phys,
+                              (const uint8_t *)&loadfile_plabel,
+                              sizeof(loadfile_plabel));
+    cpu_flush_icache_range(loadfile_stub_phys, sizeof(findfv_stub));
     /*
      * PPI interface: a single function pointer (plabel) to the status hook.
      * The descriptor points at this struct, not at the plabel itself.
@@ -1938,12 +1982,22 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     cpu_physical_memory_write(memmap_iface_phys,
                               (const uint8_t *)&memmap_iface,
                               sizeof(memmap_iface));
+    uint64_t security_iface = cpu_to_le64(ipf_fw_region8_addr(security_plabel_phys));
+    cpu_physical_memory_write(security_iface_phys,
+                              (const uint8_t *)&security_iface,
+                              sizeof(security_iface));
+    uint64_t loadfile_iface = cpu_to_le64(ipf_fw_region8_addr(loadfile_plabel_phys));
+    cpu_physical_memory_write(loadfile_iface_phys,
+                              (const uint8_t *)&loadfile_iface,
+                              sizeof(loadfile_iface));
 
-    const uint64_t status_guid_phys = ppi_phys + 0x60;
-    const uint64_t findfv_guid_phys = ppi_phys + 0x70;
-    const uint64_t secinfo_guid_phys = ppi_phys + 0x80;
-    const uint64_t memmap_guid_phys = ppi_phys + 0x90;
-    uint8_t ppi[0xa0];
+    const uint64_t status_guid_phys = ppi_phys + 0x90;
+    const uint64_t findfv_guid_phys = ppi_phys + 0xa0;
+    const uint64_t secinfo_guid_phys = ppi_phys + 0xb0;
+    const uint64_t memmap_guid_phys = ppi_phys + 0xc0;
+    const uint64_t security_guid_phys = ppi_phys + 0xd0;
+    const uint64_t loadfile_guid_phys = ppi_phys + 0xe0;
+    uint8_t ppi[0xf0];
     memset(ppi, 0, sizeof(ppi));
     uint64_t flags = 0x00000010ULL; /* PPI */
     stq_le_p(&ppi[0x00], flags);
@@ -1955,14 +2009,22 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     stq_le_p(&ppi[0x30], flags);
     stq_le_p(&ppi[0x38], ipf_fw_region8_addr(secinfo_guid_phys));
     stq_le_p(&ppi[0x40], ipf_fw_region8_addr(secinfo_iface_phys));
-    flags = 0x80000000ULL | 0x00000010ULL; /* TERMINATE_LIST | PPI */
     stq_le_p(&ppi[0x48], flags);
     stq_le_p(&ppi[0x50], ipf_fw_region8_addr(memmap_guid_phys));
     stq_le_p(&ppi[0x58], ipf_fw_region8_addr(memmap_iface_phys));
-    memcpy(&ppi[0x60], status_guid, sizeof(status_guid));
-    memcpy(&ppi[0x70], findfv_guid, sizeof(findfv_guid));
-    memcpy(&ppi[0x80], secinfo_guid, sizeof(secinfo_guid));
-    memcpy(&ppi[0x90], memmap_guid, sizeof(memmap_guid));
+    stq_le_p(&ppi[0x60], flags);
+    stq_le_p(&ppi[0x68], ipf_fw_region8_addr(security_guid_phys));
+    stq_le_p(&ppi[0x70], ipf_fw_region8_addr(security_iface_phys));
+    flags = 0x80000000ULL | 0x00000010ULL; /* TERMINATE_LIST | PPI */
+    stq_le_p(&ppi[0x78], flags);
+    stq_le_p(&ppi[0x80], ipf_fw_region8_addr(loadfile_guid_phys));
+    stq_le_p(&ppi[0x88], ipf_fw_region8_addr(loadfile_iface_phys));
+    memcpy(&ppi[0x90], status_guid, sizeof(status_guid));
+    memcpy(&ppi[0xa0], findfv_guid, sizeof(findfv_guid));
+    memcpy(&ppi[0xb0], secinfo_guid, sizeof(secinfo_guid));
+    memcpy(&ppi[0xc0], memmap_guid, sizeof(memmap_guid));
+    memcpy(&ppi[0xd0], security_guid, sizeof(security_guid));
+    memcpy(&ppi[0xe0], loadfile_guid, sizeof(loadfile_guid));
     cpu_physical_memory_write(ppi_phys, ppi, sizeof(ppi));
 
     ipf_boot_r9 = ipf_fw_region8_addr(handoff_phys);
@@ -1972,6 +2034,8 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     ipf_boot_findfv_iface = ipf_fw_region8_addr(findfv_iface_phys);
     ipf_boot_secinfo_stub = ipf_fw_region8_addr(secinfo_stub_phys);
     ipf_boot_memmap_stub = ipf_fw_region8_addr(memmap_stub_phys);
+    ipf_boot_security_stub = ipf_fw_region8_addr(security_stub_phys);
+    ipf_boot_loadfile_stub = ipf_fw_region8_addr(loadfile_stub_phys);
     DPRINTF("PEI startup: bfv=%016" PRIx64 " bfv_size=%" PRIu64
             " temp=%016" PRIx64 " tsize=%" PRIu64
             " pei_temp=%016" PRIx64 " pei_tsize=%" PRIu64
@@ -3144,6 +3208,8 @@ static void main_cpu_reset(void *opaque)
         s->fw_pei_findfv_iface = ipf_boot_findfv_iface;
         s->fw_pei_secinfo_stub = ipf_boot_secinfo_stub;
         s->fw_pei_memmap_stub = ipf_boot_memmap_stub;
+        s->fw_pei_security_stub = ipf_boot_security_stub;
+        s->fw_pei_loadfile_stub = ipf_boot_loadfile_stub;
         s->fw_mem_size = ipf_boot_mem_size;
     } else {
         s->fw_pei_handoff = 0;
@@ -3153,6 +3219,8 @@ static void main_cpu_reset(void *opaque)
         s->fw_pei_findfv_iface = 0;
         s->fw_pei_secinfo_stub = 0;
         s->fw_pei_memmap_stub = 0;
+        s->fw_pei_security_stub = 0;
+        s->fw_pei_loadfile_stub = 0;
         s->fw_mem_size = 0;
     }
     /*

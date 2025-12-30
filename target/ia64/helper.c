@@ -30,6 +30,17 @@ static uint64_t ia64_fw_pei_cached_hob_base;
 static uint64_t ia64_fw_pei_cached_temp_base;
 static uint64_t ia64_fw_pei_cached_temp_size;
 
+#define IA64_EFI_FFS_FILE_HEADER_SIZE  24
+#define IA64_EFI_FFS_FILE_HEADER2_SIZE 32
+#define IA64_EFI_SECTION_PE32          0x10
+#define IA64_EFI_SECTION_TE            0x12
+#define IA64_EFI_TE_IMAGE_HEADER_SIGNATURE 0x5A56
+
+typedef struct {
+    uint8_t Size[3];
+    uint8_t Type;
+} IA64EfiCommonSectionHeader;
+
 static inline hwaddr ia64_phys_mode_addr(uint64_t addr)
 {
     /*
@@ -5114,6 +5125,228 @@ static bool ia64_fw_find_fv_by_index(CPUIA64State *env, uint8_t index,
 #endif
 }
 
+static uint32_t ia64_fw_section_size(const uint8_t *hdr)
+{
+    return (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16);
+}
+
+static bool ia64_fw_pe32_entry_from_mem(CPUState *cs, hwaddr base, uint64_t len,
+                                        uint32_t *entry_out)
+{
+    uint8_t hdr[0x200];
+    size_t need = MIN(len, sizeof(hdr));
+    if (need < 0x40) {
+        return false;
+    }
+    if (!ia64_fw_read_bytes_any(cs, base, hdr, need)) {
+        return false;
+    }
+
+    uint16_t te_sig = lduw_le_p(hdr);
+    if (te_sig == IA64_EFI_TE_IMAGE_HEADER_SIGNATURE) {
+        if (len < 40) {
+            return false;
+        }
+        uint16_t stripped = lduw_le_p(&hdr[6]);
+        uint32_t entry = ldl_le_p(&hdr[8]);
+        *entry_out = entry + 40 - stripped;
+        return true;
+    }
+
+    if (lduw_le_p(hdr) != 0x5a4d) { /* MZ */
+        return false;
+    }
+    uint32_t lfanew = ldl_le_p(&hdr[0x3c]);
+    if (lfanew + 0x18 + 0x10 + 4 > len) {
+        return false;
+    }
+    uint8_t pe_sig[4];
+    if (!ia64_fw_read_bytes_any(cs, base + lfanew, pe_sig, sizeof(pe_sig))) {
+        return false;
+    }
+    if (ldl_le_p(pe_sig) != 0x00004550) { /* PE\0\0 */
+        return false;
+    }
+    uint8_t opt_hdr[0x1a];
+    if (!ia64_fw_read_bytes_any(cs, base + lfanew + 0x18, opt_hdr, sizeof(opt_hdr))) {
+        return false;
+    }
+    uint16_t magic = lduw_le_p(&opt_hdr[0]);
+    if (magic != 0x10b && magic != 0x20b) {
+        return false;
+    }
+    uint32_t entry = ldl_le_p(&opt_hdr[0x10]);
+    *entry_out = entry;
+    return true;
+}
+
+static void ia64_fw_handle_security_ppi(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    CPUState *cs = env_cpu(env);
+    uint64_t auth_status = env->r[34];
+    uint64_t ffs_ptr = env->r[35];
+    uint64_t crisis_ptr = env->r[36];
+
+    if (crisis_ptr) {
+        uint8_t out = 0;
+        if (!ia64_fw_write_bytes_any(cs, crisis_ptr, &out, sizeof(out))) {
+            env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            return;
+        }
+    }
+
+    env->r[8] = 0; /* EFI_SUCCESS */
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_security_ppi pc=%016" PRIx64
+                      " auth=%016" PRIx64 " ffs=%016" PRIx64
+                      " crisis_ptr=%016" PRIx64 "\n",
+                      pc, auth_status, ffs_ptr, crisis_ptr);
+    }
+#endif
+}
+
+static void ia64_fw_handle_fv_load_file(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    CPUState *cs = env_cpu(env);
+    uint64_t ffs_ptr = env->r[34];
+    uint64_t image_addr_ptr = env->r[35];
+    uint64_t image_size_ptr = env->r[36];
+    uint64_t entry_ptr = env->r[37];
+    uint64_t status = 0;
+
+    if (!ffs_ptr || (!image_addr_ptr && !image_size_ptr && !entry_ptr)) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 2; /* EFI_INVALID_PARAMETER */
+        return;
+    }
+
+    hwaddr ffs_phys = ia64_phys_mode_addr(ffs_ptr);
+    uint8_t fh[IA64_EFI_FFS_FILE_HEADER2_SIZE];
+    if (!ia64_fw_read_bytes_any(cs, ffs_phys, fh,
+                                IA64_EFI_FFS_FILE_HEADER_SIZE)) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+        return;
+    }
+
+    uint32_t size24 = (uint32_t)fh[20] |
+                      ((uint32_t)fh[21] << 8) |
+                      ((uint32_t)fh[22] << 16);
+    uint64_t fsize = size24;
+    size_t hdr_size = IA64_EFI_FFS_FILE_HEADER_SIZE;
+    if (size24 == 0xffffff) {
+        if (!ia64_fw_read_bytes_any(cs, ffs_phys + IA64_EFI_FFS_FILE_HEADER_SIZE,
+                                    fh + IA64_EFI_FFS_FILE_HEADER_SIZE,
+                                    IA64_EFI_FFS_FILE_HEADER2_SIZE -
+                                    IA64_EFI_FFS_FILE_HEADER_SIZE)) {
+            env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            return;
+        }
+        fsize = ldq_le_p(&fh[24]);
+        hdr_size = IA64_EFI_FFS_FILE_HEADER2_SIZE;
+    }
+
+    if (fsize < hdr_size) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 2; /* EFI_INVALID_PARAMETER */
+        return;
+    }
+
+    hwaddr file_end = ffs_phys + (hwaddr)fsize;
+    hwaddr sec_phys = ffs_phys + hdr_size;
+    bool found = false;
+    uint64_t img_size = 0;
+    uint64_t img_phys = 0;
+    uint64_t entry_phys = 0;
+
+    while (sec_phys + sizeof(IA64EfiCommonSectionHeader) <= file_end) {
+        uint8_t sh[sizeof(IA64EfiCommonSectionHeader)];
+        if (!ia64_fw_read_bytes_any(cs, sec_phys, sh, sizeof(sh))) {
+            status = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            break;
+        }
+        uint32_t sec_size = ia64_fw_section_size(sh);
+        uint8_t sec_type = sh[3];
+        if (sec_size < sizeof(IA64EfiCommonSectionHeader) ||
+            sec_phys + sec_size > file_end) {
+            status = IA64_EFI_STATUS_ERROR_BIT | 3; /* EFI_UNSUPPORTED */
+            break;
+        }
+        if (sec_type == IA64_EFI_SECTION_PE32 ||
+            sec_type == IA64_EFI_SECTION_TE) {
+            hwaddr img_base = sec_phys + sizeof(IA64EfiCommonSectionHeader);
+            uint64_t img_len = sec_size - sizeof(IA64EfiCommonSectionHeader);
+            uint32_t entry_off = 0;
+            if (!ia64_fw_pe32_entry_from_mem(cs, img_base, img_len, &entry_off) ||
+                entry_off >= img_len) {
+                status = IA64_EFI_STATUS_ERROR_BIT | 3; /* EFI_UNSUPPORTED */
+                break;
+            }
+            img_phys = img_base;
+            img_size = img_len;
+            entry_phys = img_base + entry_off;
+            found = true;
+            status = 0;
+            break;
+        }
+        uint32_t advance = (sec_size + 3) & ~3U;
+        if (!advance || sec_phys + advance < sec_phys) {
+            status = IA64_EFI_STATUS_ERROR_BIT | 3; /* EFI_UNSUPPORTED */
+            break;
+        }
+        sec_phys += advance;
+    }
+
+    if (!found && status == 0) {
+        status = IA64_EFI_STATUS_ERROR_BIT | 14; /* EFI_NOT_FOUND */
+    }
+
+    if (status == 0) {
+        if (image_addr_ptr) {
+            uint64_t out = cpu_to_le64(ia64_fw_encode_addr(ffs_ptr, img_phys));
+            if (!ia64_fw_write_bytes_any(cs, image_addr_ptr,
+                                         (const uint8_t *)&out, sizeof(out))) {
+                status = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            }
+        }
+        if (status == 0 && image_size_ptr) {
+            uint64_t out = cpu_to_le64(img_size);
+            if (!ia64_fw_write_bytes_any(cs, image_size_ptr,
+                                         (const uint8_t *)&out, sizeof(out))) {
+                status = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            }
+        }
+        if (status == 0 && entry_ptr) {
+            uint64_t out = cpu_to_le64(ia64_fw_encode_addr(ffs_ptr, entry_phys));
+            if (!ia64_fw_write_bytes_any(cs, entry_ptr,
+                                         (const uint8_t *)&out, sizeof(out))) {
+                status = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            }
+        }
+    }
+
+    env->r[8] = status;
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_loadfile pc=%016" PRIx64 " ffs=%016" PRIx64
+                      " img=%016" PRIx64 " size=%" PRIu64
+                      " entry=%016" PRIx64 " status=%" PRIu64 "\n",
+                      pc, ffs_ptr,
+                      ia64_fw_encode_addr(ffs_ptr, img_phys), img_size,
+                      ia64_fw_encode_addr(ffs_ptr, entry_phys),
+                      (unsigned long long)(status & ~IA64_EFI_STATUS_ERROR_BIT));
+    }
+#endif
+}
+
 static void ia64_fw_handle_findfv(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
@@ -5525,6 +5758,16 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     if (env->fw_pei_memmap_stub &&
         ((pc ^ env->fw_pei_memmap_stub) & ~0xFULL) == 0) {
         ia64_fw_handle_memmap_autoscan(env, pc);
+        return;
+    }
+    if (env->fw_pei_security_stub &&
+        ((pc ^ env->fw_pei_security_stub) & ~0xFULL) == 0) {
+        ia64_fw_handle_security_ppi(env, pc);
+        return;
+    }
+    if (env->fw_pei_loadfile_stub &&
+        ((pc ^ env->fw_pei_loadfile_stub) & ~0xFULL) == 0) {
+        ia64_fw_handle_fv_load_file(env, pc);
         return;
     }
 
