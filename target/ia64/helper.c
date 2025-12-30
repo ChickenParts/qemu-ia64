@@ -2556,6 +2556,35 @@ static const IA64EfiGuid ia64_efi_guid_flashmap_hob = {
     .data3 = 0x4198,
     .data4 = { 0x94, 0xf0, 0x74, 0xb7, 0xb8, 0xc5, 0x54, 0x59 },
 };
+static const IA64EfiGuid ia64_efi_guid_memtype_info = {
+    .data1 = 0x4c19049f,
+    .data2 = 0x4137,
+    .data3 = 0x4dd3,
+    .data4 = { 0x9c, 0x10, 0x8b, 0x97, 0xa8, 0x3f, 0xfd, 0xfa },
+};
+
+typedef struct {
+    uint32_t type;
+    uint32_t pages;
+} IA64EfiMemTypeInfo;
+
+static const IA64EfiMemTypeInfo ia64_fw_memtype_info[] = {
+    { 0, 0 },  /* EfiReservedMemoryType */
+    { 1, 0 },  /* EfiLoaderCode */
+    { 2, 0 },  /* EfiLoaderData */
+    { 3, 0 },  /* EfiBootServicesCode */
+    { 4, 0 },  /* EfiBootServicesData */
+    { 5, 0 },  /* EfiRuntimeServicesCode */
+    { 6, 0 },  /* EfiRuntimeServicesData */
+    { 7, 0 },  /* EfiConventionalMemory */
+    { 8, 0 },  /* EfiUnusableMemory */
+    { 9, 0 },  /* EfiACPIReclaimMemory */
+    { 10, 0 }, /* EfiACPIMemoryNVS */
+    { 11, 0 }, /* EfiMemoryMappedIO */
+    { 12, 0 }, /* EfiMemoryMappedIOPortSpace */
+    { 13, 0 }, /* EfiPalCode */
+    { 14, 0 }, /* EfiMaxMemoryType (terminator) */
+};
 
 static bool ia64_fw_guid_equal(const IA64EfiGuid *a, const IA64EfiGuid *b)
 {
@@ -5342,7 +5371,7 @@ static void ia64_fw_handle_fv_load_file(CPUIA64State *env, uint64_t pc)
                       pc, ffs_ptr,
                       ia64_fw_encode_addr(ffs_ptr, img_phys), img_size,
                       ia64_fw_encode_addr(ffs_ptr, entry_phys),
-                      (unsigned long long)(status & ~IA64_EFI_STATUS_ERROR_BIT));
+                      (uint64_t)(status & ~IA64_EFI_STATUS_ERROR_BIT));
     }
 #endif
 }
@@ -9543,12 +9572,15 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     static int enabled = -1;
     static int dump_enabled = -1;
     static int dump_after_patch = -1;
+    static int memtype_enabled = -1;
     static bool fixed_sysmem_rdesc;
     static uint64_t fixed_sysmem_rdesc_base;
     static bool fixed_fv_hobs;
     static uint64_t fixed_fv_hobs_base;
     static bool fixed_flashmap_vars;
     static uint64_t fixed_flashmap_base;
+    static bool fixed_memtype_hob;
+    static uint64_t fixed_memtype_base;
     static bool fixed_attr;
     static bool fixed_pei_span;
     static bool fixed_free_bottom;
@@ -9599,7 +9631,18 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         const char *s = getenv("QEMU_IA64_EFI_HOB_DUMP");
         dump_enabled = (s && *s) ? 1 : 0;
     }
-    if (!enabled) {
+    if (memtype_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_EFI_MEMTYPE_HOB");
+        if (!s || !*s) {
+            memtype_enabled = 1;
+        } else if (!strcmp(s, "0") || !strcmp(s, "off") ||
+                   !strcmp(s, "false") || !strcmp(s, "no")) {
+            memtype_enabled = 0;
+        } else {
+            memtype_enabled = 1;
+        }
+    }
+    if (!enabled && !memtype_enabled) {
         if (dump_enabled && !dumped_hobs) {
             if ((dump_throttle++ & 0xff) == 0) {
                 if (ia64_fw_dump_efi_hobs(cs, stack_phys)) {
@@ -9609,8 +9652,17 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         }
         return;
     }
+    if (!enabled) {
+        if (dump_enabled && !dumped_hobs) {
+            if ((dump_throttle++ & 0xff) == 0) {
+                if (ia64_fw_dump_efi_hobs(cs, stack_phys)) {
+                    dumped_hobs = true;
+                }
+            }
+        }
+    }
 
-    if (fixed_sysmem_rdesc && fixed_fv_hobs &&
+    if (enabled && fixed_sysmem_rdesc && fixed_fv_hobs &&
         (fixed_attr && fixed_free_bottom && fixed_free_top)) {
         return;
     }
@@ -9643,7 +9695,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
     hwaddr ip_phys = ia64_phys_mode_addr(env->ip);
     bool in_flash = (ip_phys >= 0xff000000ULL);
     bool in_hob_loop = (env->ip >= 0x11b80 && env->ip < 0x11d80);
-    if (!hob_force_ram && (throttle++ & 0x7f) != 0 && !in_hob_loop) {
+    if (enabled && !hob_force_ram && (throttle++ & 0x7f) != 0 && !in_hob_loop) {
         return;
     }
 
@@ -10137,21 +10189,22 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         }
     }
 
-    if (!fixed_boot_mode && boot_mode == 0x20) {
-        uint8_t out[4];
-        stl_le_p(out, 0x00);
-        if (ia64_fw_write_bytes_any(cs, hob_base + 12, out, sizeof(out))) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: hob_patch: boot_mode recovery -> full\n");
-            fixed_boot_mode = true;
-            boot_mode = 0x00;
+    if (enabled) {
+        if (!fixed_boot_mode && boot_mode == 0x20) {
+            uint8_t out[4];
+            stl_le_p(out, 0x00);
+            if (ia64_fw_write_bytes_any(cs, hob_base + 12, out, sizeof(out))) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: hob_patch: boot_mode recovery -> full\n");
+                fixed_boot_mode = true;
+                boot_mode = 0x00;
+            }
         }
-    }
 
-    if (fixed_fv_hobs && fixed_fv_hobs_base && fixed_fv_hobs_base != hob_base) {
-        fixed_fv_hobs = false;
-    }
-    if (!fixed_fv_hobs) {
+        if (fixed_fv_hobs && fixed_fv_hobs_base && fixed_fv_hobs_base != hob_base) {
+            fixed_fv_hobs = false;
+        }
+        if (!fixed_fv_hobs) {
         enum { MAX_FV_HOBS = 8 };
         IA64FwFvInfo fv_hobs[MAX_FV_HOBS] = { 0 };
         IA64FwFvInfo fv_flash[MAX_FV_HOBS] = { 0 };
@@ -10278,12 +10331,14 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             fixed_fv_hobs = true;
             fixed_fv_hobs_base = hob_base;
         }
+        }
     }
 
-    if (fixed_flashmap_vars && fixed_flashmap_base && fixed_flashmap_base != hob_base) {
-        fixed_flashmap_vars = false;
-    }
-    if (!fixed_flashmap_vars && !in_flash) {
+    if (enabled) {
+        if (fixed_flashmap_vars && fixed_flashmap_base && fixed_flashmap_base != hob_base) {
+            fixed_flashmap_vars = false;
+        }
+        if (!fixed_flashmap_vars && !in_flash) {
         bool have_vars = false;
         uint64_t cur = hob_base;
         for (int iter = 0; iter < 4096 && cur < hob_end; iter++) {
@@ -10392,6 +10447,104 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 }
             }
         }
+    }
+
+    if (memtype_enabled) {
+        if (fixed_memtype_hob && fixed_memtype_base && fixed_memtype_base != hob_base) {
+            fixed_memtype_hob = false;
+        }
+        if (!fixed_memtype_hob && !in_flash) {
+            bool have_memtype = false;
+            uint64_t cur = hob_base;
+            for (int iter = 0; iter < 4096 && cur < hob_end; iter++) {
+                uint8_t h[8];
+                if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+                    break;
+                }
+                uint16_t type = lduw_le_p(&h[0]);
+                uint16_t len = lduw_le_p(&h[2]);
+                if (len < sizeof(h)) {
+                    break;
+                }
+                if (type == EFI_HOB_TYPE_END_OF_HOB_LIST) {
+                    break;
+                }
+                if (type == EFI_HOB_TYPE_GUID_EXTENSION && len >= 0x18) {
+                    uint8_t gh[0x20];
+                    if (cpu_memory_rw_debug(cs, cur, gh, sizeof(gh), false) == 0) {
+                        IA64EfiGuid guid;
+                        ia64_fw_guid_from_bytes(&gh[8], &guid);
+                        if (ia64_fw_guid_equal(&guid, &ia64_efi_guid_memtype_info)) {
+                            have_memtype = true;
+                            break;
+                        }
+                    }
+                }
+                cur += len;
+                if (cur - hob_base > (16ULL << 20)) {
+                    break;
+                }
+            }
+
+            if (have_memtype) {
+                fixed_memtype_hob = true;
+                fixed_memtype_base = hob_base;
+            } else if (end_hob) {
+                const uint16_t hob_len = 0x18 + sizeof(ia64_fw_memtype_info);
+                uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
+                uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
+                uint64_t new_end_hob = end_hob + hob_len;
+                uint64_t new_free_bottom_phys = free_bottom_phys + hob_len;
+
+                if (new_free_bottom_phys < free_top_phys &&
+                    new_free_bottom_phys > free_bottom_phys) {
+                    uint8_t gh[0x18 + sizeof(ia64_fw_memtype_info)] = { 0 };
+
+                    stw_le_p(&gh[0], EFI_HOB_TYPE_GUID_EXTENSION);
+                    stw_le_p(&gh[2], hob_len);
+                    stl_le_p(&gh[4], 0);
+                    stl_le_p(&gh[8], ia64_efi_guid_memtype_info.data1);
+                    stw_le_p(&gh[12], ia64_efi_guid_memtype_info.data2);
+                    stw_le_p(&gh[14], ia64_efi_guid_memtype_info.data3);
+                    memcpy(&gh[16], ia64_efi_guid_memtype_info.data4, 8);
+                    memcpy(&gh[0x18], ia64_fw_memtype_info, sizeof(ia64_fw_memtype_info));
+
+                    cpu_physical_memory_write(end_hob, gh, sizeof(gh));
+
+                    uint8_t endhdr[8] = { 0 };
+                    stw_le_p(&endhdr[0], EFI_HOB_TYPE_END_OF_HOB_LIST);
+                    stw_le_p(&endhdr[2], sizeof(endhdr));
+                    cpu_physical_memory_write(new_end_hob, endhdr, sizeof(endhdr));
+
+                    uint64_t end_hob_tmpl = ldq_le_p(&phit[48]);
+                    uint64_t free_bottom_tmpl = ldq_le_p(&phit[40]);
+                    if (!end_hob_tmpl) {
+                        end_hob_tmpl = mem_bottom;
+                    }
+                    if (!free_bottom_tmpl) {
+                        free_bottom_tmpl = mem_bottom;
+                    }
+                    free_bottom = ia64_fw_encode_addr(free_bottom_tmpl, new_free_bottom_phys);
+                    stq_le_p(&phit[48], ia64_fw_encode_addr(end_hob_tmpl, new_end_hob));
+                    stq_le_p(&phit[40], free_bottom);
+                    cpu_physical_memory_write(hob_base, phit, sizeof(phit));
+
+                    end_hob = new_end_hob;
+                    hob_end = new_end_hob + sizeof(endhdr);
+                    env->fw_phit_free_bottom = free_bottom;
+                    env->fw_phit_free_top = free_top;
+                    fixed_memtype_hob = true;
+                    fixed_memtype_base = hob_base;
+
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: hob_patch: inserted MemoryTypeInformation HOB\n");
+                }
+            }
+        }
+    }
+
+    if (!enabled) {
+        return;
     }
 
     if (in_flash) {
@@ -11039,6 +11192,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             dumped_after_patch = true;
         }
     }
+}
+
 }
 
 static bool ia64_fw_fastpath_copy(uint64_t dst, uint64_t src, uint64_t len)
