@@ -6839,11 +6839,12 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                               (unsigned)((env->pr >> 14) & 1),
                               (unsigned)((env->pr >> 15) & 1));
             }
-        } else if (pc >= 0xffe256a0ULL && pc <= 0xffe2572cULL) {
+        } else if ((pc >= 0xffe255a0ULL && pc <= 0xffe25620ULL) ||
+                   (pc >= 0xffe256a0ULL && pc <= 0xffe2572cULL)) {
             if (loop_hits_dxe++ < (uint32_t)dbg_loop_limit) {
                 uint64_t ptr = env->r[12];
-                uint8_t val = cpu_ldub_data(env, ptr);
-                uint64_t next = cpu_ldq_data(env, ptr + 8);
+                uint8_t val = cpu_ldub_data_ra(env, ptr, GETPC());
+                uint64_t next = cpu_ldq_data_ra(env, ptr + 8, GETPC());
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "dbg_loop_dxe pc=%016" PRIx64 " hit=%u"
                               " r12=%016" PRIx64 " byte=%02x next=%016" PRIx64
