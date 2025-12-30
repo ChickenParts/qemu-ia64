@@ -7603,6 +7603,30 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
     }
 }
 
+void HELPER(dbg_ar_lc_store)(CPUIA64State *env, uint64_t pc, uint64_t val)
+{
+    static int dbg_inited;
+    static int dbg_enabled;
+
+    if (!dbg_inited) {
+        const char *s = getenv("QEMU_IA64_DBG_AR_LC");
+        dbg_enabled = (s && *s && strcmp(s, "0") != 0);
+        dbg_inited = 1;
+    }
+    if (!dbg_enabled) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "dbg_ar_lc_store pc=%016" PRIx64
+                  " val=%016" PRIx64
+                  " r1=%016" PRIx64 " r2=%016" PRIx64
+                  " r3=%016" PRIx64 " r8=%016" PRIx64
+                  " ar.lc(old)=%016" PRIx64 "\n",
+                  pc, val, env->r[1], env->r[2], env->r[3], env->r[8],
+                  env->ar[65]);
+}
+
 void HELPER(dbg_cmp)(CPUIA64State *env, uint64_t pc, uint64_t lhs, uint64_t rhs,
                      uint32_t p1, uint32_t p2)
 {
@@ -12200,11 +12224,12 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
      */
     if (stack_count) {
         env->r[10] = stack_count;
+        env->r[33] = stack_count;
     } else if (ppi) {
         env->r[10] = ppi;
-    }
-    if (sec_handoff && ppi) {
-        env->r[33] = ppi;
+        if (sec_handoff) {
+            env->r[33] = ppi;
+        }
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
@@ -12324,8 +12349,8 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     }
     if (stack_count) {
         env->r[10] = stack_count;
-    }
-    if (ppi) {
+        env->r[33] = stack_count;
+    } else if (ppi) {
         env->r[33] = ppi;
     }
     if (ia64_fw_r33_watch_enabled()) {
