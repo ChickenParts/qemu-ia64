@@ -12529,6 +12529,10 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
                   " r1=%016" PRIx64 " r12=%016" PRIx64 "\n",
                   pc, r8, env->r[32], env->r[33], env->r[34],
                   env->r[1], env->r[12]);
+    if ((pc & ~0xFULL) == 0x00000000ffe268b0ULL ||
+        (pc & ~0xFULL) == 0x80000000ffe268b0ULL) {
+        HELPER(fw_pei_err268_probe)(env, pc);
+    }
     {
         CPUState *cs = env_cpu(env);
         uint64_t arg0 = env->r[32];
