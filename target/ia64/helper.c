@@ -14150,6 +14150,16 @@ static bool ia64_fw_pei_addr_in_cached_temp(uint64_t phys)
                    ia64_fw_pei_cached_temp_size);
 }
 
+static bool ia64_fw_try_translate_addr(CPUIA64State *env, uint64_t va,
+                                       hwaddr *pa)
+{
+    if (!(env->psr & IA64_PSR_DT)) {
+        *pa = ia64_phys_mode_addr(va);
+        return true;
+    }
+    return ia64_try_translate(env, va, pa);
+}
+
 static bool ia64_fw_pei_store_watch_enabled(void)
 {
     static int enabled = -1;
@@ -14161,6 +14171,26 @@ static bool ia64_fw_pei_store_watch_enabled(void)
 }
 
 static bool ia64_fw_pei_store_watch_active;
+
+static bool ia64_fw_pei_load_watch_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_LOAD_WATCH");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static bool ia64_fw_pei_memdump_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_MEMDUMP");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled != 0;
+}
 
 void HELPER(fw_pei_store_watch_toggle)(CPUIA64State *env, uint64_t pc)
 {
@@ -14216,11 +14246,14 @@ void HELPER(fw_pei_store_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
         return;
     }
 
-    hwaddr addr_pa = (env->psr & IA64_PSR_DT) ?
-        helper_tpa(env, addr) : ia64_phys_mode_addr(addr);
+    hwaddr addr_pa = 0;
+    bool pa_ok = ia64_fw_try_translate_addr(env, addr, &addr_pa);
+    uint64_t addr_phys = ia64_phys_mode_addr(addr);
     const hwaddr lo = 0x000000001ef10000ULL;
     const hwaddr hi = 0x000000001ef10100ULL;
-    if (addr_pa < lo || addr_pa >= hi) {
+    bool hit = (pa_ok && addr_pa >= lo && addr_pa < hi) ||
+               (addr_phys >= lo && addr_phys < hi);
+    if (!hit) {
         return;
     }
 
@@ -14228,8 +14261,324 @@ void HELPER(fw_pei_store_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   "pei_store_watch pc=%016" PRIx64 " ri=%u"
                   " ip=%016" PRIx64
                   " addr=%016" PRIx64 " addr_pa=%016" HWADDR_PRIx
-                  " size=%u val=%016" PRIx64 "\n",
-                  pc, ri, env->ip, addr, addr_pa, size, val);
+                  " addr_phys=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
+                  pc, ri, env->ip, addr, addr_pa, addr_phys, size, val);
+#endif
+}
+
+void HELPER(fw_pei_load_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                               uint64_t addr, uint32_t size, uint64_t val)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)ri;
+    (void)addr;
+    (void)size;
+    (void)val;
+    return;
+#else
+    if (!ia64_fw_pei_load_watch_enabled() ||
+        !ia64_fw_pei_store_watch_active) {
+        return;
+    }
+
+    static int log_limit = -1;
+    static int log_count;
+    if (log_limit == -1) {
+        log_limit = 128;
+        const char *s = getenv("QEMU_IA64_PEI_LOAD_WATCH_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+    if (log_count++ >= log_limit) {
+        return;
+    }
+
+    hwaddr addr_pa = 0;
+    bool pa_ok = ia64_fw_try_translate_addr(env, addr, &addr_pa);
+    uint64_t addr_phys = ia64_phys_mode_addr(addr);
+    const hwaddr lo = 0x000000001ef10000ULL;
+    const hwaddr hi = 0x000000001ef10100ULL;
+    bool hit = (pa_ok && addr_pa >= lo && addr_pa < hi) ||
+               (addr_phys >= lo && addr_phys < hi);
+    if (!hit) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "pei_load_watch pc=%016" PRIx64 " ri=%u"
+                  " ip=%016" PRIx64
+                  " addr=%016" PRIx64 " addr_pa=%016" HWADDR_PRIx
+                  " addr_phys=%016" PRIx64 " size=%u val=%016" PRIx64 "\n",
+                  pc, ri, env->ip, addr, addr_pa, addr_phys, size, val);
+#endif
+}
+
+void HELPER(fw_pei_memdump)(CPUIA64State *env, uint64_t pc, uint32_t stage)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)stage;
+    return;
+#else
+    if (!ia64_fw_pei_memdump_enabled() ||
+        !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    static bool dumped[2];
+    if (stage < 2 && dumped[stage]) {
+        return;
+    }
+    if (stage < 2) {
+        dumped[stage] = true;
+    }
+
+    const char *tag = (stage == 0) ? "pre" : (stage == 1) ? "post" : "stage";
+    const hwaddr base = 0x000000001ef10000ULL;
+    enum { IA64_PEI_MEMDUMP_SIZE = 0x100 };
+    uint8_t buf[IA64_PEI_MEMDUMP_SIZE];
+    CPUState *cs = env_cpu(env);
+    if (cpu_memory_rw_debug(cs, base, buf, sizeof(buf), false) != 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_memdump %s pc=%016" PRIx64
+                      " base=%016" HWADDR_PRIx " unreadable\n",
+                      tag, pc, base);
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_memdump %s pc=%016" PRIx64
+                  " base=%016" HWADDR_PRIx " size=%u\n",
+                  tag, pc, base, (unsigned)IA64_PEI_MEMDUMP_SIZE);
+    for (size_t off = 0; off < IA64_PEI_MEMDUMP_SIZE; off += 16) {
+        char line[128];
+        int pos = snprintf(line, sizeof(line), "  %016" HWADDR_PRIx ":",
+                           base + off);
+        for (size_t i = 0; i < 16; i++) {
+            pos += snprintf(line + pos, sizeof(line) - pos,
+                            " %02x", buf[off + i]);
+        }
+        qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+    }
+#endif
+}
+
+void HELPER(fw_pei_install_mem_call_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool logged;
+    if (logged) {
+        return;
+    }
+    logged = true;
+
+    CPUState *cs = env_cpu(env);
+    uint64_t b7 = env->b[7];
+    uint64_t entry = 0;
+    uint64_t gp = 0;
+    uint8_t fdesc_raw[16];
+    bool fdesc_ok = false;
+    if (b7) {
+        hwaddr b7_phys = 0;
+        (void)ia64_fw_try_translate_addr(env, b7, &b7_phys);
+        if (cpu_memory_rw_debug(cs, b7_phys, fdesc_raw,
+                                sizeof(fdesc_raw), false) == 0) {
+            fdesc_ok = true;
+            entry = ldq_le_p(&fdesc_raw[0]);
+            gp = ldq_le_p(&fdesc_raw[8]);
+        } else {
+            ia64_fw_read_fdesc(cs, b7, &entry, &gp);
+        }
+    }
+    uint64_t entry_region = entry >> 61;
+    uint64_t entry_low = entry & ((1ULL << 61) - 1);
+    hwaddr entry_phys = 0;
+    if (entry) {
+        if (!ia64_fw_try_translate_addr(env, entry, &entry_phys)) {
+            entry_phys = 0;
+        }
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_install_mem_call pc=%016" PRIx64
+                  " b7=%016" PRIx64 " entry=%016" PRIx64
+                  " entry_region=%" PRIu64 " entry_low=%016" PRIx64
+                  " entry_phys=%016" HWADDR_PRIx " gp=%016" PRIx64
+                  " r1=%016" PRIx64 " r30=%016" PRIx64
+                  " r31=%016" PRIx64 " psr=%016" PRIx64 "\n",
+                  pc, b7, entry, entry_region, entry_low, entry_phys,
+                  gp, env->r[1], env->r[30], env->r[31], env->psr);
+    {
+        hwaddr r31_phys = 0;
+        bool r31_ok = ia64_fw_try_translate_addr(env, env->r[31], &r31_phys);
+        uint8_t r31_buf[32];
+        if (r31_ok &&
+            cpu_memory_rw_debug(cs, r31_phys, r31_buf, sizeof(r31_buf), false) == 0) {
+            char line[160];
+            int pos = snprintf(line, sizeof(line),
+                               "IA64: pei_install_mem_call r31_mem %016" HWADDR_PRIx ":",
+                               r31_phys);
+            for (size_t i = 0; i < sizeof(r31_buf); i++) {
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                                " %02x", r31_buf[i]);
+            }
+            qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_call r31_phys=%016" HWADDR_PRIx
+                          " ok=%d\n",
+                          r31_phys, r31_ok ? 1 : 0);
+        }
+    }
+    if (entry) {
+        uint8_t rr_idx = extract64(entry, 61, 3);
+        uint64_t rr = env->rr[rr_idx];
+        uint32_t rid = RR_RID(rr);
+        uint8_t ps = RR_PS(rr);
+        if (!ps) {
+            ps = 12;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_call entry_rr idx=%u rr=%016" PRIx64
+                      " rid=%u ps=%u\n",
+                      rr_idx, rr, rid, ps);
+        if ((env->psr & IA64_PSR_DT) && PTA_VE(env->cr[8]) && RR_VE(rr)) {
+            uint64_t vhpt_addr = helper_thash(env);
+            uint64_t pte = cpu_ldq_data(env, vhpt_addr);
+            uint64_t tar = PTA_VF(env->cr[8]) ?
+                cpu_ldq_data(env, vhpt_addr + 8) :
+                ((uint64_t)rid << 8) | ((uint64_t)RR_PS(rr) << 2);
+            uint64_t tag = PTA_VF(env->cr[8]) ?
+                cpu_ldq_data(env, vhpt_addr + 16) : 0;
+            uint64_t expected = helper_ttag(env);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_call vhpt addr=%016" PRIx64
+                          " pte=%016" PRIx64 " tar=%016" PRIx64
+                          " tag=%016" PRIx64 " exp=%016" PRIx64 "\n",
+                          vhpt_addr, pte, tar, tag, expected);
+        }
+        for (int i = 0; i < ARRAY_SIZE(env->dtrs); i++) {
+            const typeof(env->dtrs[0]) *e = &env->dtrs[i];
+            if (!e->valid || e->rid != rid || !PTE_P(e->pte)) {
+                continue;
+            }
+            uint64_t mask = ~((1ULL << e->ps) - 1);
+            if ((entry & mask) == e->tag) {
+                uint64_t pa = e->pa + (entry & ~mask);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_mem_call DTR[%d] tag=%016" PRIx64
+                              " ps=%u pa_base=%016" PRIx64 " -> pa=%016" PRIx64 "\n",
+                              i, e->tag, e->ps, e->pa, pa);
+            }
+        }
+        for (int i = 0; i < ARRAY_SIZE(env->itrs); i++) {
+            const typeof(env->itrs[0]) *e = &env->itrs[i];
+            if (!e->valid || e->rid != rid || !PTE_P(e->pte)) {
+                continue;
+            }
+            uint64_t mask = ~((1ULL << e->ps) - 1);
+            if ((entry & mask) == e->tag) {
+                uint64_t pa = e->pa + (entry & ~mask);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_mem_call ITR[%d] tag=%016" PRIx64
+                              " ps=%u pa_base=%016" PRIx64 " -> pa=%016" PRIx64 "\n",
+                              i, e->tag, e->ps, e->pa, pa);
+            }
+        }
+    }
+    if (fdesc_ok) {
+        hwaddr b7_phys = 0;
+        bool b7_ok = ia64_fw_try_translate_addr(env, b7, &b7_phys);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_call fdesc bytes=%02x %02x %02x %02x"
+                      " %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                      fdesc_raw[0], fdesc_raw[1], fdesc_raw[2], fdesc_raw[3],
+                      fdesc_raw[4], fdesc_raw[5], fdesc_raw[6], fdesc_raw[7],
+                      fdesc_raw[8], fdesc_raw[9], fdesc_raw[10], fdesc_raw[11],
+                      fdesc_raw[12], fdesc_raw[13], fdesc_raw[14], fdesc_raw[15]);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_call b7_phys=%016" HWADDR_PRIx
+                      " ok=%d\n",
+                      b7_phys, b7_ok ? 1 : 0);
+        uint8_t around[48];
+        hwaddr start = (b7_phys >= 16) ? (b7_phys - 16) : 0;
+        if (cpu_memory_rw_debug(cs, start, around, sizeof(around), false) == 0) {
+            char line[192];
+            int pos = snprintf(line, sizeof(line),
+                               "  b7_mem %016" HWADDR_PRIx ":", start);
+            for (size_t i = 0; i < sizeof(around); i++) {
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                                " %02x", around[i]);
+            }
+            qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+        }
+    }
+    if (entry_phys) {
+        uint8_t probe[16];
+        int rc = cpu_memory_rw_debug(cs, entry_phys, probe, sizeof(probe), false);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_call probe entry_phys=%016" HWADDR_PRIx
+                      " rc=%d\n",
+                      entry_phys, rc);
+        if (rc == 0) {
+            ia64_fw_dump_code(env, "pei_install_mem_call", entry_phys, 16);
+        }
+    }
+    if (entry) {
+        hwaddr entry32 = (hwaddr)(entry & 0xffffffffULL);
+        uint8_t probe[16];
+        int rc = cpu_memory_rw_debug(cs, entry32, probe, sizeof(probe), false);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_install_mem_call probe entry32=%08" HWADDR_PRIx
+                      " rc=%d\n",
+                      entry32, rc);
+        if (rc == 0) {
+            ia64_fw_dump_code(env, "pei_install_mem_call_32", entry32, 16);
+        }
+    }
+#endif
+}
+
+void HELPER(fw_psr_update_log)(CPUIA64State *env, uint64_t pc,
+                               uint64_t old_psr, uint64_t new_psr,
+                               uint64_t mask)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)old_psr;
+    (void)new_psr;
+    (void)mask;
+    return;
+#else
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PSR_LOG");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    if (!enabled || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    if (!(mask & (IA64_PSR_DT | IA64_PSR_IT))) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: psr_update pc=%016" PRIx64 " mask=%016" PRIx64
+                  " old=%016" PRIx64 " new=%016" PRIx64 "\n",
+                  pc, mask, old_psr, new_psr);
 #endif
 }
 
