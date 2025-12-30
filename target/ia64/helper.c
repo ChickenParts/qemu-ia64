@@ -13149,6 +13149,37 @@ void HELPER(fw_pei_err268_probe)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+void HELPER(fw_pei_callfd_probe)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    static bool dumped;
+    if (dumped) {
+        return;
+    }
+    dumped = true;
+
+    CPUState *cs = env_cpu(env);
+    uint64_t fd = env->r[31];
+    uint64_t entry = 0;
+    uint64_t gp = 0;
+    if (fd) {
+        ia64_fw_read_fdesc(cs, fd, &entry, &gp);
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_callfd pc=%016" PRIx64
+                  " fd=%016" PRIx64 " entry=%016" PRIx64
+                  " gp=%016" PRIx64 " r1=%016" PRIx64 "\n",
+                  pc, fd, entry, gp, env->r[1]);
+#endif
+}
+
 static bool ia64_fw_pei_startup_dump_enabled(void)
 {
     static int enabled = -1;

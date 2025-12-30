@@ -1851,6 +1851,13 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe22400ULL ||
+         ctx->base.pc_next == 0x00000000ffe22400ULL)) {
+        gen_helper_fw_pei_callfd_probe(tcg_env,
+                                       tcg_constant_i64(ctx->base.pc_next));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe2e9b0ULL ||
          ctx->base.pc_next == 0x00000000ffe2e9b0ULL)) {
         gen_helper_fw_pei_fit_probe(tcg_env,
