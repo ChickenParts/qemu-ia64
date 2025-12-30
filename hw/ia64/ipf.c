@@ -828,6 +828,10 @@ static void ipf_fill_fw_window_erased(void)
 #define CHECKSUM_BIT_MASK     0x80
 #define EFI_SAL_FIT_PALB_TYPE 0x01
 
+#define IPF_FW_GP_BASE_ADDR   0x000000010002FEB0ULL
+#define IPF_FW_GP_GLOB_OFF    0x00000000001FFF90ULL
+#define IPF_FW_GP_GLOB_SENTINEL 0xDEADBEEF2BADBEEFULL
+
 typedef struct {
     uint8_t Size[3];
     uint8_t Type;
@@ -898,6 +902,40 @@ static bool ipf_fw_patch_fit_enabled(void)
         }
     }
     return enabled;
+}
+
+static bool ipf_fw_patch_gp_globals_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IPF_FW_PATCH_GP_GLOBALS");
+        enabled = (s && *s) ? 1 : 0;
+        if (enabled == 0) {
+            enabled = 1;
+        }
+    }
+    return enabled;
+}
+
+static void ipf_fw_patch_gp_globals(uint8_t *fw, size_t fw_size, hwaddr fw_base)
+{
+    if (!ipf_fw_patch_gp_globals_enabled()) {
+        return;
+    }
+
+    uint64_t target = IPF_FW_GP_BASE_ADDR - IPF_FW_GP_GLOB_OFF;
+    if (target < fw_base || target + 8 > fw_base + fw_size) {
+        return;
+    }
+    size_t off = (size_t)(target - fw_base);
+    uint64_t cur = ldq_le_p(&fw[off]);
+    if (cur != IPF_FW_GP_GLOB_SENTINEL) {
+        return;
+    }
+    stq_le_p(&fw[off], 0);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IPF: GP globals patch: cleared sentinel at %016" PRIx64 "\n",
+                  target);
 }
 
 static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
@@ -4409,6 +4447,7 @@ static void ipf_init(MachineState *machine)
             ipf_fw_scan_firmware(buf, (size_t)image_size, fw_offset);
         }
         ipf_fw_patch_fit(buf, (size_t)image_size, fw_offset);
+        ipf_fw_patch_gp_globals(buf, (size_t)image_size, fw_offset);
         ipf_fw_probe_fit(buf, (size_t)image_size, fw_offset);
         address_space_write(&address_space_memory, fw_offset,
                             MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
