@@ -13139,6 +13139,24 @@ void HELPER(fw_pei_err268_probe)(CPUIA64State *env, uint64_t pc)
                       "IA64: pei_err268 stack[%016" PRIx64 "]: %s\n",
                       (uint64_t)sp, hex);
     }
+    if (env->r[33]) {
+        uint8_t buf[64];
+        hwaddr p = ia64_phys_mode_addr(env->r[33]);
+        if (cpu_memory_rw_debug(cs, p, buf, sizeof(buf), false) == 0) {
+            char hex[3 * sizeof(buf) + 1];
+            size_t pos = 0;
+            for (size_t i = 0; i < sizeof(buf); i++) {
+                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ",
+                                buf[i]);
+            }
+            if (pos > 0) {
+                hex[pos - 1] = '\0';
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_err268 r33_mem[%016" PRIx64 "]: %s\n",
+                          (uint64_t)p, hex);
+        }
+    }
 
     uint64_t ps_ptr = 0;
     if (ia64_fw_pei_get_ps_ptr(env, env->r[32], &ps_ptr) ||
