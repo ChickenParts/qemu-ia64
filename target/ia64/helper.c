@@ -14150,6 +14150,89 @@ static bool ia64_fw_pei_addr_in_cached_temp(uint64_t phys)
                    ia64_fw_pei_cached_temp_size);
 }
 
+static bool ia64_fw_pei_store_watch_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_STORE_WATCH");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static bool ia64_fw_pei_store_watch_active;
+
+void HELPER(fw_pei_store_watch_toggle)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    if (!ia64_fw_pei_store_watch_enabled()) {
+        return;
+    }
+    bool enable = (pc == 0x00000000ffe66020ULL ||
+                   pc == 0x80000000ffe66020ULL);
+    ia64_fw_pei_store_watch_active = enable;
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_store_watch %s pc=%016" PRIx64 "\n",
+                      enable ? "on" : "off", pc);
+    }
+#endif
+}
+
+void HELPER(fw_pei_store_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                                uint64_t addr, uint32_t size, uint64_t val)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)ri;
+    (void)addr;
+    (void)size;
+    (void)val;
+    return;
+#else
+    if (!ia64_fw_pei_store_watch_enabled() ||
+        !ia64_fw_pei_store_watch_active) {
+        return;
+    }
+
+    static int log_limit = -1;
+    static int log_count;
+    if (log_limit == -1) {
+        log_limit = 128;
+        const char *s = getenv("QEMU_IA64_PEI_STORE_WATCH_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+    if (log_count++ >= log_limit) {
+        return;
+    }
+
+    hwaddr addr_pa = (env->psr & IA64_PSR_DT) ?
+        helper_tpa(env, addr) : ia64_phys_mode_addr(addr);
+    const hwaddr lo = 0x000000001ef10000ULL;
+    const hwaddr hi = 0x000000001ef10100ULL;
+    if (addr_pa < lo || addr_pa >= hi) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "pei_store_watch pc=%016" PRIx64 " ri=%u"
+                  " ip=%016" PRIx64
+                  " addr=%016" PRIx64 " addr_pa=%016" HWADDR_PRIx
+                  " size=%u val=%016" PRIx64 "\n",
+                  pc, ri, env->ip, addr, addr_pa, size, val);
+#endif
+}
+
 void HELPER(fw_pei_install_mem_trace)(CPUIA64State *env, uint64_t pc, uint32_t stage)
 {
 #ifdef CONFIG_USER_ONLY

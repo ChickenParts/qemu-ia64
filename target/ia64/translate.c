@@ -714,6 +714,8 @@ static uint64_t ia64_store_watch_value;
 static uint64_t ia64_store_watch_value_mask;
 static bool ia64_watch_r33_inited;
 static bool ia64_watch_r33_enabled;
+static bool ia64_pei_store_watch_inited;
+static bool ia64_pei_store_watch_enabled;
 
 static void ia64_init_store_watch(void)
 {
@@ -835,6 +837,16 @@ static bool ia64_watch_r33_match(void)
         ia64_watch_r33_enabled = (s && *s) ? true : false;
     }
     return ia64_watch_r33_enabled;
+}
+
+static bool ia64_pei_store_watch_match(void)
+{
+    if (!ia64_pei_store_watch_inited) {
+        ia64_pei_store_watch_inited = true;
+        const char *s = getenv("QEMU_IA64_PEI_STORE_WATCH");
+        ia64_pei_store_watch_enabled = (s && *s) ? true : false;
+    }
+    return ia64_pei_store_watch_enabled;
 }
 
 static TCGv_i64 gen_phys_mode_addr(TCGv_i64 addr)
@@ -1660,6 +1672,8 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
          ctx->base.pc_next == 0x00000000ffe66020ULL)) {
         gen_helper_fw_pei_install_mem_fix(tcg_env,
                                           tcg_constant_i64(ctx->base.pc_next));
+        gen_helper_fw_pei_store_watch_toggle(tcg_env,
+                                             tcg_constant_i64(ctx->base.pc_next));
         gen_helper_fw_pei_install_mem_trace(tcg_env,
                                             tcg_constant_i64(ctx->base.pc_next),
                                             tcg_constant_i32(0));
@@ -1672,6 +1686,8 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         gen_helper_fw_pei_install_mem_trace(tcg_env,
                                             tcg_constant_i64(ctx->base.pc_next),
                                             tcg_constant_i32(1));
+        gen_helper_fw_pei_store_watch_toggle(tcg_env,
+                                             tcg_constant_i64(ctx->base.pc_next));
     }
 
     if (ctx->mem_idx != MMU_USER_IDX &&
@@ -4252,6 +4268,14 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                              tcg_constant_i32(size),
                                              src);
                     gen_set_label(skip_watch);
+                }
+                if (ia64_pei_store_watch_match()) {
+                    gen_helper_fw_pei_store_watch(tcg_env,
+                                                  tcg_constant_i64(ctx->base.pc_next),
+                                                  tcg_constant_i32(ctx->ri),
+                                                  watch_addr,
+                                                  tcg_constant_i32(size),
+                                                  src);
                 }
                 if (ia64_store_watch_value_match() && size == 8) {
                     uint64_t effective_mask = ia64_store_watch_value_mask;
