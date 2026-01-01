@@ -202,6 +202,7 @@ typedef struct CPUArchState {
     uint64_t fw_pei_loadfile_stub;
     uint64_t fw_mem_size;
     uint64_t fw_pei_ps;
+    uint8_t fw_pei_mem_installed;
     uint64_t fw_pei_locate_ret_pc;
     uint64_t fw_pei_locate_instance;
     uint64_t fw_pei_locate_desc_ptr;

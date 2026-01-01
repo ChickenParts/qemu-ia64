@@ -9972,6 +9972,16 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         }
         return;
     }
+    if (!env->fw_pei_mem_installed) {
+        if (dump_enabled && !dumped_hobs) {
+            if ((dump_throttle++ & 0xff) == 0) {
+                if (ia64_fw_dump_efi_hobs(cs, stack_phys)) {
+                    dumped_hobs = true;
+                }
+            }
+        }
+        return;
+    }
     if (!enabled) {
         if (dump_enabled && !dumped_hobs) {
             if ((dump_throttle++ & 0xff) == 0) {
@@ -11194,12 +11204,27 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             if (cpu_memory_rw_debug(cs, cur, rh, sizeof(rh), false) != 0) {
                 break;
             }
+            uint32_t rtype = ldl_le_p(&rh[24]);
             uint64_t start = ldq_le_p(&rh[32]);
             uint64_t rlen = ldq_le_p(&rh[40]);
             uint32_t rattr = ldl_le_p(&rh[28]);
+            uint64_t start_phys = ia64_phys_mode_addr(start);
+
+            if (rtype == 0 && start_phys == mem_bottom_phys_local) {
+                uint64_t start_fix = ia64_fw_encode_addr(mem_bottom, start_phys);
+                if (start != start_fix) {
+                    stq_le_p(&rh[32], start_fix);
+                    cpu_physical_memory_write(cur, rh, sizeof(rh));
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: hob_patch: sysmem start %016" PRIx64
+                                  " -> %016" PRIx64 " at hob=%016" PRIx64 "\n",
+                                  start, start_fix, cur);
+                    start = start_fix;
+                }
+            }
 
         if (!fixed_pei_span &&
-            start == mem_bottom_phys_local &&
+            start_phys == mem_bottom_phys_local &&
             (orig_mem_top_phys > mem_bottom_phys_local) &&
             rlen == (orig_mem_top_phys - mem_bottom_phys_local)) {
             uint64_t extra = slack_size ? slack_size : (8ULL << 20);
@@ -11215,7 +11240,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             rlen = new_len;
         }
         if (ram_top &&
-            start == mem_bottom_phys_local &&
+            start_phys == mem_bottom_phys_local &&
             ram_top > mem_bottom_phys_local &&
             rlen < (ram_top - mem_bottom_phys_local)) {
             uint64_t new_len = ram_top - mem_bottom_phys_local;
@@ -11228,7 +11253,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             rlen = new_len;
         }
 
-            if (start == mem_bottom_phys_local &&
+            if (start_phys == mem_bottom_phys_local &&
                 (rattr & (EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE |
                           EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE)) ==
                     (EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE |
@@ -11290,6 +11315,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         mem_top_phys > mem_bottom_phys) {
         uint8_t scan[0x400];
         uint64_t stack_page = stack_phys & ~0xfffULL;
+        uint64_t temp_base = ia64_fw_pei_cached_temp_base;
+        uint64_t temp_size = ia64_fw_pei_cached_temp_size;
         uint64_t best_cand = 0;
         uint64_t best_cand_raw = 0;
         uint64_t best_cand_loc = 0;
@@ -11297,9 +11324,12 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         if (in_hob_loop) {
             uint64_t cand_raw = env->r[33];
             uint64_t cand = ia64_phys_mode_addr(cand_raw);
+            bool cand_in_temp = temp_base && temp_size &&
+                cand >= temp_base && cand < (temp_base + temp_size);
             if (cand && cand < flash_base &&
                 (cand & 0xfffULL) == 0 &&
-                cand != reloc_hob_base) {
+                cand != reloc_hob_base &&
+                !cand_in_temp) {
                 uint64_t cand_end = 0;
                 int cand_count = 0;
                 if (!ia64_fw_validate_efi_hob_list(cs, cand, &cand_end, &cand_count)) {
@@ -11316,6 +11346,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             for (size_t off = 0; off + 8 <= sizeof(scan); off += 8) {
                 uint64_t cand_raw = ldq_le_p(&scan[off]);
                 uint64_t cand = ia64_phys_mode_addr(cand_raw);
+                bool cand_in_temp = temp_base && temp_size &&
+                    cand >= temp_base && cand < (temp_base + temp_size);
                 if (!cand || cand >= flash_base) {
                     continue;
                 }
@@ -11323,6 +11355,9 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                     continue;
                 }
                 if (cand == reloc_hob_base) {
+                    continue;
+                }
+                if (cand_in_temp) {
                     continue;
                 }
 
@@ -15061,6 +15096,10 @@ void HELPER(fw_pei_install_mem_trace)(CPUIA64State *env, uint64_t pc, uint32_t s
                   "IA64: pei_install_mem_trace %s found_status=%d"
                   " found_mem=%d\n",
                   tag, found_status ? 1 : 0, found_mem ? 1 : 0);
+
+    if (stage == 1 && env->r[8] == 0) {
+        env->fw_pei_mem_installed = 1;
+    }
 #endif
 }
 
