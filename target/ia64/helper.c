@@ -144,7 +144,6 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 #define IA64_IPF_FW_FLASH_BASE        0x00000000ff000000ULL
 #define IA64_IPF_FW_FLASH_SIZE        (16ULL << 20)
 #define IA64_IPF_FW_FLASH_BLOCK_SIZE  (64ULL << 10)
-#define IA64_IPF_FW_FLASH_BLOCKS      (IA64_IPF_FW_FLASH_SIZE / IA64_IPF_FW_FLASH_BLOCK_SIZE)
 #define IA64_IPF_FW_FLASH_ATTRS       0x00100C36U
 #define IA64_EFI_FVH_SIGNATURE        0x4856465fU /* "_FVH" */
 #define IA64_EFI_VARSTORE_SIGNATURE   0x53535624U /* "$VSS" */
@@ -157,6 +156,74 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 /* Match hw/ia64/gfw.h GFW_HOB_START/GFW_HOB_SIZE. */
 #define IA64_IPF_GFW_HOB_BASE         0x00000000ff200000ULL
 #define IA64_IPF_GFW_HOB_SIZE         (1ULL << 20)
+
+static uint64_t ia64_fw_flash_base(void)
+{
+    static uint64_t base;
+    static bool inited;
+    if (!inited) {
+        base = IA64_IPF_FW_FLASH_BASE;
+        const char *s = getenv("QEMU_IA64_FW_FLASH_BASE");
+        if (s && *s) {
+            char *endp = NULL;
+            uint64_t val = strtoull(s, &endp, 0);
+            if (endp && endp != s) {
+                base = val;
+            }
+        }
+        inited = true;
+    }
+    return base;
+}
+
+static uint64_t ia64_fw_flash_size(void)
+{
+    static uint64_t size;
+    static bool inited;
+    if (!inited) {
+        size = IA64_IPF_FW_FLASH_SIZE;
+        const char *s = getenv("QEMU_IA64_FW_FLASH_SIZE");
+        if (s && *s) {
+            char *endp = NULL;
+            uint64_t val = strtoull(s, &endp, 0);
+            if (endp && endp != s && val) {
+                size = val;
+            }
+        }
+        size = QEMU_ALIGN_DOWN(size, IA64_IPF_FW_FLASH_BLOCK_SIZE);
+        if (size < IA64_IPF_FW_FLASH_BLOCK_SIZE) {
+            size = IA64_IPF_FW_FLASH_BLOCK_SIZE;
+        }
+        inited = true;
+    }
+    return size;
+}
+
+static uint64_t ia64_fw_flash_end(void)
+{
+    uint64_t base = ia64_fw_flash_base();
+    uint64_t size = ia64_fw_flash_size();
+    uint64_t end = base + size;
+    if (end < base) {
+        return UINT64_MAX;
+    }
+    return end;
+}
+
+static uint64_t ia64_fw_flash_blocks(void)
+{
+    return ia64_fw_flash_size() / IA64_IPF_FW_FLASH_BLOCK_SIZE;
+}
+
+static bool ia64_fw_addr_in_flash(uint64_t phys)
+{
+    uint64_t base = ia64_fw_flash_base();
+    uint64_t end = ia64_fw_flash_end();
+    if (end <= base) {
+        return false;
+    }
+    return phys >= base && phys < end;
+}
 
 static const uint8_t ia64_efi_ffs_guid[16] = {
     0xd9, 0x54, 0x93, 0x7a, 0x68, 0x04, 0x4a, 0x44,
@@ -912,6 +979,42 @@ void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     uint64_t last_kind = env->last_branch_kind;
     uint32_t last_ri = last_kind >> 8;
     uint32_t last_kind_id = last_kind & 0xff;
+    static int dump_enabled = -1;
+    static int dump_bundles = 8;
+    if (dump_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_UNIMPL_DUMP");
+        dump_enabled = (s && *s) ? 1 : 0;
+        const char *b = getenv("QEMU_IA64_UNIMPL_DUMP_BUNDLES");
+        if (b && *b) {
+            int v = atoi(b);
+            if (v > 0) {
+                dump_bundles = v;
+            }
+        }
+    }
+    if (dump_enabled) {
+        CPUState *cs = env_cpu(env);
+        uint64_t base = pc & ~0xFULL;
+        g_mkdir_with_parents("scratch/ia64_logs", 0755);
+        char path[256];
+        snprintf(path, sizeof(path),
+                 "scratch/ia64_logs/unimpl_%016" PRIx64 ".bin", base);
+        FILE *fp = fopen(path, "wb");
+        if (fp) {
+            for (int i = 0; i < dump_bundles; i++) {
+                uint8_t bundle[16];
+                uint64_t bpc = base + (uint64_t)i * 16;
+                if (cpu_memory_rw_debug(cs, bpc, bundle, sizeof(bundle), false) != 0) {
+                    break;
+                }
+                fwrite(bundle, 1, sizeof(bundle), fp);
+            }
+            fclose(fp);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: unimpl dump pc=%016" PRIx64 " bundles=%d file=%s\n",
+                          base, dump_bundles, path);
+        }
+    }
     cpu_abort(env_cpu(env),
               "IA64 UNIMPL: pc=%016" PRIx64 " ri=%u insn=%011" PRIx64 " %s"
               " last_branch from=%016" PRIx64 " to=%016" PRIx64
@@ -2466,9 +2569,9 @@ static size_t ia64_fw_read_ucs2le_string(CPUState *cs, uint64_t addr,
  * xenipf/EDK firmware's ExtendedSal DXE driver expects an EFI configuration
  * table entry for the SAL System Table GUID. On real platforms, this entry
  * points at an SST_ structure that describes the PAL/SAL procedure entry
- * points. For our TCG bringup, the IPF machine provides a minimal SST_ at a
- * fixed low physical address, and the IA-64 backend emulates the PAL/SAL
- * entrypoint procedures.
+ * points. For our TCG bringup, we synthesize a minimal SST_ in firmware
+ * work RAM and inject a config table entry that points at it, while the
+ * IA-64 backend emulates the PAL/SAL entrypoint procedures.
  *
  * The firmware assert we hit is consistent with `EFI_NOT_FOUND` when looking
  * up `gEfiSalSystemTableGuid` via `EfiLibGetSystemConfigurationTable()`.
@@ -2476,7 +2579,6 @@ static size_t ia64_fw_read_ucs2le_string(CPUState *cs, uint64_t addr,
 #define IA64_EFI_SYSTEM_TABLE_SIGNATURE 0x5453595320494249ULL /* "IBI SYST" */
 #define IA64_EFI_BOOT_SERVICES_SIGNATURE 0x56524553544f4f42ULL /* "BOOTSERV" */
 #define IA64_EFI_RUNTIME_SERVICES_SIGNATURE 0x56524553544e5552ULL /* "RUNTSERV" */
-#define IA64_EFI_SAL_SYSTAB_INJECT_PA   0x000000000001c000ULL
 #define IA64_PEI_SERVICES_SIGNATURE     0x5652455320494550ULL /* "P E I S" */
 
 typedef struct QEMU_PACKED {
@@ -2515,6 +2617,32 @@ typedef struct QEMU_PACKED {
     IA64EfiGuid guid;
     uint64_t table;
 } IA64EfiConfigTableEntry;
+
+typedef struct QEMU_PACKED {
+    uint8_t signature[4]; /* "SST_" */
+    uint32_t size;
+    uint8_t sal_rev_minor;
+    uint8_t sal_rev_major;
+    uint16_t entry_count;
+    uint8_t checksum;
+    uint8_t reserved1[7];
+    uint8_t sal_a_rev_minor;
+    uint8_t sal_a_rev_major;
+    uint8_t sal_b_rev_minor;
+    uint8_t sal_b_rev_major;
+    uint8_t oem_id[32];
+    uint8_t product_id[32];
+    uint8_t reserved2[8];
+} IA64SalSystab;
+
+typedef struct QEMU_PACKED {
+    uint8_t type; /* 0 == SAL_DESC_ENTRY_POINT */
+    uint8_t reserved1[7];
+    uint64_t pal_proc;
+    uint64_t sal_proc;
+    uint64_t gp;
+    uint8_t reserved2[16];
+} IA64SalDescEntryPoint;
 
 static const IA64EfiGuid ia64_efi_guid_sal_systab = {
     .data1 = 0xeb9d2d32,
@@ -2612,6 +2740,66 @@ static bool ia64_fw_guid_equal(const IA64EfiGuid *a, const IA64EfiGuid *b)
 {
     return a->data1 == b->data1 && a->data2 == b->data2 && a->data3 == b->data3 &&
            memcmp(a->data4, b->data4, sizeof(a->data4)) == 0;
+}
+
+static bool ia64_fw_read_phys(hwaddr addr, void *buf, size_t len);
+static bool ia64_fw_write_phys(hwaddr addr, const void *buf, size_t len);
+
+static uint8_t ia64_fw_byte_checksum(const uint8_t *buf, size_t len)
+{
+    uint8_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum = (uint8_t)(sum + buf[i]);
+    }
+    return (uint8_t)(0 - sum);
+}
+
+static hwaddr ia64_fw_systab_inject_pa(void)
+{
+    hwaddr end = IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE;
+    return (end - 0x2000) & ~0xFULL;
+}
+
+static hwaddr ia64_fw_sal_systab_pa(CPUIA64State *env)
+{
+    if (env->fw_sal_systab_pa) {
+        return (hwaddr)env->fw_sal_systab_pa;
+    }
+    hwaddr end = IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE;
+    hwaddr pa = (end - 0x3000) & ~0xFULL;
+    env->fw_sal_systab_pa = pa;
+    return pa;
+}
+
+static bool ia64_fw_write_sal_systab(CPUIA64State *env, hwaddr pa)
+{
+    IA64SalSystab sst = { 0 };
+    IA64SalDescEntryPoint ep = { 0 };
+    uint8_t buf[sizeof(sst) + sizeof(ep)] = { 0 };
+
+    memcpy(sst.signature, "SST_", 4);
+    sst.size = sizeof(buf);
+    sst.sal_rev_major = 2;
+    sst.sal_rev_minor = 0;
+    sst.entry_count = 1;
+    sst.sal_a_rev_major = 0;
+    sst.sal_a_rev_minor = 0;
+    sst.sal_b_rev_major = 0;
+    sst.sal_b_rev_minor = 0;
+    memcpy(sst.oem_id, "QEMU", 4);
+    memcpy(sst.product_id, "QEMU-IPF", 7);
+    sst.checksum = 0;
+
+    ep.type = 0; /* SAL_DESC_ENTRY_POINT */
+    ep.pal_proc = IA64_IPF_FW_PAL_PROC_ADDR;
+    ep.sal_proc = IA64_IPF_FW_SAL_PROC_ADDR;
+    ep.gp = IA64_IPF_FW_SAL_GP_ADDR;
+
+    memcpy(buf, &sst, sizeof(sst));
+    memcpy(buf + sizeof(sst), &ep, sizeof(ep));
+    buf[offsetof(IA64SalSystab, checksum)] = ia64_fw_byte_checksum(buf, sizeof(buf));
+
+    return ia64_fw_write_phys(pa, buf, sizeof(buf));
 }
 
 static void ia64_fw_guid_from_bytes(const uint8_t *buf, IA64EfiGuid *out)
@@ -2927,8 +3115,7 @@ static void ia64_fw_pei_log_ps_entry(CPUState *cs, uint64_t ps_ptr,
         }
         uint64_t phys = ia64_phys_mode_addr(val);
         bool in_table = (phys >= fd_table_lo && phys <= fd_table_hi);
-        bool in_flash = (phys >= IA64_IPF_FW_FLASH_BASE &&
-                         phys < IA64_IPF_FW_FLASH_BASE + IA64_IPF_FW_FLASH_SIZE);
+        bool in_flash = ia64_fw_addr_in_flash(phys);
         bool in_workram = (phys >= IA64_IPF_FW_WORKRAM_BASE &&
                            phys < IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE);
         bool near_target = (phys >= target_lo && phys <= target_hi);
@@ -3420,6 +3607,11 @@ static void ia64_fw_try_install_sal_systab(CPUIA64State *env)
         }
     }
 
+    hwaddr sal_pa = ia64_fw_sal_systab_pa(env);
+    if (!ia64_fw_write_sal_systab(env, sal_pa)) {
+        return;
+    }
+
     for (uint64_t i = 0; i < nr; i++) {
         if (ia64_fw_guid_equal(&entries[i].guid, &ia64_efi_guid_sal_systab)) {
             env->fw_sal_systab_installed = 1;
@@ -3436,9 +3628,9 @@ static void ia64_fw_try_install_sal_systab(CPUIA64State *env)
     }
     new_entries[nr].guid = ia64_efi_guid_sal_systab;
     new_entries[nr].table =
-        ia64_fw_addr_with_same_region(tables_exemplar, IA64_IPF_FW_SAL_SYSTAB_ADDR);
+        ia64_fw_addr_with_same_region(tables_exemplar, (uint64_t)sal_pa);
 
-    hwaddr inject_pa = IA64_EFI_SAL_SYSTAB_INJECT_PA;
+    hwaddr inject_pa = ia64_fw_systab_inject_pa();
     if (!ia64_fw_write_phys(inject_pa, new_entries, new_len)) {
         return;
     }
@@ -3474,7 +3666,7 @@ static void ia64_fw_try_install_sal_systab(CPUIA64State *env)
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw: installed SAL systab config entry (SST_ at %016" PRIx64 ")\n",
-                      (uint64_t)IA64_IPF_FW_SAL_SYSTAB_ADDR);
+                      (uint64_t)sal_pa);
     }
 }
 
@@ -3582,8 +3774,7 @@ static bool ia64_fw_pei_scan_core(CPUState *cs, uint64_t stack_phys,
             }
             uint64_t ps_ptr = ldq_le_p(&hdr[8]);
             uint64_t ps_phys = ia64_phys_mode_addr(ps_ptr);
-            bool ps_in_flash = (ps_phys >= IA64_IPF_FW_FLASH_BASE &&
-                                ps_phys < IA64_IPF_FW_FLASH_BASE + IA64_IPF_FW_FLASH_SIZE);
+            bool ps_in_flash = ia64_fw_addr_in_flash(ps_phys);
             bool ps_in_workram = (ps_phys >= IA64_IPF_FW_WORKRAM_BASE &&
                                   ps_phys < IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE);
             if (!ps_in_flash && !ps_in_workram) {
@@ -3661,8 +3852,7 @@ static bool ia64_fw_find_pei_hob_list(CPUState *cs, uint64_t stack_phys,
             }
             uint64_t ps_ptr = ldq_le_p(&hdr[8]);
             uint64_t ps_phys = ia64_phys_mode_addr(ps_ptr);
-            bool ps_in_flash = (ps_phys >= IA64_IPF_FW_FLASH_BASE &&
-                                ps_phys < IA64_IPF_FW_FLASH_BASE + IA64_IPF_FW_FLASH_SIZE);
+            bool ps_in_flash = ia64_fw_addr_in_flash(ps_phys);
             bool ps_in_workram = (ps_phys >= IA64_IPF_FW_WORKRAM_BASE &&
                                   ps_phys < IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE);
             if (!ps_in_flash && !ps_in_workram) {
@@ -3899,12 +4089,14 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
     }
 
     const uint8_t phit_magic[8] = { 0x01, 0x00, 0x38, 0x00, 0, 0, 0, 0 };
+    uint64_t flash_base = ia64_fw_flash_base();
+    uint64_t flash_size = ia64_fw_flash_size();
     uint64_t stack_phys = ia64_phys_mode_addr(stack_hint);
     uint64_t candidates[] = {
         0x0000000002000000ULL, /* common xenipf PEI workspace */
         0x0000000000100000ULL,
         0x0000000001000000ULL,
-        IA64_IPF_FW_FLASH_BASE,
+        flash_base,
         IA64_IPF_FW_WORKRAM_BASE,
         stack_phys ? (stack_phys & ~0x00ffffffULL) : 0,
     };
@@ -3967,8 +4159,7 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
     if (!hob_base || !hob_best_end_ok) {
         uint64_t scan_ranges[][2] = {
             { 0, 64ULL << 20 },
-            { 0xff000000ULL, 16ULL << 20 },
-            { IA64_IPF_FW_FLASH_BASE, IA64_IPF_FW_FLASH_SIZE },
+            { flash_base, flash_size },
             { 0, 0 },
         };
         if (stack_phys > (32ULL << 20)) {
@@ -5007,12 +5198,16 @@ static bool ia64_fw_fv_list_add(IA64FwFvInfo *list, int *count, int max,
 static int ia64_fw_scan_flash_fvs(CPUState *cs, IA64FwFvInfo *out, int max)
 {
     const uint8_t sig[4] = { '_', 'F', 'V', 'H' };
-    const uint64_t flash_base = IA64_IPF_FW_FLASH_BASE;
-    const uint64_t flash_size = IA64_IPF_FW_FLASH_SIZE;
-    const uint64_t flash_end = flash_base + flash_size;
+    const uint64_t flash_base = ia64_fw_flash_base();
+    const uint64_t flash_size = ia64_fw_flash_size();
+    const uint64_t flash_end = ia64_fw_flash_end();
     const size_t chunk = 64 * 1024;
     g_autofree uint8_t *buf = g_malloc(chunk);
     int count = 0;
+
+    if (flash_end <= flash_base) {
+        return 0;
+    }
 
     for (uint64_t off = 0; off < flash_size; off += chunk - 4) {
         uint64_t addr = flash_base + off;
@@ -5137,8 +5332,8 @@ static bool ia64_fw_find_fv_by_index(CPUIA64State *env, uint8_t index,
     return false;
 #else
     CPUState *cs = env_cpu(env);
-    const uint64_t flash_base = IA64_IPF_FW_FLASH_BASE;
-    const uint64_t flash_size = IA64_IPF_FW_FLASH_SIZE;
+    const uint64_t flash_base = ia64_fw_flash_base();
+    const uint64_t flash_size = ia64_fw_flash_size();
     uint8_t hdr[0x38];
     uint8_t cur = 0;
 
@@ -9965,7 +10160,8 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         fixed_sysmem_rdesc = false;
         fixed_sysmem_rdesc_base = 0;
     }
-    bool hob_low = (hob_base < IA64_IPF_FW_FLASH_BASE);
+    uint64_t flash_base = ia64_fw_flash_base();
+    bool hob_low = (hob_base < flash_base);
     if (hob_low) {
         if (attempts >= 256) {
             return;
@@ -11036,7 +11232,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         if (in_hob_loop) {
             uint64_t cand_raw = env->r[33];
             uint64_t cand = ia64_phys_mode_addr(cand_raw);
-            if (cand && cand < IA64_IPF_FW_FLASH_BASE &&
+            if (cand && cand < flash_base &&
                 (cand & 0xfffULL) == 0 &&
                 cand != reloc_hob_base) {
                 uint64_t cand_end = 0;
@@ -11055,7 +11251,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             for (size_t off = 0; off + 8 <= sizeof(scan); off += 8) {
                 uint64_t cand_raw = ldq_le_p(&scan[off]);
                 uint64_t cand = ia64_phys_mode_addr(cand_raw);
-                if (!cand || cand >= IA64_IPF_FW_FLASH_BASE) {
+                if (!cand || cand >= flash_base) {
                     continue;
                 }
                 if ((cand & 0xfffULL) != 0) {
@@ -11149,7 +11345,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                         if (!sp_valid ||
                             sp_phys == hob_base ||
                             sp_phys == best_cand ||
-                            (sp_phys < IA64_IPF_FW_FLASH_BASE &&
+                            (sp_phys < flash_base &&
                              (sp_phys & 0xfffULL) == 0)) {
                             uint64_t sp_tmpl = sp_raw ? sp_raw : best_cand_raw;
                             stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, reloc_hob_base));
@@ -11201,7 +11397,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                         if (!sp_raw ||
                             sp_phys == hob_base ||
                             sp_phys == best_cand ||
-                            (sp_phys < IA64_IPF_FW_FLASH_BASE &&
+                            (sp_phys < flash_base &&
                              (sp_phys & 0xfffULL) == 0)) {
                             uint64_t sp_tmpl = sp_raw ? sp_raw : best_cand_raw;
                             stq_le_p(val, ia64_fw_encode_addr(sp_tmpl, best_cand));
@@ -12229,9 +12425,7 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
             hwaddr bfv_phys = ia64_phys_mode_addr(bfv_base);
             sec_handoff = (data_size >= sizeof(handoff_buf) &&
                            data_size <= 0x80 &&
-                           bfv_phys >= IA64_IPF_FW_FLASH_BASE &&
-                           bfv_phys < IA64_IPF_FW_FLASH_BASE +
-                                      IA64_IPF_FW_FLASH_SIZE);
+                           ia64_fw_addr_in_flash(bfv_phys));
         }
     }
 
@@ -12362,9 +12556,7 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
             hwaddr bfv_phys = ia64_phys_mode_addr(bfv_base);
             sec_handoff = (data_size >= sizeof(handoff_buf) &&
                            data_size <= 0x80 &&
-                           bfv_phys >= IA64_IPF_FW_FLASH_BASE &&
-                           bfv_phys < IA64_IPF_FW_FLASH_BASE +
-                                      IA64_IPF_FW_FLASH_SIZE);
+                           ia64_fw_addr_in_flash(bfv_phys));
             have_handoff_buf = true;
         }
         env->r[32] = handoff;
@@ -12483,9 +12675,7 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
         hwaddr bfv_phys = ia64_phys_mode_addr(bfv_base);
         bool sec_handoff = (data_size >= sizeof(buf) &&
                             data_size <= 0x80 &&
-                            bfv_phys >= IA64_IPF_FW_FLASH_BASE &&
-                            bfv_phys < IA64_IPF_FW_FLASH_BASE +
-                                       IA64_IPF_FW_FLASH_SIZE);
+                            ia64_fw_addr_in_flash(bfv_phys));
         if (sec_handoff) {
             temp_base = ldq_le_p(&buf[24]);
             temp_size = ldq_le_p(&buf[32]);
@@ -12541,8 +12731,8 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                                alt_base && alt_base != cur_phys) {
                         /* Found an alternative HOB list elsewhere. */
                     } else if (ia64_fw_find_hob_list_in_range(cs,
-                                                              IA64_IPF_FW_FLASH_BASE,
-                                                              IA64_IPF_FW_FLASH_SIZE,
+                                                              ia64_fw_flash_base(),
+                                                              ia64_fw_flash_size(),
                                                               &alt_base, &alt_end) &&
                                alt_base && alt_base != cur_phys) {
                         /* Found a HOB list in the GFW/flash window. */
@@ -12923,9 +13113,7 @@ void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
             hwaddr bfv_phys = ia64_phys_mode_addr(bfv_base);
             bool sec_handoff = (data_size >= sizeof(buf) &&
                                 data_size <= 0x80 &&
-                                bfv_phys >= IA64_IPF_FW_FLASH_BASE &&
-                                bfv_phys < IA64_IPF_FW_FLASH_BASE +
-                                           IA64_IPF_FW_FLASH_SIZE);
+                                ia64_fw_addr_in_flash(bfv_phys));
             if (sec_handoff) {
                 uint64_t bfv_size = ldq_le_p(&buf[16]);
                 uint64_t temp_base = ldq_le_p(&buf[24]);
@@ -15098,8 +15286,7 @@ void HELPER(fw_pei_indcall_probe)(CPUIA64State *env, uint64_t pc, uint32_t stage
         (void)ia64_fw_pei_get_ps_ptr(env, ps_arg, &ps_ptr);
         if (ps_ptr) {
             uint64_t ps_phys = ia64_phys_mode_addr(ps_ptr);
-            bool ps_in_flash = (ps_phys >= IA64_IPF_FW_FLASH_BASE &&
-                                ps_phys < IA64_IPF_FW_FLASH_BASE + IA64_IPF_FW_FLASH_SIZE);
+            bool ps_in_flash = ia64_fw_addr_in_flash(ps_phys);
             bool ps_in_workram = (ps_phys >= IA64_IPF_FW_WORKRAM_BASE &&
                                   ps_phys < IA64_IPF_FW_WORKRAM_BASE + IA64_IPF_FW_WORKRAM_SIZE);
             if (!ps_in_flash && !ps_in_workram) {
@@ -17043,14 +17230,16 @@ static bool ia64_fw_fvb_translate(uint64_t instance, uint64_t lba,
                                   uint64_t *out_avail)
 {
     uint64_t block_size = IA64_IPF_FW_FLASH_BLOCK_SIZE;
-    uint64_t blocks = IA64_IPF_FW_FLASH_BLOCKS;
+    uint64_t blocks = ia64_fw_flash_blocks();
+    uint64_t flash_size = ia64_fw_flash_size();
+    uint64_t flash_base = ia64_fw_flash_base();
 
     if (lba >= blocks) {
         return false;
     }
 
     uint64_t block_off = lba * block_size;
-    if (block_off + offset >= IA64_IPF_FW_FLASH_SIZE) {
+    if (block_off + offset >= flash_size) {
         return false;
     }
 
@@ -17058,11 +17247,11 @@ static bool ia64_fw_fvb_translate(uint64_t instance, uint64_t lba,
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: ESAL_FVB instance=%" PRIu64
                       " using base=%016" PRIx64 "\n",
-                      instance, (uint64_t)IA64_IPF_FW_FLASH_BASE);
+                      instance, flash_base);
     }
 
-    *out_pa = IA64_IPF_FW_FLASH_BASE + block_off + offset;
-    *out_avail = IA64_IPF_FW_FLASH_SIZE - (block_off + offset);
+    *out_pa = flash_base + block_off + offset;
+    *out_avail = flash_size - (block_off + offset);
     return true;
 }
 
@@ -17613,8 +17802,8 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
             if (want > avail) {
                 want = avail;
             }
-            if (want > IA64_IPF_FW_FLASH_SIZE) {
-                want = IA64_IPF_FW_FLASH_SIZE;
+            if (want > ia64_fw_flash_size()) {
+                want = ia64_fw_flash_size();
             }
             n = (uint64_t)want;
             if (n) {
@@ -17678,8 +17867,8 @@ fvb_read_log:
             if (want > avail) {
                 want = avail;
             }
-            if (want > IA64_IPF_FW_FLASH_SIZE) {
-                want = IA64_IPF_FW_FLASH_SIZE;
+            if (want > ia64_fw_flash_size()) {
+                want = ia64_fw_flash_size();
             }
             n = (uint64_t)want;
             if (n) {
@@ -17767,7 +17956,7 @@ fvb_attr_log:
                 goto fvb_phys_log;
             }
             uint8_t out[8];
-            stq_le_p(out, IA64_IPF_FW_FLASH_BASE);
+            stq_le_p(out, ia64_fw_flash_base());
             if (!ia64_fw_write_bytes_any(cs, base_ptr, out, sizeof(out))) {
                 status = -1;
             }
@@ -17778,7 +17967,7 @@ fvb_phys_log:
                               " base_ptr=%016" PRIx64 " base=%016" PRIx64
                               " -> status=%" PRId64 "\n",
                               instance, base_ptr,
-                              (uint64_t)IA64_IPF_FW_FLASH_BASE, status);
+                              ia64_fw_flash_base(), status);
             }
             break;
         }
@@ -17789,11 +17978,12 @@ fvb_phys_log:
                                            : ia64_fw_arg(env, out0, 4);
             uint64_t count_ptr = use_break_args ? ia64_fw_arg_break(env, 5)
                                            : ia64_fw_arg(env, out0, 5);
+            uint64_t blocks = ia64_fw_flash_blocks();
             if (!block_ptr || !count_ptr) {
                 status = -1;
                 goto fvb_block_log;
             }
-            if (lba >= IA64_IPF_FW_FLASH_BLOCKS) {
+            if (lba >= blocks) {
                 status = -1;
                 goto fvb_block_log;
             }
@@ -17803,7 +17993,7 @@ fvb_phys_log:
                 status = -1;
                 goto fvb_block_log;
             }
-            stq_le_p(out, IA64_IPF_FW_FLASH_BLOCKS - lba);
+            stq_le_p(out, blocks - lba);
             if (!ia64_fw_write_bytes_any(cs, count_ptr, out, sizeof(out))) {
                 status = -1;
             }
@@ -17826,13 +18016,16 @@ fvb_block_log:
                                           : ia64_fw_arg(env, out0, 5);
             uint64_t offset_last = use_break_args ? ia64_fw_arg_break(env, 6)
                                              : ia64_fw_arg(env, out0, 6);
+            uint64_t blocks = ia64_fw_flash_blocks();
+            uint64_t flash_size = ia64_fw_flash_size();
+            uint64_t flash_base = ia64_fw_flash_base();
             uint64_t start_off = start_lba * IA64_IPF_FW_FLASH_BLOCK_SIZE + offset_start;
             uint64_t end_off = last_lba * IA64_IPF_FW_FLASH_BLOCK_SIZE + offset_last;
             g_autofree uint8_t *tmp = NULL;
-            if (start_lba >= IA64_IPF_FW_FLASH_BLOCKS ||
-                last_lba >= IA64_IPF_FW_FLASH_BLOCKS ||
-                start_off >= IA64_IPF_FW_FLASH_SIZE ||
-                end_off >= IA64_IPF_FW_FLASH_SIZE ||
+            if (start_lba >= blocks ||
+                last_lba >= blocks ||
+                start_off >= flash_size ||
+                end_off >= flash_size ||
                 start_off > end_off) {
                 status = -1;
                 goto fvb_range_log;
@@ -17841,7 +18034,7 @@ fvb_block_log:
             tmp = g_malloc((size_t)len);
             memset(tmp, 0xff, (size_t)len);
             if (address_space_write(&address_space_memory,
-                                    (hwaddr)(IA64_IPF_FW_FLASH_BASE + start_off),
+                                    (hwaddr)(flash_base + start_off),
                                     MEMTXATTRS_UNSPECIFIED, tmp, (size_t)len) != MEMTX_OK) {
                 status = -1;
             }

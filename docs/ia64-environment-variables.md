@@ -255,6 +255,13 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_SAL_PCI_DUMP` | Dump SAL PCI operations |
 | `QEMU_IA64_SAL_PCI_DUMP_BUNDLES` | Dump bundles on SAL PCI |
 
+### Firmware Storage
+
+| Variable | Description |
+|----------|-------------|
+| `QEMU_IA64_FW_FLASH_BASE` | Override flash window base used by ESAL/FVB and scans |
+| `QEMU_IA64_FW_FLASH_SIZE` | Override flash window size (aligned to 64KiB blocks) |
+
 ## PEI (Pre-EFI Initialization) Debugging
 
 ### General PEI Tracing
@@ -346,6 +353,8 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_DBG_DUMP_BUNDLES` | Number of bundles to dump |
 | `QEMU_IA64_ABORT_NULL_BRANCH` | Abort on null branch target |
 | `QEMU_IA64_ABORT_BRANCH_TO` | Abort when branching to address |
+| `QEMU_IA64_UNIMPL_DUMP` | Dump bundles when hitting an unimplemented instruction |
+| `QEMU_IA64_UNIMPL_DUMP_BUNDLES` | Bundles to dump for unimplemented instructions |
 
 ## Trace Call System
 

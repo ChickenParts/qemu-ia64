@@ -1185,6 +1185,30 @@ static void gen_set_ri_const(uint8_t ri)
     tcg_gen_mov_i64(cpu_psr, t);
 }
 
+static void gen_a_unit_nat1(uint8_t dst, uint8_t src)
+{
+    if (dst == 0) {
+        return;
+    }
+    TCGv_i64 nat = tcg_temp_new_i64();
+    gen_helper_gr_nat(nat, tcg_env, tcg_constant_i32(src));
+    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(dst), nat);
+}
+
+static void gen_a_unit_nat2(uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    if (dst == 0) {
+        return;
+    }
+    TCGv_i64 nat_a = tcg_temp_new_i64();
+    TCGv_i64 nat_b = tcg_temp_new_i64();
+    TCGv_i64 nat = tcg_temp_new_i64();
+    gen_helper_gr_nat(nat_a, tcg_env, tcg_constant_i32(src1));
+    gen_helper_gr_nat(nat_b, tcg_env, tcg_constant_i32(src2));
+    tcg_gen_or_i64(nat, nat_a, nat_b);
+    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(dst), nat);
+}
+
 /* CFM layout matches SKI's cfmGet(): rrbs + (sor>>3) + soil + sof. */
 #define IA64_CFM_SOF_SHIFT   0
 #define IA64_CFM_SOF_MASK    0x7fULL
@@ -2233,6 +2257,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             if (r1 != 0) {
                 tcg_gen_mov_i64(cpu_r[r1], t);
             }
+            gen_a_unit_nat1(r1, r3);
             handled = true;
         } else
         /* Immediate logical ops: and/andcm/or/xor r1 = imm8, r3 (imm7b + sign bit at 36) */
@@ -2273,6 +2298,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             if (r1 != 0) {
                 tcg_gen_mov_i64(cpu_r[r1], t);
             }
+            gen_a_unit_nat1(r1, r3);
             handled = true;
             /* handled */
         } else {
@@ -2376,6 +2402,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t1);
                 }
+                gen_a_unit_nat2(r1, r2, r3);
                 handled = true;
             }
         }
@@ -2400,6 +2427,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             }
             tcg_gen_mov_i64(cpu_r[r1], t);
         }
+        gen_a_unit_nat1(r1, r3);
         handled = true;
     } else if (major == 0x8 && x2a == 3 && ve == 0) {
         /* addp4 r1 = imm14, r3 (A4) */
@@ -2429,6 +2457,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
         if (r1 != 0) {
             tcg_gen_mov_i64(cpu_r[r1], sum);
         }
+        gen_a_unit_nat1(r1, r3);
         handled = true;
     } else if (major == 0x9) {
         /* addl r1 = imm22, r3 (A5; r3 is only 2 bits, r0-r3). */
@@ -2454,6 +2483,7 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
             }
             tcg_gen_mov_i64(cpu_r[r1_a5], t);
         }
+        gen_a_unit_nat1(r1_a5, r3_a5);
         handled = true;
     } else if (major == 0xC || major == 0xD || major == 0xE) {
         /*

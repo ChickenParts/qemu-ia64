@@ -228,6 +228,7 @@ typedef struct CPUArchState {
 
     /* Firmware bringup: one-way SAL systab config-table install guard. */
     uint64_t fw_sal_systab_installed;
+    uint64_t fw_sal_systab_pa;
 
     /* Firmware bringup: PAL platform address settings (type 0/1). */
     uint64_t pal_platform_addr[2];
