@@ -1,6 +1,7 @@
 ia64_ss = ss.source_set()
 ia64_ss.add(files(
   'cpu.c',
+  'gdbstub.c',
   'helper.c',
   'translate.c',
 ))

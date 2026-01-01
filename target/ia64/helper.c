@@ -12,6 +12,7 @@
 #include "exec/target_page.h"
 #include "exec/page-protection.h"
 #include "exec/translation-block.h"
+#include "exec/tb-flush.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "qemu/bswap.h"
 #include "qemu/log.h"
@@ -542,7 +543,11 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     ia64_intr_push_window(env);
     env->cr_ipsr = env->psr;
     env->cr_iip = env->ip & ~0xFULL;
-    env->cr_ifs = env->cfm;
+    /*
+     * IFS = CFM{38:0} | AR.EC{5:0} << 52 | V (bit 63 set by cover).
+     * Save CFM and AR.EC together so rfi can restore both.
+     */
+    env->cr_ifs = env->cfm | ((env->ar[IA64_AR_EC] & 0x3fULL) << 52);
     /*
      * Build ISR flags (X/W/R) and leave isr.code at 0 for normal accesses.
      * Linux uses bit 32 (IA64_ISR_X_BIT) to distinguish instruction misses.
@@ -1207,10 +1212,13 @@ void HELPER(rfi)(CPUIA64State *env)
      * from cr.ipsr/cr.iip/cr.ifs.  It must not unwind normal call frames.
      *
      * cr.ifs has a validity bit at 63 (set by cover when PSR.ic=0).
+     * The EC field (bits 52-57) is restored to AR.EC per IA-64 SDM.
      */
     uint64_t ifs = env->cr_ifs;
     if (ifs & (1ULL << 63)) {
         env->cfm = ifs & ~(1ULL << 63);
+        /* Restore AR.EC from IFS.ec (bits 52-57) */
+        env->ar[IA64_AR_EC] = (ifs >> 52) & 0x3f;
     }
 
     /*
@@ -18810,10 +18818,24 @@ uint64_t HELPER(get_cpuid)(CPUIA64State *env, uint64_t idx)
 
 void HELPER(srlz_d)(CPUIA64State *env)
 {
-    /* Serialization is a no-op in this model. */
+    /*
+     * Data serialization: ensure all prior data memory accesses complete
+     * before any subsequent data access. QEMU's memory model is already
+     * sequentially consistent, but flush TLB to ensure translation consistency.
+     */
+    CPUState *cs = env_cpu(env);
+    tlb_flush(cs);
 }
 
 void HELPER(srlz_i)(CPUIA64State *env)
 {
-    /* Serialization is a no-op in this model. */
+    /*
+     * Instruction serialization: ensure instruction cache coherency.
+     * Flush TLB and JIT jump cache to handle translation consistency.
+     * QEMU's TCG handles most self-modifying code automatically via
+     * TLB-based SMC detection.
+     */
+    CPUState *cs = env_cpu(env);
+    tlb_flush(cs);
+    tcg_flush_jmp_cache(cs);
 }

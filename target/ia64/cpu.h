@@ -295,21 +295,45 @@ struct IA64CPUClass {
 #define IA64_RGN7_BASE     IA64_RGN_BASE(7)
 
 /*
- * PSR bit positions (LSB indexing, matching the IA-64 SDM and SKI's BitfR()
- * extraction when converted to LSB indexing):
- *   AC  bit 3
- *   RI  bits 42:41
- *   CPL bits 33:32
- *   DT  bit 17
- *   IC  bit 13
+ * PSR bit positions (LSB indexing, matching the IA-64 SDM).
+ * See Intel IA-64 Architecture Software Developer's Manual Vol 2.
  */
-#define IA64_PSR_AC       (1ULL << 3)
-#define IA64_PSR_IC       (1ULL << 13)
-#define IA64_PSR_I        (1ULL << 14)
-#define IA64_PSR_IT       (1ULL << 36)
-#define IA64_PSR_DT       (1ULL << 17)
-#define IA64_PSR_BN       (1ULL << 44)
-#define IA64_PSR_CPL(psr) (((psr) >> 32) & 0x3)
+#define IA64_PSR_BE       (1ULL << 1)   /* Big-Endian data access */
+#define IA64_PSR_UP       (1ULL << 2)   /* User Performance monitor enable */
+#define IA64_PSR_AC       (1ULL << 3)   /* Alignment Check */
+#define IA64_PSR_MFL      (1ULL << 4)   /* Lower FP registers disabled */
+#define IA64_PSR_MFH      (1ULL << 5)   /* Upper FP registers disabled */
+#define IA64_PSR_DFL      (1ULL << 6)   /* Lower FP fault disabled */
+#define IA64_PSR_DFH      (1ULL << 7)   /* Upper FP fault disabled */
+#define IA64_PSR_IC       (1ULL << 13)  /* Interruption Collection */
+#define IA64_PSR_I        (1ULL << 14)  /* Interrupt enable */
+#define IA64_PSR_PK       (1ULL << 15)  /* Protection Key enable */
+#define IA64_PSR_DT       (1ULL << 17)  /* Data Translation */
+#define IA64_PSR_DFI      (1ULL << 18)  /* Disable FP Interlock */
+#define IA64_PSR_DII      (1ULL << 19)  /* Disable Instruction set trans */
+#define IA64_PSR_SP       (1ULL << 20)  /* Secure Performance monitors */
+#define IA64_PSR_PP       (1ULL << 21)  /* Privileged Perf monitor enable */
+#define IA64_PSR_DI       (1ULL << 22)  /* Disable Instruction set trans */
+#define IA64_PSR_SI       (1ULL << 23)  /* Secure Interval timer */
+#define IA64_PSR_DB       (1ULL << 24)  /* Debug breakpoint fault */
+#define IA64_PSR_LP       (1ULL << 25)  /* Lower Privilege transfer trap */
+#define IA64_PSR_TB       (1ULL << 26)  /* Taken Branch trap */
+#define IA64_PSR_RT       (1ULL << 27)  /* Register stack translation */
+#define IA64_PSR_CPL_SHIFT 32           /* Current Privilege Level shift */
+#define IA64_PSR_CPL_MASK (3ULL << IA64_PSR_CPL_SHIFT)
+#define IA64_PSR_IS       (1ULL << 34)  /* Instruction Set (IA-32 mode) */
+#define IA64_PSR_MC       (1ULL << 35)  /* Machine Check abort mask */
+#define IA64_PSR_IT       (1ULL << 36)  /* Instruction Translation */
+#define IA64_PSR_ID       (1ULL << 37)  /* Instruction Debug fault disable */
+#define IA64_PSR_DA       (1ULL << 38)  /* Disable Data Access faults */
+#define IA64_PSR_DD       (1ULL << 39)  /* Data Debug fault disable */
+#define IA64_PSR_SS       (1ULL << 40)  /* Single Step enable */
+#define IA64_PSR_RI_SHIFT 41            /* Restart Instruction slot */
+#define IA64_PSR_RI_MASK  (3ULL << IA64_PSR_RI_SHIFT)
+#define IA64_PSR_ED       (1ULL << 43)  /* Exception Deferral */
+#define IA64_PSR_BN       (1ULL << 44)  /* Bank Number (register bank) */
+#define IA64_PSR_IA       (1ULL << 45)  /* Disable Instruction Access faults */
+#define IA64_PSR_CPL(psr) (((psr) >> IA64_PSR_CPL_SHIFT) & 0x3)
 
 #define IA64_SPURIOUS_INT_VECTOR 0x0f
 #define IA64_ITV_MASK            (1ULL << 16)
@@ -325,16 +349,53 @@ struct IA64CPUClass {
 #define IA64_FP_SEXP(sign, exp) \
     ((((uint64_t)(sign) & 1ULL) << 17) | ((uint64_t)(exp) & 0x1FFFFULL))
 
-/* Application Register indices (subset). */
+/* Application Register indices. */
+#define IA64_AR_K0        0
+#define IA64_AR_K1        1
+#define IA64_AR_K2        2
+#define IA64_AR_K3        3
+#define IA64_AR_K4        4
+#define IA64_AR_K5        5
+#define IA64_AR_K6        6
+#define IA64_AR_K7        7
 #define IA64_AR_RSC       16
 #define IA64_AR_BSP       17
 #define IA64_AR_BSPSTORE  18
 #define IA64_AR_RNAT      19
 #define IA64_AR_UNAT      36
-#define IA64_AR_K5        5
 #define IA64_AR_FPSR      40
 #define IA64_AR_ITC       44
 #define IA64_AR_PFS       64
+#define IA64_AR_LC        65
+#define IA64_AR_EC        66
+
+/* Control Register indices. */
+#define IA64_CR_DCR       0   /* Default Control Register */
+#define IA64_CR_ITM       1   /* Interval Timer Match */
+#define IA64_CR_IVA       2   /* Interruption Vector Address */
+#define IA64_CR_PTA       8   /* Page Table Address */
+#define IA64_CR_IPSR      16  /* Interruption PSR */
+#define IA64_CR_ISR       17  /* Interruption Status */
+#define IA64_CR_IIP       19  /* Interruption IP */
+#define IA64_CR_IFA       20  /* Interruption Faulting Address */
+#define IA64_CR_ITIR      21  /* Interruption TLB Insertion */
+#define IA64_CR_IIPA      22  /* Interruption IIP Address */
+#define IA64_CR_IFS       23  /* Interruption Function State */
+#define IA64_CR_IIM       24  /* Interruption Immediate */
+#define IA64_CR_IHA       25  /* Interruption Handler Address */
+#define IA64_CR_LID       64  /* Local Interrupt ID */
+#define IA64_CR_IVR       65  /* Interrupt Vector */
+#define IA64_CR_TPR       66  /* Task Priority */
+#define IA64_CR_EOI       67  /* End of Interrupt */
+#define IA64_CR_IRR0      68  /* Interrupt Request Register 0 */
+#define IA64_CR_IRR1      69  /* Interrupt Request Register 1 */
+#define IA64_CR_IRR2      70  /* Interrupt Request Register 2 */
+#define IA64_CR_IRR3      71  /* Interrupt Request Register 3 */
+#define IA64_CR_ITV       72  /* Interval Timer Vector */
+#define IA64_CR_PMV       73  /* Performance Monitoring Vector */
+#define IA64_CR_CMCV      74  /* Corrected Machine Check Vector */
+#define IA64_CR_LRR0      80  /* Local Redirection Register 0 */
+#define IA64_CR_LRR1      81  /* Local Redirection Register 1 */
 
 #define IA64_FPSR_DEFAULT 0x0009804c0270033fULL
 
@@ -379,6 +440,10 @@ G_NORETURN void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
                                              MMUAccessType access_type,
                                              int mmu_idx, uintptr_t retaddr);
 void ia64_intr_push_window(CPUIA64State *env);
+
+int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n);
+int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n);
+
 #ifndef CONFIG_USER_ONLY
 void ia64_itm_update(CPUIA64State *env);
 void ia64_rse_switch_bspstore(CPUIA64State *env, uint64_t new_bspstore);
@@ -393,13 +458,15 @@ void ia64_fw_dump_hobs_and_gcd(CPUIA64State *env);
 static inline int cpu_ia64_mmu_index(CPUState *cs, bool ifetch)
 {
     CPUIA64State *env = cpu_env(cs);
-    (void)env;
-    return MMU_KERNEL_IDX; // Placeholder
+    int cpl = (env->psr >> 32) & 0x3;
+    (void)ifetch;
+    return (cpl == 3) ? MMU_USER_IDX : MMU_KERNEL_IDX;
 }
 
 #define TARGET_INSN_START_EXTRA_WORDS 1
 
-#define PSR_RI_SHIFT 41
-#define PSR_RI_MASK  (3ULL << PSR_RI_SHIFT)
+/* Legacy aliases for translate.c compatibility */
+#define PSR_RI_SHIFT IA64_PSR_RI_SHIFT
+#define PSR_RI_MASK  IA64_PSR_RI_MASK
 
 #endif

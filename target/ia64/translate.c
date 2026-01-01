@@ -5621,10 +5621,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint8_t pos = 63 - cpos;
                 uint8_t len = extract64(insn, 27, 6) + 1;
 
-                if (len == 0 || len > 64 || pos > 63 || (pos + len) > 64) {
-                    gen_unimpl(ctx, insn, "I12/I13 dep.z");
-                    handled = true;
-                } else {
+                /*
+                 * IA-64 allows pos + len > 64; bits beyond 63 are lost.
+                 * len is 1-64 (encoded as len-1), pos is 0-63.
+                 */
+                {
                     TCGv_i64 src = tcg_temp_new_i64();
                     if (y == 0) {
                         uint8_t r2 = extract64(insn, 13, 7);
@@ -5877,11 +5878,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     uint8_t len = extract64(insn, 27, 6) + 1;
                     bool is_signed = extract64(insn, 13, 1);
 
-                    if (pos + len > 64 || len == 0) {
-                        gen_unimpl(ctx, insn, "I-slot extr");
-                        return;
-                    }
-
+                    /*
+                     * IA-64 allows pos + len > 64; bits beyond 63 are zero.
+                     * len is 1-64 (encoded as len-1), pos is 0-63.
+                     */
                     TCGv_i64 src = tcg_temp_new_i64();
                     if (r3 == 0) {
                         tcg_gen_movi_i64(src, 0);
@@ -5944,6 +5944,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint8_t cpos = extract64(insn, 14, 6);
                 uint8_t pos = 63 - cpos;
                 uint8_t len = extract64(insn, 27, 6) + 1;
+                /*
+                 * IA-64 allows pos + len > 64; bits beyond 63 are lost.
+                 * C shift semantics naturally truncate the high bits.
+                 */
                 uint64_t mask = (len >= 64) ? ~0ULL : ((1ULL << len) - 1) << pos;
                 uint64_t imm1 = extract64(insn, 36, 1);
 

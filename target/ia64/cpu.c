@@ -165,6 +165,13 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     env->f[1][0] = 0x8000000000000000ULL;
     env->f[1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_BIAS);
 
+    /*
+     * Application register initialization.
+     * AR.FPSR defaults to the IA-64 SDM-specified reset value.
+     * Other ARs (RSC, UNAT, PFS, etc.) are 0 from memset.
+     */
+    env->ar[IA64_AR_FPSR] = IA64_FPSR_DEFAULT;
+
     /* CPUID registers (Linux reads indices 0..4 in cpu_init/identify_cpu). */
     {
         static const uint8_t vendor[16] = "GenuineIntel";
@@ -176,7 +183,13 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
                         (0ULL << 16) |        /* model */
                         (0x7ULL << 24) |      /* family: Merced */
                         (0x8ULL << 32);       /* archrev */
-        env->cpuid[4] = 0; /* features */
+        /*
+         * CPUID[4] feature bits (from IA-64 SDM):
+         *   Bit 0: Long Branch Pointer (LBP) - 16-bit predicate support
+         *   Bit 1: Spontaneous Deferral supported
+         *   Bit 16-23: PAL version (0 for emulated)
+         */
+        env->cpuid[4] = (1ULL << 0);  /* LBP: 16-bit predicate support */
     }
 
     env->last_b0_write_pc = 0;
@@ -590,9 +603,9 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->dump_state = ia64_cpu_dump_state;
     cc->set_pc = ia64_cpu_set_pc;
     cc->get_pc = ia64_cpu_get_pc;
-    cc->gdb_read_register = NULL; // TODO
-    cc->gdb_write_register = NULL; // TODO
-    cc->gdb_num_core_regs = 0;
+    cc->gdb_read_register = ia64_cpu_gdb_read_register;
+    cc->gdb_write_register = ia64_cpu_gdb_write_register;
+    cc->gdb_num_core_regs = 525; /* GR + BR + IP/CFM/PSR/PR + FR + AR + CR + NAT */
 #ifndef CONFIG_USER_ONLY
     cc->sysemu_ops = &ia64_sysemu_ops;
 #endif
@@ -631,5 +644,6 @@ DEFINE_TYPES(ia64_cpu_type_infos)
 
 void ia64_cpu_list(void)
 {
-    // TODO
+    qemu_printf("Available CPUs:\n");
+    qemu_printf("  itanium\n");
 }
