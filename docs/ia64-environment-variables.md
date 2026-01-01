@@ -149,7 +149,16 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_DBG_PROBE` | Enable probe instruction debugging |
 | `QEMU_IA64_DBG_PROBE_RANGE` | Probe address range |
 | `QEMU_IA64_DBG_PROBE_LIMIT` | Limit probe debug entries |
-| `QEMU_IA64_DBG_PROBE_DUMP_R*` | Dump specific registers on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R2` | Dump R2 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R8` | Dump R8 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R12` | Dump R12 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R30` | Dump R30 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R31` | Dump R31 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R32` | Dump R32 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R33` | Dump R33 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R34` | Dump R34 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R35` | Dump R35 on probe |
+| `QEMU_IA64_DBG_PROBE_DUMP_R36` | Dump R36 on probe |
 | `QEMU_IA64_DBG_PROBE_DUMP_ADDR` | Dump memory at address on probe |
 | `QEMU_IA64_DBG_PROBE_DUMP_ADDR_LEN` | Length of memory dump |
 | `QEMU_IA64_DBG_PROBE_HOB_FAILFAST` | Fail fast on HOB probe issues |
@@ -194,11 +203,15 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_FW_FASTPATH` | Enable firmware fast-path optimizations |
 | `QEMU_IA64_FW_FASTPATH_TRACE` | Trace fast-path execution |
 | `QEMU_IA64_FW_FASTPATH_TRACE_LIMIT` | Limit fast-path trace entries |
+| `QEMU_IA64_FW_FASTPATH_TRACE_MATCH_SRC` | Trace fast-path only when source matches |
+| `QEMU_IA64_FW_FASTPATH_TRACE_MATCH_DST_RANGE` | Trace fast-path only when destination is in range |
+| `QEMU_IA64_FW_FASTPATH_TRACE_MATCH_LEN` | Trace fast-path only when length matches |
 | `QEMU_IA64_FW_R8_TRACE` | Trace R8 (return value) |
 | `QEMU_IA64_FW_R8_TRACE_MIN_PC` | Minimum PC for R8 trace |
 | `QEMU_IA64_FW_R8_TRACE_MAX_PC` | Maximum PC for R8 trace |
 | `QEMU_IA64_FW_R8_TARGET` | Specific R8 value to trace |
 | `QEMU_IA64_FW_R8_DUMP` | Dump state on R8 match |
+| `QEMU_IA64_FW_R8_DUMP_BUNDLES` | Bundles to dump on R8 match |
 | `QEMU_IA64_FW_CALL_TRACE` | Trace firmware function calls |
 | `QEMU_IA64_FW_CALL_TRACE_LIMIT` | Limit call trace entries |
 | `QEMU_IA64_FW_DUMP_PC` | Dump state at specific PC |
