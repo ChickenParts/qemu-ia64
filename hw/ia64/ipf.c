@@ -29,6 +29,8 @@
 #include "qemu/osdep.h"
 #include "hw/loader.h"
 #include "hw/i386/pc.h"
+#include "hw/isa/isa.h"
+#include "hw/rtc/mc146818rtc.h"
 /* #include "fdc.h" */
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_ids.h"
@@ -104,6 +106,8 @@ struct IPFMachineState {
 
     PCIBus *pcibus;
     I2CBus *smbus;
+    ISABus *isa_bus;
+    MC146818RtcState *rtc;
     IA64CPU *cpu;
 
     /*
@@ -143,6 +147,8 @@ struct IPFMachineState {
     MemoryRegion iosapic_mmio;
     uint32_t iosapic_reg_select;
     uint32_t iosapic_reg[0x40];
+    uint32_t iosapic_irr;        /* Interrupt Request Register */
+    uint32_t iosapic_remote_irr; /* For level-triggered coalescing */
 
     /* Lightweight debug watchpoints (see QEMU_IA64_WATCH_* env vars). */
     struct IpfTextWatch *text_watch[8];
@@ -154,6 +160,9 @@ struct IPFMachineState {
 #define IPF_VARSTORE_SIGNATURE 0x53535624U /* "$VSS" */
 #define IPF_VARSTORE_FORMATTED 0x5a
 #define IPF_VARSTORE_HEALTHY   0xfe
+
+/* Forward declaration for IOSAPIC EOI handling */
+static void iosapic_service(IPFMachineState *m, int pin);
 
 static bool ipf_fw_nvram_blank(const uint8_t *buf, size_t size)
 {
@@ -572,6 +581,13 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_FW_PEI_TEMP_SIZE (2ULL << 20)
 
 #define IPF_IOSAPIC_VERSION_REG 0x1
+#define IPF_IOSAPIC_NUM_PINS    16
+
+/* IOSAPIC redirection entry bits (same layout as IOAPIC) */
+#define IOSAPIC_LVT_MASKED      (1 << 16)
+#define IOSAPIC_LVT_TRIGGER_LEVEL (1 << 15)
+#define IOSAPIC_LVT_REMOTE_IRR  (1 << 14)
+#define IOSAPIC_VECTOR_MASK     0xff
 
 typedef struct QEMU_PACKED {
     uint64_t signature;
@@ -3065,36 +3081,118 @@ static int cmos_get_fd_drive_type(int fd0)
 //static int parallel_io[MAX_PARALLEL_PORTS] = { 0x378, 0x278, 0x3bc };
 //static int parallel_irq[MAX_PARALLEL_PORTS] = { 7, 7, 7 };
 
-#ifdef HAS_AUDIO
-static void audio_init (PCIBus *pci_bus, qemu_irq *pic)
+/*
+ * ISA bus and RTC initialization.
+ *
+ * The ISA bus is needed for legacy devices like the RTC. On IA-64 systems,
+ * ISA devices are typically accessed through an LPC bus or similar, which
+ * we emulate using the legacy I/O port mapping at IPF_LEGACY_IO_BASE.
+ */
+static void ipf_isa_bus_init(IPFMachineState *m)
 {
-    struct soundhw *c;
-    int audio_enabled = 0;
+    MemoryRegion *isa_address_space_io = get_system_io();
 
-    for (c = soundhw; !audio_enabled && c->name; ++c) {
-        audio_enabled = c->enabled;
-    }
+    /*
+     * Create a standalone ISA bus. Since we don't have a PCI-ISA bridge,
+     * we create an ISA bus directly attached to system I/O.
+     */
+    m->isa_bus = isa_bus_new(NULL, isa_address_space_io, isa_address_space_io,
+                             &error_fatal);
 
-    if (audio_enabled) {
-        AudioState *s;
+    /*
+     * Initialize the MC146818 RTC at ports 0x70-0x71.
+     * Use base year 2000 for Y2K compliance.
+     */
+    m->rtc = mc146818_rtc_init(m->isa_bus, 2000, NULL);
 
-        s = AUD_init ();
-        if (s) {
-            for (c = soundhw; c->name; ++c) {
-                if (c->enabled) {
-                    if (c->isa) {
-                        c->init.init_isa (s, pic);
-                    } else {
-                        if (pci_bus) {
-                            c->init.init_pci (pci_bus, s);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    DPRINTF("ISA bus and RTC initialized\n");
 }
-#endif
+
+/*
+ * Initialize CMOS settings based on system configuration.
+ *
+ * This sets up the standard CMOS RAM values that firmware and operating
+ * systems expect, such as memory size, equipment byte, etc.
+ */
+static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
+{
+    MC146818RtcState *s = m->rtc;
+    ram_addr_t ram_size = machine->ram_size;
+    int val;
+
+    if (!s) {
+        return;
+    }
+
+    /*
+     * Base memory size in KB (0x15-0x16).
+     * Standard PC value is 640KB.
+     */
+    val = 640;
+    mc146818rtc_set_cmos_data(s, 0x15, val & 0xff);
+    mc146818rtc_set_cmos_data(s, 0x16, (val >> 8) & 0xff);
+
+    /*
+     * Extended memory size in KB (0x17-0x18 and 0x30-0x31).
+     * This is memory from 1MB onwards, up to 64MB.
+     */
+    val = (ram_size / 1024) - 1024;
+    if (val < 0) {
+        val = 0;
+    }
+    if (val > 65535) {
+        val = 65535;
+    }
+    mc146818rtc_set_cmos_data(s, 0x17, val & 0xff);
+    mc146818rtc_set_cmos_data(s, 0x18, (val >> 8) & 0xff);
+    mc146818rtc_set_cmos_data(s, 0x30, val & 0xff);
+    mc146818rtc_set_cmos_data(s, 0x31, (val >> 8) & 0xff);
+
+    /*
+     * Memory above 16MB in 64KB blocks (0x34-0x35).
+     */
+    if (ram_size > (16 * 1024 * 1024)) {
+        val = (ram_size / 65536) - ((16 * 1024 * 1024) / 65536);
+    } else {
+        val = 0;
+    }
+    if (val > 65535) {
+        val = 65535;
+    }
+    mc146818rtc_set_cmos_data(s, 0x34, val & 0xff);
+    mc146818rtc_set_cmos_data(s, 0x35, (val >> 8) & 0xff);
+
+    /*
+     * Equipment byte (0x14).
+     * 0x02 = FPU present
+     * 0x04 = PS/2 mouse installed
+     */
+    val = 0x02 | 0x04;
+    mc146818rtc_set_cmos_data(s, 0x14, val);
+
+    /*
+     * CPU count - 1 (0x5f).
+     * For now, we only support single CPU.
+     */
+    mc146818rtc_set_cmos_data(s, 0x5f, 0);
+
+    DPRINTF("CMOS initialized: RAM %lu MB\n",
+            (unsigned long)(ram_size / (1024 * 1024)));
+}
+
+/*
+ * Modern audio device initialization.
+ *
+ * Audio support uses PCI-attached Intel HDA or AC97 when a PCI bus is
+ * available and the user requests audio via -device or -audiodev options.
+ * The old soundhw global array API is deprecated; audio devices are now
+ * created through the standard device model.
+ *
+ * To enable audio in IPF:
+ *   qemu-system-ia64 ... -device intel-hda -device hda-duplex
+ * or:
+ *   qemu-system-ia64 ... -device AC97
+ */
 
 #if 0
 static void pc_init_ne2k_isa(NICInfo *nd, qemu_irq *pic)
@@ -4339,9 +4437,28 @@ static void ipf_iosapic_write(void *opaque, hwaddr addr, uint64_t data,
         }
         break;
     }
-    case IPF_IOSAPIC_EOI:
-        /* Ignore end-of-interrupt for now. */
+    case IPF_IOSAPIC_EOI: {
+        /*
+         * EOI register: the value written is the vector that completed.
+         * Find the pin with that vector and clear its remote_irr bit.
+         */
+        uint8_t vector = val & IOSAPIC_VECTOR_MASK;
+        for (int pin = 0; pin < IPF_IOSAPIC_NUM_PINS; pin++) {
+            uint32_t lo = m->iosapic_reg[0x10 + pin * 2];
+            if ((lo & IOSAPIC_VECTOR_MASK) == vector) {
+                /* Clear remote IRR for this pin */
+                m->iosapic_remote_irr &= ~(1 << pin);
+                /* If still pending and level-triggered, re-service */
+                if ((lo & IOSAPIC_LVT_TRIGGER_LEVEL) &&
+                    (m->iosapic_irr & (1 << pin)) &&
+                    !(lo & IOSAPIC_LVT_MASKED)) {
+                    iosapic_service(m, pin);
+                }
+                break;
+            }
+        }
         break;
+    }
     default:
         break;
     }
@@ -4364,6 +4481,8 @@ static void ipf_init_iosapic(IPFMachineState *m, MemoryRegion *sysmem)
      * routing based on MADT IO_SAPIC entries.
      */
     m->iosapic_reg_select = 0;
+    m->iosapic_irr = 0;
+    m->iosapic_remote_irr = 0;
     memset(m->iosapic_reg, 0, sizeof(m->iosapic_reg));
 
     for (int i = 0; i < 16; i++) {
@@ -4501,6 +4620,10 @@ static void ipf_init(MachineState *machine)
      */
     ipf_init_acpi_pm(m, sysmem);
 
+    /* Initialize ISA bus and RTC for legacy device support. */
+    ipf_isa_bus_init(m);
+    ipf_cmos_init(m, machine);
+
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
     if (image_size > 0) {
@@ -4612,6 +4735,12 @@ static void ipf_init(MachineState *machine)
          * This honors the user's -vga selection (e.g. std/cirrus/virtio).
          */
         pci_vga_init(m->pcibus);
+    }
+
+    /* Initialize PCI network devices using the modern QEMU NIC API. */
+    if (m->pcibus) {
+        MachineClass *mc = MACHINE_GET_CLASS(machine);
+        pci_init_nic_devices(m->pcibus, mc->default_nic);
     }
 
     if (!kernel_filename) {
@@ -5466,48 +5595,111 @@ static void ipf_init(MachineState *machine)
 //#define IOAPIC_NUM_PINS2 48
 //
 //static int ioapic_irq_count[IOAPIC_NUM_PINS2];
-//
-//static int ioapic_map_irq(int devfn, int irq_num)
-//{
-//    int irq, dev;
-//    dev = devfn >> 3;
-//    irq = ((((dev << 2) + (dev >> 3) + irq_num) & 31) + 16);
-//    return irq;
-//}
+/*
+ * PCI slot to IOSAPIC pin mapping (standard PCI swizzle).
+ * Offset by 16 to avoid ISA IRQ conflicts.
+ */
+static int ipf_pci_map_irq(PCIDevice *pci_dev, int irq_num)
+{
+    int dev = PCI_SLOT(pci_dev->devfn);
+    /* Standard PCI swizzle + offset to avoid ISA conflicts */
+    return ((((dev << 2) + (dev >> 3) + irq_num) & 15) + 16) % IPF_IOSAPIC_NUM_PINS;
+}
+
+/*
+ * Service a pending IOSAPIC interrupt by delivering it to the CPU.
+ */
+static void iosapic_service(IPFMachineState *m, int pin)
+{
+    if (pin >= IPF_IOSAPIC_NUM_PINS) {
+        return;
+    }
+
+    /* Read redirection entry (64-bit split across two 32-bit registers) */
+    uint64_t entry = ((uint64_t)m->iosapic_reg[0x11 + pin * 2] << 32) |
+                     m->iosapic_reg[0x10 + pin * 2];
+
+    /* Check if masked */
+    if (entry & IOSAPIC_LVT_MASKED) {
+        return;
+    }
+
+    /* Extract vector */
+    uint8_t vector = entry & IOSAPIC_VECTOR_MASK;
+
+    /* For level-triggered, mark remote IRR to prevent coalescing */
+    if (entry & IOSAPIC_LVT_TRIGGER_LEVEL) {
+        if (m->iosapic_remote_irr & (1 << pin)) {
+            /* Already in service, coalesce */
+            return;
+        }
+        m->iosapic_remote_irr |= (1 << pin);
+        m->iosapic_reg[0x10 + pin * 2] |= IOSAPIC_LVT_REMOTE_IRR;
+    }
+
+    /* Deliver external interrupt to CPU */
+    if (m->cpu) {
+        CPUState *cs = CPU(m->cpu);
+        CPUIA64State *env = &m->cpu->env;
+
+        /* Set the interrupt vector in cr.ivr or similar mechanism */
+        /* For IA-64, external interrupts go through the IVT at vector 0x3000 */
+        cs->exception_index = IA64_VEC_EXTERNAL_INTERRUPT + vector;
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    }
+}
 
 /*
  * Dummy function to provide match for call from hw/apic.c
  */
 void apic_set_irq_delivered(void);
-void apic_set_irq_delivered(void) {
+void apic_set_irq_delivered(void)
+{
 }
 
+/*
+ * IOSAPIC interrupt input handler.
+ * Called when a device asserts or deasserts an interrupt line.
+ */
 void ioapic_set_irq(void *opaque, int irq_num, int level);
 void ioapic_set_irq(void *opaque, int irq_num, int level)
 {
-   // int vector, pic_ret;
+    IPFMachineState *m = opaque;
 
-   // PCIDevice *pci_dev = (PCIDevice *)opaque;
-   // vector = ioapic_map_irq(pci_dev->devfn, irq_num);
+    if (irq_num >= IPF_IOSAPIC_NUM_PINS) {
+        return;
+    }
 
-   // if (level)
-   //     ioapic_irq_count[vector] += 1;
-   // else
-   //     ioapic_irq_count[vector] -= 1;
+    uint32_t mask = 1 << irq_num;
+    uint64_t entry = ((uint64_t)m->iosapic_reg[0x11 + irq_num * 2] << 32) |
+                     m->iosapic_reg[0x10 + irq_num * 2];
 
-   // if (kvm_enabled()) {
-    //	if (kvm_set_irq(vector, ioapic_irq_count[vector] == 0, &pic_ret))
-   //         if (pic_ret != 0)
-   //             apic_set_irq_delivered();
-	  //  return;
-   // }
+    bool level_triggered = (entry & IOSAPIC_LVT_TRIGGER_LEVEL) != 0;
+    bool masked = (entry & IOSAPIC_LVT_MASKED) != 0;
+
+    if (level_triggered) {
+        /* Level-triggered: track IRR based on level */
+        if (level) {
+            m->iosapic_irr |= mask;
+        } else {
+            m->iosapic_irr &= ~mask;
+        }
+    } else {
+        /* Edge-triggered: set IRR on rising edge only */
+        if (level && !masked) {
+            m->iosapic_irr |= mask;
+        }
+    }
+
+    /* Service the interrupt if pending and not masked */
+    if (!masked && (m->iosapic_irr & mask)) {
+        iosapic_service(m, irq_num);
+        /* Clear IRR for edge-triggered */
+        if (!level_triggered) {
+            m->iosapic_irr &= ~mask;
+        }
+    }
 }
-
-//int ipf_map_irq(PCIDevice *pci_dev, int irq_num);
-//int ipf_map_irq(PCIDevice *pci_dev, int irq_num)
-//{
-//	return ioapic_map_irq(pci_dev->devfn, irq_num);
-//}
 
 static bool ipf_machine_get_firmware_preboot(Object *obj, Error **errp)
 {
@@ -5537,6 +5729,7 @@ static void ipf_machine_class_init(ObjectClass *oc, const void *data)
      * standard VGA model over cirrus unless the user overrides with -vga.
      */
     mc->default_display = "std";
+    mc->default_nic = "e1000";
     mc->is_default = true;
 
     object_class_property_add_bool(oc, "firmware-preboot",
