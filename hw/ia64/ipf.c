@@ -29,6 +29,7 @@
 #include "qemu/osdep.h"
 #include "hw/loader.h"
 #include "hw/i386/pc.h"
+#include "hw/irq.h"
 #include "hw/isa/isa.h"
 #include "hw/rtc/mc146818rtc.h"
 /* #include "fdc.h" */
@@ -108,6 +109,7 @@ struct IPFMachineState {
     I2CBus *smbus;
     ISABus *isa_bus;
     MC146818RtcState *rtc;
+    PCIDevice *piix4;
     IA64CPU *cpu;
 
     /*
@@ -163,6 +165,7 @@ struct IPFMachineState {
 
 /* Forward declaration for IOSAPIC EOI handling */
 static void iosapic_service(IPFMachineState *m, int pin);
+void ioapic_set_irq(void *opaque, int irq_num, int level);
 
 static bool ipf_fw_nvram_blank(const uint8_t *buf, size_t size)
 {
@@ -3091,6 +3094,27 @@ static int cmos_get_fd_drive_type(int fd0)
 static void ipf_isa_bus_init(IPFMachineState *m)
 {
     MemoryRegion *isa_address_space_io = get_system_io();
+    qemu_irq *isa_irqs;
+
+    if (m->isa_bus) {
+        return;
+    }
+
+    if (m->piix4) {
+        BusState *bus;
+        QLIST_FOREACH(bus, &DEVICE(m->piix4)->child_bus, sibling) {
+            if (object_dynamic_cast(OBJECT(bus), TYPE_ISA_BUS)) {
+                m->isa_bus = ISA_BUS(bus);
+                break;
+            }
+        }
+        if (m->isa_bus) {
+            PIIXState *piix = PIIX_PCI_DEVICE(m->piix4);
+            m->rtc = &piix->rtc;
+            DPRINTF("ISA bus/RTC: using PIIX4 southbridge\n");
+            return;
+        }
+    }
 
     /*
      * Create a standalone ISA bus. Since we don't have a PCI-ISA bridge,
@@ -3098,6 +3122,10 @@ static void ipf_isa_bus_init(IPFMachineState *m)
      */
     m->isa_bus = isa_bus_new(NULL, isa_address_space_io, isa_address_space_io,
                              &error_fatal);
+
+    /* Route ISA IRQs into the IOSAPIC handler. */
+    isa_irqs = qemu_allocate_irqs(ioapic_set_irq, m, ISA_NUM_IRQS);
+    isa_bus_register_input_irqs(m->isa_bus, isa_irqs);
 
     /*
      * Initialize the MC146818 RTC at ports 0x70-0x71.
@@ -4274,6 +4302,7 @@ static void ipf_init_southbridge(IPFMachineState *m)
      */
     PCIDevice *piix = pci_new_multifunction(PCI_DEVFN(1, 0), TYPE_PIIX4_PCI_DEVICE);
     pci_realize_and_unref(piix, m->pcibus, &error_fatal);
+    m->piix4 = piix;
 }
 
 static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
@@ -4620,10 +4649,6 @@ static void ipf_init(MachineState *machine)
      */
     ipf_init_acpi_pm(m, sysmem);
 
-    /* Initialize ISA bus and RTC for legacy device support. */
-    ipf_isa_bus_init(m);
-    ipf_cmos_init(m, machine);
-
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
     if (image_size > 0) {
@@ -4730,11 +4755,18 @@ static void ipf_init(MachineState *machine)
     if (run_firmware) {
         ipf_init_pci(m);
         ipf_init_southbridge(m);
+        ipf_isa_bus_init(m);
+        ipf_cmos_init(m, machine);
         /*
          * Attach a PCI VGA device so the guest firmware can present a UI.
          * This honors the user's -vga selection (e.g. std/cirrus/virtio).
          */
         pci_vga_init(m->pcibus);
+    }
+
+    if (!run_firmware) {
+        ipf_isa_bus_init(m);
+        ipf_cmos_init(m, machine);
     }
 
     /* Initialize PCI network devices using the modern QEMU NIC API. */
@@ -5661,7 +5693,6 @@ void apic_set_irq_delivered(void)
  * IOSAPIC interrupt input handler.
  * Called when a device asserts or deasserts an interrupt line.
  */
-void ioapic_set_irq(void *opaque, int irq_num, int level);
 void ioapic_set_irq(void *opaque, int irq_num, int level)
 {
     IPFMachineState *m = opaque;
