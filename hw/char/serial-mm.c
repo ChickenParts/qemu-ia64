@@ -54,7 +54,7 @@ static inline void serial_mm_hook_char(uint8_t ch)
         return;
     }
     if (ch == '\r') {
-        return;
+        ch = '\n';
     }
     if (ch != '\n' && serial_mm_line_len + 1 < sizeof(serial_mm_line_buf)) {
         serial_mm_line_buf[serial_mm_line_len++] = (char)ch;

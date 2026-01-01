@@ -3645,7 +3645,7 @@ static void ipf_debugcon_log_hob(IPFMachineState *m, const char *tag,
 static bool ipf_debugcon_line_accum(IPFMachineState *m, uint8_t ch)
 {
     if (ch == '\r') {
-        return false;
+        return m->debugcon_line_len > 0;
     }
     if (ch != '\n' && m->debugcon_line_len + 1 < sizeof(m->debugcon_line)) {
         m->debugcon_line[m->debugcon_line_len++] = ch;
@@ -3659,14 +3659,24 @@ static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
                                     int log_to_qemu_log, int dxe_trace_enabled,
                                     int hob_on_assert_enabled)
 {
+    bool is_assert;
     if (!m || !line) {
         return;
     }
+    is_assert = strstr(line, "ASSERT") != NULL;
     if (!m->debugcon_trace_once &&
         hob_on_assert_enabled &&
-        strstr(line, "ASSERT")) {
+        is_assert) {
         m->debugcon_trace_once = true;
         ipf_dump_gfw_hob("assert");
+    }
+    if (hob_on_assert_enabled && is_assert && !m->debugcon_gcd_dumped && m->cpu) {
+        m->debugcon_gcd_dumped = true;
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: ASSERT line=\"%s\"\n", line);
+        }
+        ia64_fw_dump_hobs_and_gcd(&m->cpu->env);
     }
     if (!m->debugcon_gcd_dumped &&
         strstr(line, "ASSERT in") && strstr(line, "Gcd.c") && m->cpu) {
@@ -3736,18 +3746,27 @@ static void ipf_uart_line_hook(const char *line, void *opaque)
 {
     IPFMachineState *m = opaque;
     static int hob_on_assert_enabled = -1;
+    bool is_assert;
     if (!m || !line) {
         return;
     }
     if (hob_on_assert_enabled == -1) {
         hob_on_assert_enabled = getenv("QEMU_IPF_DUMP_HOB_ON_ASSERT") ? 1 : 0;
     }
-    bool is_assert = strstr(line, "ASSERT") != NULL;
+    is_assert = strstr(line, "ASSERT") != NULL;
     if (is_assert && !m->debugcon_trace_once) {
         m->debugcon_trace_once = true;
         if (hob_on_assert_enabled) {
             ipf_dump_gfw_hob("assert");
         }
+    }
+    if (hob_on_assert_enabled && is_assert && !m->debugcon_gcd_dumped && m->cpu) {
+        m->debugcon_gcd_dumped = true;
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: UART ASSERT line=\"%s\"\n", line);
+        }
+        ia64_fw_dump_hobs_and_gcd(&m->cpu->env);
     }
     if (m->debugcon_gcd_dumped) {
         return;
