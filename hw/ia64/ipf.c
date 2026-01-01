@@ -3662,6 +3662,12 @@ static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
     if (!m || !line) {
         return;
     }
+    if (!m->debugcon_trace_once &&
+        hob_on_assert_enabled &&
+        strstr(line, "ASSERT")) {
+        m->debugcon_trace_once = true;
+        ipf_dump_gfw_hob("assert");
+    }
     if (!m->debugcon_gcd_dumped &&
         strstr(line, "ASSERT in") && strstr(line, "Gcd.c") && m->cpu) {
         m->debugcon_gcd_dumped = true;
@@ -3729,8 +3735,19 @@ static void ipf_debugcon_trace_line(IPFMachineState *m, const char *line,
 static void ipf_uart_line_hook(const char *line, void *opaque)
 {
     IPFMachineState *m = opaque;
+    static int hob_on_assert_enabled = -1;
     if (!m || !line) {
         return;
+    }
+    if (hob_on_assert_enabled == -1) {
+        hob_on_assert_enabled = getenv("QEMU_IPF_DUMP_HOB_ON_ASSERT") ? 1 : 0;
+    }
+    bool is_assert = strstr(line, "ASSERT") != NULL;
+    if (is_assert && !m->debugcon_trace_once) {
+        m->debugcon_trace_once = true;
+        if (hob_on_assert_enabled) {
+            ipf_dump_gfw_hob("assert");
+        }
     }
     if (m->debugcon_gcd_dumped) {
         return;
