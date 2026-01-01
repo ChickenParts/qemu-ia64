@@ -5733,6 +5733,20 @@ static bool ia64_fw_memmap_region(CPUIA64State *env, uint64_t index,
     return false;
 }
 
+static bool ia64_fw_memmap_table_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IPF_FW_MEMMAP_TABLE");
+        if (!s || !*s) {
+            enabled = 1;
+        } else {
+            enabled = ia64_env_truthy(s) ? 1 : 0;
+        }
+    }
+    return enabled;
+}
+
 void HELPER(fw_autoscan_memtop_fix)(CPUIA64State *env, uint64_t pc)
 {
 #ifdef CONFIG_USER_ONLY
@@ -5793,19 +5807,34 @@ void HELPER(fw_pei_install_mem_fix)(CPUIA64State *env, uint64_t pc)
         size = 0x01000000ULL;
     }
 
+    uint64_t desired_base = ram_base;
+    uint64_t desired_size = mem_top - ram_base;
+    if (desired_size > (1ULL << 20)) {
+        desired_base = ram_base + (1ULL << 20);
+        desired_size = mem_top - desired_base;
+    }
+    if (desired_size == 0) {
+        return;
+    }
+
     uint64_t base_phys = ia64_phys_mode_addr(base_raw);
     uint64_t new_phys = base_phys;
     bool fix = false;
 
-    if (base_phys < ram_base || base_phys >= mem_top ||
+    if (size < desired_size) {
+        size = desired_size;
+        fix = true;
+    }
+
+    if (base_phys < desired_base || base_phys >= mem_top ||
         base_phys + size > mem_top) {
         if (mem_top < size) {
             return;
         }
-        new_phys = mem_top - size;
+        new_phys = desired_base;
         new_phys &= ~((1ULL << 20) - 1);
-        if (new_phys < ram_base) {
-            new_phys = ram_base;
+        if (new_phys < desired_base) {
+            new_phys = desired_base;
         }
         fix = true;
     }
@@ -5853,6 +5882,10 @@ static void ia64_fw_try_write_memmap_table(CPUIA64State *env)
         uint64_t base_mb = 0;
         uint64_t size_mb = 0;
         if (ia64_fw_memmap_region(env, idx, &base, &size)) {
+            if (idx == 0 && base == 0 && size > (1ULL << 20)) {
+                base = 1ULL << 20;
+                size -= 1ULL << 20;
+            }
             base_mb = base >> 20;
             size_mb = size >> 20;
         }
@@ -5872,6 +5905,38 @@ static void ia64_fw_try_write_memmap_table(CPUIA64State *env)
                       "IA64: fw_memmap_table base=%016" PRIx64
                       " entries=%" PRIu64 " mem=%" PRIu64 "\n",
                       table_base, max_entries, env->fw_mem_size);
+    }
+#endif
+}
+
+void HELPER(fw_autoscan_memmap_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    static bool logged;
+    if (!ia64_fw_memmap_table_enabled()) {
+        return;
+    }
+    ia64_fw_try_write_memmap_table(env);
+    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        CPUState *cs = env_cpu(env);
+        uint64_t base0 = 0;
+        uint64_t size0 = 0;
+        uint64_t base1 = 0;
+        uint64_t size1 = 0;
+        (void)ia64_fw_read_u64(cs, 0x0000000002000000ULL, &base0);
+        (void)ia64_fw_read_u64(cs, 0x0000000002000008ULL, &size0);
+        (void)ia64_fw_read_u64(cs, 0x0000000002000010ULL, &base1);
+        (void)ia64_fw_read_u64(cs, 0x0000000002000018ULL, &size1);
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_autoscan_memmap_fix pc=%016" PRIx64
+                      " mem=%" PRIu64 " entry0=%" PRIx64 "/%" PRIx64
+                      " entry1=%" PRIx64 "/%" PRIx64 "\n",
+                      pc, env->fw_mem_size, base0, size0, base1, size1);
     }
 #endif
 }

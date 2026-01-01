@@ -958,6 +958,10 @@ static void ipf_fw_write_memmap_table(uint64_t mem_size)
         uint64_t base_mb = 0;
         uint64_t size_mb = 0;
         if (ipf_fw_memmap_region(mem_size, idx, &base, &size)) {
+            if (idx == 0 && base == 0 && size > (1ULL << 20)) {
+                base = 1ULL << 20;
+                size -= 1ULL << 20;
+            }
             base_mb = base >> 20;
             size_mb = size >> 20;
         }
