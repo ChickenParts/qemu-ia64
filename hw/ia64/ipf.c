@@ -890,6 +890,96 @@ static bool ipf_fw_pei_use_pi_handoff(void)
     return use_pi;
 }
 
+static bool ipf_fw_memmap_table_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IPF_FW_MEMMAP_TABLE");
+        if (s && *s) {
+            enabled = (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 ||
+                       strcmp(s, "no") == 0) ? 0 : 1;
+        } else {
+            enabled = 1;
+        }
+    }
+    return enabled;
+}
+
+static bool ipf_fw_memmap_region(uint64_t mem_size, uint64_t index,
+                                 uint64_t *base, uint64_t *size)
+{
+    const uint64_t vga_start = IPF_VGA_HOLE_START;
+    const uint64_t vga_size = IPF_VGA_HOLE_SIZE;
+    const uint64_t low_limit = 0xC0000000ULL;
+
+    if (!mem_size) {
+        return false;
+    }
+    if (index == 0) {
+        *base = 0;
+        if (mem_size < vga_start) {
+            *size = mem_size;
+        } else {
+            uint64_t lo = mem_size + vga_size;
+            *size = (lo < low_limit) ? lo : low_limit;
+        }
+        return *size > 0;
+    }
+    if (index == 1 && mem_size > low_limit) {
+        *base = 0x100000000ULL;
+        *size = mem_size + vga_size - low_limit;
+        return *size > 0;
+    }
+    return false;
+}
+
+static void ipf_fw_write_memmap_table(uint64_t mem_size)
+{
+    static bool logged;
+    const uint64_t table_base = 0x0000000002000000ULL;
+    const uint64_t max_entries = 16;
+
+    if (!mem_size) {
+        return;
+    }
+
+    uint8_t raw[8];
+    if (address_space_read(&address_space_memory, table_base + 8,
+                           MEMTXATTRS_UNSPECIFIED, raw, sizeof(raw)) == MEMTX_OK) {
+        uint64_t size0 = ldq_le_p(raw);
+        if (size0 != 0) {
+            return;
+        }
+    }
+
+    for (uint64_t idx = 0; idx < max_entries; idx++) {
+        uint64_t base = 0;
+        uint64_t size = 0;
+        uint64_t base_mb = 0;
+        uint64_t size_mb = 0;
+        if (ipf_fw_memmap_region(mem_size, idx, &base, &size)) {
+            base_mb = base >> 20;
+            size_mb = size >> 20;
+        }
+
+        uint8_t out[16];
+        stq_le_p(out, base_mb);
+        stq_le_p(out + 8, size_mb);
+        if (address_space_write(&address_space_memory, table_base + idx * sizeof(out),
+                                MEMTXATTRS_UNSPECIFIED, out, sizeof(out)) != MEMTX_OK) {
+            return;
+        }
+    }
+
+    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF: fw memmap table base=%016" PRIx64
+                      " entries=%" PRIu64 " mem=%" PRIu64 "\n",
+                      table_base, max_entries, mem_size);
+    }
+}
+
 static bool ipf_fw_is_erased(const uint8_t *buf, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
@@ -4735,6 +4825,9 @@ static void ipf_init(MachineState *machine)
         ipf_boot_mem_size = machine->ram_size;
         if (run_firmware) {
             ipf_dump_gfw_hob("boot");
+        }
+        if (run_firmware && ipf_fw_memmap_table_enabled()) {
+            ipf_fw_write_memmap_table(machine->ram_size);
         }
 
         /*
