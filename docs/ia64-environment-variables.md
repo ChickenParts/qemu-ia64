@@ -32,6 +32,7 @@ Environment variables are organized into the following categories:
 | `QEMU_IPF_FW_PROBE_FIT` | Probe and log Firmware Interface Table entries |
 | `QEMU_IPF_FW_PATCH_FIT` | Enable FIT patching for compatibility |
 | `QEMU_IPF_FW_PATCH_GP_GLOBALS` | Patch global pointer references in firmware |
+| `QEMU_IPF_FW_MEMMAP_TABLE` | Populate firmware memmap table at 0x2000000 (set 0/false/no to disable) |
 | `QEMU_IPF_FW_REGION` | Specify firmware memory region (format: start-end) |
 | `QEMU_IPF_FW_DXE_DUMP` | Dump DXE (Driver Execution Environment) phase info |
 | `QEMU_IPF_FW_WATCH_DXE` | Enable DXE phase watchpoints |
