@@ -3391,11 +3391,42 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     uint64_t nr = imm >> 8;
                     bool allow_fw = in_fw || fw_hypercall;
                     if (!allow_fw) {
+                        TCGLabel *do_break = gen_new_label();
+                        TCGLabel *done = gen_new_label();
+                        TCGv_i64 active = tcg_temp_new_i64();
+
+                        tcg_gen_ld_i64(active, tcg_env,
+                                       offsetof(CPUIA64State, fw_preboot_active));
+                        tcg_gen_brcondi_i64(TCG_COND_EQ, active, 0, do_break);
+
+                        if (nr == 0x0) {
+                            /*
+                             * Firmware break(0) call gate.
+                             *
+                             * Some xenipf/EDK paths end up executing a break(0)
+                             * without a proper IVT installed yet. Handle it as a
+                             * firmware status hook to avoid trapping into the
+                             * empty break vector.
+                             */
+                            gen_helper_fw_break0(tcg_env,
+                                                 tcg_constant_i64(ctx->base.pc_next));
+                        } else if (nr == 0x1100) {
+                            /* FW_HYPERCALL_SAL_CALL */
+                            gen_helper_fw_sal_break(tcg_env);
+                        } else if (nr == 0x1000) {
+                            /* FW_HYPERCALL_PAL_CALL */
+                            gen_helper_fw_pal(tcg_env);
+                        } else {
+                            gen_unimpl(ctx, insn, "break.m hypercall");
+                        }
+
+                        tcg_gen_br(done);
+                        gen_set_label(do_break);
                         gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
                         if (qp == 0) {
                             ctx->base.is_jmp = DISAS_NORETURN;
                         }
-                        tcg_gen_exit_tb(NULL, 0);
+                        gen_set_label(done);
                     } else if (nr == 0x0) {
                         /*
                          * Firmware break(0) call gate.
@@ -3421,7 +3452,6 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                             if (qp == 0) {
                                 ctx->base.is_jmp = DISAS_NORETURN;
                             }
-                            tcg_gen_exit_tb(NULL, 0);
                         }
                     }
                 } else {
@@ -3429,7 +3459,6 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     if (qp == 0) {
                         ctx->base.is_jmp = DISAS_NORETURN;
                     }
-                    tcg_gen_exit_tb(NULL, 0);
                 }
             } else {
                 gen_unimpl(ctx, insn, "M-slot");
@@ -5255,7 +5284,6 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     if (qp == 0) {
                         ctx->base.is_jmp = DISAS_NORETURN;
                     }
-                    tcg_gen_exit_tb(NULL, 0);
                 }
                 if (skip_label) {
                     gen_set_label(skip_label);

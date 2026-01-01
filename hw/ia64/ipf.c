@@ -4916,6 +4916,10 @@ static void ipf_init(MachineState *machine)
         /* Firmware-only boot: enter Xen/KVM guest firmware entry point. */
         ipf_boot_ip = IPF_GFW_ENTRY;
         ipf_boot_r28 = GFW_HOB_START;
+        env->fw_preboot_active = 1;
+        env->fw_preboot_ip = 0;
+        env->fw_preboot_r28 = 0;
+        env->fw_preboot_kernel_low = 0;
         ipf_setup_ram_watches(m, sysmem, cpu, machine->ram, 0, false);
         qemu_register_reset(main_cpu_reset, cpu);
         return;
