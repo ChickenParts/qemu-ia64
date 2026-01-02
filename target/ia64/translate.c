@@ -3485,6 +3485,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             /* mov to/from control regs and region regs */
             uint8_t x3 = (insn >> 33) & 0x7;
             uint8_t x6 = (insn >> 27) & 0x3f;
+            uint8_t x2 = (insn >> 31) & 0x3;
+            uint8_t x4 = (insn >> 27) & 0xf;
             if (x3 == 1) {
                 /* M20: chk.s.m r2, target25 */
                 uint8_t qp = insn & 0x3f;
@@ -3509,6 +3511,44 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
 
                 if (skip) {
                     gen_set_label(skip);
+                }
+                break;
+            }
+            if (x3 == 0 && x4 == 0x6) {
+                /* M?: mov {r1=msr[r3], msr[r3]=r2} */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                if (x2 == 1) {
+                    TCGv_i64 val = tcg_temp_new_i64();
+                    gen_helper_msr_read(val, tcg_env, idx);
+                    if (r1 != 0) {
+                        tcg_gen_mov_i64(cpu_r[r1], val);
+                        gen_helper_gr_nat_set(tcg_env,
+                                              tcg_constant_i32(r1),
+                                              tcg_constant_i64(0));
+                    }
+                } else if (x2 == 0) {
+                    TCGv_i64 val = tcg_temp_new_i64();
+                    if (r2 == 0) {
+                        tcg_gen_movi_i64(val, 0);
+                    } else {
+                        tcg_gen_mov_i64(val, cpu_r[r2]);
+                    }
+                    gen_helper_msr_write(tcg_env, idx, val);
+                } else {
+                    gen_unimpl(ctx, insn, "mov msr");
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
                 }
                 break;
             }

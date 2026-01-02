@@ -19355,6 +19355,39 @@ uint64_t HELPER(get_cpuid)(CPUIA64State *env, uint64_t idx)
     return 0;
 }
 
+uint64_t HELPER(msr_read)(CPUIA64State *env, uint64_t idx)
+{
+    if (idx >= IA64_MSR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: msr read index out of range: 0x%" PRIx64, idx);
+    }
+    return env->msr[idx];
+}
+
+void HELPER(msr_write)(CPUIA64State *env, uint64_t idx, uint64_t val)
+{
+    if (idx >= IA64_MSR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: msr write index out of range: 0x%" PRIx64, idx);
+    }
+    uint64_t new_val = val;
+    switch (idx) {
+    case 0x612:
+        /* SDV firmware waits for bit 6 after clearing bit 9. */
+        new_val |= (1ULL << 6);
+        break;
+    case 0x60d:
+        /* SDV firmware clears MSR 0x60e bit 0 after reset sequencing. */
+        if (0x60e < IA64_MSR_COUNT) {
+            env->msr[0x60e] &= ~1ULL;
+        }
+        break;
+    default:
+        break;
+    }
+    env->msr[idx] = new_val;
+}
+
 void HELPER(srlz_d)(CPUIA64State *env)
 {
     /*

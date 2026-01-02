@@ -12,6 +12,8 @@
 #include "exec/cpu-defs.h"
 #include "exec/cpu-common.h"
 
+#define IA64_MSR_COUNT 4096
+
 typedef struct QEMUTimer QEMUTimer;
 
 typedef struct CPUArchState {
@@ -35,6 +37,7 @@ typedef struct CPUArchState {
     uint64_t cr_iha;     /* Interruption handler address */
     uint64_t cr[128];
     uint64_t ar[128];
+    uint64_t msr[IA64_MSR_COUNT];
     uint64_t rr[8];
     uint64_t cpuid[5];
 

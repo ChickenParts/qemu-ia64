@@ -864,6 +864,7 @@ typedef struct {
 static size_t ipf_fw_align_up(size_t val, size_t align);
 static bool ipf_fw_find_pei_core_fv(const uint8_t *buf, size_t size,
                                     size_t *fv_off_out, uint64_t *fv_size_out);
+static bool ipf_fw_has_fvh_signature(const uint8_t *buf, size_t size);
 
 static bool ipf_fw_scan_enabled(void)
 {
@@ -873,6 +874,17 @@ static bool ipf_fw_scan_enabled(void)
         enabled = (s && *s) ? 1 : 0;
     }
     return enabled;
+}
+
+static bool ipf_fw_has_fvh_signature(const uint8_t *buf, size_t size)
+{
+    const uint8_t sig[4] = { '_', 'F', 'V', 'H' };
+    for (size_t i = 0; i + sizeof(sig) <= size; i++) {
+        if (memcmp(buf + i, sig, sizeof(sig)) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool ipf_fw_pei_use_pi_handoff(void)
@@ -1886,6 +1898,20 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     size_t fv_off = 0;
     uint64_t fv_len = 0;
     if (!ipf_fw_find_pei_core_fv(buf, size, &fv_off, &fv_len)) {
+        if (!ipf_fw_has_fvh_signature(buf, size)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: PEI handoff: no FV signature; skipping raw ROM\n");
+            ipf_boot_r9 = 0;
+            ipf_boot_r10 = 0;
+            ipf_boot_ppi = 0;
+            ipf_boot_findfv_stub = 0;
+            ipf_boot_findfv_iface = 0;
+            ipf_boot_secinfo_stub = 0;
+            ipf_boot_memmap_stub = 0;
+            ipf_boot_security_stub = 0;
+            ipf_boot_loadfile_stub = 0;
+            return;
+        }
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IPF: PEI handoff: PEI core FV not found; using firmware base\n");
         fv_off = 0;
