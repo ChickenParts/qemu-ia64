@@ -1605,6 +1605,11 @@ static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
     DisasContext *ctx = container_of(db, DisasContext, base);
 
 #ifndef CONFIG_USER_ONLY
+    if (ctx->base.pc_next == 0) {
+        gen_helper_null_pc_abort(tcg_env,
+                                 tcg_constant_i64(ctx->base.pc_next),
+                                 tcg_constant_i32(ctx->ri));
+    }
     if (ia64_get_fw_fastpath_enabled()) {
         TCGv_i32 handled = tcg_temp_new_i32();
         gen_helper_fw_fastpath(handled, tcg_env,
@@ -2859,7 +2864,9 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
             tcg_gen_andi_i64(ret, cpu_b[0], ~0xFULL);
             tcg_gen_mov_i64(cpu_pc, ret);
             gen_set_ri_const(0);
-            ctx->base.is_jmp = DISAS_NORETURN;
+            if (qp == 0) {
+                ctx->base.is_jmp = DISAS_NORETURN;
+            }
             tcg_gen_exit_tb(NULL, 0);
             gen_set_label(no_pal);
         }

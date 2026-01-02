@@ -16087,20 +16087,47 @@ void HELPER(check_null_branch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     }
     if (to == 0) {
         CPUState *cs = env_cpu(env);
+        uint64_t r30 = env->r[30];
+        uint64_t r31 = env->r[31];
+        uint64_t b7 = env->b[7];
+        uint64_t desc_va = 0;
+        uint64_t desc_entry = 0;
+        uint64_t desc_gp = 0;
+        bool desc_ok = false;
+        if (r31 >= 8) {
+            desc_va = r31 - 8;
+            hwaddr desc_phys = ia64_phys_mode_addr(desc_va);
+            if (desc_phys) {
+                MemTxResult r1 = address_space_read(&address_space_memory,
+                                                    desc_phys, MEMTXATTRS_UNSPECIFIED,
+                                                    (uint8_t *)&desc_entry,
+                                                    sizeof(desc_entry));
+                MemTxResult r2 = address_space_read(&address_space_memory,
+                                                    desc_phys + 8, MEMTXATTRS_UNSPECIFIED,
+                                                    (uint8_t *)&desc_gp,
+                                                    sizeof(desc_gp));
+                desc_ok = (r1 == MEMTX_OK && r2 == MEMTX_OK);
+            }
+        }
         cpu_restore_state(cs, GETPC());
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: null branch pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
                       " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
-                      " b0=%016" PRIx64 " b6=%016" PRIx64
+                      " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
                       " r12=%016" PRIx64 " r14=%016" PRIx64
+                      " r30=%016" PRIx64 " r31=%016" PRIx64
                       " r32=%016" PRIx64 " r33=%016" PRIx64 " r34=%016" PRIx64
-                      " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64 "\n",
+                      " r35=%016" PRIx64 " r36=%016" PRIx64 " r37=%016" PRIx64
+                      " desc=%016" PRIx64 " entry=%016" PRIx64 " gp=%016" PRIx64
+                      " desc_ok=%d\n",
                       pc, ri, insn,
                       env->ip, env->psr, env->cfm,
-                      env->b[0], env->b[6],
+                      env->b[0], env->b[6], b7,
                       env->r[12], env->r[14],
+                      r30, r31,
                       env->r[32], env->r[33], env->r[34], env->r[35],
-                      env->r[36], env->r[37]);
+                      env->r[36], env->r[37],
+                      desc_va, desc_entry, desc_gp, desc_ok ? 1 : 0);
         cpu_abort(cs,
                   "IA64: null branch target pc=%016" PRIx64 " ri=%u insn=%011" PRIx64,
                   pc, ri, insn);
@@ -16128,6 +16155,52 @@ void HELPER(check_null_branch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   "IA64: branch_to hit pc=%016" PRIx64 " ri=%u to=%016" PRIx64,
                   pc, ri, to);
     }
+}
+
+void HELPER(null_pc_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri)
+{
+    CPUState *cs = env_cpu(env);
+    uint64_t gp = env->r[1];
+    uint64_t r37 = env->r[37];
+    uint64_t gp_slot = 0;
+    uint64_t gp_slot_val = 0;
+    bool gp_slot_ok = false;
+
+    if (gp) {
+        gp_slot = gp - 0x1fee50ULL;
+    } else if (r37) {
+        gp_slot = r37 - 0x1fee50ULL;
+    }
+    if (gp_slot) {
+        hwaddr gp_slot_phys = ia64_phys_mode_addr(gp_slot);
+        if (gp_slot_phys) {
+            MemTxResult r = address_space_read(&address_space_memory,
+                                               gp_slot_phys,
+                                               MEMTXATTRS_UNSPECIFIED,
+                                               (uint8_t *)&gp_slot_val,
+                                               sizeof(gp_slot_val));
+            gp_slot_ok = (r == MEMTX_OK);
+        }
+    }
+    cpu_restore_state(cs, GETPC());
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: null pc pc=%016" PRIx64 " ri=%u"
+                  " ip=%016" PRIx64 " psr=%016" PRIx64 " cfm=%016" PRIx64
+                  " last_branch from=%016" PRIx64 " to=%016" PRIx64
+                  " kind=%" PRIu64 " insn=%011" PRIx64
+                  " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
+                  " r12=%016" PRIx64 " r14=%016" PRIx64
+                  " r30=%016" PRIx64 " r31=%016" PRIx64
+                  " r1=%016" PRIx64 " r37=%016" PRIx64
+                  " gp_slot=%016" PRIx64 " gp_slot_val=%016" PRIx64
+                  " gp_slot_ok=%d\n",
+                  pc, ri, env->ip, env->psr, env->cfm,
+                  env->last_branch_from, env->last_branch_to,
+                  env->last_branch_kind, env->last_branch_insn,
+                  env->b[0], env->b[6], env->b[7],
+                  env->r[12], env->r[14], env->r[30], env->r[31],
+                  gp, r37, gp_slot, gp_slot_val, gp_slot_ok ? 1 : 0);
+    cpu_abort(cs, "IA64: null pc pc=%016" PRIx64 " ri=%u", pc, ri);
 }
 
 void HELPER(dbg_mem_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
