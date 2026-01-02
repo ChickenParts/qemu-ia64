@@ -19388,6 +19388,105 @@ void HELPER(msr_write)(CPUIA64State *env, uint64_t idx, uint64_t val)
     env->msr[idx] = new_val;
 }
 
+uint64_t HELPER(pkr_read)(CPUIA64State *env, uint64_t idx)
+{
+    if (idx >= IA64_PKR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: pkr read index out of range: 0x%" PRIx64, idx);
+    }
+    return env->pkr[idx];
+}
+
+void HELPER(pkr_write)(CPUIA64State *env, uint64_t idx, uint64_t val)
+{
+    if (idx >= IA64_PKR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: pkr write index out of range: 0x%" PRIx64, idx);
+    }
+    env->pkr[idx] = val;
+    if (val & (1ULL << 63)) {
+        uint32_t key = (uint32_t)((val >> 32) & 0xffffff);
+        for (uint32_t i = 0; i < IA64_PKR_COUNT; i++) {
+            uint64_t pkr = env->pkr[i];
+            if (((pkr >> 32) & 0xffffff) == key && (pkr & (1ULL << 63))) {
+                env->pkr[i] = pkr & ~1ULL;
+            }
+        }
+    }
+}
+
+uint64_t HELPER(pmc_read)(CPUIA64State *env, uint64_t idx)
+{
+    if (idx >= IA64_PMC_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: pmc read index out of range: 0x%" PRIx64, idx);
+    }
+    return env->pmc[idx];
+}
+
+void HELPER(pmc_write)(CPUIA64State *env, uint64_t idx, uint64_t val)
+{
+    if (idx >= IA64_PMC_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: pmc write index out of range: 0x%" PRIx64, idx);
+    }
+    env->pmc[idx] = val;
+}
+
+uint64_t HELPER(pmd_read)(CPUIA64State *env, uint64_t idx)
+{
+    if (idx >= IA64_PMD_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: pmd read index out of range: 0x%" PRIx64, idx);
+    }
+    return env->pmd[idx];
+}
+
+void HELPER(pmd_write)(CPUIA64State *env, uint64_t idx, uint64_t val)
+{
+    if (idx >= IA64_PMD_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: pmd write index out of range: 0x%" PRIx64, idx);
+    }
+    env->pmd[idx] = val;
+}
+
+uint64_t HELPER(dbr_read)(CPUIA64State *env, uint64_t idx)
+{
+    if (idx >= IA64_DBR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: dbr read index out of range: 0x%" PRIx64, idx);
+    }
+    return env->dbr[idx];
+}
+
+void HELPER(dbr_write)(CPUIA64State *env, uint64_t idx, uint64_t val)
+{
+    if (idx >= IA64_DBR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: dbr write index out of range: 0x%" PRIx64, idx);
+    }
+    env->dbr[idx] = val;
+}
+
+uint64_t HELPER(ibr_read)(CPUIA64State *env, uint64_t idx)
+{
+    if (idx >= IA64_IBR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: ibr read index out of range: 0x%" PRIx64, idx);
+    }
+    return env->ibr[idx];
+}
+
+void HELPER(ibr_write)(CPUIA64State *env, uint64_t idx, uint64_t val)
+{
+    if (idx >= IA64_IBR_COUNT) {
+        cpu_abort(env_cpu(env),
+                  "IA64: ibr write index out of range: 0x%" PRIx64, idx);
+    }
+    env->ibr[idx] = val;
+}
+
 void HELPER(srlz_d)(CPUIA64State *env)
 {
     /*

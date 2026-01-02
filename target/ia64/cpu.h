@@ -13,6 +13,11 @@
 #include "exec/cpu-common.h"
 
 #define IA64_MSR_COUNT 4096
+#define IA64_PKR_COUNT 16
+#define IA64_PMC_COUNT 64
+#define IA64_PMD_COUNT 64
+#define IA64_DBR_COUNT 16
+#define IA64_IBR_COUNT 16
 
 typedef struct QEMUTimer QEMUTimer;
 
@@ -38,6 +43,11 @@ typedef struct CPUArchState {
     uint64_t cr[128];
     uint64_t ar[128];
     uint64_t msr[IA64_MSR_COUNT];
+    uint64_t pkr[IA64_PKR_COUNT];
+    uint64_t pmc[IA64_PMC_COUNT];
+    uint64_t pmd[IA64_PMD_COUNT];
+    uint64_t dbr[IA64_DBR_COUNT];
+    uint64_t ibr[IA64_IBR_COUNT];
     uint64_t rr[8];
     uint64_t cpuid[5];
 

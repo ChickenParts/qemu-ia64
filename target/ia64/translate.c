@@ -3323,6 +3323,26 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 /* PSR update affects translation mode; end TB here. */
                 ctx->base.is_jmp = DISAS_TOO_MANY;
+            } else if (x3 == 0 && x2 == 0 && x4 == 0x5) {
+                /* M44: rum imm24 (reset user mask) */
+                uint64_t imm21a = extract64(insn, 6, 21);
+                uint64_t i = extract64(insn, 36, 1);
+                uint64_t i2d = extract64(insn, 31, 2);
+                uint64_t imm24 = (i << 23) | (i2d << 21) | imm21a;
+                TCGv_i64 old_psr = tcg_temp_new_i64();
+                tcg_gen_mov_i64(old_psr, cpu_psr);
+                TCGv_i64 mask = tcg_temp_new_i64();
+                tcg_gen_movi_i64(mask, ~imm24);
+                tcg_gen_and_i64(cpu_psr, cpu_psr, mask);
+                if (imm24 & (IA64_PSR_DT | IA64_PSR_IT)) {
+                    TCGv_i64 new_psr = tcg_temp_new_i64();
+                    tcg_gen_mov_i64(new_psr, cpu_psr);
+                    gen_helper_fw_psr_update_log(tcg_env,
+                                                 tcg_constant_i64(ctx->base.pc_next),
+                                                 old_psr, new_psr,
+                                                 tcg_constant_i64(imm24));
+                }
+                ctx->base.is_jmp = DISAS_TOO_MANY;
             } else if (x3 == 0 && x2 == 0 && x4 == 0x1) {
                 /* M48: nop.m/hint.m imm21 (hints ignored) */
             } else if (x3 == 0 && x2 == 2 && (x4 == 0x2 || x4 == 0x3)) {
@@ -3701,6 +3721,251 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
+            if (x3 == 0 && x6 == 0x3) {
+                /* M42: mov pkr[r3] = r2 */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                TCGv_i64 val = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(val, 0);
+                } else {
+                    tcg_gen_mov_i64(val, cpu_r[r2]);
+                }
+                gen_helper_pkr_write(tcg_env, idx, val);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0xd) {
+                /* M43: mov r1 = pkr[r3] */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                TCGv_i64 val = tcg_temp_new_i64();
+                gen_helper_pkr_read(val, tcg_env, idx);
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], val);
+                    gen_helper_gr_nat_set(tcg_env,
+                                          tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0x4) {
+                /* M42: mov pmc[r3] = r2 */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                TCGv_i64 val = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(val, 0);
+                } else {
+                    tcg_gen_mov_i64(val, cpu_r[r2]);
+                }
+                gen_helper_pmc_write(tcg_env, idx, val);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0x5) {
+                /* M42: mov pmd[r3] = r2 */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                TCGv_i64 val = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(val, 0);
+                } else {
+                    tcg_gen_mov_i64(val, cpu_r[r2]);
+                }
+                gen_helper_pmd_write(tcg_env, idx, val);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0xe) {
+                /* M43: mov r1 = pmc[r3] */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                TCGv_i64 val = tcg_temp_new_i64();
+                gen_helper_pmc_read(val, tcg_env, idx);
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], val);
+                    gen_helper_gr_nat_set(tcg_env,
+                                          tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0xf) {
+                /* M43: mov r1 = pmd[r3] */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                TCGv_i64 val = tcg_temp_new_i64();
+                gen_helper_pmd_read(val, tcg_env, idx);
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], val);
+                    gen_helper_gr_nat_set(tcg_env,
+                                          tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0x1) {
+                /* M42: mov dbr[r3] = r2 */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                TCGv_i64 val = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(val, 0);
+                } else {
+                    tcg_gen_mov_i64(val, cpu_r[r2]);
+                }
+                gen_helper_dbr_write(tcg_env, idx, val);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0x2) {
+                /* M42: mov ibr[r3] = r2 */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r2 = extract64(insn, 13, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                TCGv_i64 val = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(val, 0);
+                } else {
+                    tcg_gen_mov_i64(val, cpu_r[r2]);
+                }
+                gen_helper_ibr_write(tcg_env, idx, val);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0xb) {
+                /* M43: mov r1 = dbr[r3] */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                TCGv_i64 val = tcg_temp_new_i64();
+                gen_helper_dbr_read(val, tcg_env, idx);
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], val);
+                    gen_helper_gr_nat_set(tcg_env,
+                                          tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+            if (x3 == 0 && x6 == 0xc) {
+                /* M43: mov r1 = ibr[r3] */
+                uint8_t qp = insn & 0x3f;
+                TCGLabel *skip_label = gen_qp_skip(qp);
+                uint8_t r1 = extract64(insn, 6, 7);
+                uint8_t r3 = extract64(insn, 20, 7);
+                TCGv_i64 idx = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(idx, 0);
+                } else {
+                    tcg_gen_mov_i64(idx, cpu_r[r3]);
+                }
+                TCGv_i64 val = tcg_temp_new_i64();
+                gen_helper_ibr_read(val, tcg_env, idx);
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], val);
+                    gen_helper_gr_nat_set(tcg_env,
+                                          tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
+                }
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
             if (x3 == 0 && x6 == 0x0) {
                 /* mov rr[r3] = r2 */
                 uint8_t qp = insn & 0x3f;
@@ -3879,8 +4144,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     gen_set_label(skip_label);
                 }
                 break;
-            } else if (x3 == 0 && x6 == 0x34) {
-                /* ptc.e r3 */
+            } else if (x3 == 0 && (x6 == 0x34 || x6 == 0x3c)) {
+                /* ptc.e r3 (accept variant with extra hint bit) */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
                 uint8_t r3 = extract64(insn, 20, 7);
