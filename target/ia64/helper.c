@@ -12542,12 +12542,15 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
      */
     if (stack_count) {
         env->r[10] = stack_count;
-        env->r[33] = stack_count;
     } else if (ppi) {
         env->r[10] = ppi;
-        if (sec_handoff) {
+    }
+    if (sec_handoff) {
+        if (ppi) {
             env->r[33] = ppi;
         }
+    } else {
+        env->r[33] = 0;
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
@@ -12559,6 +12562,63 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
                       "IA64: fw_pei_startup_fix pc=%016" PRIx64
                       " r9=%016" PRIx64 " r10=%016" PRIx64 "\n",
                       pc, env->r[9], env->r[10]);
+    }
+#endif
+}
+
+void HELPER(fw_pei_startup_call_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    uint64_t handoff = env->fw_pei_handoff;
+    uint64_t ppi = env->fw_pei_ppi;
+    uint64_t stack_count = env->fw_pei_stack_count;
+    static bool logged;
+
+    if (!handoff && !ppi && !stack_count) {
+        return;
+    }
+    if (stack_count == 0 || env->r[33] != stack_count) {
+        return;
+    }
+    if (handoff && env->r[32] != handoff) {
+        return;
+    }
+
+    bool sec_handoff = false;
+    if (handoff) {
+        uint8_t handoff_buf[0x48];
+        hwaddr handoff_phys = ia64_phys_mode_addr(handoff);
+        if (cpu_memory_rw_debug(env_cpu(env), handoff_phys,
+                                handoff_buf, sizeof(handoff_buf), false) == 0) {
+            uint16_t data_size = lduw_le_p(&handoff_buf[0]);
+            uint64_t bfv_base = ldq_le_p(&handoff_buf[8]);
+            hwaddr bfv_phys = ia64_phys_mode_addr(bfv_base);
+            sec_handoff = (data_size >= sizeof(handoff_buf) &&
+                           data_size <= 0x80 &&
+                           ia64_fw_addr_in_flash(bfv_phys));
+        }
+    }
+
+    uint64_t new_r33 = env->r[33];
+    if (sec_handoff) {
+        new_r33 = ppi ? ppi : 0;
+    } else {
+        new_r33 = 0;
+    }
+    if (new_r33 == env->r[33]) {
+        return;
+    }
+    env->r[33] = new_r33;
+    if (!logged && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        logged = true;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_pei_startup_call_fix pc=%016" PRIx64
+                      " r33=%016" PRIx64 " sec=%d\n",
+                      pc, env->r[33], sec_handoff);
     }
 #endif
 }
@@ -12665,9 +12725,13 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     }
     if (stack_count) {
         env->r[10] = stack_count;
-        env->r[33] = stack_count;
-    } else if (ppi) {
-        env->r[33] = ppi;
+    }
+    if (sec_handoff) {
+        if (ppi) {
+            env->r[33] = ppi;
+        }
+    } else {
+        env->r[33] = 0;
     }
     if (ia64_fw_r33_watch_enabled()) {
         env->fw_pei_r33_watch_active = 1;
@@ -14410,6 +14474,20 @@ void HELPER(fw_pei_ppi_dump)(CPUIA64State *env, uint64_t pc)
     int64_t last_install = (int64_t)ldq_le_p(&hdr[24]);
     int64_t last_notify = (int64_t)ldq_le_p(&hdr[32]);
 
+    {
+        char hex[3 * sizeof(hdr) + 1];
+        size_t pos = 0;
+        for (size_t i = 0; i < sizeof(hdr); i++) {
+            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x ", hdr[i]);
+        }
+        if (pos > 0) {
+            hex[pos - 1] = '\0';
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: pei_ppi_db hdr[%016" PRIx64 "]: %s\n",
+                      ppi_base, hex);
+    }
+
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64: pei_ppi_db pc=%016" PRIx64
                   " ps=%016" PRIx64 " core=%016" PRIx64
@@ -14431,6 +14509,24 @@ void HELPER(fw_pei_ppi_dump)(CPUIA64State *env, uint64_t pc)
     }
 
     const uint64_t list_base = ppi_base + 40;
+    if (ppi_end == 0) {
+        for (int64_t i = 0; i < 8; i++) {
+            uint64_t desc_ptr = 0;
+            if (!ia64_fw_read_u64(cs, list_base + (uint64_t)i * 8, &desc_ptr)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ppi_db peek idx=%" PRIi64
+                              " desc_ptr unreadable\n",
+                              i);
+                break;
+            }
+            if (desc_ptr) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_ppi_db peek idx=%" PRIi64
+                              " desc_ptr=%016" PRIx64 "\n",
+                              i, desc_ptr);
+            }
+        }
+    }
     for (int64_t i = 0; i < ppi_end; i++) {
         uint64_t desc_ptr = 0;
         if (!ia64_fw_read_u64(cs, list_base + (uint64_t)i * 8, &desc_ptr)) {
