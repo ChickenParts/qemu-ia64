@@ -63,6 +63,7 @@
 #include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "exec/cpu-common.h"
 #include "chardev/char.h"
 #include <ctype.h>
 
@@ -103,7 +104,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPFMachineState, IPF_MACHINE)
  */
 
 #define IPF_PCI_FW_BUS 0xff
-#define IPF_PCI_FW_DEV_COUNT 3
+#define IPF_PCI_FW_DEV_COUNT 5
 #define IPF_PCI_FW_MAX_FUNC 8
 
 typedef struct IPFPciFwConfig {
@@ -559,10 +560,15 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_LEGACY_IO_SIZE (64ULL * 1024 * 1024)
 
 #define IPF_PCI_FW_DEV_SAC 0
+#define IPF_PCI_FW_DEV_SDC 1
+#define IPF_PCI_FW_DEV_GXB 2
 #define IPF_PCI_FW_DEV_MAC 5
 #define IPF_PCI_FW_DEV_MDC 6
 
 #define IPF_PCI_FW_DEVICE_ID_SAC 0x84e0 /* 460GX System Address Controller */
+#define IPF_PCI_FW_DEVICE_ID_SDC 0x84e1 /* 460GX System Data Controller */
+#define IPF_PCI_FW_DEVICE_ID_GXB_FN1 0x84ea /* 460GX AGP Bridge (GXB function 1) */
+#define IPF_PCI_FW_DEVICE_ID_GXB_FN2 0x84e2 /* 460GX AGP Bridge (GXB function 2) */
 #define IPF_PCI_FW_DEVICE_ID_MAC 0x84e3 /* 460GX Memory Address Controller */
 #define IPF_PCI_FW_DEVICE_ID_MDC 0x84e4 /* 460GX Memory Data Controller */
 
@@ -4194,13 +4200,20 @@ static void ipf_trace_ioport(IPFMachineState *m, bool is_write,
         return;
     }
 
-    if (trace_pci && (port == 0xcf8 || port == 0xcfc)) {
+    uint64_t pc = 0;
+    CPUState *cs = current_cpu;
+    if (cs) {
+        CPUIA64State *env = cpu_env(cs);
+        pc = env->ip;
+    }
+
+    if (trace_pci && (port == 0xcf8 || (port >= 0xcfc && port <= 0xcff))) {
         trace_count++;
         if (port == 0xcf8 && is_write && size == 4) {
             m->trace_pci_cfgaddr = val;
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "ipf pci cfgaddr %s size=%u val=%08x\n",
-                          is_write ? "wr" : "rd", size, val);
+                          "ipf pci cfgaddr %s size=%u val=%08x pc=%016" PRIx64 "\n",
+                          is_write ? "wr" : "rd", size, val, pc);
             return;
         }
 
@@ -4208,10 +4221,10 @@ static void ipf_trace_ioport(IPFMachineState *m, bool is_write,
         uint8_t bus = (cfgaddr >> 16) & 0xff;
         uint8_t dev = (cfgaddr >> 11) & 0x1f;
         uint8_t func = (cfgaddr >> 8) & 0x7;
-        uint16_t reg = (cfgaddr & 0xfc);
+        uint16_t reg = (cfgaddr & 0xfc) + (port & 0x3);
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "ipf pci cfgdata %s bus=%u dev=%u fn=%u reg=0x%02x size=%u val=%08x\n",
-                      is_write ? "wr" : "rd", bus, dev, func, reg, size, val);
+                      "ipf pci cfgdata %s bus=%u dev=%u fn=%u reg=0x%02x size=%u val=%08x pc=%016" PRIx64 "\n",
+                      is_write ? "wr" : "rd", bus, dev, func, reg, size, val, pc);
         return;
     }
 
@@ -4307,10 +4320,14 @@ static int ipf_pci_fw_dev_index(uint8_t dev)
     switch (dev) {
     case IPF_PCI_FW_DEV_SAC:
         return 0;
-    case IPF_PCI_FW_DEV_MAC:
+    case IPF_PCI_FW_DEV_SDC:
         return 1;
-    case IPF_PCI_FW_DEV_MDC:
+    case IPF_PCI_FW_DEV_GXB:
         return 2;
+    case IPF_PCI_FW_DEV_MAC:
+        return 3;
+    case IPF_PCI_FW_DEV_MDC:
+        return 4;
     default:
         return -1;
     }
@@ -4358,23 +4375,48 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x00);
     ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[1][0], PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_SDC,
+                            PCI_CLASS_BRIDGE_HOST >> 8,
+                            PCI_CLASS_BRIDGE_HOST & 0xff,
+                            0x00, 0x00);
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][0], PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_MAC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x80);
-    for (int fn = 1; fn < IPF_PCI_FW_MAX_FUNC; fn++) {
-        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[1][fn], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][1], PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_GXB_FN1,
+                            PCI_CLASS_BRIDGE_PCI >> 8,
+                            PCI_CLASS_BRIDGE_PCI & 0xff,
+                            0x00, 0x01);
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][2], PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_GXB_FN2,
+                            PCI_CLASS_BRIDGE_PCI >> 8,
+                            PCI_CLASS_BRIDGE_PCI & 0xff,
+                            0x00, 0x01);
+    for (int fn = 3; fn < IPF_PCI_FW_MAX_FUNC; fn++) {
+        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][fn], PCI_VENDOR_ID_INTEL,
                                 IPF_PCI_FW_DEVICE_ID_MAC,
                                 PCI_CLASS_BRIDGE_HOST >> 8,
                                 PCI_CLASS_BRIDGE_HOST & 0xff,
                                 0x00, 0x00);
-        pci_set_byte(m->pci_fw_cfg[1][fn].cfg + 0x48, 0xff);
+        pci_set_byte(m->pci_fw_cfg[3][fn].cfg + 0x48, 0xff);
     }
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[2][0], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[4][0], PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_MDC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
+                            0x00, 0x80);
+    for (int fn = 1; fn < IPF_PCI_FW_MAX_FUNC; fn++) {
+        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[4][fn], PCI_VENDOR_ID_INTEL,
+                                IPF_PCI_FW_DEVICE_ID_MDC,
+                                PCI_CLASS_BRIDGE_HOST >> 8,
+                                PCI_CLASS_BRIDGE_HOST & 0xff,
+                                0x00, 0x00);
+        if (fn >= 4) {
+            pci_set_byte(m->pci_fw_cfg[4][fn].cfg + 0x48, 0xff);
+        }
+    }
 
     /* SDV firmware pokes this control register on the SAC device. */
     pci_set_long(m->pci_fw_cfg[0][0].cfg + 0x70, 0xffffffffU);

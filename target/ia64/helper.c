@@ -7234,7 +7234,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                       " r10=%016" PRIx64 " r11=%016" PRIx64
                       " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
                       " r18=%016" PRIx64
-                      " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
+                      " r19=%016" PRIx64 " r21=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
                       " r24=%016" PRIx64
                       " r28=%016" PRIx64 " r29=%016" PRIx64
                       " r30=%016" PRIx64 " r31=%016" PRIx64
@@ -7260,7 +7260,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                       env->r[0], env->r[1], env->r[2], env->r[3],
                       env->r[8], env->r[9], env->r[10], env->r[11],
                       env->r[12], env->r[14], env->r[15],
-                      env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
+                      env->r[18], env->r[19], env->r[21], env->r[22], env->r[23], env->r[27],
                       env->r[24], env->r[28], env->r[29],
                       env->r[30], env->r[31],
                       env->r[43], env->r[44],
@@ -7288,7 +7288,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                 " r10=%016" PRIx64 " r11=%016" PRIx64
                 " r12=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64
                 " r18=%016" PRIx64
-                " r19=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
+                " r19=%016" PRIx64 " r21=%016" PRIx64 " r22=%016" PRIx64 " r23=%016" PRIx64 " r27=%016" PRIx64
                 " r24=%016" PRIx64
                 " r28=%016" PRIx64 " r29=%016" PRIx64
                 " r30=%016" PRIx64 " r31=%016" PRIx64
@@ -7314,7 +7314,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                 env->r[0], env->r[1], env->r[2], env->r[3],
                 env->r[8], env->r[9], env->r[10], env->r[11],
                 env->r[12], env->r[14], env->r[15],
-                env->r[18], env->r[19], env->r[22], env->r[23], env->r[27],
+                env->r[18], env->r[19], env->r[21], env->r[22], env->r[23], env->r[27],
                 env->r[24], env->r[28], env->r[29],
                 env->r[30], env->r[31],
                 env->r[43], env->r[44],
@@ -18011,23 +18011,28 @@ static void ia64_fw_sal_common(CPUIA64State *env, bool break_abi)
                           " r34=%016" PRIx64 " r35=%016" PRIx64
                           " r36=%016" PRIx64 " r37=%016" PRIx64
                           " r38=%016" PRIx64 " r39=%016" PRIx64
-                          " r40=%016" PRIx64 " r41=%016" PRIx64 "\n",
+                          " r40=%016" PRIx64 " r41=%016" PRIx64
+                          " r21=%016" PRIx64 "\n",
                           env->ip, env->b[0], env->psr, env->cfm,
                           env->r[1], env->r[9], env->r[12],
                           env->r[28], env->r[29], env->r[30], env->r[31],
                           env->r[32], env->r[33], env->r[34], env->r[35],
                           env->r[36], env->r[37], env->r[38], env->r[39],
-                          env->r[40], env->r[41]);
+                          env->r[40], env->r[41],
+                          env->r[21]);
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: SAL_CALL_CTX last_branch from=%016" PRIx64
                           " to=%016" PRIx64 " kind=%u ri=%u insn=%011" PRIx64
                           " cfm=%016" PRIx64 " sof=%u sol=%u sor=%u out0=r%u"
                           " out0..3=%016" PRIx64 " %016" PRIx64
-                          " %016" PRIx64 " %016" PRIx64 "\n",
+                          " %016" PRIx64 " %016" PRIx64
+                          " from_call=%d break_abi=%d use_break_args=%d\n",
                           env->last_branch_from, env->last_branch_to,
                           lb_kind, lb_ri, env->last_branch_insn,
                           env->cfm, sof, sol, sor, out0,
-                          out0v, out1v, out2v, out3v);
+                          out0v, out1v, out2v, out3v,
+                          from_call ? 1 : 0, break_abi ? 1 : 0,
+                          use_break_args ? 1 : 0);
         }
     }
 
@@ -18547,11 +18552,13 @@ fvb_range_log:
                               "IA64: SAL_PCI_CONFIG_READ invalid size=%" PRIu64
                               " addr=%016" PRIx64 " type=%" PRIu64
                               " break_abi=%d"
+                              " from_call=%d use_break_args=%d"
                               " raw=%" PRIu64
                               " cfm=%016" PRIx64 " out0=r%u"
                               " r28=%016" PRIx64 " r29=%016" PRIx64
                               " r30=%016" PRIx64 " r31=%016" PRIx64 "\n",
                               size, pci_addr, type, break_abi ? 1 : 0,
+                              from_call ? 1 : 0, use_break_args ? 1 : 0,
                               size_raw,
                               env->cfm, out0,
                               env->r[28], env->r[29], env->r[30], env->r[31]);
