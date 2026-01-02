@@ -2045,22 +2045,13 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     /*
-     * xenipf/EDK firmware: trace PeiMain's InstallPpi call site.
+     * xenipf/EDK firmware: trace PeiCore's InstallPpi call site.
+     * (br.call in slot 2 of the bundle at 0xffe20540.)
      */
     if (ctx->mem_idx != MMU_USER_IDX &&
-        ctx->ri == 0 &&
-        (ctx->base.pc_next == 0x80000000ffe20910ULL ||
-         ctx->base.pc_next == 0x00000000ffe20910ULL)) {
-        gen_helper_fw_pei_pre_install_probe(tcg_env,
-                                            tcg_constant_i64(ctx->base.pc_next));
-    }
-    /*
-     * xenipf/EDK firmware: trace PeiInstallPpi entry to confirm the
-     * DispatchTable pointer reaches the PPI database update.
-     */
-    if (ctx->mem_idx != MMU_USER_IDX &&
-        (ctx->base.pc_next == 0x80000000ffe25b90ULL ||
-         ctx->base.pc_next == 0x00000000ffe25b90ULL)) {
+        ctx->ri == 2 &&
+        (ctx->base.pc_next == 0x80000000ffe20540ULL ||
+         ctx->base.pc_next == 0x00000000ffe20540ULL)) {
         gen_helper_fw_pei_pre_install_probe(tcg_env,
                                             tcg_constant_i64(ctx->base.pc_next));
     }
