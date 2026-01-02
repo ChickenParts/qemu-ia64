@@ -334,6 +334,8 @@ Environment variables are organized into the following categories:
 |----------|-------------|
 | `QEMU_IA64_LOG_K3` | Log K3 (kernel level 3) events |
 | `QEMU_IA64_LOG_K3_LIMIT` | Limit K3 log entries |
+| `QEMU_IA64_LOG_K4` | Log K4 (kernel level 4) events |
+| `QEMU_IA64_LOG_K4_LIMIT` | Limit K4 log entries |
 | `QEMU_IA64_LOG_K5` | Log K5 (kernel level 5) events |
 | `QEMU_IA64_LOG_K5_LIMIT` | Limit K5 log entries |
 | `QEMU_IA64_FORCE_K3` | Force K3 mode |
