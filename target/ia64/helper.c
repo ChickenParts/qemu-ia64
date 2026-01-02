@@ -10072,7 +10072,6 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         hob_best_span = hob_end - hob_base;
         hob_from_pei = true;
     }
-    if (!hob_from_pei) {
     for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
         uint64_t addr = candidates[i];
         if (!addr) {
@@ -10101,6 +10100,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
             hob_best_span = span;
             hob_base = addr;
             hob_end = end;
+            hob_from_pei = false;
         }
     }
     for (uint64_t off = 0; off < scan_len; off += chunk - 8) {
@@ -10135,6 +10135,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                 hob_best_span = span;
                 hob_base = cand;
                 hob_end = end;
+                hob_from_pei = false;
             }
         }
     }
@@ -10173,6 +10174,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                     hob_best_span = span;
                     hob_base = cand;
                     hob_end = end;
+                    hob_from_pei = false;
                 }
             }
         }
@@ -10213,10 +10215,10 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
                     hob_best_span = span;
                     hob_base = cand;
                     hob_end = end;
+                    hob_from_pei = false;
                 }
             }
         }
-    }
     }
     if (!hob_base) {
         return;
@@ -12792,9 +12794,8 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
     }
 
     uint64_t hob_base = temp_base + (temp_size - hob_size);
-    env->r[39] = hob_base;
-    env->r[30] = hob_base;
-    ia64_fw_pei_cached_hob_base = hob_base;
+    uint64_t active_hob_base = hob_base;
+    bool redirect_hob = false;
     ia64_fw_pei_cached_temp_base = temp_base;
     ia64_fw_pei_cached_temp_size = temp_size;
 
@@ -12810,14 +12811,28 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
     if (hob_ptr) {
         uint64_t cur = 0;
         if (ia64_fw_read_u64(cs, hob_ptr, &cur)) {
-            bool cur_in_temp = (cur >= temp_base &&
-                                cur < (temp_base + temp_size));
-            if (!cur_in_temp) {
-                uint64_t cur_phys = ia64_phys_mode_addr(cur);
-                uint64_t cur_end = 0;
-                int count = 0;
-                bool have_src = ia64_fw_validate_efi_hob_list(cs, cur_phys,
-                                                              &cur_end, &count);
+            uint64_t cur_phys = ia64_phys_mode_addr(cur);
+            uint64_t cur_end = 0;
+            int count = 0;
+            bool have_src = false;
+            bool cur_in_temp = false;
+            bool cur_in_gfw = false;
+            bool cur_in_flash = false;
+
+            if (cur_phys) {
+                cur_in_temp = (cur_phys >= temp_base &&
+                               cur_phys < (temp_base + temp_size));
+                cur_in_gfw = (cur_phys >= IA64_IPF_GFW_HOB_BASE &&
+                              cur_phys < IA64_IPF_GFW_HOB_BASE + IA64_IPF_GFW_HOB_SIZE);
+                cur_in_flash = ia64_fw_addr_in_flash(cur_phys);
+                have_src = ia64_fw_validate_efi_hob_list(cs, cur_phys,
+                                                         &cur_end, &count);
+            }
+
+            bool cur_in_ram = (!cur_in_temp && !cur_in_gfw && !cur_in_flash);
+            if (cur_in_ram) {
+                active_hob_base = cur_phys;
+            } else if (!cur_in_temp && (cur_in_gfw || cur_in_flash || !cur_phys)) {
                 if (!have_src) {
                     uint64_t alt_base = 0;
                     uint64_t alt_end = 0;
@@ -12875,9 +12890,10 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                                           (cur_end - cur_phys));
                         }
                     }
+                    redirect_hob = true;
                 }
             }
-            if (!cur_in_temp && cur != hob_base) {
+            if (redirect_hob && cur != hob_base) {
                 uint8_t out[8];
                 stq_le_p(out, hob_base);
                 if (ia64_fw_write_bytes_any(cs, hob_ptr, out, sizeof(out)) &&
@@ -12891,6 +12907,15 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
             }
         }
     }
+
+    if (redirect_hob) {
+        env->r[39] = hob_base;
+        env->r[30] = hob_base;
+        ia64_fw_pei_cached_hob_base = hob_base;
+    } else if (active_hob_base) {
+        ia64_fw_pei_cached_hob_base = active_hob_base;
+    }
+    hob_base = active_hob_base;
 
     /*
      * The PEI core also caches the HOB list base in its private core
@@ -12951,7 +12976,7 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
      * memory calculations read the correct list.
      */
     uint64_t gp = env->r[1];
-    if (gp) {
+    if (gp && redirect_hob) {
         uint64_t free_top = hob_base + hob_size;
         uint64_t free_bottom = hob_base + 0x40;
         uint64_t vars[] = { gp + 0x20, gp + 0x28 };
