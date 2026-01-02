@@ -12516,38 +12516,20 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
         return;
     }
 
-    bool sec_handoff = false;
-    if (handoff) {
-        uint8_t handoff_buf[0x48];
-        hwaddr handoff_phys = ia64_phys_mode_addr(handoff);
-        if (cpu_memory_rw_debug(env_cpu(env), handoff_phys,
-                                handoff_buf, sizeof(handoff_buf), false) == 0) {
-            uint16_t data_size = lduw_le_p(&handoff_buf[0]);
-            uint64_t bfv_base = ldq_le_p(&handoff_buf[8]);
-            hwaddr bfv_phys = ia64_phys_mode_addr(bfv_base);
-            sec_handoff = (data_size >= sizeof(handoff_buf) &&
-                           data_size <= 0x80 &&
-                           ia64_fw_addr_in_flash(bfv_phys));
-        }
-    }
-
     if (handoff) {
         env->r[9] = handoff;
     }
     /*
      * The PEI boot block copies r9/r10 into r32/r33 before calling the PEI
-     * core. Some xenipf/EDK firmware still expects r10 to hold the stack
-     * count for ar.k4-based stack sizing; prefer that when available and
-     * provide the PPI list later via fw_pei_entry_fix()/fw_pei_ppi_fix().
+     * core. Keep the PPI list in r10 so PEI can seed the PPI database, and
+     * rely on fw_boot_k4_fix() to restore ar.k4-based stack sizing.
      */
-    if (stack_count) {
+    if (ppi) {
+        env->r[10] = ppi;
+        env->r[33] = ppi;
+    } else if (stack_count) {
         env->r[10] = stack_count;
         env->r[33] = stack_count;
-    } else if (ppi) {
-        env->r[10] = ppi;
-        if (sec_handoff) {
-            env->r[33] = ppi;
-        }
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
@@ -12665,9 +12647,11 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     }
     if (stack_count) {
         env->r[10] = stack_count;
-        env->r[33] = stack_count;
-    } else if (ppi) {
+    }
+    if (ppi) {
         env->r[33] = ppi;
+    } else if (stack_count) {
+        env->r[33] = stack_count;
     }
     if (ia64_fw_r33_watch_enabled()) {
         env->fw_pei_r33_watch_active = 1;
@@ -12829,7 +12813,8 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                                                          &cur_end, &count);
             }
 
-            bool cur_in_ram = (!cur_in_temp && !cur_in_gfw && !cur_in_flash);
+            bool cur_in_ram = cur_phys &&
+                              (!cur_in_temp && !cur_in_gfw && !cur_in_flash);
             if (cur_in_ram) {
                 active_hob_base = cur_phys;
             } else if (!cur_in_temp && (cur_in_gfw || cur_in_flash || !cur_phys)) {
