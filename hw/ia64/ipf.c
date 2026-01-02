@@ -141,16 +141,20 @@ struct IPFMachineState {
     MemoryRegion bmapm1;
     MemoryRegion bmapm2;
     MemoryRegion legacy_io_mmio;
+    MemoryRegion legacy_io_mmio_hi;
     MemoryRegion acpi_pm_mmio;
     uint16_t acpi_pm1_evt_sts;
     uint16_t acpi_pm1_evt_en;
     uint16_t acpi_pm1_cnt;
     uint64_t acpi_pm_timer_start_ns;
     MemoryRegion iosapic_mmio;
+    MemoryRegion gx_mmio;
     uint32_t iosapic_reg_select;
     uint32_t iosapic_reg[0x40];
     uint32_t iosapic_irr;        /* Interrupt Request Register */
     uint32_t iosapic_remote_irr; /* For level-triggered coalescing */
+    uint32_t gx_mmio_cb0;
+    uint32_t gx_mmio_cc0;
 
     /* Lightweight debug watchpoints (see QEMU_IA64_WATCH_* env vars). */
     struct IpfTextWatch *text_watch[8];
@@ -538,6 +542,8 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
  * translated offsets back into ioport numbers.
  */
 #define IPF_LEGACY_IO_BASE 0x00000000e0000000ULL
+/* Firmware resets ar.k0 to 0xFFFFC000000 (1TB - 4MB). Mirror the window there. */
+#define IPF_LEGACY_IO_BASE_FW 0x00000ffffc000000ULL
 #define IPF_LEGACY_IO_SIZE (64ULL * 1024 * 1024)
 
 /* IA-64 IOSAPIC base used by Linux/ia64 (see asm/iosapic.h). */
@@ -547,6 +553,15 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_IOSAPIC_REG_SELECT 0x0
 #define IPF_IOSAPIC_WINDOW     0x10
 #define IPF_IOSAPIC_EOI        0x40
+
+/*
+ * 460GX/SDV control window used by firmware during early init.
+ * The SDV ROM programs 0xfeb00cb0/0xfeb00cc0 as a simple doorbell/ID latch.
+ */
+#define IPF_GX_MMIO_BASE 0x00000000feb00000ULL
+#define IPF_GX_MMIO_SIZE 0x00001000ULL
+#define IPF_GX_MMIO_REG_CB0 0x0cb0
+#define IPF_GX_MMIO_REG_CC0 0x0cc0
 
 /*
  * Xen-style VGA hole compensation.
@@ -4330,8 +4345,14 @@ static void ipf_init_legacy_io(IPFMachineState *m, MemoryRegion *sysmem)
     memory_region_init_io(&m->legacy_io_mmio, OBJECT(m), &ipf_legacy_io_ops,
                           m, "ipf.legacy-io", IPF_LEGACY_IO_SIZE);
     memory_region_add_subregion(sysmem, IPF_LEGACY_IO_BASE, &m->legacy_io_mmio);
+    memory_region_init_io(&m->legacy_io_mmio_hi, OBJECT(m), &ipf_legacy_io_ops,
+                          m, "ipf.legacy-io-hi", IPF_LEGACY_IO_SIZE);
+    memory_region_add_subregion(sysmem, IPF_LEGACY_IO_BASE_FW,
+                                &m->legacy_io_mmio_hi);
     DPRINTF("LEGACY-IO: mapped at 0x%016" PRIx64 " (size=0x%" PRIx64 ")\n",
             (uint64_t)IPF_LEGACY_IO_BASE, (uint64_t)IPF_LEGACY_IO_SIZE);
+    DPRINTF("LEGACY-IO: mapped at 0x%016" PRIx64 " (fw)\n",
+            (uint64_t)IPF_LEGACY_IO_BASE_FW);
 }
 
 static const char *ipf_pcihost_root_bus_path(PCIHostState *host_bridge,
@@ -4578,6 +4599,90 @@ static void ipf_init_acpi_pm(IPFMachineState *m, MemoryRegion *sysmem)
     DPRINTF("ACPI-PM: mapped at 0x%016" PRIx64 "\n", (uint64_t)IPF_ACPI_PM_BASE);
 }
 
+static uint32_t ipf_gx_mmio_read_reg(IPFMachineState *m, hwaddr addr)
+{
+    switch (addr) {
+    case IPF_GX_MMIO_REG_CB0:
+        return m->gx_mmio_cb0 | (1U << 7);
+    case IPF_GX_MMIO_REG_CC0:
+        return m->gx_mmio_cc0 | (1U << 7);
+    default:
+        return 0;
+    }
+}
+
+static void ipf_gx_mmio_write_reg(IPFMachineState *m, hwaddr addr,
+                                  uint32_t value, uint32_t mask)
+{
+    switch (addr) {
+    case IPF_GX_MMIO_REG_CB0:
+        m->gx_mmio_cb0 = (m->gx_mmio_cb0 & ~mask) | (value & mask);
+        break;
+    case IPF_GX_MMIO_REG_CC0:
+        m->gx_mmio_cc0 = (m->gx_mmio_cc0 & ~mask) | (value & mask);
+        break;
+    default:
+        break;
+    }
+}
+
+static uint64_t ipf_gx_mmio_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IPFMachineState *m = opaque;
+    uint64_t val = 0;
+
+    if (size >= 1 && size <= 4) {
+        uint32_t reg = ipf_gx_mmio_read_reg(m, addr & ~0x3ULL);
+        unsigned shift = (addr & 3) * 8;
+        uint64_t mask = (size >= 8) ? UINT64_MAX :
+                        ((1ULL << (size * 8)) - 1);
+        val = (reg >> shift) & mask;
+    }
+
+    ipf_trace_mmio("gx-mmio", IPF_GX_MMIO_BASE + addr, size, val, false);
+    return val;
+}
+
+static void ipf_gx_mmio_write(void *opaque, hwaddr addr, uint64_t data,
+                              unsigned size)
+{
+    IPFMachineState *m = opaque;
+
+    ipf_trace_mmio("gx-mmio", IPF_GX_MMIO_BASE + addr, size, data, true);
+    if (size >= 1 && size <= 4) {
+        unsigned shift = (addr & 3) * 8;
+        uint32_t mask = (size == 4) ? 0xffffffffU :
+                        (uint32_t)((1ULL << (size * 8)) - 1);
+        uint32_t value = (uint32_t)data & mask;
+        if (shift) {
+            mask <<= shift;
+            value <<= shift;
+        }
+        ipf_gx_mmio_write_reg(m, addr & ~0x3ULL, value, mask);
+    }
+}
+
+static const MemoryRegionOps ipf_gx_mmio_ops = {
+    .read = ipf_gx_mmio_read,
+    .write = ipf_gx_mmio_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
+
+static void ipf_init_gx_mmio(IPFMachineState *m, MemoryRegion *sysmem)
+{
+    m->gx_mmio_cb0 = 0;
+    m->gx_mmio_cc0 = 0;
+    memory_region_init_io(&m->gx_mmio, OBJECT(m), &ipf_gx_mmio_ops, m,
+                          "ipf.gx-mmio", IPF_GX_MMIO_SIZE);
+    memory_region_add_subregion(sysmem, IPF_GX_MMIO_BASE, &m->gx_mmio);
+    DPRINTF("GX-MMIO: mapped at 0x%016" PRIx64 "\n",
+            (uint64_t)IPF_GX_MMIO_BASE);
+}
+
 static uint64_t ipf_iosapic_read(void *opaque, hwaddr addr, unsigned size)
 {
     IPFMachineState *m = opaque;
@@ -4800,6 +4905,7 @@ static void ipf_init(MachineState *machine)
     ipf_init_debugcon(m);
     ipf_init_legacy_io(m, sysmem);
     ipf_init_iosapic(m, sysmem);
+    ipf_init_gx_mmio(m, sysmem);
     /*
      * Provide the ACPI PM1/PMTMR register block for both firmware and direct
      * -kernel boots.
