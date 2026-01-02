@@ -3526,7 +3526,11 @@ static void main_cpu_reset(void *opaque)
      * firmware. Match it so the PEI dispatcher can run the BFV PEIMs.
      */
     if (booting_firmware) {
-        s->psr = IA64_PSR_AC | IA64_PSR_BN;
+        /*
+         * Keep BN=0 for firmware so banked r16-r31 survive the PEI/DXE
+         * rfi-based mode switch (the SDV ROM saves b0 in r25).
+         */
+        s->psr = IA64_PSR_AC;
         s->cr[21] = ((uint64_t)TARGET_PAGE_BITS << 2); /* cr.itir (ps) */
         s->cr[8] = (15ULL << 2);                       /* cr.pta */
     } else if (ipf_boot_ip) {
