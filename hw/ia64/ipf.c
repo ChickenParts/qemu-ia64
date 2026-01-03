@@ -111,6 +111,7 @@ typedef struct IPFPciFwConfig {
     bool present;
     uint8_t cfg[PCI_CONFIG_SPACE_SIZE];
     uint8_t wmask[PCI_CONFIG_SPACE_SIZE];
+    uint8_t w1c[PCI_CONFIG_SPACE_SIZE];
 } IPFPciFwConfig;
 
 struct IPFMachineState {
@@ -560,7 +561,7 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_LEGACY_IO_SIZE (64ULL * 1024 * 1024)
 
 #define IPF_PCI_FW_DEV_SAC 0
-#define IPF_PCI_FW_DEV_SDC 1
+#define IPF_PCI_FW_DEV_SDC 4
 #define IPF_PCI_FW_DEV_GXB 2
 #define IPF_PCI_FW_DEV_MAC 5
 #define IPF_PCI_FW_DEV_MDC 6
@@ -571,6 +572,8 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_PCI_FW_DEVICE_ID_GXB_FN2 0x84e2 /* 460GX AGP Bridge (GXB function 2) */
 #define IPF_PCI_FW_DEVICE_ID_MAC 0x84e3 /* 460GX Memory Address Controller */
 #define IPF_PCI_FW_DEVICE_ID_MDC 0x84e4 /* 460GX Memory Data Controller */
+#define IPF_PCI_FW_DEVICE_ID_WXB 0x84e6 /* 460GX Wide PCI Expander Bridge */
+#define IPF_PCI_FW_DEVICE_ID_IHPC 0x123f /* 460GX WXB Integrated Hot-Plug Controller */
 
 /* IA-64 IOSAPIC base used by Linux/ia64 (see asm/iosapic.h). */
 #define IPF_IOSAPIC_BASE 0x00000000fec00000ULL
@@ -4494,6 +4497,39 @@ static int ipf_pci_fw_dev_index(uint8_t dev)
     return (dev < IPF_PCI_FW_DEV_COUNT) ? (int)dev : -1;
 }
 
+static void ipf_pci_fw_cfg_set(IPFPciFwConfig *cfg, uint16_t off, unsigned size,
+                               uint64_t value, uint64_t wmask, uint64_t w1c)
+{
+    for (unsigned i = 0; i < size; i++) {
+        uint16_t idx = off + i;
+        if (idx >= PCI_CONFIG_SPACE_SIZE) {
+            break;
+        }
+        cfg->cfg[idx] = (value >> (i * 8)) & 0xff;
+        cfg->wmask[idx] = (wmask >> (i * 8)) & 0xff;
+        cfg->w1c[idx] = (w1c >> (i * 8)) & 0xff;
+    }
+}
+
+static void ipf_pci_fw_cfg_set_ro(IPFPciFwConfig *cfg, uint16_t off,
+                                  unsigned size, uint64_t value)
+{
+    ipf_pci_fw_cfg_set(cfg, off, size, value, 0, 0);
+}
+
+static void ipf_pci_fw_cfg_set_rw(IPFPciFwConfig *cfg, uint16_t off,
+                                  unsigned size, uint64_t value, uint64_t wmask)
+{
+    ipf_pci_fw_cfg_set(cfg, off, size, value, wmask, 0);
+}
+
+static void ipf_pci_fw_cfg_set_w1c(IPFPciFwConfig *cfg, uint16_t off,
+                                   unsigned size, uint64_t value,
+                                   uint64_t w1c)
+{
+    ipf_pci_fw_cfg_set(cfg, off, size, value, 0, w1c);
+}
+
 static void ipf_pci_fw_cfg_init_one(IPFPciFwConfig *cfg,
                                     uint16_t vendor_id,
                                     uint16_t device_id,
@@ -4505,14 +4541,15 @@ static void ipf_pci_fw_cfg_init_one(IPFPciFwConfig *cfg,
     cfg->present = true;
     memset(cfg->cfg, 0, sizeof(cfg->cfg));
     memset(cfg->wmask, 0xff, sizeof(cfg->wmask));
+    memset(cfg->w1c, 0, sizeof(cfg->w1c));
 
-    pci_set_word(cfg->cfg + PCI_VENDOR_ID, vendor_id);
-    pci_set_word(cfg->cfg + PCI_DEVICE_ID, device_id);
-    pci_set_byte(cfg->cfg + PCI_REVISION_ID, 0x00);
-    pci_set_byte(cfg->cfg + PCI_CLASS_PROG, prog_if);
-    pci_set_word(cfg->cfg + PCI_CLASS_DEVICE,
-                 (base_class << 8) | sub_class);
-    pci_set_byte(cfg->cfg + PCI_HEADER_TYPE, header_type);
+    ipf_pci_fw_cfg_set_ro(cfg, PCI_VENDOR_ID, 2, vendor_id);
+    ipf_pci_fw_cfg_set_ro(cfg, PCI_DEVICE_ID, 2, device_id);
+    ipf_pci_fw_cfg_set_ro(cfg, PCI_REVISION_ID, 1, 0x00);
+    ipf_pci_fw_cfg_set_ro(cfg, PCI_CLASS_PROG, 1, prog_if);
+    ipf_pci_fw_cfg_set_ro(cfg, PCI_CLASS_DEVICE, 2,
+                          (base_class << 8) | sub_class);
+    ipf_pci_fw_cfg_set_ro(cfg, PCI_HEADER_TYPE, 1, header_type);
 
     /* Keep identity fields read-only. */
     cfg->wmask[PCI_VENDOR_ID] = 0;
@@ -4526,6 +4563,75 @@ static void ipf_pci_fw_cfg_init_one(IPFPciFwConfig *cfg,
     cfg->wmask[PCI_HEADER_TYPE] = 0;
 }
 
+static void ipf_pci_fw_cfg_init_sac(IPFPciFwConfig *fn0,
+                                    IPFPciFwConfig *fn1,
+                                    IPFPciFwConfig *fn2)
+{
+    /* SECTID/DEDTID/FSETID: bit7 RW, bit6 W1C, bits5:0 RO. */
+    ipf_pci_fw_cfg_set(fn0, 0x80, 1, 0x00, 0x80, 0x40);
+    ipf_pci_fw_cfg_set(fn0, 0x81, 1, 0x00, 0x80, 0x40);
+    ipf_pci_fw_cfg_set(fn0, 0x82, 1, 0x00, 0x80, 0x40);
+
+    /* XTPRS: read-only, default 0x80 in each byte. */
+    ipf_pci_fw_cfg_set_ro(fn0, 0xC0, 8, 0x8080808080808080ULL);
+
+    /* FERR_SAC / NERR_SAC: write-1-clear status registers. */
+    ipf_pci_fw_cfg_set_w1c(fn1, 0x40, 4, 0x00000000U, 0xffffffffU);
+    ipf_pci_fw_cfg_set_w1c(fn1, 0x44, 4, 0x00000000U, 0xffffffffU);
+
+    /* BIUITID: bits 5:0 RW. */
+    ipf_pci_fw_cfg_set_rw(fn1, 0x80, 1, 0x00, 0x3f);
+
+    /* IT_MON PMD/PMC counters. */
+    for (int i = 0; i < 6; i++) {
+        uint16_t pmd = 0x90 + (i * 8);
+        uint16_t pmc = 0xD0 + (i * 8);
+        ipf_pci_fw_cfg_set_rw(fn2, pmd, 8, 0x0,
+                              0x000000ffffffffffULL);
+        ipf_pci_fw_cfg_set_rw(fn2, pmc, 8, 0x0,
+                              0x000001ffffffffffULL);
+    }
+}
+
+static void ipf_pci_fw_cfg_init_wxb(IPFPciFwConfig *cfg)
+{
+    /* WXB ERRSTS: write-1-clear flags. */
+    ipf_pci_fw_cfg_set_w1c(cfg, 0x44, 1, 0x00, 0xAB);
+    /* WXB ERRCMD: control bits. Default 0x8040. */
+    ipf_pci_fw_cfg_set_rw(cfg, 0x45, 2, 0x8040, 0xB800);
+}
+
+static void ipf_pci_fw_cfg_init_ihpc(IPFPciFwConfig *cfg)
+{
+    /* IHPC command: SERR, parity enable, memory space. */
+    ipf_pci_fw_cfg_set_rw(cfg, PCI_COMMAND, 2, 0x0000, 0x0142);
+    /* IHPC status: DEVSEL medium (01), W1C on error bits. */
+    ipf_pci_fw_cfg_set(cfg, PCI_STATUS, 2, 0x0200, 0x0000, 0xC000);
+
+    /* Cache line size / latency timer. */
+    ipf_pci_fw_cfg_set_rw(cfg, PCI_CACHE_LINE_SIZE, 1, 0x00, 0xff);
+    ipf_pci_fw_cfg_set_rw(cfg, PCI_LATENCY_TIMER, 1, 0x00, 0xff);
+
+    /* Interrupt line/pin. */
+    ipf_pci_fw_cfg_set_rw(cfg, PCI_INTERRUPT_LINE, 1, 0xff, 0xff);
+    ipf_pci_fw_cfg_set_ro(cfg, PCI_INTERRUPT_PIN, 1, 0x01);
+
+    /* Hot-plug slot identifier. */
+    ipf_pci_fw_cfg_set_rw(cfg, 0x40, 2, 0x0000, 0x00ff);
+    /* Misc hot-plug configuration. */
+    ipf_pci_fw_cfg_set_rw(cfg, 0x42, 2, 0x0002, 0xF080);
+    /* Hot-plug features. */
+    ipf_pci_fw_cfg_set_ro(cfg, 0x44, 2, 0x0000);
+    /* Switch change / power fault SERR status. */
+    ipf_pci_fw_cfg_set_w1c(cfg, 0x48, 1, 0x00, 0x3f);
+    ipf_pci_fw_cfg_set_w1c(cfg, 0x49, 1, 0x00, 0x3f);
+    /* Arbiter SERR status. */
+    ipf_pci_fw_cfg_set_ro(cfg, 0x4A, 1, 0x00);
+    /* Memory index / access port. */
+    ipf_pci_fw_cfg_set_rw(cfg, 0x50, 4, 0x00000000, 0x000000fc);
+    ipf_pci_fw_cfg_set_rw(cfg, 0x54, 4, 0x00000000, 0xffffffff);
+}
+
 static void ipf_init_pci_fw_cfg(IPFMachineState *m)
 {
     memset(m->pci_fw_cfg, 0, sizeof(m->pci_fw_cfg));
@@ -4536,12 +4642,21 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x80);
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][1],
+                            PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_SAC,
+                            PCI_CLASS_BRIDGE_HOST >> 8,
+                            PCI_CLASS_BRIDGE_HOST & 0xff,
+                            0x00, 0x00);
     ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][2],
                             PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_SAC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x00);
+    ipf_pci_fw_cfg_init_sac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0],
+                            &m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][1],
+                            &m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][2]);
     ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SDC][0],
                             PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_SDC,
@@ -4595,15 +4710,15 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
 
     for (int dev = 16; dev <= 23; dev++) {
         ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][0], PCI_VENDOR_ID_INTEL,
-                                IPF_PCI_FW_DEVICE_ID_MAC,
-                                PCI_CLASS_BRIDGE_HOST >> 8,
-                                PCI_CLASS_BRIDGE_HOST & 0xff,
-                                0x00, 0x80);
+                                IPF_PCI_FW_DEVICE_ID_WXB,
+                                PCI_CLASS_BRIDGE_PCI >> 8,
+                                PCI_CLASS_BRIDGE_PCI & 0xff,
+                                0x00, 0x81);
         ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][1], PCI_VENDOR_ID_INTEL,
-                                IPF_PCI_FW_DEVICE_ID_MDC,
-                                PCI_CLASS_BRIDGE_HOST >> 8,
-                                PCI_CLASS_BRIDGE_HOST & 0xff,
-                                0x00, 0x00);
+                                IPF_PCI_FW_DEVICE_ID_IHPC,
+                                0x08, 0x04, 0x00, 0x00);
+        ipf_pci_fw_cfg_init_wxb(&m->pci_fw_cfg[dev][0]);
+        ipf_pci_fw_cfg_init_ihpc(&m->pci_fw_cfg[dev][1]);
     }
 
     /* SDV firmware pokes this control register on the SAC device. */
@@ -4672,9 +4787,15 @@ static void ipf_pci_fw_cfg_write(IPFMachineState *m, uint8_t dev,
         if (off >= PCI_CONFIG_SPACE_SIZE) {
             break;
         }
-        uint8_t mask = cfg->wmask[off];
+        uint8_t w1c = cfg->w1c[off];
+        uint8_t mask = cfg->wmask[off] & ~w1c;
         uint8_t byte = (val >> (i * 8)) & 0xff;
-        cfg->cfg[off] = (cfg->cfg[off] & ~mask) | (byte & mask);
+        uint8_t cur = cfg->cfg[off];
+        if (w1c) {
+            cur &= ~(byte & w1c);
+        }
+        cur = (cur & ~mask) | (byte & mask);
+        cfg->cfg[off] = cur;
     }
     if (trace_special && dev == IPF_PCI_FW_DEV_MDC) {
         if ((func <= 1 && (reg == 0x90 || reg == 0x94)) ||
