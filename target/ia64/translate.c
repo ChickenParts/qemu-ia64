@@ -5814,6 +5814,131 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                     tcg_gen_mov_i64(cpu_r[r1], dst);
                 }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 mix1.{l,r}: za=0 zb=0 ve=0 x2a=2 x2c=2 */
+            if (za == 0 && zb == 0 && ve == 0 && x2a == 2 && x2c == 2 &&
+                (x2b == 0 || x2b == 2)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (r1 != 0) {
+                    TCGv_i64 dst = tcg_temp_new_i64();
+                    TCGv_i64 t = tcg_temp_new_i64();
+                    tcg_gen_movi_i64(dst, 0);
+                    for (int i = 0; i < 8; i++) {
+                        bool from_a;
+                        int src_index;
+                        if (x2b == 2) {
+                            /* mix1.l: dst.b0=src1.b0, dst.b1=src2.b0, ... */
+                            from_a = (i & 1) == 0;
+                            src_index = from_a ? i : (i - 1);
+                        } else {
+                            /* mix1.r: dst.b0=src1.b1, dst.b1=src2.b1, ... */
+                            from_a = (i & 1) == 0;
+                            src_index = from_a ? (i + 1) : i;
+                        }
+                        int src_shift = (7 - src_index) * 8;
+                        int dst_shift = (7 - i) * 8;
+                        if (from_a) {
+                            if (src_shift) {
+                                tcg_gen_shri_i64(t, a, src_shift);
+                            } else {
+                                tcg_gen_mov_i64(t, a);
+                            }
+                        } else {
+                            if (src_shift) {
+                                tcg_gen_shri_i64(t, b, src_shift);
+                            } else {
+                                tcg_gen_mov_i64(t, b);
+                            }
+                        }
+                        tcg_gen_andi_i64(t, t, 0xff);
+                        if (dst_shift) {
+                            tcg_gen_shli_i64(t, t, dst_shift);
+                        }
+                        tcg_gen_or_i64(dst, dst, t);
+                    }
+                    tcg_gen_mov_i64(cpu_r[r1], dst);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 mix2.{l,r}: za=0 zb=1 ve=0 x2a=2 x2c=2 */
+            if (za == 0 && zb == 1 && ve == 0 && x2a == 2 && x2c == 2 &&
+                (x2b == 0 || x2b == 2)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (r1 != 0) {
+                    TCGv_i64 dst = tcg_temp_new_i64();
+                    TCGv_i64 t = tcg_temp_new_i64();
+                    tcg_gen_movi_i64(dst, 0);
+                    for (int i = 0; i < 4; i++) {
+                        bool from_a;
+                        int src_index;
+                        if (x2b == 2) {
+                            /* mix2.l: dst.h0=src1.h0, dst.h1=src2.h0, ... */
+                            from_a = (i & 1) == 0;
+                            src_index = from_a ? i : (i - 1);
+                        } else {
+                            /* mix2.r: dst.h0=src1.h1, dst.h1=src2.h1, ... */
+                            from_a = (i & 1) == 0;
+                            src_index = from_a ? (i + 1) : i;
+                        }
+                        int src_shift = (3 - src_index) * 16;
+                        int dst_shift = (3 - i) * 16;
+                        if (from_a) {
+                            if (src_shift) {
+                                tcg_gen_shri_i64(t, a, src_shift);
+                            } else {
+                                tcg_gen_mov_i64(t, a);
+                            }
+                        } else {
+                            if (src_shift) {
+                                tcg_gen_shri_i64(t, b, src_shift);
+                            } else {
+                                tcg_gen_mov_i64(t, b);
+                            }
+                        }
+                        tcg_gen_andi_i64(t, t, 0xffff);
+                        if (dst_shift) {
+                            tcg_gen_shli_i64(t, t, dst_shift);
+                        }
+                        tcg_gen_or_i64(dst, dst, t);
+                    }
+                    tcg_gen_mov_i64(cpu_r[r1], dst);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
@@ -5859,6 +5984,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                     tcg_gen_mov_i64(cpu_r[r1], dst);
                 }
+                gen_a_unit_nat2(r1, r2, r3);
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
