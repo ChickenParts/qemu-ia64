@@ -1240,10 +1240,32 @@ static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
             uint8_t type = ent[14] & FIT_TYPE_MASK;
             uint8_t csum_valid = (ent[14] & CHECKSUM_BIT_MASK) ? 1 : 0;
             uint8_t csum = ent[15];
+            const char *type_name = ipf_fw_fit_type_name(type);
+            const char *tag = NULL;
+            char hdr[5] = "....";
+            if (addr) {
+                uint64_t phys = addr;
+                if ((addr >> 61) != 0) {
+                    phys &= ((1ULL << 61) - 1);
+                }
+                if (phys >= fw_base && phys < fw_base + fw_size) {
+                    size_t foff = (size_t)(phys - fw_base);
+                    size_t avail = fw_size - foff;
+                    const uint8_t *payload = fw + foff;
+                    size_t sniff_len = MIN(avail, (size_t)0x2000);
+                    ipf_fw_fit_ascii4(hdr, payload);
+                    tag = ipf_fw_fit_sniff_tag(payload, sniff_len);
+                }
+            }
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IPF: FIT probe: entry%zu addr=%016" PRIx64
-                          " size=0x%06x rev=%u type=0x%02x csum_valid=%u csum=0x%02x\n",
-                          i, addr, size, rev, type, csum_valid, csum);
+                          " size=0x%06x rev=%u type=0x%02x%s%s csum_valid=%u csum=0x%02x hdr=%s%s%s\n",
+                          i, addr, size, rev, type,
+                          type_name ? " (" : "",
+                          type_name ? type_name : "",
+                          csum_valid, csum, hdr,
+                          tag ? " tag=" : "",
+                          tag ? tag : "");
         }
     }
     if (!any_nonzero) {
@@ -1259,6 +1281,61 @@ static uint8_t ipf_fw_fit_checksum8(const uint8_t *buf, size_t len)
         sum = (uint8_t)(sum + buf[i]);
     }
     return (uint8_t)(0 - sum);
+}
+
+static const char *ipf_fw_fit_type_name(uint8_t type)
+{
+    switch (type) {
+    case EFI_SAL_FIT_PALB_TYPE:
+        return "PAL_B";
+    case COMP_TYPE_FIT_PEICORE:
+        return "PEI_CORE";
+    case COMP_TYPE_FIT_BFV:
+        return "BFV";
+    case COMP_TYPE_FIT_UNUSED:
+        return "UNUSED";
+    default:
+        return NULL;
+    }
+}
+
+static const char *ipf_fw_fit_sniff_tag(const uint8_t *buf, size_t len)
+{
+    struct {
+        const char *tag;
+        const char *needle;
+    } needles[] = {
+        { "SAL_A", "SAL_A" },
+        { "SAL_B", "SAL_B" },
+        { "PAL", "PAL" },
+        { "EFI", "EFI" },
+        { "EDK", "EDK" },
+        { "TIANO", "TIANO" },
+        { "KITTYHAWK", "KittyHawk" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(needles); i++) {
+        const char *needle = needles[i].needle;
+        size_t nlen = strlen(needle);
+        if (nlen == 0 || nlen > len) {
+            continue;
+        }
+        for (size_t off = 0; off + nlen <= len; off++) {
+            if (memcmp(buf + off, needle, nlen) == 0) {
+                return needles[i].tag;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void ipf_fw_fit_ascii4(char out[5], const uint8_t *buf)
+{
+    for (int i = 0; i < 4; i++) {
+        uint8_t c = buf[i];
+        out[i] = (c >= 0x20 && c <= 0x7e) ? (char)c : '.';
+    }
+    out[4] = '\0';
 }
 
 static bool ipf_fw_pe32_entry(const uint8_t *img, size_t len,
