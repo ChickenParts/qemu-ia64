@@ -1255,17 +1255,23 @@ static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
                     size_t foff = (size_t)(phys - fw_base);
                     size_t avail = fw_size - foff;
                     const uint8_t *payload = fw + foff;
-                    size_t sniff_len = MIN(avail, (size_t)0x2000);
+                    uint64_t size_bytes = (uint64_t)size * 16;
+                    size_t max_sniff = (size_t)MIN(size_bytes, (uint64_t)0x20000);
+                    if (max_sniff == 0) {
+                        max_sniff = 0x2000;
+                    }
+                    size_t sniff_len = MIN(avail, max_sniff);
                     ipf_fw_fit_ascii4(hdr_ascii, payload);
                     tag = ipf_fw_fit_sniff_tag(payload, sniff_len);
                 }
             }
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IPF: FIT probe: entry%zu addr=%016" PRIx64
-                          " size=0x%06x rev=%u type=0x%02x%s%s csum_valid=%u csum=0x%02x hdr=%s%s%s\n",
+                          " size=0x%06x rev=%u type=0x%02x%s%s%s csum_valid=%u csum=0x%02x hdr=%s%s%s\n",
                           i, addr, size, rev, type,
                           type_name ? " (" : "",
                           type_name ? type_name : "",
+                          type_name ? ")" : "",
                           csum_valid, csum, hdr_ascii,
                           tag ? " tag=" : "",
                           tag ? tag : "");
