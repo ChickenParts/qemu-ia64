@@ -104,7 +104,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPFMachineState, IPF_MACHINE)
  */
 
 #define IPF_PCI_FW_BUS 0xff
-#define IPF_PCI_FW_DEV_COUNT 5
+#define IPF_PCI_FW_DEV_COUNT 32
 #define IPF_PCI_FW_MAX_FUNC 8
 
 typedef struct IPFPciFwConfig {
@@ -4491,20 +4491,7 @@ static void ipf_trace_mmio(const char *dev, hwaddr addr, unsigned size,
 
 static int ipf_pci_fw_dev_index(uint8_t dev)
 {
-    switch (dev) {
-    case IPF_PCI_FW_DEV_SAC:
-        return 0;
-    case IPF_PCI_FW_DEV_SDC:
-        return 1;
-    case IPF_PCI_FW_DEV_GXB:
-        return 2;
-    case IPF_PCI_FW_DEV_MAC:
-        return 3;
-    case IPF_PCI_FW_DEV_MDC:
-        return 4;
-    default:
-        return -1;
-    }
+    return (dev < IPF_PCI_FW_DEV_COUNT) ? (int)dev : -1;
 }
 
 static void ipf_pci_fw_cfg_init_one(IPFPciFwConfig *cfg,
@@ -4543,57 +4530,84 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
 {
     memset(m->pci_fw_cfg, 0, sizeof(m->pci_fw_cfg));
 
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[0][0], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0],
+                            PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_SAC,
+                            PCI_CLASS_BRIDGE_HOST >> 8,
+                            PCI_CLASS_BRIDGE_HOST & 0xff,
+                            0x00, 0x80);
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][2],
+                            PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_SAC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x00);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[1][0], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SDC][0],
+                            PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_SDC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x00);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][0], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][0],
+                            PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_MAC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x80);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][1], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][1],
+                            PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_GXB_FN1,
                             PCI_CLASS_BRIDGE_PCI >> 8,
                             PCI_CLASS_BRIDGE_PCI & 0xff,
                             0x00, 0x01);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][2], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][2],
+                            PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_GXB_FN2,
                             PCI_CLASS_BRIDGE_PCI >> 8,
                             PCI_CLASS_BRIDGE_PCI & 0xff,
                             0x00, 0x01);
     for (int fn = 3; fn < IPF_PCI_FW_MAX_FUNC; fn++) {
-        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[3][fn], PCI_VENDOR_ID_INTEL,
+        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][fn],
+                                PCI_VENDOR_ID_INTEL,
                                 IPF_PCI_FW_DEVICE_ID_MAC,
                                 PCI_CLASS_BRIDGE_HOST >> 8,
                                 PCI_CLASS_BRIDGE_HOST & 0xff,
                                 0x00, 0x00);
-        pci_set_byte(m->pci_fw_cfg[3][fn].cfg + 0x48, 0xff);
+        pci_set_byte(m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][fn].cfg + 0x48, 0xff);
     }
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[4][0], PCI_VENDOR_ID_INTEL,
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][0],
+                            PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_MDC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x80);
     for (int fn = 1; fn < IPF_PCI_FW_MAX_FUNC; fn++) {
-        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[4][fn], PCI_VENDOR_ID_INTEL,
+        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][fn],
+                                PCI_VENDOR_ID_INTEL,
                                 IPF_PCI_FW_DEVICE_ID_MDC,
                                 PCI_CLASS_BRIDGE_HOST >> 8,
                                 PCI_CLASS_BRIDGE_HOST & 0xff,
                                 0x00, 0x00);
         if (fn >= 4) {
-            pci_set_byte(m->pci_fw_cfg[4][fn].cfg + 0x48, 0xff);
+            pci_set_byte(m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][fn].cfg + 0x48, 0xff);
         }
     }
 
+    for (int dev = 16; dev <= 23; dev++) {
+        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][0], PCI_VENDOR_ID_INTEL,
+                                IPF_PCI_FW_DEVICE_ID_MAC,
+                                PCI_CLASS_BRIDGE_HOST >> 8,
+                                PCI_CLASS_BRIDGE_HOST & 0xff,
+                                0x00, 0x80);
+        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][1], PCI_VENDOR_ID_INTEL,
+                                IPF_PCI_FW_DEVICE_ID_MDC,
+                                PCI_CLASS_BRIDGE_HOST >> 8,
+                                PCI_CLASS_BRIDGE_HOST & 0xff,
+                                0x00, 0x00);
+    }
+
     /* SDV firmware pokes this control register on the SAC device. */
-    pci_set_long(m->pci_fw_cfg[0][0].cfg + 0x70, 0xffffffffU);
+    pci_set_long(m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0].cfg + 0x70, 0xffffffffU);
 }
 
 static uint32_t ipf_pci_fw_cfg_read(IPFMachineState *m, uint8_t dev,
