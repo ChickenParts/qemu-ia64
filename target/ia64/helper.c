@@ -9540,7 +9540,8 @@ void HELPER(ret_restore)(CPUIA64State *env)
                       " top_ret=%016" PRIx64 " top_cfm=%016" PRIx64 "\n",
                       env->ip, env->b[0], env->cfm, env->ar[64],
                       env->rse_depth, env->last_b0_write_pc,
-                      env->last_b0_write_kind & 0xff, env->last_b0_write_insn,
+                      (unsigned)(env->last_b0_write_kind & 0xff),
+                      env->last_b0_write_insn,
                       top_ret, top_cfm);
     }
     if (watch_hit) {
@@ -9754,7 +9755,8 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
                       " last_b0_kind=%u last_b0_insn=%016" PRIx64
                       " top_ret=%016" PRIx64 " top_cfm=%016" PRIx64 "\n",
                       env->ip, env->b[0], kind, env->rse_depth,
-                      env->last_b0_write_pc, env->last_b0_write_kind & 0xff,
+                      env->last_b0_write_pc,
+                      (unsigned)(env->last_b0_write_kind & 0xff),
                       env->last_b0_write_insn, top_ret, top_cfm);
     }
     if (watch_hit) {
