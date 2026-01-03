@@ -4866,15 +4866,27 @@ static bool ipf_pci_fw_cfg_io(IPFMachineState *m, bool is_write, uint32_t port,
 
     uint8_t bus = (cfgaddr >> 16) & 0xff;
     uint8_t dev = (cfgaddr >> 11) & 0x1f;
-    if (bus == 0 && dev == 0x10) {
-        bus = IPF_PCI_FW_BUS;
-        dev = IPF_PCI_FW_DEV_SAC;
-    }
-    if (bus != IPF_PCI_FW_BUS) {
+    uint8_t func = (cfgaddr >> 8) & 0x7;
+    bool cse_bus = (bus == IPF_PCI_FW_BUS);
+    bool legacy_bus0 = (bus == 0);
+
+    /* Firmware probes internal chipset devices on bus 0 and via CSE (0xff). */
+    if (!cse_bus && !legacy_bus0) {
         return false;
     }
 
-    uint8_t func = (cfgaddr >> 8) & 0x7;
+    int idx = ipf_pci_fw_dev_index(dev);
+    if (idx < 0 || func >= IPF_PCI_FW_MAX_FUNC ||
+        !m->pci_fw_cfg[idx][func].present) {
+        if (legacy_bus0) {
+            return false;
+        }
+        if (!is_write && val) {
+            *val = ~0U;
+        }
+        return true;
+    }
+
     uint16_t reg = (cfgaddr & 0xfc) + (port & 0x3);
     if (is_write) {
         ipf_pci_fw_cfg_write(m, dev, func, reg, size, val ? *val : 0);
