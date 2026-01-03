@@ -906,6 +906,12 @@ static size_t ipf_fw_align_up(size_t val, size_t align);
 static bool ipf_fw_find_pei_core_fv(const uint8_t *buf, size_t size,
                                     size_t *fv_off_out, uint64_t *fv_size_out);
 static bool ipf_fw_has_fvh_signature(const uint8_t *buf, size_t size);
+static bool ipf_fw_find_fit_header(const uint8_t *buf, size_t size,
+                                   size_t *fit_off_out,
+                                   uint32_t *entry_count_out);
+static bool ipf_fw_has_fit_signature(const uint8_t *buf, size_t size);
+static bool ipf_fw_find_fit_pei_entry(const uint8_t *buf, size_t size,
+                                      uint64_t *entry_out);
 
 static bool ipf_fw_scan_enabled(void)
 {
@@ -924,6 +930,73 @@ static bool ipf_fw_has_fvh_signature(const uint8_t *buf, size_t size)
         if (memcmp(buf + i, sig, sizeof(sig)) == 0) {
             return true;
         }
+    }
+    return false;
+}
+
+static bool ipf_fw_find_fit_header(const uint8_t *buf, size_t size,
+                                   size_t *fit_off_out,
+                                   uint32_t *entry_count_out)
+{
+    const uint8_t sig[8] = { '_', 'F', 'I', 'T', '_', ' ', ' ', ' ' };
+    for (size_t i = 0; i + sizeof(sig) <= size; i++) {
+        if (memcmp(buf + i, sig, sizeof(sig)) != 0) {
+            continue;
+        }
+        if (i + 16 > size) {
+            continue;
+        }
+        uint32_t entry_count = buf[i + 8] |
+                               (buf[i + 9] << 8) |
+                               (buf[i + 10] << 16);
+        if (entry_count == 0) {
+            continue;
+        }
+        if ((size_t)entry_count * 16 > size - i) {
+            continue;
+        }
+        if (fit_off_out) {
+            *fit_off_out = i;
+        }
+        if (entry_count_out) {
+            *entry_count_out = entry_count;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool ipf_fw_has_fit_signature(const uint8_t *buf, size_t size)
+{
+    return ipf_fw_find_fit_header(buf, size, NULL, NULL);
+}
+
+static bool ipf_fw_find_fit_pei_entry(const uint8_t *buf, size_t size,
+                                      uint64_t *entry_out)
+{
+    size_t fit_off = 0;
+    uint32_t entry_count = 0;
+    if (!ipf_fw_find_fit_header(buf, size, &fit_off, &entry_count)) {
+        return false;
+    }
+
+    for (size_t i = 1; i < entry_count; i++) {
+        const uint8_t *ent = buf + fit_off + i * 16;
+        uint64_t addr = ldq_le_p(ent);
+        uint8_t type = ent[14] & FIT_TYPE_MASK;
+        if (type != COMP_TYPE_FIT_PEICORE) {
+            continue;
+        }
+        if (addr == 0) {
+            continue;
+        }
+        if ((addr >> 61) == 0) {
+            addr |= 0x8000000000000000ULL;
+        }
+        if (entry_out) {
+            *entry_out = addr;
+        }
+        return true;
     }
     return false;
 }
@@ -1231,7 +1304,7 @@ static bool ipf_fw_find_pei_core_entry(const uint8_t *buf, size_t size,
     size_t fv_off = 0;
     uint64_t fv_len = 0;
     if (!ipf_fw_find_pei_core_fv(buf, size, &fv_off, &fv_len)) {
-        return false;
+        return ipf_fw_find_fit_pei_entry(buf, size, entry_out);
     }
     if (fv_off + 0x38 > size || fv_len < 0x38 || fv_off + fv_len > size) {
         return false;
@@ -1938,10 +2011,12 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
 {
     size_t fv_off = 0;
     uint64_t fv_len = 0;
+    bool has_fv = ipf_fw_has_fvh_signature(buf, size);
+    bool has_fit = ipf_fw_has_fit_signature(buf, size);
     if (!ipf_fw_find_pei_core_fv(buf, size, &fv_off, &fv_len)) {
-        if (!ipf_fw_has_fvh_signature(buf, size)) {
+        if (!has_fv && !has_fit) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "IPF: PEI handoff: no FV signature; skipping raw ROM\n");
+                          "IPF: PEI handoff: no FV/FIT signature; skipping raw ROM\n");
             ipf_boot_r9 = 0;
             ipf_boot_r10 = 0;
             ipf_boot_ppi = 0;
@@ -1953,8 +2028,21 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
             ipf_boot_loadfile_stub = 0;
             return;
         }
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IPF: PEI handoff: PEI core FV not found; using firmware base\n");
+        if (!has_fv && has_fit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: PEI handoff: no FV signature; FIT present, using firmware base\n");
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IPF: PEI handoff: PEI core FV not found; using firmware base\n");
+        }
+        if (has_fit && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            uint64_t pei_entry = 0;
+            if (ipf_fw_find_fit_pei_entry(buf, size, &pei_entry)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IPF: PEI handoff: FIT PEI core entry=%016" PRIx64 "\n",
+                              pei_entry);
+            }
+        }
         fv_off = 0;
         fv_len = size;
     }
