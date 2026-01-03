@@ -563,8 +563,8 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_PCI_FW_DEV_SAC 0
 #define IPF_PCI_FW_DEV_SDC 4
 #define IPF_PCI_FW_DEV_GXB 2
-#define IPF_PCI_FW_DEV_MAC 5
-#define IPF_PCI_FW_DEV_MDC 6
+#define IPF_PCI_FW_DEV_MAC 5 /* Memory Card A */
+#define IPF_PCI_FW_DEV_MDC 6 /* Memory Card B */
 
 #define IPF_PCI_FW_DEVICE_ID_SAC 0x84e0 /* 460GX System Address Controller */
 #define IPF_PCI_FW_DEVICE_ID_SDC 0x84e1 /* 460GX System Data Controller */
@@ -4601,6 +4601,59 @@ static void ipf_pci_fw_cfg_init_wxb(IPFPciFwConfig *cfg)
     ipf_pci_fw_cfg_set_rw(cfg, 0x45, 2, 0x8040, 0xB800);
 }
 
+static void ipf_pci_fw_cfg_init_sdc(IPFPciFwConfig *cfg)
+{
+    /* SDC first-error logs (RO). */
+    ipf_pci_fw_cfg_set_ro(cfg, 0x40, 8, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x48, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x49, 2, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x50, 8, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x58, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x59, 2, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x60, 8, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x68, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x69, 2, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x70, 8, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x78, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x79, 2, 0);
+
+    ipf_pci_fw_cfg_set_w1c(cfg, 0x80, 4, 0x00000000U, 0xffffffffU);
+    ipf_pci_fw_cfg_set_w1c(cfg, 0x84, 4, 0x00000000U, 0xffffffffU);
+
+    ipf_pci_fw_cfg_set_ro(cfg, 0x88, 4, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x8C, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x8D, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x8E, 1, 0);
+
+    ipf_pci_fw_cfg_set_rw(cfg, 0x98, 3, 0x000000, 0x01ffff);
+    ipf_pci_fw_cfg_set_rw(cfg, 0x9C, 3, 0x000000, 0x01ffff);
+    ipf_pci_fw_cfg_set_rw(cfg, 0xA0, 8, 0x0, 0x000000ffffffffffULL);
+    ipf_pci_fw_cfg_set_rw(cfg, 0xA8, 8, 0x0, 0x000000ffffffffffULL);
+
+    ipf_pci_fw_cfg_set_rw(cfg, 0xC8, 1, 0x00, 0xff);
+    ipf_pci_fw_cfg_set_rw(cfg, 0xC9, 1, 0x00, 0xff);
+    ipf_pci_fw_cfg_set_rw(cfg, 0xCA, 1, 0x00, 0xff);
+    ipf_pci_fw_cfg_set_rw(cfg, 0xCB, 1, 0x00, 0xff);
+
+    ipf_pci_fw_cfg_set_ro(cfg, 0xD0, 8, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0xD8, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0xD9, 2, 0);
+
+    ipf_pci_fw_cfg_set_ro(cfg, 0xE0, 8, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0xE8, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0xE9, 2, 0);
+
+    ipf_pci_fw_cfg_set_ro(cfg, 0xF0, 8, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0xF8, 1, 0);
+    ipf_pci_fw_cfg_set_ro(cfg, 0xF9, 2, 0);
+}
+
+static void ipf_pci_fw_cfg_init_mac(IPFPciFwConfig *cfg)
+{
+    ipf_pci_fw_cfg_set_ro(cfg, 0x98, 1, 0x00);
+    ipf_pci_fw_cfg_set_ro(cfg, 0x9C, 3, 0x000000);
+}
+
 static void ipf_pci_fw_cfg_init_ihpc(IPFPciFwConfig *cfg)
 {
     /* IHPC command: SERR, parity enable, memory space. */
@@ -4663,6 +4716,7 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x00);
+    ipf_pci_fw_cfg_init_sdc(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SDC][0]);
     ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][0],
                             PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_MAC,
@@ -4671,42 +4725,27 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
                             0x00, 0x80);
     ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][1],
                             PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_GXB_FN1,
-                            PCI_CLASS_BRIDGE_PCI >> 8,
-                            PCI_CLASS_BRIDGE_PCI & 0xff,
-                            0x00, 0x01);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][2],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_GXB_FN2,
-                            PCI_CLASS_BRIDGE_PCI >> 8,
-                            PCI_CLASS_BRIDGE_PCI & 0xff,
-                            0x00, 0x01);
-    for (int fn = 3; fn < IPF_PCI_FW_MAX_FUNC; fn++) {
-        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][fn],
-                                PCI_VENDOR_ID_INTEL,
-                                IPF_PCI_FW_DEVICE_ID_MAC,
-                                PCI_CLASS_BRIDGE_HOST >> 8,
-                                PCI_CLASS_BRIDGE_HOST & 0xff,
-                                0x00, 0x00);
-        pci_set_byte(m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][fn].cfg + 0x48, 0xff);
-    }
+                            IPF_PCI_FW_DEVICE_ID_MDC,
+                            PCI_CLASS_BRIDGE_HOST >> 8,
+                            PCI_CLASS_BRIDGE_HOST & 0xff,
+                            0x00, 0x00);
+    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][0]);
+    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][1]);
+
     ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][0],
+                            PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_MAC,
+                            PCI_CLASS_BRIDGE_HOST >> 8,
+                            PCI_CLASS_BRIDGE_HOST & 0xff,
+                            0x00, 0x80);
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][1],
                             PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_MDC,
                             PCI_CLASS_BRIDGE_HOST >> 8,
                             PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x80);
-    for (int fn = 1; fn < IPF_PCI_FW_MAX_FUNC; fn++) {
-        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][fn],
-                                PCI_VENDOR_ID_INTEL,
-                                IPF_PCI_FW_DEVICE_ID_MDC,
-                                PCI_CLASS_BRIDGE_HOST >> 8,
-                                PCI_CLASS_BRIDGE_HOST & 0xff,
-                                0x00, 0x00);
-        if (fn >= 4) {
-            pci_set_byte(m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][fn].cfg + 0x48, 0xff);
-        }
-    }
+                            0x00, 0x00);
+    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][0]);
+    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][1]);
 
     for (int dev = 16; dev <= 23; dev++) {
         ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][0], PCI_VENDOR_ID_INTEL,
