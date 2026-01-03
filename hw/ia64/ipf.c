@@ -4826,11 +4826,15 @@ static bool ipf_pci_fw_cfg_io(IPFMachineState *m, bool is_write, uint32_t port,
     }
 
     uint8_t bus = (cfgaddr >> 16) & 0xff;
+    uint8_t dev = (cfgaddr >> 11) & 0x1f;
+    if (bus == 0 && dev == 0x10) {
+        bus = IPF_PCI_FW_BUS;
+        dev = IPF_PCI_FW_DEV_SAC;
+    }
     if (bus != IPF_PCI_FW_BUS) {
         return false;
     }
 
-    uint8_t dev = (cfgaddr >> 11) & 0x1f;
     uint8_t func = (cfgaddr >> 8) & 0x7;
     uint16_t reg = (cfgaddr & 0xfc) + (port & 0x3);
     if (is_write) {
