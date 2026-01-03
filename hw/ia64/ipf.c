@@ -912,6 +912,9 @@ static bool ipf_fw_find_fit_header(const uint8_t *buf, size_t size,
 static bool ipf_fw_has_fit_signature(const uint8_t *buf, size_t size);
 static bool ipf_fw_find_fit_pei_entry(const uint8_t *buf, size_t size,
                                       uint64_t *entry_out);
+static const char *ipf_fw_fit_type_name(uint8_t type);
+static const char *ipf_fw_fit_sniff_tag(const uint8_t *buf, size_t len);
+static void ipf_fw_fit_ascii4(char out[5], const uint8_t *buf);
 
 static bool ipf_fw_scan_enabled(void)
 {
@@ -1242,7 +1245,7 @@ static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
             uint8_t csum = ent[15];
             const char *type_name = ipf_fw_fit_type_name(type);
             const char *tag = NULL;
-            char hdr[5] = "....";
+            char hdr_ascii[5] = "....";
             if (addr) {
                 uint64_t phys = addr;
                 if ((addr >> 61) != 0) {
@@ -1253,7 +1256,7 @@ static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
                     size_t avail = fw_size - foff;
                     const uint8_t *payload = fw + foff;
                     size_t sniff_len = MIN(avail, (size_t)0x2000);
-                    ipf_fw_fit_ascii4(hdr, payload);
+                    ipf_fw_fit_ascii4(hdr_ascii, payload);
                     tag = ipf_fw_fit_sniff_tag(payload, sniff_len);
                 }
             }
@@ -1263,7 +1266,7 @@ static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
                           i, addr, size, rev, type,
                           type_name ? " (" : "",
                           type_name ? type_name : "",
-                          csum_valid, csum, hdr,
+                          csum_valid, csum, hdr_ascii,
                           tag ? " tag=" : "",
                           tag ? tag : "");
         }
