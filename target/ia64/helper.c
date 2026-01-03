@@ -9419,6 +9419,86 @@ void HELPER(manual_call_enter)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
+typedef struct {
+    bool inited;
+    bool enabled;
+    uint64_t lo;
+    uint64_t hi;
+    int limit;
+    int count;
+} IA64RetTraceConfig;
+
+static bool ia64_parse_ret_trace_range(const char *s,
+                                       uint64_t *lo, uint64_t *hi)
+{
+    char *end = NULL;
+    uint64_t start = strtoull(s, &end, 0);
+    if (!end || end == s) {
+        return false;
+    }
+    if (*end == '\0') {
+        *lo = start;
+        *hi = start;
+        return true;
+    }
+    if (*end == '-' || *end == ':') {
+        char *end2 = NULL;
+        uint64_t stop = strtoull(end + 1, &end2, 0);
+        if (!end2 || end2 == end + 1) {
+            return false;
+        }
+        *lo = start;
+        *hi = stop;
+        return true;
+    }
+    if (*end == '+') {
+        char *end2 = NULL;
+        uint64_t len = strtoull(end + 1, &end2, 0);
+        if (!end2 || end2 == end + 1 || len == 0) {
+            return false;
+        }
+        *lo = start;
+        *hi = start + len - 1;
+        return true;
+    }
+    return false;
+}
+
+static bool ia64_ret_trace_hit(uint64_t pc)
+{
+    static IA64RetTraceConfig cfg;
+    if (!cfg.inited) {
+        const char *range = getenv("QEMU_IA64_RET_TRACE_RANGE");
+        if (range && *range) {
+            uint64_t lo = 0;
+            uint64_t hi = 0;
+            if (ia64_parse_ret_trace_range(range, &lo, &hi)) {
+                cfg.enabled = true;
+                cfg.lo = lo;
+                cfg.hi = hi;
+            }
+        }
+        const char *limit = getenv("QEMU_IA64_RET_TRACE_LIMIT");
+        if (limit && *limit) {
+            cfg.limit = (int)strtol(limit, NULL, 0);
+        } else {
+            cfg.limit = 256;
+        }
+        cfg.inited = true;
+    }
+    if (!cfg.enabled) {
+        return false;
+    }
+    if (pc < cfg.lo || pc > cfg.hi) {
+        return false;
+    }
+    if (cfg.limit > 0 && cfg.count >= cfg.limit) {
+        return false;
+    }
+    cfg.count++;
+    return true;
+}
+
 void HELPER(ret_restore)(CPUIA64State *env)
 {
     static int log_count;
@@ -9443,6 +9523,25 @@ void HELPER(ret_restore)(CPUIA64State *env)
                       " cfm=0x%" PRIx64 " depth=%u\n",
                       env->ip, env->b[0], env->cfm, env->rse_depth);
         log_count++;
+    }
+    if (ia64_ret_trace_hit(env->ip)) {
+        uint64_t top_ret = 0;
+        uint64_t top_cfm = 0;
+        if (env->rse_depth > 0 && env->rse_frames) {
+            const struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth - 1];
+            top_ret = frame->ret_addr;
+            top_cfm = frame->cfm;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ret_trace ip=%016" PRIx64 " b0=%016" PRIx64
+                      " cfm=%016" PRIx64 " pfs=%016" PRIx64
+                      " depth=%u last_b0_pc=%016" PRIx64
+                      " last_b0_kind=%u last_b0_insn=%016" PRIx64
+                      " top_ret=%016" PRIx64 " top_cfm=%016" PRIx64 "\n",
+                      env->ip, env->b[0], env->cfm, env->ar[64],
+                      env->rse_depth, env->last_b0_write_pc,
+                      env->last_b0_write_kind & 0xff, env->last_b0_write_insn,
+                      top_ret, top_cfm);
     }
     if (watch_hit) {
         uint64_t top_ret = 0;
@@ -9640,6 +9739,23 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
                       " last_b0_kind=%u depth=%u pop=%d\n",
                       env->ip, env->b[0], kind, env->rse_depth, do_pop);
         log_count++;
+    }
+    if (ia64_ret_trace_hit(env->ip)) {
+        uint64_t top_ret = 0;
+        uint64_t top_cfm = 0;
+        if (env->rse_depth > 0 && env->rse_frames) {
+            const struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth - 1];
+            top_ret = frame->ret_addr;
+            top_cfm = frame->cfm;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ret_b0_trace ip=%016" PRIx64 " b0=%016" PRIx64
+                      " kind=%u depth=%u last_b0_pc=%016" PRIx64
+                      " last_b0_kind=%u last_b0_insn=%016" PRIx64
+                      " top_ret=%016" PRIx64 " top_cfm=%016" PRIx64 "\n",
+                      env->ip, env->b[0], kind, env->rse_depth,
+                      env->last_b0_write_pc, env->last_b0_write_kind & 0xff,
+                      env->last_b0_write_insn, top_ret, top_cfm);
     }
     if (watch_hit) {
         uint64_t top_ret = 0;

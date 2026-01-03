@@ -344,6 +344,8 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_MANUAL_CALL_LOG` | Log manual call linkage |
 | `QEMU_IA64_RET_UNWIND_PFS` | Enable return PFS unwinding |
 | `QEMU_IA64_RET_WATCH_B0` | Watch B0 on returns |
+| `QEMU_IA64_RET_TRACE_RANGE` | Trace ret_restore/b0 in a PC range (start-end or start+len) |
+| `QEMU_IA64_RET_TRACE_LIMIT` | Limit return trace entries |
 
 ## Assert and Debug Buffer
 
