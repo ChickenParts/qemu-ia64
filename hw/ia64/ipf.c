@@ -4425,6 +4425,10 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
 static uint32_t ipf_pci_fw_cfg_read(IPFMachineState *m, uint8_t dev,
                                     uint8_t func, uint16_t reg, unsigned size)
 {
+    static int trace_special = -1;
+    if (trace_special == -1) {
+        trace_special = getenv("QEMU_IPF_TRACE_PCI_SPECIAL") ? 1 : 0;
+    }
     int idx = ipf_pci_fw_dev_index(dev);
     if (idx < 0 || func >= IPF_PCI_FW_MAX_FUNC ||
         !m->pci_fw_cfg[idx][func].present) {
@@ -4443,6 +4447,20 @@ static uint32_t ipf_pci_fw_cfg_read(IPFMachineState *m, uint8_t dev,
         }
         val |= (uint32_t)byte << (i * 8);
     }
+    if (trace_special && dev == IPF_PCI_FW_DEV_MDC) {
+        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) ||
+            (func >= 4 && reg == 0x48)) {
+            uint64_t pc = 0;
+            CPUState *cs = current_cpu;
+            if (cs) {
+                CPUIA64State *env = cpu_env(cs);
+                pc = env->ip;
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ipf pci special rd dev=%u fn=%u reg=0x%02x size=%u val=0x%08x pc=%016" PRIx64 "\n",
+                          dev, func, reg, size, val, pc);
+        }
+    }
     return val;
 }
 
@@ -4450,6 +4468,10 @@ static void ipf_pci_fw_cfg_write(IPFMachineState *m, uint8_t dev,
                                  uint8_t func,
                                  uint16_t reg, unsigned size, uint32_t val)
 {
+    static int trace_special = -1;
+    if (trace_special == -1) {
+        trace_special = getenv("QEMU_IPF_TRACE_PCI_SPECIAL") ? 1 : 0;
+    }
     int idx = ipf_pci_fw_dev_index(dev);
     if (idx < 0 || func >= IPF_PCI_FW_MAX_FUNC ||
         !m->pci_fw_cfg[idx][func].present) {
@@ -4465,6 +4487,20 @@ static void ipf_pci_fw_cfg_write(IPFMachineState *m, uint8_t dev,
         uint8_t mask = cfg->wmask[off];
         uint8_t byte = (val >> (i * 8)) & 0xff;
         cfg->cfg[off] = (cfg->cfg[off] & ~mask) | (byte & mask);
+    }
+    if (trace_special && dev == IPF_PCI_FW_DEV_MDC) {
+        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) ||
+            (func >= 4 && reg == 0x48)) {
+            uint64_t pc = 0;
+            CPUState *cs = current_cpu;
+            if (cs) {
+                CPUIA64State *env = cpu_env(cs);
+                pc = env->ip;
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ipf pci special wr dev=%u fn=%u reg=0x%02x size=%u val=0x%08x pc=%016" PRIx64 "\n",
+                          dev, func, reg, size, val, pc);
+        }
     }
 }
 
