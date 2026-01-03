@@ -64,3 +64,17 @@ firmware path. Items are grouped by status.
 - SAL/ESAL Flash volume access assumes a fixed flash base and size; confirm the
   Flash.fd layout matches `IA64_IPF_FW_FLASH_BASE`/`SIZE` or make it dynamic
   (`target/ia64/helper.c:106`).
+
+## Firmware provenance notes
+
+- Tenox SDV/i2000 images carry `Z:\KittyHawk\Source\...` PDB paths, including
+  `Arch\ia64\Chipset\460GX\AUTOSCAN` and `Products\SoftSur\SAL_A/SAL_B`, plus
+  `Platform\Recovery\BigSur`, suggesting the KittyHawk codebase across SDV and
+  i2000 releases.
+- All Tenox 4MiB BIOS images contain an `_FIT_` table at a common offset; the
+  FIT entries include a PEI core (type 0x10) but no BFV (type 0x7e) entry.
+- The local EDK tree (`EDK/Sample/Version.env`) reports `EDK_BUILD_VERSION =
+  Edk1.06` and `TIANO_RELEASE_VERSION = 0x00080006` (UEFI 2.0A / PI 1.0).
+- BIOS release notes show version strings like `W460GXBS2.86E.0130...` and
+  `...0117C...`, but the binaries do not contain explicit EDK version strings;
+  mapping BIOS version -> EDK release remains open.
