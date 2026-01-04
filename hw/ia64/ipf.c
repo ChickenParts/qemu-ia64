@@ -121,6 +121,8 @@ struct IPFMachineState {
     I2CBus *smbus;
     ISABus *isa_bus;
     MC146818RtcState *rtc;
+    uint8_t cmos_ext_index;
+    uint8_t cmos_ext[256];
     PCIDevice *piix4;
     IA64CPU *cpu;
 
@@ -161,6 +163,7 @@ struct IPFMachineState {
     uint64_t acpi_pm_timer_start_ns;
     MemoryRegion iosapic_mmio;
     MemoryRegion gx_mmio;
+    MemoryRegion gx_mmio_alias;
     uint32_t iosapic_reg_select;
     uint32_t iosapic_reg[0x40];
     uint32_t iosapic_irr;        /* Interrupt Request Register */
@@ -184,6 +187,8 @@ struct IPFMachineState {
 /* Forward declaration for IOSAPIC EOI handling */
 static void iosapic_service(IPFMachineState *m, int pin);
 void ioapic_set_irq(void *opaque, int irq_num, int level);
+static void ipf_pci_fw_cfg_set_ro(IPFPciFwConfig *cfg, uint16_t off,
+                                  unsigned size, uint64_t value);
 
 static bool ipf_fw_nvram_blank(const uint8_t *buf, size_t size)
 {
@@ -3542,6 +3547,33 @@ static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
      */
     mc146818rtc_set_cmos_data(s, 0x5f, 0);
 
+    /*
+     * Extended CMOS (0x72/0x73). Defaults to 0xff; seed platform byte 0xD3
+     * so firmware's integrity check (low bits vs. inverted high bits) passes.
+     */
+    memset(m->cmos_ext, 0xff, sizeof(m->cmos_ext));
+    m->cmos_ext_index = 0;
+    m->cmos_ext[0xD3] = 0xD3;
+    /*
+     * SAC config register 0x44 encodes CMOS strap bits in 15/10/7 as
+     * active-low. Invert CMOS[0xD3] low bits so firmware's strap check matches.
+     */
+    {
+        uint8_t strap = m->cmos_ext[0xD3] & 0x7;
+        uint16_t sac44 = 0;
+        if (!(strap & 0x1)) {
+            sac44 |= (1U << 15);
+        }
+        if (!(strap & 0x2)) {
+            sac44 |= (1U << 10);
+        }
+        if (!(strap & 0x4)) {
+            sac44 |= (1U << 7);
+        }
+        ipf_pci_fw_cfg_set_ro(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0],
+                              0x44, 2, sac44);
+    }
+
     DPRINTF("CMOS initialized: RAM %lu MB\n",
             (unsigned long)(ram_size / (1024 * 1024)));
 }
@@ -4416,16 +4448,18 @@ static void ipf_trace_ioport(IPFMachineState *m, bool is_write,
     if (trace_post && (port == 0x80 || port == 0x84)) {
         trace_count++;
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "ipf post ioport %s port=0x%04x size=%u val=%08x\n",
-                      is_write ? "wr" : "rd", port, size, val);
+                      "ipf post ioport %s port=0x%04x size=%u val=%08x"
+                      " pc=%016" PRIx64 "\n",
+                      is_write ? "wr" : "rd", port, size, val, pc);
         return;
     }
 
     if (trace_ports && port >= trace_port_lo && port <= trace_port_hi) {
         trace_count++;
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "ipf ioport %s port=0x%04x size=%u val=%08x\n",
-                      is_write ? "wr" : "rd", port, size, val);
+                      "ipf ioport %s port=0x%04x size=%u val=%08x"
+                      " pc=%016" PRIx64 "\n",
+                      is_write ? "wr" : "rd", port, size, val, pc);
         return;
     }
 }
@@ -4595,6 +4629,8 @@ static void ipf_pci_fw_cfg_init_sac(IPFPciFwConfig *fn0,
 
 static void ipf_pci_fw_cfg_init_wxb(IPFPciFwConfig *cfg)
 {
+    /* WXB expander bus ID (firmware programs reg 0x40 early). */
+    ipf_pci_fw_cfg_set_rw(cfg, 0x40, 2, 0x00ff, 0x00ff);
     /* WXB ERRSTS: write-1-clear flags. */
     ipf_pci_fw_cfg_set_w1c(cfg, 0x44, 1, 0x00, 0xAB);
     /* WXB ERRCMD: control bits. Default 0x8040. */
@@ -4908,6 +4944,21 @@ static uint64_t ipf_legacy_io_read(void *opaque, hwaddr addr, unsigned size)
         return val;
     }
 
+    if (size == 1) {
+        if (port == 0x72) {
+            val = m->cmos_ext_index;
+            ipf_trace_ioport(m, false, port, size, val);
+            ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, val, false);
+            return val;
+        }
+        if (port == 0x73) {
+            val = m->cmos_ext[m->cmos_ext_index];
+            ipf_trace_ioport(m, false, port, size, val);
+            ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, val, false);
+            return val;
+        }
+    }
+
     switch (size) {
     case 1:
         val = cpu_inb(port);
@@ -4942,6 +4993,17 @@ static void ipf_legacy_io_write(void *opaque, hwaddr addr, uint64_t data,
     uint32_t val32 = (uint32_t)data;
     if (ipf_pci_fw_cfg_io(m, true, port, size, &val32)) {
         return;
+    }
+
+    if (size == 1) {
+        if (port == 0x72) {
+            m->cmos_ext_index = data & 0xff;
+            return;
+        }
+        if (port == 0x73) {
+            m->cmos_ext[m->cmos_ext_index] = data & 0xff;
+            return;
+        }
     }
 
     switch (size) {
@@ -5246,7 +5308,7 @@ static void ipf_gx_mmio_write_reg(IPFMachineState *m, hwaddr addr,
     switch (addr) {
     case IPF_GX_MMIO_REG_CB0:
         m->gx_mmio_cb0 = (m->gx_mmio_cb0 & ~mask) | (value & mask);
-        /* SDV firmware polls CB0 bit1 after setting bit0; mirror the doorbell. */
+        /* Doorbell: firmware expects bit1 to reflect bit0 activity. */
         if (m->gx_mmio_cb0 & 0x1) {
             m->gx_mmio_cb0 |= 0x2;
         } else {
@@ -5314,6 +5376,16 @@ static void ipf_init_gx_mmio(IPFMachineState *m, MemoryRegion *sysmem)
     memory_region_init_io(&m->gx_mmio, OBJECT(m), &ipf_gx_mmio_ops, m,
                           "ipf.gx-mmio", IPF_GX_MMIO_SIZE);
     memory_region_add_subregion(sysmem, IPF_GX_MMIO_BASE, &m->gx_mmio);
+    /*
+     * Firmware uses region-4 addresses (bit63 set) for the doorbell window.
+     * Mirror the GX MMIO block there so CB0/CC0 reads hit the same registers.
+     */
+    memory_region_init_alias(&m->gx_mmio_alias, OBJECT(m),
+                             "ipf.gx-mmio.alias", &m->gx_mmio, 0,
+                             IPF_GX_MMIO_SIZE);
+    memory_region_add_subregion(sysmem,
+                                IPF_GX_MMIO_BASE | (1ULL << 63),
+                                &m->gx_mmio_alias);
     DPRINTF("GX-MMIO: mapped at 0x%016" PRIx64 "\n",
             (uint64_t)IPF_GX_MMIO_BASE);
 }
