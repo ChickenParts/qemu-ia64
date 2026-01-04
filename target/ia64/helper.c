@@ -5776,48 +5776,22 @@ void HELPER(fw_autoscan_memtop_fix)(CPUIA64State *env, uint64_t pc)
 #endif
 }
 
-void HELPER(fw_pei_install_mem_fix)(CPUIA64State *env, uint64_t pc)
+static bool ia64_fw_pei_patch_mem_args(CPUIA64State *env, uint64_t pc,
+                                       int base_reg, int size_reg,
+                                       uint64_t mem_top, uint64_t desired_base,
+                                       uint64_t desired_size, const char *tag)
 {
-#ifdef CONFIG_USER_ONLY
-    (void)env;
-    (void)pc;
-    return;
-#else
-    uint64_t ram_base = 0;
-    uint64_t ram_size = 0;
-    if (!ia64_fw_memmap_region(env, 0, &ram_base, &ram_size)) {
-        return;
-    }
-    uint64_t mem_top = ram_base + ram_size;
-    if (mem_top <= ram_base) {
-        return;
-    }
-
-    uint8_t sof = env->cfm & 0x7f;
-    uint8_t sol = (env->cfm >> 7) & 0x7f;
-    uint8_t outs = (sof > sol) ? (sof - sol) : 0;
-    uint8_t out0 = 32 + sol;
-    if (outs < 3 || out0 + 2 >= 128) {
-        return;
-    }
-
-    uint64_t base_raw = env->r[out0 + 1];
-    uint64_t size = env->r[out0 + 2];
+    const uint64_t min_size = 1ULL << 20;
+    uint64_t base_raw = env->r[base_reg];
+    uint64_t size = env->r[size_reg];
     if (!size) {
         size = 0x01000000ULL;
     }
-
-    uint64_t desired_base = ram_base;
-    uint64_t desired_size = mem_top - ram_base;
-    if (desired_size > (1ULL << 20)) {
-        desired_base = ram_base + (1ULL << 20);
-        desired_size = mem_top - desired_base;
-    }
-    if (desired_size == 0) {
-        return;
-    }
-
     uint64_t base_phys = ia64_phys_mode_addr(base_raw);
+    if ((base_phys & (min_size - 1)) != 0 || size < min_size) {
+        return false;
+    }
+
     uint64_t new_phys = base_phys;
     bool fix = false;
 
@@ -5829,10 +5803,9 @@ void HELPER(fw_pei_install_mem_fix)(CPUIA64State *env, uint64_t pc)
     if (base_phys < desired_base || base_phys >= mem_top ||
         base_phys + size > mem_top) {
         if (mem_top < size) {
-            return;
+            return false;
         }
-        new_phys = desired_base;
-        new_phys &= ~((1ULL << 20) - 1);
+        new_phys = desired_base & ~(min_size - 1);
         if (new_phys < desired_base) {
             new_phys = desired_base;
         }
@@ -5840,15 +5813,63 @@ void HELPER(fw_pei_install_mem_fix)(CPUIA64State *env, uint64_t pc)
     }
 
     uint64_t new_base = ia64_fw_encode_addr(base_raw, new_phys);
-    if (fix || new_base != base_raw || size != env->r[out0 + 2]) {
-        env->r[out0 + 1] = new_base;
-        env->r[out0 + 2] = size;
+    if (fix || new_base != base_raw || size != env->r[size_reg]) {
+        env->r[base_reg] = new_base;
+        env->r[size_reg] = size;
         if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: fw_pei_install_mem_fix pc=%016" PRIx64
-                          " base=%016" PRIx64 " -> %016" PRIx64
-                          " size=%016" PRIx64 " mem_top=%016" PRIx64 "\n",
-                          pc, base_raw, new_base, size, mem_top);
+                          " %s r%u=%016" PRIx64 " -> %016" PRIx64
+                          " r%u=%016" PRIx64 " mem_top=%016" PRIx64 "\n",
+                          pc, tag, base_reg, base_raw, new_base,
+                          size_reg, size, mem_top);
+        }
+    }
+    return true;
+}
+
+void HELPER(fw_pei_install_mem_fix)(CPUIA64State *env, uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    const uint64_t min_size = 1ULL << 20;
+    uint64_t ram_base = 0;
+    uint64_t ram_size = 0;
+    if (!ia64_fw_memmap_region(env, 0, &ram_base, &ram_size)) {
+        return;
+    }
+    uint64_t mem_top = ram_base + ram_size;
+    if (mem_top <= ram_base) {
+        return;
+    }
+
+    uint64_t desired_base = ram_base;
+    uint64_t desired_size = mem_top - ram_base;
+    if (desired_size > min_size) {
+        desired_base = ram_base + min_size;
+        desired_size = mem_top - desired_base;
+    }
+    if (desired_size == 0) {
+        return;
+    }
+
+    bool patched = false;
+    patched = ia64_fw_pei_patch_mem_args(env, pc, 33, 34,
+                                         mem_top, desired_base, desired_size,
+                                         "in") || patched;
+
+    uint8_t sof = env->cfm & 0x7f;
+    uint8_t sol = (env->cfm >> 7) & 0x7f;
+    uint8_t outs = (sof > sol) ? (sof - sol) : 0;
+    uint8_t out0 = 32 + sol;
+    if (outs >= 3 && out0 + 2 < 128) {
+        if (!patched || out0 + 1 != 33) {
+            patched = ia64_fw_pei_patch_mem_args(env, pc, out0 + 1, out0 + 2,
+                                                 mem_top, desired_base,
+                                                 desired_size, "out") || patched;
         }
     }
 
