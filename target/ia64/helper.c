@@ -7247,6 +7247,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                       " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
                       " r41=%016" PRIx64 " r42=%016" PRIx64
                       " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
+                      " r52=%016" PRIx64 " r53=%016" PRIx64
                       " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
                       " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
                       pc, ri,
@@ -7271,6 +7272,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                       env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
                       env->r[41], env->r[42],
                       env->r[47], env->r[48], env->r[49],
+                      env->r[52], env->r[53],
                       env->b[0], env->b[6], env->b[7], env->r[45], env->r[46]);
     } else {
         fprintf(stderr,
@@ -7301,6 +7303,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                 " r38=%016" PRIx64 " r39=%016" PRIx64 " r40=%016" PRIx64
                 " r41=%016" PRIx64 " r42=%016" PRIx64
                 " r47=%016" PRIx64 " r48=%016" PRIx64 " r49=%016" PRIx64
+                " r52=%016" PRIx64 " r53=%016" PRIx64
                 " b0=%016" PRIx64 " b6=%016" PRIx64 " b7=%016" PRIx64
                 " r45=%016" PRIx64 " r46=%016" PRIx64 "\n",
                 pc, ri,
@@ -7325,6 +7328,7 @@ void HELPER(dbg_probe)(CPUIA64State *env, uint64_t pc, uint32_t ri)
                 env->r[36], env->r[37], env->r[38], env->r[39], env->r[40],
                 env->r[41], env->r[42],
                 env->r[47], env->r[48], env->r[49],
+                env->r[52], env->r[53],
                 env->b[0], env->b[6], env->b[7], env->r[45], env->r[46]);
     }
 

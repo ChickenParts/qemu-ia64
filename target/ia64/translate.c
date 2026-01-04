@@ -2968,9 +2968,9 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                 ctx->base.is_jmp = DISAS_NORETURN;
             }
             tcg_gen_exit_tb(NULL, 0);
-	        } else if (btype == 2 || btype == 3) {
-	            /* B1: br.wexit/br.wtop target25 */
-	            const bool is_wtop = (btype == 3);
+        } else if (btype == 2 || btype == 3) {
+	    /* B1: br.wexit/br.wtop target25 */
+	    const bool is_wtop = (btype == 3);
 	            /*
 	             * Per SKI brWtopEx/brWexitEx + tgtPrRd:
 	             *   - SRC2 is the qualifying predicate value (qp), not p63.
