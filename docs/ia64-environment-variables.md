@@ -88,6 +88,9 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_MOVB_LOG_LIMIT` | Limit MOV BR log entries |
 | `QEMU_IA64_MOVB_LOG_B` | Filter by specific branch register |
 | `QEMU_IA64_MOVB_LOG_DUMP` | Dump bundle on MOV BR |
+| `QEMU_IA64_TB_LOG_LIMIT` | Log first N translated TB start PCs |
+| `QEMU_IA64_TB_LOG_MIN_PC` | Filter TB log start (inclusive) |
+| `QEMU_IA64_TB_LOG_MAX_PC` | Filter TB log end (inclusive) |
 | `QEMU_IA64_MOVRB_LOG` | Log MOV from branch register instructions |
 | `QEMU_IA64_BRL_LOG` | Log long branch instructions |
 

@@ -107,6 +107,12 @@ static bool ia64_dbg_call_pc_inited;
 static uint64_t ia64_dbg_call_pcs[IA64_MAX_DBG_CALL_PCS];
 static size_t ia64_dbg_call_pc_count;
 
+static bool ia64_tb_log_inited;
+static uint64_t ia64_tb_log_min_pc;
+static uint64_t ia64_tb_log_max_pc;
+static int ia64_tb_log_limit;
+static int ia64_tb_log_count;
+
 static bool ia64_hang_abort_inited;
 static uint64_t ia64_hang_abort_threshold;
 static bool ia64_fw_dump_pc_inited;
@@ -376,6 +382,47 @@ static bool ia64_dbg_call_pc_match(uint64_t pc)
         }
     }
     return false;
+}
+
+static void ia64_init_tb_log(void)
+{
+    if (ia64_tb_log_inited) {
+        return;
+    }
+    ia64_tb_log_inited = true;
+    ia64_tb_log_min_pc = 0;
+    ia64_tb_log_max_pc = UINT64_MAX;
+    ia64_tb_log_limit = 0;
+
+    const char *s = getenv("QEMU_IA64_TB_LOG_MIN_PC");
+    if (s && *s) {
+        ia64_tb_log_min_pc = strtoull(s, NULL, 0) & ~0xFULL;
+    }
+    s = getenv("QEMU_IA64_TB_LOG_MAX_PC");
+    if (s && *s) {
+        ia64_tb_log_max_pc = strtoull(s, NULL, 0) & ~0xFULL;
+    }
+    s = getenv("QEMU_IA64_TB_LOG_LIMIT");
+    if (s && *s) {
+        ia64_tb_log_limit = atoi(s);
+    }
+    if (ia64_tb_log_limit < 0) {
+        ia64_tb_log_limit = 0;
+    }
+}
+
+static void ia64_tb_log(uint64_t pc, uint32_t ri)
+{
+    ia64_init_tb_log();
+    if (ia64_tb_log_limit == 0 || ia64_tb_log_count >= ia64_tb_log_limit) {
+        return;
+    }
+    if (pc < ia64_tb_log_min_pc || pc > ia64_tb_log_max_pc) {
+        return;
+    }
+    ia64_tb_log_count++;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: tb_log pc=%016" PRIx64 " ri=%u\n", pc, ri);
 }
 
 #define IA64_MAX_DBG_PROBES 32
@@ -1629,6 +1676,10 @@ static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
                               tcg_constant_i64(ctx->base.pc_next),
                               tcg_constant_i32(ctx->ri),
                               tcg_constant_i64(hang_threshold));
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        ia64_tb_log(ctx->base.pc_next, ctx->ri);
     }
 
     if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
