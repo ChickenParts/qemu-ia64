@@ -12667,12 +12667,12 @@ void HELPER(fw_pei_startup_fix)(CPUIA64State *env, uint64_t pc)
     } else if (ppi) {
         env->r[10] = ppi;
     }
-    if (sec_handoff) {
-        if (ppi) {
-            env->r[33] = ppi;
+    if (!stack_count) {
+        if (sec_handoff) {
+            env->r[33] = ppi ? ppi : 0;
+        } else {
+            env->r[33] = 0;
         }
-    } else {
-        env->r[33] = 0;
     }
     /* OldCoreData must be NULL on the first PEI core entry. */
     env->r[34] = 0;
@@ -12703,7 +12703,7 @@ void HELPER(fw_pei_startup_call_fix)(CPUIA64State *env, uint64_t pc)
     if (!handoff && !ppi && !stack_count) {
         return;
     }
-    if (stack_count == 0 || env->r[33] != stack_count) {
+    if (stack_count != 0) {
         return;
     }
     if (handoff && env->r[32] != handoff) {
@@ -12725,12 +12725,7 @@ void HELPER(fw_pei_startup_call_fix)(CPUIA64State *env, uint64_t pc)
         }
     }
 
-    uint64_t new_r33 = env->r[33];
-    if (sec_handoff) {
-        new_r33 = ppi ? ppi : 0;
-    } else {
-        new_r33 = 0;
-    }
+    uint64_t new_r33 = sec_handoff ? (ppi ? ppi : 0) : 0;
     if (new_r33 == env->r[33]) {
         return;
     }
@@ -12848,12 +12843,12 @@ void HELPER(fw_pei_entry_fix)(CPUIA64State *env, uint64_t pc)
     if (stack_count) {
         env->r[10] = stack_count;
     }
-    if (sec_handoff) {
-        if (ppi) {
-            env->r[33] = ppi;
+    if (!stack_count) {
+        if (sec_handoff) {
+            env->r[33] = ppi ? ppi : 0;
+        } else {
+            env->r[33] = 0;
         }
-    } else {
-        env->r[33] = 0;
     }
     if (ia64_fw_r33_watch_enabled()) {
         env->fw_pei_r33_watch_active = 1;
