@@ -5246,6 +5246,12 @@ static void ipf_gx_mmio_write_reg(IPFMachineState *m, hwaddr addr,
     switch (addr) {
     case IPF_GX_MMIO_REG_CB0:
         m->gx_mmio_cb0 = (m->gx_mmio_cb0 & ~mask) | (value & mask);
+        /* SDV firmware polls CB0 bit1 after setting bit0; mirror the doorbell. */
+        if (m->gx_mmio_cb0 & 0x1) {
+            m->gx_mmio_cb0 |= 0x2;
+        } else {
+            m->gx_mmio_cb0 &= ~0x2;
+        }
         break;
     case IPF_GX_MMIO_REG_CC0:
         m->gx_mmio_cc0 = (m->gx_mmio_cc0 & ~mask) | (value & mask);
