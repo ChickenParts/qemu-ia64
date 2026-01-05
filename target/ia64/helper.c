@@ -23,6 +23,7 @@
 #include "system/ioport.h"
 #include "hw/boards.h"
 #include <math.h>
+#include <time.h>
 #include <zlib.h>
 
 static bool ia64_fw_log_enabled(void);
@@ -32,8 +33,13 @@ static uint64_t ia64_fw_pei_cached_temp_base;
 static uint64_t ia64_fw_pei_cached_temp_size;
 static bool ia64_fw_find_efi_system_table(CPUState *cs, uint64_t start,
                                           uint64_t end, uint64_t *out_pa);
+static bool ia64_fw_read_u64(CPUState *cs, uint64_t addr, uint64_t *out);
 static bool ia64_fw_read_fdesc(CPUState *cs, uint64_t addr,
                                uint64_t *entry, uint64_t *gp);
+
+static uint64_t ia64_fw_rt_get_time_entry;
+static bool ia64_fw_rt_get_time_patched;
+static uint64_t ia64_fw_rt_get_time_stub_phys;
 
 #define IA64_EFI_FFS_FILE_HEADER_SIZE  24
 #define IA64_EFI_FFS_FILE_HEADER2_SIZE 32
@@ -2636,6 +2642,27 @@ typedef struct QEMU_PACKED {
 } IA64EfiRuntimeServices;
 
 typedef struct QEMU_PACKED {
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+    uint8_t pad1;
+    uint32_t nanosecond;
+    int16_t time_zone;
+    uint8_t daylight;
+    uint8_t pad2;
+} IA64EfiTime;
+
+typedef struct QEMU_PACKED {
+    uint32_t resolution;
+    uint32_t accuracy;
+    uint8_t sets_to_zero;
+    uint8_t pad[3];
+} IA64EfiTimeCapabilities;
+
+typedef struct QEMU_PACKED {
     IA64EfiGuid guid;
     uint64_t table;
 } IA64EfiConfigTableEntry;
@@ -2913,6 +2940,381 @@ static void ia64_fw_log_mem_dump(CPUState *cs, uint64_t addr, const char *tag)
                             " %02x", buf[off + i]);
         }
         qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+    }
+}
+
+static const uint8_t ia64_fw_rt_get_time_stub[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x80, 0x08, 0x00, 0x84, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+};
+
+static bool ia64_fw_rt_setup_get_time_stub(CPUIA64State *env, uint64_t *stub_phys,
+                                           uint64_t template_addr)
+{
+    CPUState *cs = env_cpu(env);
+    uint64_t mem_top = ia64_phys_mode_addr(env->fw_phit_mem_top);
+    if (!mem_top && env->fw_mem_size) {
+        uint64_t ram_top = env->fw_mem_size;
+        if (ram_top >= 0x000a0000ULL) {
+            ram_top += 0x00020000ULL;
+        }
+        mem_top = ram_top;
+    }
+    if (!mem_top) {
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt_get_time stub mem_top unavailable\n");
+        }
+        return false;
+    }
+    uint64_t cand = (mem_top + 0x1000ULL) & ~0xFULL;
+    uint8_t probe;
+    if (cpu_memory_rw_debug(cs, cand, &probe, 1, false) != 0) {
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt_get_time stub probe failed at %016" PRIx64 "\n",
+                          cand);
+        }
+        return false;
+    }
+
+    if (ia64_fw_rt_get_time_stub_phys == 0) {
+        ia64_fw_rt_get_time_stub_phys = cand;
+        cpu_physical_memory_write(cand, ia64_fw_rt_get_time_stub,
+                                  sizeof(ia64_fw_rt_get_time_stub));
+        cpu_flush_icache_range(cand, sizeof(ia64_fw_rt_get_time_stub));
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt_get_time stub written phys=%016" PRIx64
+                          " entry=%016" PRIx64 "\n",
+                          cand, ia64_fw_encode_addr(template_addr, cand));
+        }
+    }
+    if (stub_phys) {
+        *stub_phys = ia64_fw_rt_get_time_stub_phys;
+    }
+    return true;
+}
+
+static bool ia64_fw_rt_patch_get_time_desc(CPUIA64State *env,
+                                           uint64_t fdesc,
+                                           uint64_t match_entry)
+{
+    CPUState *cs = env_cpu(env);
+    if (ia64_fw_rt_get_time_patched) {
+        return false;
+    }
+    uint64_t stub_phys = 0;
+    if (!ia64_fw_rt_setup_get_time_stub(env, &stub_phys, match_entry)) {
+        return false;
+    }
+
+    uint64_t q0 = 0;
+    uint64_t q1 = 0;
+    if (!ia64_fw_read_u64(cs, fdesc, &q0) ||
+        !ia64_fw_read_u64(cs, fdesc + 8, &q1)) {
+        return false;
+    }
+    bool match_q0 = (q0 == match_entry);
+    bool match_q1 = (q1 == match_entry);
+    if (!match_q0 && !match_q1) {
+        return false;
+    }
+
+    uint64_t stub_entry = ia64_fw_encode_addr(match_entry, stub_phys);
+    uint64_t new_q0 = match_q0 ? stub_entry : q0;
+    uint64_t new_q1 = match_q1 ? stub_entry : q1;
+    uint8_t out[16];
+    stq_le_p(out, new_q0);
+    stq_le_p(out + 8, new_q1);
+    hwaddr fdesc_phys = ia64_phys_mode_addr(fdesc);
+    cpu_physical_memory_write(fdesc_phys, out, sizeof(out));
+
+    ia64_fw_rt_get_time_entry = stub_entry;
+    ia64_fw_rt_get_time_patched = true;
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_rt_get_time patched fdesc=%016" PRIx64
+                      " entry=%016" PRIx64 " gp=%016" PRIx64 "\n",
+                      fdesc, stub_entry, match_q0 ? new_q1 : new_q0);
+    }
+    return true;
+}
+
+static void ia64_fw_handle_get_time(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+    uint64_t time_ptr = env->r[32];
+    uint64_t cap_ptr = env->r[33];
+    if (!time_ptr) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 2; /* EFI_INVALID_PARAMETER */
+        return;
+    }
+
+    struct tm tm;
+    time_t now = time(NULL);
+    gmtime_r(&now, &tm);
+    uint64_t ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint32_t nsec = (uint32_t)(ns % 1000000000ULL);
+
+    IA64EfiTime t = {
+        .year = cpu_to_le16((uint16_t)(tm.tm_year + 1900)),
+        .month = (uint8_t)(tm.tm_mon + 1),
+        .day = (uint8_t)tm.tm_mday,
+        .hour = (uint8_t)tm.tm_hour,
+        .minute = (uint8_t)tm.tm_min,
+        .second = (uint8_t)tm.tm_sec,
+        .pad1 = 0,
+        .nanosecond = cpu_to_le32(nsec),
+        .time_zone = cpu_to_le16(0),
+        .daylight = 0,
+        .pad2 = 0,
+    };
+
+    if (!ia64_fw_write_bytes_any(cs, time_ptr,
+                                 (const uint8_t *)&t, sizeof(t))) {
+        env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+        return;
+    }
+
+    if (cap_ptr) {
+        IA64EfiTimeCapabilities caps = {
+            .resolution = cpu_to_le32(1),
+            .accuracy = cpu_to_le32(0),
+            .sets_to_zero = 0,
+            .pad = { 0, 0, 0 },
+        };
+        if (!ia64_fw_write_bytes_any(cs, cap_ptr,
+                                     (const uint8_t *)&caps, sizeof(caps))) {
+            env->r[8] = IA64_EFI_STATUS_ERROR_BIT | 7; /* EFI_DEVICE_ERROR */
+            return;
+        }
+    }
+
+    env->r[8] = 0; /* EFI_SUCCESS */
+}
+
+static void ia64_fw_decode_rt_call(CPUIA64State *env, uint64_t pc, const char *tag)
+{
+    CPUState *cs = env_cpu(env);
+    uint64_t r13 = env->r[13];
+    uint64_t match_entry = env->b[7] ? env->b[7] : env->r[30];
+    uint64_t rt_base = 0;
+    IA64EfiRuntimeServices rt = { 0 };
+
+    if (!r13 || !match_entry) {
+        return;
+    }
+
+    struct {
+        const char *name;
+        size_t off;
+    } fields[] = {
+        { "get_time", offsetof(IA64EfiRuntimeServices, get_time) },
+        { "set_time", offsetof(IA64EfiRuntimeServices, set_time) },
+        { "get_wakeup_time", offsetof(IA64EfiRuntimeServices, get_wakeup_time) },
+        { "set_wakeup_time", offsetof(IA64EfiRuntimeServices, set_wakeup_time) },
+        { "set_virtual_address_map", offsetof(IA64EfiRuntimeServices, set_virtual_address_map) },
+        { "convert_pointer", offsetof(IA64EfiRuntimeServices, convert_pointer) },
+        { "get_variable", offsetof(IA64EfiRuntimeServices, get_variable) },
+        { "get_next_variable", offsetof(IA64EfiRuntimeServices, get_next_variable) },
+        { "set_variable", offsetof(IA64EfiRuntimeServices, set_variable) },
+        { "get_next_high_mono_count", offsetof(IA64EfiRuntimeServices, get_next_high_mono_count) },
+        { "reset_system", offsetof(IA64EfiRuntimeServices, reset_system) },
+        { "update_capsule", offsetof(IA64EfiRuntimeServices, update_capsule) },
+        { "query_capsule_caps", offsetof(IA64EfiRuntimeServices, query_capsule_caps) },
+        { "query_variable_info", offsetof(IA64EfiRuntimeServices, query_variable_info) },
+    };
+
+    const uint64_t sig = IA64_EFI_RUNTIME_SERVICES_SIGNATURE;
+    uint64_t scan_start = (r13 > 0x2000) ? (r13 - 0x2000) : 0;
+    uint64_t scan_end = r13 + 0x2000;
+    for (uint64_t cand = scan_start; cand + sizeof(rt) <= scan_end; cand += 8) {
+        if (!ia64_fw_read_bytes_any(cs, cand, (uint8_t *)&rt, sizeof(rt))) {
+            continue;
+        }
+        if (rt.hdr.signature != sig) {
+            continue;
+        }
+        if (rt.hdr.headersize < sizeof(rt) || rt.hdr.headersize > 4096) {
+            continue;
+        }
+        rt_base = cand;
+        break;
+    }
+
+    if (rt_base) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_rt_call %s pc=%016" PRIx64
+                      " r13=%016" PRIx64 " rt_base=%016" PRIx64
+                      " entry=%016" PRIx64 "\n",
+                      tag ? tag : "hang", pc, r13, rt_base, match_entry);
+    }
+
+    if (!rt_base) {
+        bool matched = false;
+        uint64_t desc_addr = 0;
+        uint64_t desc_gp = 0;
+        for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+            uint64_t cand_base = r13 - fields[i].off;
+            if (!ia64_fw_read_bytes_any(cs, cand_base,
+                                        (uint8_t *)&rt, sizeof(rt))) {
+                continue;
+            }
+            uint64_t entry = 0;
+            uint64_t gp = 0;
+            uint64_t q0 = 0;
+            uint64_t q1 = 0;
+            uint64_t fdesc = cand_base + fields[i].off;
+            if (!ia64_fw_read_u64(cs, fdesc, &q0) ||
+                !ia64_fw_read_u64(cs, fdesc + 8, &q1)) {
+                continue;
+            }
+            if (q0 == match_entry) {
+                entry = q0;
+                gp = q1;
+            } else if (q1 == match_entry) {
+                entry = q1;
+                gp = q0;
+            } else {
+                entry = q0;
+                gp = q1;
+            }
+            if (entry != match_entry) {
+                continue;
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt_call %s pc=%016" PRIx64
+                          " r13=%016" PRIx64 " rt_base=%016" PRIx64
+                          " entry=%016" PRIx64 " gp=%016" PRIx64
+                          " sig=%016" PRIx64 " hdr=%u heuristic=%s\n",
+                          tag ? tag : "hang", pc, r13, cand_base,
+                          entry, gp, rt.hdr.signature, rt.hdr.headersize,
+                          fields[i].name);
+            if (!strcmp(fields[i].name, "get_time")) {
+                (void)ia64_fw_rt_patch_get_time_desc(env, fdesc, match_entry);
+            }
+            matched = true;
+            break;
+        }
+        if (!matched) {
+            uint64_t scan2_start = (r13 > 0x20000) ? (r13 - 0x20000) : 0;
+            uint64_t scan2_end = r13 + 0x20000;
+            uint8_t buf[4096];
+            for (uint64_t base = scan2_start;
+                 base + sizeof(buf) <= scan2_end && !desc_addr;
+                 base += sizeof(buf) - 8) {
+                if (!ia64_fw_read_bytes_any(cs, base, buf, sizeof(buf))) {
+                    continue;
+                }
+                for (size_t off = 0; off + 16 <= sizeof(buf); off += 8) {
+                    uint64_t q0 = ldq_le_p(&buf[off]);
+                    uint64_t q1 = ldq_le_p(&buf[off + 8]);
+                    if (q0 == match_entry) {
+                        desc_addr = base + off;
+                        desc_gp = q1;
+                        break;
+                    }
+                    if (q1 == match_entry) {
+                        desc_addr = base + off;
+                        desc_gp = q0;
+                        break;
+                    }
+                }
+            }
+            if (desc_addr) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: efi_rt_call %s entry=%016" PRIx64
+                              " fdesc=%016" PRIx64 " gp=%016" PRIx64 "\n",
+                              tag ? tag : "hang", match_entry,
+                              desc_addr, desc_gp);
+                for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+                    uint64_t cand_base = desc_addr - fields[i].off;
+                    if (!ia64_fw_read_bytes_any(cs, cand_base,
+                                                (uint8_t *)&rt, sizeof(rt))) {
+                        continue;
+                    }
+                    uint64_t entry = 0;
+                    uint64_t gp = 0;
+                    uint64_t q0 = 0;
+                    uint64_t q1 = 0;
+                    uint64_t fdesc = cand_base + fields[i].off;
+                    if (!ia64_fw_read_u64(cs, fdesc, &q0) ||
+                        !ia64_fw_read_u64(cs, fdesc + 8, &q1)) {
+                        continue;
+                    }
+                    if (q0 == match_entry) {
+                        entry = q0;
+                        gp = q1;
+                    } else if (q1 == match_entry) {
+                        entry = q1;
+                        gp = q0;
+                    } else {
+                        entry = q0;
+                        gp = q1;
+                    }
+                    if (entry != match_entry) {
+                        continue;
+                    }
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: efi_rt_call %s cand_base=%016" PRIx64
+                                  " entry=%016" PRIx64 " gp=%016" PRIx64
+                                  " sig=%016" PRIx64 " hdr=%u heuristic=%s\n",
+                                  tag ? tag : "hang", cand_base, entry, gp,
+                                  rt.hdr.signature, rt.hdr.headersize,
+                                  fields[i].name);
+                    if (!strcmp(fields[i].name, "get_time")) {
+                        (void)ia64_fw_rt_patch_get_time_desc(env, fdesc, match_entry);
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt_call %s pc=%016" PRIx64
+                          " r13=%016" PRIx64 " entry=%016" PRIx64
+                          " rt_base=not_found\n",
+                          tag ? tag : "hang", pc, r13, match_entry);
+        }
+        return;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+        uint64_t entry = 0;
+        uint64_t gp = 0;
+        uint64_t q0 = 0;
+        uint64_t q1 = 0;
+        uint64_t fdesc = rt_base + fields[i].off;
+        if (!ia64_fw_read_u64(cs, fdesc, &q0) ||
+            !ia64_fw_read_u64(cs, fdesc + 8, &q1)) {
+            continue;
+        }
+        if (q0 == match_entry) {
+            entry = q0;
+            gp = q1;
+        } else if (q1 == match_entry) {
+            entry = q1;
+            gp = q0;
+        } else {
+            entry = q0;
+            gp = q1;
+        }
+        if (entry == match_entry) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt_call match %s fdesc=%016" PRIx64
+                          " entry=%016" PRIx64 " gp=%016" PRIx64 "\n",
+                          fields[i].name, fdesc, entry, gp);
+            if (!strcmp(fields[i].name, "get_time")) {
+                (void)ia64_fw_rt_patch_get_time_desc(env, fdesc, match_entry);
+            }
+            break;
+        }
     }
 }
 
@@ -6335,6 +6737,11 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
 #ifndef CONFIG_USER_ONLY
     ia64_fw_try_patch_efi_hobs(env);
 #endif
+
+    if (ia64_fw_rt_get_time_entry && pc == ia64_fw_rt_get_time_entry) {
+        ia64_fw_handle_get_time(env);
+        return;
+    }
 
     if (env->fw_pei_findfv_stub &&
         ((pc ^ env->fw_pei_findfv_stub) & ~0xFULL) == 0) {
@@ -17062,6 +17469,12 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
             ia64_fw_log_mem_dump(cs, env->r[13], "hang_r13");
             if (env->r[13] > 0x80) {
                 ia64_fw_log_mem_dump(cs, env->r[13] - 0x80, "hang_r13_base");
+            }
+            ia64_fw_decode_rt_call(env, pc, "hang");
+            if (ia64_fw_rt_get_time_patched) {
+                env->dbg_tb_same1 = 0;
+                env->dbg_tb_same2 = 0;
+                return;
             }
         }
     }
