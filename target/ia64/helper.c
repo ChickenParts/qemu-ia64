@@ -2614,6 +2614,24 @@ typedef struct QEMU_PACKED {
 } IA64EfiSystemTable;
 
 typedef struct QEMU_PACKED {
+    IA64EfiTableHeader hdr;
+    uint64_t get_time;
+    uint64_t set_time;
+    uint64_t get_wakeup_time;
+    uint64_t set_wakeup_time;
+    uint64_t set_virtual_address_map;
+    uint64_t convert_pointer;
+    uint64_t get_variable;
+    uint64_t get_next_variable;
+    uint64_t set_variable;
+    uint64_t get_next_high_mono_count;
+    uint64_t reset_system;
+    uint64_t update_capsule;
+    uint64_t query_capsule_caps;
+    uint64_t query_variable_info;
+} IA64EfiRuntimeServices;
+
+typedef struct QEMU_PACKED {
     IA64EfiGuid guid;
     uint64_t table;
 } IA64EfiConfigTableEntry;
@@ -2657,6 +2675,117 @@ static const IA64EfiGuid ia64_efi_guid_esal_pci = {
     .data3 = 0x4905,
     .data4 = { 0x92, 0xf6, 0x2b, 0x46, 0x59, 0xdc, 0x30, 0x63 },
 };
+
+static void ia64_fw_log_efi_runtime_services(CPUIA64State *env, const char *tag)
+{
+    static int enabled = -1;
+    static uint64_t last_systab_pa;
+    static uint64_t last_rt_ptr;
+    static uint32_t last_crc;
+    static bool logged_missing;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_EFI_RT_LOG");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    if (!enabled || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    uint64_t systab_pa = env->fw_efi_systab_pa;
+    if (!systab_pa) {
+        if (!logged_missing) {
+            logged_missing = true;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt %s missing EFI system table\n",
+                          tag ? tag : "?");
+        }
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    IA64EfiSystemTable st;
+    if (!ia64_fw_read_bytes_any(cs, systab_pa, (uint8_t *)&st, sizeof(st))) {
+        return;
+    }
+    if (st.hdr.signature != IA64_EFI_SYSTEM_TABLE_SIGNATURE) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_rt %s systab=%016" PRIx64
+                      " bad sig=%016" PRIx64 "\n",
+                      tag ? tag : "?", systab_pa, st.hdr.signature);
+        return;
+    }
+
+    uint64_t rt_ptr = st.runtime;
+    if (!rt_ptr) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_rt %s systab=%016" PRIx64
+                      " rt_ptr=0\n",
+                      tag ? tag : "?", systab_pa);
+        return;
+    }
+
+    IA64EfiRuntimeServices rt;
+    if (!ia64_fw_read_bytes_any(cs, rt_ptr, (uint8_t *)&rt, sizeof(rt))) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_rt %s rt_ptr=%016" PRIx64
+                      " unreadable\n",
+                      tag ? tag : "?", rt_ptr);
+        return;
+    }
+
+    uint32_t crc = crc32(0, (const Bytef *)&rt, sizeof(rt));
+    if (systab_pa == last_systab_pa && rt_ptr == last_rt_ptr &&
+        crc == last_crc) {
+        return;
+    }
+    last_systab_pa = systab_pa;
+    last_rt_ptr = rt_ptr;
+    last_crc = crc;
+
+    uint64_t rt_phys = ia64_phys_mode_addr(rt_ptr);
+    uint64_t flash_base = ia64_fw_flash_base();
+    uint64_t flash_end = flash_base + ia64_fw_flash_size();
+    bool rt_in_flash = (rt_phys >= flash_base && rt_phys < flash_end);
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: efi_rt %s systab=%016" PRIx64
+                  " rt_ptr=%016" PRIx64 " rt_phys=%016" PRIx64
+                  " sig=%016" PRIx64 " hdr=%u crc=0x%08x flash=%d\n",
+                  tag ? tag : "?", systab_pa, rt_ptr, rt_phys,
+                  rt.hdr.signature, rt.hdr.headersize, crc,
+                  rt_in_flash ? 1 : 0);
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: efi_rt funcs get_time=%016" PRIx64
+                  " set_time=%016" PRIx64
+                  " set_va_map=%016" PRIx64
+                  " reset=%016" PRIx64 "\n",
+                  rt.get_time, rt.set_time, rt.set_virtual_address_map,
+                  rt.reset_system);
+
+    {
+        uint64_t entry = 0, gp = 0;
+        if (ia64_fw_read_fdesc(cs, rt.get_time, &entry, &gp)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt fdesc get_time entry=%016" PRIx64
+                          " gp=%016" PRIx64 "\n",
+                          entry, gp);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt fdesc get_time unreadable\n");
+        }
+        if (ia64_fw_read_fdesc(cs, rt.set_virtual_address_map, &entry, &gp)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt fdesc set_va_map entry=%016" PRIx64
+                          " gp=%016" PRIx64 "\n",
+                          entry, gp);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_rt fdesc set_va_map unreadable\n");
+        }
+    }
+}
 
 static const IA64EfiGuid ia64_efi_guid_esal_fvb = {
     .data1 = 0xa2271df1,
@@ -6073,6 +6202,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     static int scan_count;
 
     ia64_fw_try_install_sal_systab(env);
+    ia64_fw_log_efi_runtime_services(env, "break0");
 #ifndef CONFIG_USER_ONLY
     ia64_fw_try_patch_efi_hobs(env);
 #endif
