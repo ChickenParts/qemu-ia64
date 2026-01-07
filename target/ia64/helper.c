@@ -36,6 +36,8 @@ static bool ia64_fw_find_efi_system_table(CPUState *cs, uint64_t start,
 static bool ia64_fw_read_u64(CPUState *cs, uint64_t addr, uint64_t *out);
 static bool ia64_fw_read_fdesc(CPUState *cs, uint64_t addr,
                                uint64_t *entry, uint64_t *gp);
+static void ia64_fw_dump_mem_range(CPUState *cs, const char *tag,
+                                   uint64_t base, uint64_t size);
 
 static uint64_t ia64_fw_rt_get_time_entry;
 static bool ia64_fw_rt_get_time_patched;
@@ -17698,6 +17700,35 @@ void HELPER(hang_abort)(CPUIA64State *env, uint64_t pc, uint32_t ri,
     ia64_fw_dump_code(env, "hang_to", env->last_branch_to, 64);
     ia64_fw_dump_code(env, "hang_b7", env->b[7], 64);
     {
+        static int mem_dump_enabled = -1;
+        static uint64_t mem_dump_size;
+        if (mem_dump_enabled == -1) {
+            const char *s = getenv("QEMU_IA64_HANG_DUMP_MEM");
+            mem_dump_enabled = ia64_env_truthy(s) ? 1 : 0;
+            const char *sz = getenv("QEMU_IA64_HANG_DUMP_MEM_SIZE");
+            if (sz && *sz) {
+                char *endp = NULL;
+                mem_dump_size = strtoull(sz, &endp, 0);
+                if (endp == sz) {
+                    mem_dump_size = 0;
+                }
+            }
+            if (!mem_dump_size) {
+                mem_dump_size = 4ULL << 20;
+            }
+        }
+        if (mem_dump_enabled) {
+            uint64_t size = mem_dump_size;
+            uint64_t half = size / 2;
+            uint64_t pc_base = (pc > half) ? (pc - half) : 0;
+            ia64_fw_dump_mem_range(cs, "pc", pc_base, size);
+            if (env->r[1]) {
+                uint64_t gp_base = (env->r[1] > half) ? (env->r[1] - half) : 0;
+                ia64_fw_dump_mem_range(cs, "r1", gp_base, size);
+            }
+        }
+    }
+    {
         static int rt_dump_enabled = -1;
         if (rt_dump_enabled == -1) {
             const char *s = getenv("QEMU_IA64_EFI_RT_LOG");
@@ -18770,6 +18801,42 @@ static void ia64_fw_dump_code(CPUIA64State *env, const char *tag,
                   "IA64: SAL_PCI dump pc=%016" PRIx64 " start=%016" PRIx64
                   " bundles=%d file=%s\n",
                   base, start, bundles, path);
+}
+
+static void ia64_fw_dump_mem_range(CPUState *cs, const char *tag,
+                                   uint64_t base, uint64_t size)
+{
+    if (!base || !size) {
+        return;
+    }
+    g_mkdir_with_parents("scratch/ia64_logs", 0755);
+    char path[256];
+    snprintf(path, sizeof(path),
+             "scratch/ia64_logs/hang_mem_%s_%016" PRIx64 ".bin",
+             tag ? tag : "mem", base);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        return;
+    }
+
+    const size_t chunk = 64 * 1024;
+    g_autofree uint8_t *buf = g_malloc(chunk);
+    uint64_t remaining = size;
+    uint64_t addr = base;
+    while (remaining) {
+        size_t step = (remaining > chunk) ? chunk : (size_t)remaining;
+        if (cpu_memory_rw_debug(cs, addr, buf, step, false) != 0) {
+            break;
+        }
+        fwrite(buf, 1, step, fp);
+        addr += step;
+        remaining -= step;
+    }
+    fclose(fp);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: hang_dump mem tag=%s base=%016" PRIx64
+                  " size=%" PRIu64 " file=%s\n",
+                  tag ? tag : "mem", base, size, path);
 }
 
 void HELPER(fw_dump_pc)(CPUIA64State *env, uint64_t pc, uint32_t bundles)
