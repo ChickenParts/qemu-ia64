@@ -2297,6 +2297,8 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
 #define IA64_EFI_CLASS_IO_BUS                0x02000000u
 #define IA64_EFI_CLASS_SOFTWARE              0x03000000u
 #define IA64_EFI_IO_BUS_PCI_SUBCLASS         0x00010000u
+#define IA64_EFI_SW_SUBCLASS_PEI             0x00020000u
+#define IA64_EFI_SW_SUBCLASS_DXE             0x00030000u
 
 static bool ia64_fw_status_is_assert(uint32_t code_type, uint32_t value)
 {
@@ -5097,6 +5099,183 @@ static bool ia64_fw_dump_efi_hobs_impl(CPUState *cs, uint64_t stack_hint,
     return false;
 }
 
+static bool ia64_fw_dump_hob_resource_descs(CPUState *cs, uint64_t stack_hint,
+                                            const char *tag)
+{
+    enum {
+        EFI_HOB_TYPE_RESOURCE_DESCRIPTOR = 0x0003,
+        EFI_HOB_TYPE_END_OF_HOB_LIST = 0xffff,
+    };
+    enum {
+        EFI_RESOURCE_ATTRIBUTE_PRESENT = 0x00000001u,
+        EFI_RESOURCE_ATTRIBUTE_INITIALIZED = 0x00000002u,
+        EFI_RESOURCE_ATTRIBUTE_TESTED = 0x00000004u,
+    };
+
+    uint64_t hob_base = 0;
+    uint64_t hob_end = 0;
+    uint64_t hob_best_span = 0;
+    uint64_t stack_phys = ia64_phys_mode_addr(stack_hint);
+    uint64_t flash_base = ia64_fw_flash_base();
+    uint64_t flash_size = ia64_fw_flash_size();
+
+    if (stack_phys &&
+        ia64_fw_find_pei_hob_list(cs, stack_phys, &hob_base, &hob_end)) {
+        hob_best_span = hob_end - hob_base;
+    }
+    if (ia64_fw_pei_cached_hob_base) {
+        uint64_t end = 0;
+        int count = 0;
+        if (ia64_fw_validate_efi_hob_list(cs, ia64_fw_pei_cached_hob_base,
+                                          &end, &count)) {
+            uint64_t span = end - ia64_fw_pei_cached_hob_base;
+            if (!hob_base || span > hob_best_span) {
+                hob_base = ia64_fw_pei_cached_hob_base;
+                hob_end = end;
+                hob_best_span = span;
+            }
+        }
+    }
+
+    {
+        uint64_t cand_base = 0;
+        uint64_t cand_end = 0;
+        if (ia64_fw_find_hob_list_in_range(cs, 0, 64ULL << 20,
+                                           &cand_base, &cand_end)) {
+            uint64_t span = cand_end - cand_base;
+            if (!hob_base || span > hob_best_span) {
+                hob_base = cand_base;
+                hob_end = cand_end;
+                hob_best_span = span;
+            }
+        }
+        if (flash_size &&
+            ia64_fw_find_hob_list_in_range(cs, flash_base, flash_size,
+                                           &cand_base, &cand_end)) {
+            uint64_t span = cand_end - cand_base;
+            if (!hob_base || span > hob_best_span) {
+                hob_base = cand_base;
+                hob_end = cand_end;
+                hob_best_span = span;
+            }
+        }
+        if (stack_phys > (32ULL << 20) &&
+            ia64_fw_find_hob_list_in_range(cs, stack_phys - (32ULL << 20),
+                                           64ULL << 20,
+                                           &cand_base, &cand_end)) {
+            uint64_t span = cand_end - cand_base;
+            if (!hob_base || span > hob_best_span) {
+                hob_base = cand_base;
+                hob_end = cand_end;
+                hob_best_span = span;
+            }
+        }
+    }
+
+    if (!hob_base) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_hob_res: %s PHIT HOB not found\n",
+                      tag ? tag : "handoff");
+        return false;
+    }
+
+    uint8_t phit[0x38];
+    if (cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), false) != 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_hob_res: %s PHIT read failed addr=%016" PRIx64 "\n",
+                      tag ? tag : "handoff", hob_base);
+        return false;
+    }
+
+    uint64_t mem_top = ldq_le_p(&phit[16]);
+    uint64_t mem_bottom = ldq_le_p(&phit[24]);
+    uint64_t free_top = ldq_le_p(&phit[32]);
+    uint64_t free_bottom = ldq_le_p(&phit[40]);
+    uint64_t end_hob = ldq_le_p(&phit[48]);
+    uint64_t mem_top_phys = ia64_phys_mode_addr(mem_top);
+    uint64_t mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
+    uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
+    uint64_t free_bottom_phys = ia64_phys_mode_addr(free_bottom);
+    uint64_t end_hob_phys = ia64_phys_mode_addr(end_hob);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: efi_hob_res: %s base=%016" PRIx64
+                  " mem=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " free=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " end=%016" PRIx64 " list_end=%016" PRIx64 "\n",
+                  tag ? tag : "handoff", hob_base,
+                  mem_bottom_phys, mem_top_phys,
+                  free_bottom_phys, free_top_phys,
+                  end_hob_phys, hob_end);
+
+    uint64_t cur = hob_base;
+    int res_count = 0;
+    for (int iter = 0; iter < 4096; iter++) {
+        uint8_t h[8];
+        if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_res: header read failed addr=%016" PRIx64 "\n",
+                          cur);
+            break;
+        }
+        uint16_t type = lduw_le_p(&h[0]);
+        uint16_t len = lduw_le_p(&h[2]);
+        if (len < sizeof(h)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_res: bad hob len=%u type=%u addr=%016" PRIx64 "\n",
+                          len, type, cur);
+            break;
+        }
+        if (type == EFI_HOB_TYPE_END_OF_HOB_LIST) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_res: end_hob addr=%016" PRIx64 "\n",
+                          cur);
+            break;
+        }
+        if (type == EFI_HOB_TYPE_RESOURCE_DESCRIPTOR && len >= 0x30) {
+            uint8_t rh[0x30];
+            if (cpu_memory_rw_debug(cs, cur, rh, sizeof(rh), false) == 0) {
+                uint32_t rtype = ldl_le_p(&rh[24]);
+                uint32_t rattr = ldl_le_p(&rh[28]);
+                uint64_t start = ldq_le_p(&rh[32]);
+                uint64_t rlen = ldq_le_p(&rh[40]);
+                bool tested = (rattr & (EFI_RESOURCE_ATTRIBUTE_PRESENT |
+                                        EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+                                        EFI_RESOURCE_ATTRIBUTE_TESTED)) ==
+                              (EFI_RESOURCE_ATTRIBUTE_PRESENT |
+                               EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+                               EFI_RESOURCE_ATTRIBUTE_TESTED);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: efi_hob_res: RES type=%u attr=0x%08x tested=%d start=%016" PRIx64
+                              " len=%016" PRIx64 "\n",
+                              rtype, rattr, tested ? 1 : 0, start, rlen);
+                res_count++;
+            }
+        }
+
+        cur += len;
+        if (hob_end && cur >= hob_end) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_res: reached hob_end cur=%016" PRIx64 "\n",
+                          cur);
+            break;
+        }
+        if (cur - hob_base > (16ULL << 20)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: efi_hob_res: abort, list too long\n");
+            break;
+        }
+    }
+
+    if (res_count == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_hob_res: %s no resource descriptors found\n",
+                      tag ? tag : "handoff");
+        return false;
+    }
+
+    return true;
+}
+
 static bool ia64_fw_dump_efi_hobs(CPUState *cs, uint64_t stack_hint)
 {
     return ia64_fw_dump_efi_hobs_impl(cs, stack_hint, false);
@@ -6733,6 +6912,9 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     static int log_limit = -1;
     static int log_count;
     static int gcd_dump_enabled = -1;
+    static int dxe_hob_res_dump_enabled = -1;
+    static bool dxe_hob_res_dumped;
+    static int dxe_hob_res_attempts;
     static int scan_always = -1;
     static int scan_limit = -1;
     static int scan_count;
@@ -6783,6 +6965,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     uint32_t log_code_type = code_type;
     uint32_t log_value = value;
     bool is_assert = ia64_fw_status_is_assert(code_type, value);
+    bool is_dxe_status = false;
     if (!is_assert && ia64_fw_status_is_assert(alt_code_type, alt_value)) {
         is_assert = true;
         code_type = alt_code_type;
@@ -6802,6 +6985,13 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         ia64_fw_status_code_valid(ppi_code_type, ppi_value)) {
         log_code_type = ppi_code_type;
         log_value = ppi_value;
+    }
+    if (ia64_fw_status_code_valid(log_code_type, log_value)) {
+        is_dxe_status =
+            (log_value & IA64_EFI_STATUS_CODE_CLASS_MASK) ==
+                IA64_EFI_CLASS_SOFTWARE &&
+            (log_value & IA64_EFI_STATUS_CODE_SUBCLASS_MASK) ==
+                IA64_EFI_SW_SUBCLASS_DXE;
     }
     if (is_assert && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         uint64_t data_ptrs[3] = { env->r[36], env->r[37], env->r[35] };
@@ -6868,6 +7058,10 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         const char *s = getenv("QEMU_IA64_FW_GCD_DUMP");
         gcd_dump_enabled = (s && *s) ? 1 : 0;
     }
+    if (dxe_hob_res_dump_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_EFI_HOB_RES_DUMP");
+        dxe_hob_res_dump_enabled = (s && *s) ? 1 : 0;
+    }
     if (scan_always == -1) {
         const char *s = getenv("QEMU_IA64_FW_BREAK0_SCAN_ALWAYS");
         scan_always = (s && *s) ? 1 : 0;
@@ -6914,6 +7108,17 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
             post_code_efi = (uint8_t)
                 ((((log_value & IA64_EFI_STATUS_CODE_CLASS_MASK) >> 24) << 5) |
                  (((log_value & IA64_EFI_STATUS_CODE_SUBCLASS_MASK) >> 16) & 0x1f));
+        }
+    }
+
+    if (dxe_hob_res_dump_enabled && !dxe_hob_res_dumped &&
+        dxe_hob_res_attempts < 16 &&
+        (post_code == 0x8c00 || post_code_alt == 0x8c00 || is_dxe_status)) {
+        bool dumped = ia64_fw_dump_hob_resource_descs(env_cpu(env), env->r[12],
+                                                      "dxe_handoff");
+        dxe_hob_res_attempts++;
+        if (dumped) {
+            dxe_hob_res_dumped = true;
         }
     }
 
