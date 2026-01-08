@@ -5192,6 +5192,11 @@ static bool ia64_fw_dump_hob_resource_descs(CPUState *cs, uint64_t stack_hint,
     uint64_t free_top = ldq_le_p(&phit[32]);
     uint64_t free_bottom = ldq_le_p(&phit[40]);
     uint64_t end_hob = ldq_le_p(&phit[48]);
+    uint64_t mem_top_raw = mem_top;
+    uint64_t mem_bottom_raw = mem_bottom;
+    uint64_t free_top_raw = free_top;
+    uint64_t free_bottom_raw = free_bottom;
+    uint64_t end_hob_raw = end_hob;
     uint64_t mem_top_phys = ia64_phys_mode_addr(mem_top);
     uint64_t mem_bottom_phys = ia64_phys_mode_addr(mem_bottom);
     uint64_t free_top_phys = ia64_phys_mode_addr(free_top);
@@ -5206,9 +5211,19 @@ static bool ia64_fw_dump_hob_resource_descs(CPUState *cs, uint64_t stack_hint,
                   mem_bottom_phys, mem_top_phys,
                   free_bottom_phys, free_top_phys,
                   end_hob_phys, hob_end);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: efi_hob_res: %s raw mem=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " free=[%016" PRIx64 "..%016" PRIx64 "]"
+                  " end=%016" PRIx64 "\n",
+                  tag ? tag : "handoff",
+                  mem_bottom_raw, mem_top_raw,
+                  free_bottom_raw, free_top_raw,
+                  end_hob_raw);
 
     uint64_t cur = hob_base;
     int res_count = 0;
+    uint64_t sysmem_min = UINT64_MAX;
+    uint64_t sysmem_max = 0;
     for (int iter = 0; iter < 4096; iter++) {
         uint8_t h[8];
         if (cpu_memory_rw_debug(cs, cur, h, sizeof(h), false) != 0) {
@@ -5249,6 +5264,15 @@ static bool ia64_fw_dump_hob_resource_descs(CPUState *cs, uint64_t stack_hint,
                               " len=%016" PRIx64 "\n",
                               rtype, rattr, tested ? 1 : 0, start, rlen);
                 res_count++;
+                if (rtype == 0 && tested && rlen) {
+                    uint64_t end = start + rlen;
+                    if (start < sysmem_min) {
+                        sysmem_min = start;
+                    }
+                    if (end > sysmem_max) {
+                        sysmem_max = end;
+                    }
+                }
             }
         }
 
@@ -5271,6 +5295,11 @@ static bool ia64_fw_dump_hob_resource_descs(CPUState *cs, uint64_t stack_hint,
                       "IA64: efi_hob_res: %s no resource descriptors found\n",
                       tag ? tag : "handoff");
         return false;
+    }
+    if (sysmem_min != UINT64_MAX) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: efi_hob_res: sysmem tested range=[%016" PRIx64 "..%016" PRIx64 "]\n",
+                      sysmem_min, sysmem_max);
     }
 
     return true;
