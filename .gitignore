@@ -35,3 +35,4 @@ stuff/vmlinux-ia64-main
 # Local firmware/kernel build artifacts and reference trees
 EDK/
 Edk 1.06.zip
+docs/460gx.pdf
