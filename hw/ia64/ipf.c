@@ -621,8 +621,8 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_FW_WORKRAM_BASE 0x0000000100000000ULL
 #define IPF_FW_WORKRAM_SIZE (16ULL << 20)
 
-#define IPF_FW_PEI_HANDOFF_BASE (IPF_FW_WORKRAM_BASE + 0x1000)
-#define IPF_FW_PEI_PPI_BASE (IPF_FW_WORKRAM_BASE + 0x2000)
+#define IPF_FW_PEI_HANDOFF_BASE (IPF_FW_PEI_TEMP_BASE + 0x1000)
+#define IPF_FW_PEI_PPI_BASE (IPF_FW_PEI_TEMP_BASE + 0x0)
 #define IPF_FW_PEI_STUB_BASE (IPF_FW_WORKRAM_BASE + 0x3000)
 /*
  * xenipf SEC stack setup uses 0x04000000 as the temporary RAM base when
@@ -1021,7 +1021,7 @@ static bool ipf_fw_pei_use_pi_handoff(void)
             use_pi = (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 ||
                       strcmp(s, "no") == 0) ? 0 : 1;
         } else {
-            use_pi = 1;
+            use_pi = 0;
         }
     }
     return use_pi;
@@ -2148,7 +2148,7 @@ static void ipf_fw_setup_pei_handoff(const uint8_t *buf, size_t size,
     const uint64_t handoff_phys = ipf_fw_pei_use_pi_handoff() ?
                                   IPF_FW_PEI_HANDOFF_BASE :
                                   (temp_phys + 0x1000);
-    const uint64_t ppi_phys = temp_phys;
+    const uint64_t ppi_phys = IPF_FW_PEI_PPI_BASE;
     const uint64_t stub_phys = IPF_FW_PEI_STUB_BASE;
     const uint64_t plabel_phys = stub_phys + 0x20;
     const uint64_t ppi_iface_phys = stub_phys + 0x40;

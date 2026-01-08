@@ -1770,6 +1770,22 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe22cc0ULL ||
+         ctx->base.pc_next == 0x00000000ffe22cc0ULL)) {
+        gen_helper_fw_pei_phit_temp_fix(tcg_env,
+                                        tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe25320ULL ||
+         ctx->base.pc_next == 0x00000000ffe25320ULL)) {
+        gen_helper_fw_pei_phit_postinit_fix(tcg_env,
+                                            tcg_constant_i64(ctx->base.pc_next));
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe65b40ULL ||
          ctx->base.pc_next == 0x00000000ffe65b40ULL)) {
         gen_helper_fw_autoscan_memmap_fix(tcg_env,
@@ -1888,6 +1904,13 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                            tcg_constant_i64(ctx->base.pc_next));
     }
     if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 2 &&
+        (ctx->base.pc_next == 0x80000000ffe20540ULL ||
+         ctx->base.pc_next == 0x00000000ffe20540ULL)) {
+        gen_helper_fw_pei_core_call_fix(tcg_env,
+                                        tcg_constant_i64(ctx->base.pc_next));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe2e450ULL ||
          ctx->base.pc_next == 0x00000000ffe2e450ULL)) {
@@ -2003,6 +2026,14 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
             gen_helper_fw_pei_err_watch(tcg_env,
                                         tcg_constant_i64(ctx->base.pc_next));
         }
+    }
+
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 1 &&
+        (ctx->base.pc_next == 0x80000000ffe2bb50ULL ||
+         ctx->base.pc_next == 0x00000000ffe2bb50ULL)) {
+        gen_helper_fw_pei_assert_probe(tcg_env,
+                                       tcg_constant_i64(ctx->base.pc_next));
     }
 
     if (ctx->mem_idx != MMU_USER_IDX &&
