@@ -165,6 +165,7 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 /* Match hw/ia64/ipf.c firmware work RAM window. */
 #define IA64_IPF_FW_WORKRAM_BASE      0x0000000100000000ULL
 #define IA64_IPF_FW_WORKRAM_SIZE      (16ULL << 20)
+#define IA64_IPF_FW_SLACK_SIZE        (64ULL << 20)
 /* Match hw/ia64/gfw.h GFW_HOB_START/GFW_HOB_SIZE. */
 #define IA64_IPF_GFW_HOB_BASE         0x00000000ff200000ULL
 #define IA64_IPF_GFW_HOB_SIZE         (1ULL << 20)
@@ -11646,7 +11647,7 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         uint8_t probe;
         if (orig_mem_top &&
             cpu_memory_rw_debug(cs, orig_mem_top, &probe, 1, false) == 0) {
-            const uint64_t max_slack = 256ULL << 20;
+            const uint64_t max_slack = IA64_IPF_FW_SLACK_SIZE;
             for (uint64_t try = max_slack; try >= (1ULL << 20); try >>= 1) {
                 if (cpu_memory_rw_debug(cs, orig_mem_top + try - 1, &probe, 1, false) == 0) {
                     slack_size = try;
