@@ -28,7 +28,7 @@ Environment variables are organized into the following categories:
 |----------|-------------|
 | `QEMU_IPF_DUMP_HOB` | Dump Hand-Off Block (HOB) contents on boot |
 | `QEMU_IPF_FW_SCAN` | Enable firmware binary scanning and analysis |
-| `QEMU_IPF_FW_PEI_PI` | Enable PEI phase initialization tracing |
+| `QEMU_IPF_FW_PEI_PI` | Use PI-style PEI handoff (SEC handoff + PPI list); set 0/false/no for framework startup descriptor |
 | `QEMU_IPF_FW_PROBE_FIT` | Probe and log Firmware Interface Table entries |
 | `QEMU_IPF_FW_PATCH_FIT` | Enable FIT patching for compatibility |
 | `QEMU_IPF_FW_PATCH_GP_GLOBALS` | Patch global pointer references in firmware |
