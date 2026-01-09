@@ -14200,7 +14200,7 @@ void HELPER(fw_pei_core_call_fix)(CPUIA64State *env, uint64_t pc)
         env->r[out_base + 1] = ppi;
         env->nat[out_base + 1] = 0;
     }
-    if (env->r[34] != 0) {
+    if (!env->fw_pei_mem_installed && env->r[34] != 0) {
         env->r[34] = 0;
         env->nat[34] = 0;
     }
@@ -14426,6 +14426,10 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
     uint64_t hob_size = env->r[40] ? env->r[40] : env->r[34];
     uint64_t temp_base = 0;
     uint64_t temp_size = 0;
+    uint64_t pei_base = 0;
+    uint64_t pei_size = 0;
+    uint64_t stack_base = 0;
+    uint64_t stack_size = 0;
 
     if (!handoff) {
         return;
@@ -14443,6 +14447,10 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
         if (sec_handoff) {
             temp_base = ldq_le_p(&buf[24]);
             temp_size = ldq_le_p(&buf[32]);
+            pei_base = ldq_le_p(&buf[40]);
+            pei_size = ldq_le_p(&buf[48]);
+            stack_base = ldq_le_p(&buf[56]);
+            stack_size = ldq_le_p(&buf[64]);
         } else {
             return;
         }
@@ -14451,11 +14459,27 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
     if (!temp_base || !temp_size) {
         return;
     }
-    if (!hob_size || hob_size > temp_size) {
-        hob_size = temp_size;
+    uint64_t hob_region_base = temp_base;
+    uint64_t hob_region_size = temp_size;
+    if (pei_base && pei_size) {
+        uint64_t pei_top = pei_base + pei_size;
+        uint64_t temp_top = temp_base + temp_size;
+        if (pei_top > pei_base &&
+            pei_base >= temp_base && pei_top <= temp_top) {
+            hob_region_base = pei_base;
+            hob_region_size = pei_size;
+        }
+    }
+    if (stack_base && stack_base > hob_region_base &&
+        stack_base < hob_region_base + hob_region_size) {
+        hob_region_size = stack_base - hob_region_base;
+    }
+    (void)stack_size;
+    if (!hob_size || hob_size > hob_region_size) {
+        hob_size = hob_region_size;
     }
 
-    uint64_t hob_base = temp_base + (temp_size - hob_size);
+    uint64_t hob_base = hob_region_base + (hob_region_size - hob_size);
     uint64_t active_hob_base = hob_base;
     bool redirect_hob = false;
     ia64_fw_pei_cached_temp_base = temp_base;
@@ -14493,9 +14517,10 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
 
             bool cur_in_ram = cur_phys &&
                               (!cur_in_temp && !cur_in_gfw && !cur_in_flash);
-            if (cur_in_ram) {
+            if (cur_in_temp) {
                 active_hob_base = cur_phys;
-            } else if (!cur_in_temp && (cur_in_gfw || cur_in_flash || !cur_phys)) {
+            } else if (!cur_in_temp &&
+                       (cur_in_gfw || cur_in_flash || cur_in_ram || !cur_phys)) {
                 if (!have_src) {
                     uint64_t alt_base = 0;
                     uint64_t alt_end = 0;
@@ -14530,6 +14555,22 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                     }
                 }
                 if (have_src) {
+                    uint64_t cur_len = (cur_end > cur_phys) ? (cur_end - cur_phys) : 0;
+                    if (cur_len) {
+                        uint64_t min_size = (cur_len + 0xfffULL) & ~0xfffULL;
+                        uint64_t want = min_size + 0x10000ULL; /* leave room for growth */
+                        uint64_t capped = (want > hob_region_size) ? hob_region_size : want;
+                        if (capped < min_size) {
+                            capped = hob_region_size;
+                        }
+                        if (!hob_size || hob_size > hob_region_size ||
+                            hob_size < min_size || hob_size > capped) {
+                            hob_size = capped;
+                            hob_base = hob_region_base +
+                                       (hob_region_size - hob_size);
+                            active_hob_base = hob_base;
+                        }
+                    }
                     uint8_t phit[0x38];
                     if (cpu_memory_rw_debug(cs, cur_phys, phit,
                                             sizeof(phit), false) == 0) {
@@ -14616,11 +14657,19 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
             uint64_t hob_raw = 0;
             uint64_t hob_template = 0;
             if (ia64_fw_read_u64(cs, core + 0x260, &hob_raw)) {
-                hob_template = hob_raw;
                 uint64_t hob_phys = ia64_phys_mode_addr(hob_raw);
+                uint64_t hob_end = 0;
+                int hob_count = 0;
+                bool hob_valid = hob_raw &&
+                    ia64_fw_validate_efi_hob_list(cs, hob_phys,
+                                                  &hob_end, &hob_count);
+                if (hob_valid) {
+                    hob_template = hob_raw;
+                }
                 bool hob_in_temp = (hob_phys >= temp_base &&
                                     hob_phys < (temp_base + temp_size));
-                if (!hob_in_temp && (hob_phys != hob_base || hob_raw != hob_base)) {
+                if (hob_valid && !hob_in_temp &&
+                    (hob_phys != hob_base || hob_raw != hob_base)) {
                     uint64_t enc = ia64_fw_encode_addr(hob_raw, hob_base);
                     if (hob_phys == hob_base && hob_raw != hob_base) {
                         enc = hob_base;
@@ -14654,9 +14703,8 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                         ia64_fw_validate_efi_hob_list(cs, hob_field_phys,
                                                       &hob_field_end,
                                                       &hob_field_count);
-                    bool needs_update = !hob_field_raw || !hob_field_valid ||
-                        (redirect_hob && hob_field_phys != hob_base);
-                    if (needs_update) {
+                    if (redirect_hob && hob_field_valid &&
+                        hob_field_phys != hob_base) {
                         uint64_t tmpl = hob_field_raw ? hob_field_raw : hob_template;
                         uint64_t enc = ia64_fw_encode_addr(tmpl, hob_base);
                         if (hob_field_phys == hob_base && hob_field_raw != hob_base) {
@@ -16694,20 +16742,28 @@ void HELPER(fw_pei_install_mem_call_probe)(CPUIA64State *env, uint64_t pc)
 
     CPUState *cs = env_cpu(env);
     uint64_t b7 = env->b[7];
-    uint64_t entry = 0;
-    uint64_t gp = 0;
+    uint64_t entry = b7;
+    uint64_t gp = env->r[1];
+    uint64_t fdesc = 0;
+    uint64_t fd_entry = 0;
+    uint64_t fd_gp = 0;
     uint8_t fdesc_raw[16];
     bool fdesc_ok = false;
-    if (b7) {
-        hwaddr b7_phys = 0;
-        (void)ia64_fw_try_translate_addr(env, b7, &b7_phys);
-        if (cpu_memory_rw_debug(cs, b7_phys, fdesc_raw,
+    bool fdesc_raw_ok = false;
+    if (env->r[31] >= 8) {
+        fdesc = env->r[31] - 8;
+    }
+    if (fdesc) {
+        hwaddr fdesc_phys = 0;
+        if (ia64_fw_try_translate_addr(env, fdesc, &fdesc_phys) &&
+            cpu_memory_rw_debug(cs, fdesc_phys, fdesc_raw,
                                 sizeof(fdesc_raw), false) == 0) {
             fdesc_ok = true;
-            entry = ldq_le_p(&fdesc_raw[0]);
-            gp = ldq_le_p(&fdesc_raw[8]);
-        } else {
-            ia64_fw_read_fdesc(cs, b7, &entry, &gp);
+            fdesc_raw_ok = true;
+            fd_entry = ldq_le_p(&fdesc_raw[0]);
+            fd_gp = ldq_le_p(&fdesc_raw[8]);
+        } else if (ia64_fw_read_fdesc(cs, fdesc, &fd_entry, &fd_gp)) {
+            fdesc_ok = true;
         }
     }
     uint64_t entry_region = entry >> 61;
@@ -16724,9 +16780,10 @@ void HELPER(fw_pei_install_mem_call_probe)(CPUIA64State *env, uint64_t pc)
                   " entry_region=%" PRIu64 " entry_low=%016" PRIx64
                   " entry_phys=%016" HWADDR_PRIx " gp=%016" PRIx64
                   " r1=%016" PRIx64 " r30=%016" PRIx64
-                  " r31=%016" PRIx64 " psr=%016" PRIx64 "\n",
+                  " r31=%016" PRIx64 " fdesc=%016" PRIx64
+                  " psr=%016" PRIx64 "\n",
                   pc, b7, entry, entry_region, entry_low, entry_phys,
-                  gp, env->r[1], env->r[30], env->r[31], env->psr);
+                  gp, env->r[1], env->r[30], env->r[31], fdesc, env->psr);
     {
         hwaddr r31_phys = 0;
         bool r31_ok = ia64_fw_try_translate_addr(env, env->r[31], &r31_phys);
@@ -16806,30 +16863,19 @@ void HELPER(fw_pei_install_mem_call_probe)(CPUIA64State *env, uint64_t pc)
         }
     }
     if (fdesc_ok) {
-        hwaddr b7_phys = 0;
-        bool b7_ok = ia64_fw_try_translate_addr(env, b7, &b7_phys);
+        bool match = (fd_entry == entry && fd_gp == gp);
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: pei_install_mem_call fdesc bytes=%02x %02x %02x %02x"
-                      " %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                      fdesc_raw[0], fdesc_raw[1], fdesc_raw[2], fdesc_raw[3],
-                      fdesc_raw[4], fdesc_raw[5], fdesc_raw[6], fdesc_raw[7],
-                      fdesc_raw[8], fdesc_raw[9], fdesc_raw[10], fdesc_raw[11],
-                      fdesc_raw[12], fdesc_raw[13], fdesc_raw[14], fdesc_raw[15]);
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: pei_install_mem_call b7_phys=%016" HWADDR_PRIx
-                      " ok=%d\n",
-                      b7_phys, b7_ok ? 1 : 0);
-        uint8_t around[48];
-        hwaddr start = (b7_phys >= 16) ? (b7_phys - 16) : 0;
-        if (cpu_memory_rw_debug(cs, start, around, sizeof(around), false) == 0) {
-            char line[192];
-            int pos = snprintf(line, sizeof(line),
-                               "  b7_mem %016" HWADDR_PRIx ":", start);
-            for (size_t i = 0; i < sizeof(around); i++) {
-                pos += snprintf(line + pos, sizeof(line) - pos,
-                                " %02x", around[i]);
-            }
-            qemu_log_mask(LOG_GUEST_ERROR, "%s\n", line);
+                      "IA64: pei_install_mem_call fdesc entry=%016" PRIx64
+                      " gp=%016" PRIx64 " match=%d\n",
+                      fd_entry, fd_gp, match ? 1 : 0);
+        if (fdesc_raw_ok) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_install_mem_call fdesc bytes=%02x %02x %02x %02x"
+                          " %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                          fdesc_raw[0], fdesc_raw[1], fdesc_raw[2], fdesc_raw[3],
+                          fdesc_raw[4], fdesc_raw[5], fdesc_raw[6], fdesc_raw[7],
+                          fdesc_raw[8], fdesc_raw[9], fdesc_raw[10], fdesc_raw[11],
+                          fdesc_raw[12], fdesc_raw[13], fdesc_raw[14], fdesc_raw[15]);
         }
     }
     if (entry_phys) {
