@@ -1021,7 +1021,8 @@ static bool ipf_fw_pei_use_pi_handoff(void)
             use_pi = (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 ||
                       strcmp(s, "no") == 0) ? 0 : 1;
         } else {
-            use_pi = 0;
+            /* xenipf/EDK PEI core expects PI-style handoff by default. */
+            use_pi = 1;
         }
     }
     return use_pi;
