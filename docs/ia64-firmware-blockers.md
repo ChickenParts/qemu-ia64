@@ -1,5 +1,9 @@
 # IA-64 Firmware Blockers
 
+This file is the rolling blocker evidence log referenced by
+`IA64_ROADMAP.md`. Keep this focused on current symptoms, repro facts, and
+investigation breadcrumbs.
+
 - DXE GCD assert: not observed in current runs after HOB list adjustments; keep an eye on resource HOB consistency if it reappears.
 - PEI/DXE hang in byte-copy loop around `pc=0xffe7b1e0` (seen with hang heartbeats). The loop copies a byte and decrements a count loaded via `**(r12+0x30)`; in the failing case the count is a pointer (example store: `pc=0xffe7b2e0` writes `0xffffffff0011b850` to `r12+0x08`), so it takes effectively forever to reach zero.
   - Store watch shows the count slot (`r12+0x08`) being overwritten by `st8 [r31]=r33` at `pc=0xffe24bb0`, which writes a pointer (ex: `0xffffffff0011b898`). That suggests argument/stack-slot corruption or missing initialization before the copy loop.

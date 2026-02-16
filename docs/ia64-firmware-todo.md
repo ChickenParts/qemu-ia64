@@ -3,6 +3,8 @@
 This list tracks known correctness gaps and bringup blockers for the IA-64
 firmware path. Items are grouped by status.
 
+For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
+
 ## Fixed in this pass
 
 - Correct ar.ec EC_CNT extraction in call/return ar.pfs construction (`target/ia64/helper.c:5233`).

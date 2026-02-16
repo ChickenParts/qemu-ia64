@@ -15184,14 +15184,6 @@ void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
                 uint64_t pei_size = ldq_le_p(&buf[48]);
                 uint64_t stack_base = ldq_le_p(&buf[56]);
                 uint64_t stack_size = ldq_le_p(&buf[64]);
-                if (env->fw_pei_ppi && env->r[33] != env->fw_pei_ppi) {
-                    env->r[33] = env->fw_pei_ppi;
-                    if (log_enabled) {
-                        qemu_log_mask(LOG_GUEST_ERROR,
-                                      "IA64: fw_pei_core_entry fix r33 -> %016" PRIx64 "\n",
-                                      env->fw_pei_ppi);
-                    }
-                }
                 if (log_enabled) {
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "IA64: fw_pei_core_entry handoff(sec) size=%u"
@@ -15209,6 +15201,14 @@ void HELPER(fw_pei_core_entry_probe)(CPUIA64State *env, uint64_t pc)
                 uint64_t car_size = ldq_le_p(&buf[8]);
                 uint64_t dispatch16 = ldq_le_p(&buf[16]);
                 uint64_t dispatch24 = ldq_le_p(&buf[24]);
+                if (env->fw_pei_ppi && env->r[33] != env->fw_pei_ppi) {
+                    env->r[33] = env->fw_pei_ppi;
+                    if (log_enabled) {
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "IA64: fw_pei_core_entry fix r33 -> %016" PRIx64 "\n",
+                                      env->fw_pei_ppi);
+                    }
+                }
                 if (log_enabled) {
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "IA64: fw_pei_core_entry handoff(startup)"
