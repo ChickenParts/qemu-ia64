@@ -34,6 +34,17 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   (`target/ia64/translate.c:109`, `scripts/run-ia64-firmware.sh:19`).
 - Respect ar.rsc.mode=0 (lazy) by skipping eager RSE spills so the PEI core's
   HOB pointer is not clobbered by backing-store writes (`target/ia64/helper.c`).
+- Restrict A-unit decode routing in M/I slots to architected A-unit majors
+  (`0x8,0x9,0xC,0xD,0xE`), so `major=0xA/0xB` no longer takes the A-unit path
+  (`target/ia64/translate.c`).
+- Implement A10 `pshladd2` / `pshradd2` packed halfword shift+add operations
+  (`target/ia64/translate.c`, `target/ia64/helper.c`, `target/ia64/helper.h`).
+- Complete A9 packed average/compare families:
+  `pavg*`, `pavg*.raz`, `pavgsub*`, `pcmp*.{eq,gt}`
+  (`target/ia64/translate.c`, `target/ia64/helper.c`, `target/ia64/helper.h`).
+- Route `gen_unimpl` through IA-64 illegal-op/general exception vector
+  (`0x5400`) instead of host aborting QEMU
+  (`target/ia64/helper.c`, `target/ia64/cpu.h`).
 
 ## Open issues (needs work)
 
@@ -55,6 +66,11 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   firmware uses it.
 - NaT propagation is incomplete in A-unit integer ops (only padd/psub handle NaT);
   other integer ALU ops ignore NaT and will silently compute values (`target/ia64/translate.c:1173`).
+- I-unit `op=7` multimedia/shift decode only covers a subset (mix/unpack4/mux/shl/shr/popcnt);
+  missing families include `pmpy*`, `pack2.*`, `unpack1/2.*`, `pmin/pmax`, `psad1`,
+  `pshl2/4`, `pshr2/4` register/immediate forms (`target/ia64/translate.c` I-slot `major=7`).
+- F-unit decode is still a bringup subset; many architected F-slot encodings still
+  fall through to `gen_unimpl("F-slot")` (`target/ia64/translate.c`).
 - ALAT/advanced load modeling is minimal; advanced load exceptions and NaT
   handling are not fully implemented (ld.a/chk.a paths in `target/ia64/translate.c`
   and `target/ia64/helper.c`).

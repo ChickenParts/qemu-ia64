@@ -2856,6 +2856,67 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
                     gen_helper_psub4(res, tcg_env, a, b);
                     op_ok = true;
                 }
+            } else if (x4 == 0x2) {
+                /* pavg{1,2} and pavg{1,2}.raz */
+                if (x2b == 2) {
+                    if (size == 1) {
+                        gen_helper_pavg1(res, tcg_env, a, b);
+                        op_ok = true;
+                    } else if (size == 2) {
+                        gen_helper_pavg2(res, tcg_env, a, b);
+                        op_ok = true;
+                    }
+                } else if (x2b == 3) {
+                    if (size == 1) {
+                        gen_helper_pavg1_raz(res, tcg_env, a, b);
+                        op_ok = true;
+                    } else if (size == 2) {
+                        gen_helper_pavg2_raz(res, tcg_env, a, b);
+                        op_ok = true;
+                    }
+                }
+            } else if (x4 == 0x3 && x2b == 2) {
+                /* pavgsub{1,2} */
+                if (size == 1) {
+                    gen_helper_pavgsub1(res, tcg_env, a, b);
+                    op_ok = true;
+                } else if (size == 2) {
+                    gen_helper_pavgsub2(res, tcg_env, a, b);
+                    op_ok = true;
+                }
+            } else if (x4 == 0x9 && (x2b == 0 || x2b == 1)) {
+                /* pcmp{1,2,4}.{eq,gt} */
+                if (x2b == 0) {
+                    if (size == 1) {
+                        gen_helper_pcmp1_eq(res, tcg_env, a, b);
+                        op_ok = true;
+                    } else if (size == 2) {
+                        gen_helper_pcmp2_eq(res, tcg_env, a, b);
+                        op_ok = true;
+                    } else if (size == 4) {
+                        gen_helper_pcmp4_eq(res, tcg_env, a, b);
+                        op_ok = true;
+                    }
+                } else {
+                    if (size == 1) {
+                        gen_helper_pcmp1_gt(res, tcg_env, a, b);
+                        op_ok = true;
+                    } else if (size == 2) {
+                        gen_helper_pcmp2_gt(res, tcg_env, a, b);
+                        op_ok = true;
+                    } else if (size == 4) {
+                        gen_helper_pcmp4_gt(res, tcg_env, a, b);
+                        op_ok = true;
+                    }
+                }
+            } else if (x4 == 0x4 && size == 2) {
+                /* A10: pshladd2 r1 = r2, count2, r3 */
+                gen_helper_pshladd2(res, tcg_env, a, b, tcg_constant_i32(x2b));
+                op_ok = true;
+            } else if (x4 == 0x6 && size == 2) {
+                /* A10: pshradd2 r1 = r2, count2, r3 */
+                gen_helper_pshradd2(res, tcg_env, a, b, tcg_constant_i32(x2b));
+                op_ok = true;
             }
 
             if (op_ok) {
@@ -3274,7 +3335,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
          * (e.g. "adds"/"mov" idioms in kernel prologues and MLX bundles).
          * Decode those here before falling back to memory/control decoding.
          */
-        if (major >= 0x8 && major <= 0xE) {
+        if (major == 0x8 || major == 0x9 ||
+            major == 0xC || major == 0xD || major == 0xE) {
             decode_a_unit(ctx, insn);
             break;
         }
@@ -4902,8 +4964,6 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         }
         case 0x8: /* A-unit */
         case 0x9: /* A-unit */
-        case 0xA: /* A-unit */
-        case 0xB: /* A-unit */
         case 0xC: /* A-unit */
         case 0xD: /* A-unit */
         case 0xE: /* A-unit */
@@ -6585,8 +6645,6 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         }
         case 0x8: /* A-unit */
         case 0x9: /* A-unit */
-        case 0xA: /* A-unit */
-        case 0xB: /* A-unit */
         case 0xC: /* A-unit */
         case 0xD: /* A-unit */
         case 0xE: /* A-unit */

@@ -1,39 +1,50 @@
 # Status Update (2026-02-16)
 
 ## Summary
-Work is focused on IA-64 firmware bringup and PEI/DXE stability. The most recent change is a small adjustment to the PEI core entry probe in `target/ia64/helper.c`: the r33 fixup for the PEI PPI pointer is now applied only for the startup handoff path (not the SEC handoff path). This keeps the probe from mutating r33 in the SEC handoff case and aligns with the intended data layout in the startup handoff.
+This tranche focused on IA-64 instruction coverage and trap behavior hardening:
+- Completed A9 packed average/compare instruction families.
+- Completed A10 packed shift+add family.
+- Routed `gen_unimpl` through IA-64 illegal-op/general exception handling
+  (`0x5400`) instead of host-aborting QEMU.
 
-## Roadmap Context
-- Canonical execution roadmap: `IA64_ROADMAP.md` (Q2 2026 plan).
-- Detailed blocker evidence log: `docs/ia64-firmware-blockers.md`.
-- Longer-form architecture and debt context: `IA64-AUDIT.md`, `docs/ia64-firmware-todo.md`.
+## Implemented in This Tranche
+- `target/ia64/translate.c`
+  - Added A9 decode coverage for:
+    - `pavg1`, `pavg2`
+    - `pavg1.raz`, `pavg2.raz`
+    - `pavgsub1`, `pavgsub2`
+    - `pcmp1.eq`, `pcmp2.eq`, `pcmp4.eq`
+    - `pcmp1.gt`, `pcmp2.gt`, `pcmp4.gt`
+  - Added A10 decode coverage for:
+    - `pshladd2`, `pshradd2`
+  - Kept A-unit routing fix in M/I slots: majors limited to
+    `0x8,0x9,0xC,0xD,0xE`.
+- `target/ia64/helper.c` / `target/ia64/helper.h`
+  - Added helper implementations and declarations for all A9 ops above.
+  - Added helper implementations and declarations for A10 `pshladd2/pshradd2`.
+  - Changed `HELPER(unimpl)` to raise `IA64_VEC_ILLEGAL_OP` via `ia64_fault()`
+    after logging, replacing `cpu_abort()`.
+- `target/ia64/cpu.h`
+  - Added `IA64_VEC_GENERAL_EXCEPTION` and `IA64_VEC_ILLEGAL_OP`.
 
-## Current Code Change
-- `target/ia64/helper.c`: moved the `fw_pei_ppi` -> `r33` fixup into the startup handoff branch of `HELPER(fw_pei_core_entry_probe)`.
-  - Diff summary: 8 insertions, 8 deletions; no functional change elsewhere.
+## Validation Evidence
+Build:
+- `ninja -C build -j4` passed.
 
-## Recent Run Artifacts
-- `run.repro.err` shows a fatal unimplemented A-slot instruction:
-  - `IA64 UNIMPL: pc=a00000010002e240 ri=2 insn=14000000202 A-slot`
-- `run.watch.err` shows a fatal unimplemented M-slot instruction:
-  - `IA64 UNIMPL: pc=a00000010114d4a0 ri=0 insn=01018202830 M-slot`
-- `run.repro.out`/`run.watch.out` indicate the kernel entry handoff and reset proceed before hitting the UNIMPL.
+Runtime smoke:
+- `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+  - Result: `rc=124` (timeout), no host fatal abort.
+- `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+  - Result: `rc=137` (killed after timeout path), no host fatal abort.
 
-## Known Blockers / Open Issues
-(From `docs/ia64-firmware-blockers.md`)
-- PEI/DXE hang in byte-copy loop around `pc=0xffe7b1e0`, likely due to argument/stack-slot corruption (size becomes a pointer).
-- PHIT memory range mismatch: HOB shows 16MiB even with `-m 512M`.
-- HOB list consistency: DXE might be using a different list than the one patched by QEMU.
-- FlashMap GUIDed HOB validation needed for EFI variables region.
-- PEI PPI assert: `fw_pei_err` loops on `EFI_NOT_FOUND`/`EFI_ABORTED` after `InstallPeiMemory`.
+Logs checked:
+- `scratch/ia64_logs/qemu.fw.log`
+- `scratch/ia64_logs/qemu.log`
+- No `IA64 UNIMPL`/fatal-host-abort lines observed in these fresh logs.
 
-## Suggested Next Steps
-1. Decide whether to address the A-slot/M-slot UNIMPLs first (likely needed for forward progress). Use the PCs in `run.repro.err` and `run.watch.err` to decode the exact opcodes and implement or stub them.
-2. If focusing on PEI PPI asserts, add/enable PPI dispatch tracing around the `fw_pei_err` loop to identify the failing PPI/notify path.
-3. Re-check PHIT memory size and HOB list cloning logic to confirm the firmware sees the expected memory map.
-
-## Files Touched / Useful References
-- Modified: `target/ia64/helper.c`
-- Logs: `run.repro.err`, `run.repro.out`, `run.watch.err`, `run.watch.out`
-- Blocker tracking: `docs/ia64-firmware-blockers.md`
-- Overall audit context: `IA64-AUDIT.md`
+## Remaining Open Work
+- I-unit `op=7` multimedia gaps still open (`pmpy*`, `pack2.*`,
+  `unpack1/2.*`, `pmin/pmax`, `psad1`, `pshl2/4`, `pshr2/4` forms).
+- F-unit coverage remains partial; many encodings still fall through to
+  `gen_unimpl("F-slot")`.
+- Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
