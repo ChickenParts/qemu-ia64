@@ -4404,29 +4404,61 @@ static void ia64_fw_pei_seed_core_hob_field(CPUState *cs, uint64_t core)
     (void)core;
     return;
 #else
+    uint64_t hob260_raw = 0;
     uint64_t hob470_raw = 0;
-    if (!core || !ia64_fw_read_u64(cs, core + 0x470, &hob470_raw)) {
-        return;
-    }
-    if (hob470_raw && hob470_raw != UINT64_MAX) {
+    uint64_t hob478_raw = 0;
+    uint64_t hob260_phys = 0;
+    uint64_t hob470_phys = 0;
+    uint64_t hob478_phys = 0;
+    bool hob260_ok = false;
+    bool hob470_ok = false;
+    bool hob478_ok = false;
+    bool hob260_valid = false;
+    bool hob470_valid = false;
+    bool hob478_valid = false;
+    uint64_t src_raw = 0;
+    uint64_t src_phys = 0;
+    const char *src_name = "none";
+
+    if (!core) {
         return;
     }
 
-    uint64_t src_raw = 0;
-    uint64_t src_phys = 0;
-    const uint64_t src_offsets[] = { 0x260, 0x478 };
-    for (size_t i = 0; i < ARRAY_SIZE(src_offsets); i++) {
-        uint64_t cand_raw = 0;
-        if (!ia64_fw_read_u64(cs, core + src_offsets[i], &cand_raw) ||
-            !cand_raw || cand_raw == UINT64_MAX) {
-            continue;
-        }
-        uint64_t cand_phys = ia64_phys_mode_addr(cand_raw);
-        if (ia64_fw_validate_efi_hob_list(cs, cand_phys, NULL, NULL)) {
-            src_raw = cand_raw;
-            src_phys = cand_phys;
-            break;
-        }
+    hob260_ok = ia64_fw_read_u64(cs, core + 0x260, &hob260_raw);
+    hob470_ok = ia64_fw_read_u64(cs, core + 0x470, &hob470_raw);
+    hob478_ok = ia64_fw_read_u64(cs, core + 0x478, &hob478_raw);
+    if (!hob260_ok && !hob470_ok) {
+        return;
+    }
+
+    if (hob260_ok && hob260_raw && hob260_raw != UINT64_MAX) {
+        hob260_phys = ia64_phys_mode_addr(hob260_raw);
+        hob260_valid = ia64_fw_validate_efi_hob_list(cs, hob260_phys,
+                                                     NULL, NULL);
+    }
+    if (hob470_ok && hob470_raw && hob470_raw != UINT64_MAX) {
+        hob470_phys = ia64_phys_mode_addr(hob470_raw);
+        hob470_valid = ia64_fw_validate_efi_hob_list(cs, hob470_phys,
+                                                     NULL, NULL);
+    }
+    if (hob478_ok && hob478_raw && hob478_raw != UINT64_MAX) {
+        hob478_phys = ia64_phys_mode_addr(hob478_raw);
+        hob478_valid = ia64_fw_validate_efi_hob_list(cs, hob478_phys,
+                                                     NULL, NULL);
+    }
+
+    if (hob260_valid) {
+        src_raw = hob260_raw;
+        src_phys = hob260_phys;
+        src_name = "core_260";
+    } else if (hob470_valid) {
+        src_raw = hob470_raw;
+        src_phys = hob470_phys;
+        src_name = "core_470";
+    } else if (hob478_valid) {
+        src_raw = hob478_raw;
+        src_phys = hob478_phys;
+        src_name = "core_478";
     }
 
     if (!src_phys && ia64_fw_pei_cached_hob_base &&
@@ -4434,28 +4466,52 @@ static void ia64_fw_pei_seed_core_hob_field(CPUState *cs, uint64_t core)
                                       NULL, NULL)) {
         src_phys = ia64_fw_pei_cached_hob_base;
         src_raw = src_phys;
+        src_name = "cached";
     }
     if (!src_phys) {
         return;
     }
 
-    uint64_t tmpl = src_raw ? src_raw : src_phys;
-    uint64_t enc = ia64_fw_encode_addr(tmpl, src_phys);
-    uint8_t out[8];
-    stq_le_p(out, enc);
-    if (!ia64_fw_write_bytes_any(cs, core + 0x470, out, sizeof(out))) {
-        return;
-    }
+    struct {
+        uint64_t off;
+        bool have_raw;
+        bool valid;
+        uint64_t raw;
+    } targets[] = {
+        { 0x260, hob260_ok, hob260_valid, hob260_raw },
+        { 0x470, hob470_ok, hob470_valid, hob470_raw },
+    };
 
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
-        static int log_count;
-        if (log_count < 32) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: pei_core_hob470_seed core=%016" PRIx64
-                          " old=%016" PRIx64 " new=%016" PRIx64
-                          " src_phys=%016" PRIx64 "\n",
-                          core, hob470_raw, enc, src_phys);
-            log_count++;
+    for (size_t i = 0; i < ARRAY_SIZE(targets); i++) {
+        uint64_t old_raw = targets[i].raw;
+        bool missing = !old_raw || old_raw == UINT64_MAX;
+        if (!targets[i].have_raw || targets[i].valid) {
+            continue;
+        }
+
+        uint64_t tmpl = src_raw ? src_raw : src_phys;
+        uint64_t enc = ia64_fw_encode_addr(tmpl, src_phys);
+        uint8_t out[8];
+        stq_le_p(out, enc);
+        if (!ia64_fw_write_bytes_any(cs, core + targets[i].off, out,
+                                     sizeof(out))) {
+            continue;
+        }
+
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            static int log_count;
+            if (log_count < 64) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_core_hob_seed core=%016" PRIx64
+                              " off=0x%03zx old=%016" PRIx64
+                              " new=%016" PRIx64
+                              " reason=%s src=%s src_phys=%016" PRIx64 "\n",
+                              core, (size_t)targets[i].off,
+                              old_raw, enc,
+                              missing ? "missing" : "invalid",
+                              src_name, src_phys);
+                log_count++;
+            }
         }
     }
 #endif
@@ -16748,6 +16804,11 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                     }
                 }
             }
+            /*
+             * Keep both core HOB slots (0x260 and 0x470) non-null/valid once
+             * we have a validated source pointer for this core instance.
+             */
+            ia64_fw_pei_seed_core_hob_field(cs, core);
         }
     }
 

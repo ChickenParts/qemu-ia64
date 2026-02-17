@@ -95,6 +95,11 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   `pc=0xffe24e80` OOR cascade in baseline runs
   (`target/ia64/helper.c`, `scripts/run-ia64-firmware.sh`,
   `docs/ia64-environment-variables.md`).
+- Fix PEI core HOB-slot coherence by seeding missing/invalid core `+0x260` and
+  `+0x470` slots from validated peer/cached HOB sources during core discovery
+  and `fw_pei_hob_init_fix`, eliminating the early `pc=0xffe24e80`
+  `EFI_OUT_OF_RESOURCES` regression even with HOB out-pointer repair disabled
+  (`target/ia64/helper.c`).
 - Fix tested system-memory HOB coverage synthesis to use current PHIT physical
   bounds so DXE GCD preconditions can be materialized in HOB patch mode
   (`target/ia64/helper.c`, `scripts/run-ia64-firmware.sh`).
@@ -118,12 +123,6 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   `report_status_code` return and first-bad capture is skipped for this path.
   Root production semantics in notify/dispatch chain are still not fully solved
   and remain correlated with the baseline DXE `Gcd.c:1736` stop.
-- The early PEI `EFI_OUT_OF_RESOURCES` regression at `pc=0xffe24e80` is now
-  compatibility-mitigated by bounded `GetHobList` out-pointer repair; with
-  fixes disabled (`QEMU_IA64_PEI_HOB_PTR_FIX=0`,
-  `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD=0`) the old failure reproduces.
-  Root-cause provenance for why firmware sometimes returns/observes a null
-  `GetHobList` out pointer on that path remains open.
 - SAL systab injection can still be too late or collide with firmware memory:
   we write a synthetic SST_ into fixed low RAM and inject an EFI config entry
   without reserving/allocating space from firmware (`target/ia64/helper.c:1849`,

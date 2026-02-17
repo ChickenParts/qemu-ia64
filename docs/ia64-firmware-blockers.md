@@ -77,14 +77,14 @@ investigation breadcrumbs.
   - Legacy knobs remain for bisecting compatibility:
     - `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL`
     - `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS`
-- PEI core HOB-pointer slot seeding is now active for both initial and
-  relocated core instances:
-  - `fw_pei_hob_init_fix` seeds core `+0x470` when missing.
-  - `ia64_fw_pei_find_core_from_ps()` now seeds missing `+0x470` from validated
-    `+0x260`/`+0x478`/cached HOB sources on discovery.
+- PEI core HOB-pointer slot seeding now keeps both core slots coherent
+  (`+0x260` and `+0x470`) for initial and relocated core instances:
+  - `ia64_fw_pei_seed_core_hob_field()` now seeds missing/invalid
+    `+0x260`/`+0x470` from validated `core+0x260/+0x470/+0x478` or cached HOB.
+  - `fw_pei_hob_init_fix` now calls this seeding path after core discovery.
   - Evidence:
-    - `fw_pei_hob_init_fix ... hob470_raw=0 ... new=0x40ef000 ...`
-    - `pei_core_hob470_seed core=0x11ba90 old=0 ... new=0x40ef000 ...`
+    - `pei_core_hob_seed core=... off=0x260 old=0 ... new=0x40ef000 ...`
+    - `pei_core_hob_seed core=... off=0x470 old=0 ... new=0x40ef000 ...`
 - PEI HOB flow contract tracing/repair is now wired (default on):
   - `QEMU_IA64_PEI_HOB_FLOW_TRACE=1` logs `GetHobList`/`CreateHob` call-return
     pointer contract with core/HOB provenance (`pei_hob_flow ...`).
@@ -96,12 +96,14 @@ investigation breadcrumbs.
   - A/B evidence (2026-02-17):
     - defaults on: no early `pc=0xffe24e80` `EFI_OUT_OF_RESOURCES` transition
       observed in 35s baseline run window.
-    - fixes off (`...HOB_PTR_FIX=0 ...CREATE_HOB_PTR_GUARD=0`):
-      `pc=0xffe24e80` `EFI_OUT_OF_RESOURCES` regression reproduces.
-  - Residual root-cause item:
-    - underlying reason firmware writes/observes null `GetHobList` out pointers
-      on the failing path is still not fully explained; current behavior is a
-      bounded compatibility repair.
+    - fixes off (`...HOB_PTR_FIX=0 ...CREATE_HOB_PTR_GUARD=0`) after slot
+      coherence seeding: no early `pc=0xffe24e80` transition in the same run
+      window, and no `pei_hob_ptr_fix` events required.
+  - Root-cause update:
+    - early OOR path was driven by core `+0x260` being left null/invalid while
+      `+0x470` was valid; `GetHobList`/`CreateHob` consumers on that path read
+      the stale `+0x260` slot.
+    - bounded HOB out-pointer repair remains as compatibility guard/bisect aid.
 - Tested sysmem HOB coverage fix is now in place for HOB patch mode:
   - system-memory synthesis now validates coverage against PHIT physical
     `EfiFreeMemoryBottom..Top` and inserts when missing.

@@ -255,6 +255,27 @@ Logs checked:
       - `EFI_OUT_OF_RESOURCES`.
   - No host abort/regression in these runs (`rc=124` timeout path).
 
+## Follow-up (P3-K Core HOB Slot Coherence Root-Cause Fix)
+- Implemented root-cause fix for early PEI HOB pointer divergence:
+  - `target/ia64/helper.c`
+    - `ia64_fw_pei_seed_core_hob_field()` now seeds both core `+0x260` and
+      `+0x470` when missing/invalid, sourcing from validated
+      `+0x260`/`+0x470`/`+0x478` or cached HOB base.
+    - `fw_pei_hob_init_fix` now invokes this seeding path after core discovery
+      so early PEI consumers do not see a null `+0x260` while `+0x470` is valid.
+- Validation (2026-02-17):
+  - Build/tests:
+    - `ninja -C build -j4` passed.
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware A/B:
+    - with HOB pointer repair disabled
+      (`IA64_PEI_HOB_PTR_FIX=0 IA64_PEI_CREATE_HOB_PTR_GUARD=0`):
+      no early `pc=0xffe24e80` `EFI_OUT_OF_RESOURCES` transition in a 35s run.
+    - default knobs: no early `pc=0xffe24e80` transition in 20s run.
+  - Log evidence (`scratch/ia64_logs/qemu.fw.log`):
+    - `pei_core_hob_seed core=... off=0x260 old=0 ... new=0x40ef000 ...`
+    - no `pei_hob_ptr_fix` events required in the above windows.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
