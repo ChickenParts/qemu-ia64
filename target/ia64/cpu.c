@@ -200,6 +200,16 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     env->prev_b0_write_insn = 0;
     env->prev_b0_write_val = 0;
     env->prev_b0_write_kind = 0;
+    env->last_b7_write_pc = 0;
+    env->last_b7_write_kind = 0;
+    env->last_b7_write_aux = 0;
+    env->last_b7_write_old = 0;
+    env->last_b7_write_val = 0;
+    env->prev_b7_write_pc = 0;
+    env->prev_b7_write_kind = 0;
+    env->prev_b7_write_aux = 0;
+    env->prev_b7_write_old = 0;
+    env->prev_b7_write_val = 0;
     memset(env->b0_trace_pc, 0, sizeof(env->b0_trace_pc));
     memset(env->b0_trace_insn, 0, sizeof(env->b0_trace_insn));
     memset(env->b0_trace_val, 0, sizeof(env->b0_trace_val));

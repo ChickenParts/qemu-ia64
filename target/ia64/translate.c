@@ -765,6 +765,8 @@ static bool ia64_pei_store_watch_inited;
 static bool ia64_pei_store_watch_enabled;
 static bool ia64_pei_load_watch_inited;
 static bool ia64_pei_load_watch_enabled;
+static bool ia64_fw_pei_copy_writer_watch_inited;
+static bool ia64_fw_pei_copy_writer_watch_enabled;
 
 static void ia64_init_store_watch(void)
 {
@@ -906,6 +908,16 @@ static bool ia64_pei_load_watch_match(void)
         ia64_pei_load_watch_enabled = (s && *s) ? true : false;
     }
     return ia64_pei_load_watch_enabled;
+}
+
+static bool ia64_fw_pei_copy_writer_watch_match(void)
+{
+    if (!ia64_fw_pei_copy_writer_watch_inited) {
+        ia64_fw_pei_copy_writer_watch_inited = true;
+        const char *s = getenv("QEMU_IA64_FW_PEI_COPY_WRITER_TRACE");
+        ia64_fw_pei_copy_writer_watch_enabled = (s && *s) ? true : false;
+    }
+    return ia64_fw_pei_copy_writer_watch_enabled;
 }
 
 static TCGv_i64 gen_phys_mode_addr(TCGv_i64 addr)
@@ -2027,6 +2039,30 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                         tcg_constant_i64(ctx->base.pc_next));
         }
     }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe22560ULL ||
+         ctx->base.pc_next == 0x00000000ffe22560ULL)) {
+        gen_helper_fw_pei_first_bad_status_probe(tcg_env,
+                                                 tcg_constant_i64(ctx->base.pc_next),
+                                                 tcg_constant_i32(1));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe2be20ULL ||
+         ctx->base.pc_next == 0x00000000ffe2be20ULL)) {
+        gen_helper_fw_pei_first_bad_status_probe(tcg_env,
+                                                 tcg_constant_i64(ctx->base.pc_next),
+                                                 tcg_constant_i32(2));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe26eb0ULL ||
+         ctx->base.pc_next == 0x00000000ffe26eb0ULL)) {
+        gen_helper_fw_pei_first_bad_status_probe(tcg_env,
+                                                 tcg_constant_i64(ctx->base.pc_next),
+                                                 tcg_constant_i32(3));
+    }
 
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 1 &&
@@ -2092,6 +2128,9 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe268b0ULL ||
          ctx->base.pc_next == 0x00000000ffe268b0ULL)) {
+        gen_helper_fw_pei_first_bad_status_probe(tcg_env,
+                                                 tcg_constant_i64(ctx->base.pc_next),
+                                                 tcg_constant_i32(4));
         gen_helper_fw_pei_err268_probe(tcg_env,
                                        tcg_constant_i64(ctx->base.pc_next));
     }
@@ -2286,6 +2325,75 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         gen_helper_fw_pei_oor_probe(tcg_env,
                                     tcg_constant_i64(ctx->base.pc_next),
                                     tcg_constant_i32(1));
+    }
+
+    /*
+     * xenipf/EDK firmware: targeted trace for GetHobList store site and the
+     * byte-copy helper setup/count/body bundles used in DXE assert triage.
+     */
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe24bb0ULL ||
+         ctx->base.pc_next == 0x00000000ffe24bb0ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(0));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe24bc0ULL ||
+         ctx->base.pc_next == 0x00000000ffe24bc0ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(1));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe7b220ULL ||
+         ctx->base.pc_next == 0x00000000ffe7b220ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(2));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe7b280ULL ||
+         ctx->base.pc_next == 0x00000000ffe7b280ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(6));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe7b2a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe7b2a0ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(7));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe7b2e0ULL ||
+         ctx->base.pc_next == 0x00000000ffe7b2e0ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(3));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe7b310ULL ||
+         ctx->base.pc_next == 0x00000000ffe7b310ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(4));
+    }
+    if (ctx->mem_idx != MMU_USER_IDX &&
+        ctx->ri == 0 &&
+        (ctx->base.pc_next == 0x80000000ffe7b3a0ULL ||
+         ctx->base.pc_next == 0x00000000ffe7b3a0ULL)) {
+        gen_helper_fw_pei_copy_probe(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next),
+                                     tcg_constant_i32(5));
     }
 #endif
 
@@ -3067,6 +3175,14 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                           "br.call(reg) pc=%016" PRIx64 " insn=%011" PRIx64
                           " b1=%u b2=%u\n",
                           ctx->base.pc_next, insn, b1, b2);
+        }
+        {
+            TCGv_i64 fixed_tgt = tcg_temp_new_i64();
+            gen_helper_fw_fix_call_tgt(fixed_tgt, tcg_env,
+                                       tcg_constant_i64(ctx->base.pc_next),
+                                       tcg_constant_i32(b2),
+                                       tgt);
+            tcg_gen_mov_i64(tgt, fixed_tgt);
         }
         if (ia64_dbg_call_pc_match(ctx->base.pc_next)) {
             gen_helper_dbg_call(tcg_env, tcg_constant_i64(ctx->base.pc_next));
@@ -4916,6 +5032,14 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                                   tcg_constant_i32(size),
                                                   src);
                 }
+                if (ia64_fw_pei_copy_writer_watch_match()) {
+                    gen_helper_fw_pei_copy_writer_store(tcg_env,
+                                                        tcg_constant_i64(ctx->base.pc_next),
+                                                        tcg_constant_i32(ctx->ri),
+                                                        watch_addr,
+                                                        tcg_constant_i32(size),
+                                                        src);
+                }
                 if (ia64_store_watch_value_match() && size == 8) {
                     uint64_t effective_mask = ia64_store_watch_value_mask;
                     if (effective_mask) {
@@ -5801,6 +5925,45 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             }
 
             /*
+             * I1 pmpyshr2/pmpyshr2.u:
+             *   x2b=3 => signed pmpyshr2
+             *   x2b=1 => unsigned pmpyshr2.u
+             * count2 mapping (SKI count2I1): 0->0, 1->7, 2->15, 3->16.
+             */
+            if (za == 0 && zb == 1 && ve == 0 && x2a == 0 &&
+                (x2b == 1 || x2b == 3)) {
+                uint8_t count2 = (x2c == 0) ? 0 : (x2c == 1) ? 7 : (x2c == 2) ? 15 : 16;
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (x2b == 3) {
+                    gen_helper_pmpyshr2(res, tcg_env, a, b, tcg_constant_i32(count2));
+                } else {
+                    gen_helper_pmpyshr2_u(res, tcg_env, a, b, tcg_constant_i32(count2));
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /*
              * I8 pshl2/pshl4 immediate-count forms:
              *   za=0 zb=1 => pshl2
              *   za=1 zb=0 => pshl4
@@ -5954,6 +6117,132 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                 }
 
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 pmpy2.{r,l}: za=0 zb=1 ve=0 x2a=2 x2c=3 */
+            if (za == 0 && zb == 1 && ve == 0 && x2a == 2 && x2c == 3 &&
+                (x2b == 1 || x2b == 3)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (x2b == 1) {
+                    gen_helper_pmpy2_r(res, tcg_env, a, b);
+                } else {
+                    gen_helper_pmpy2_l(res, tcg_env, a, b);
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 pmin1.u/pmax1.u: za=0 zb=0 ve=0 x2a=2 x2b=1 x2c=0/1 */
+            if (za == 0 && zb == 0 && ve == 0 && x2a == 2 && x2b == 1 &&
+                (x2c == 0 || x2c == 1)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (x2c == 0) {
+                    gen_helper_pmin1_u(res, tcg_env, a, b);
+                } else {
+                    gen_helper_pmax1_u(res, tcg_env, a, b);
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 pmin2/pmax2: za=0 zb=1 ve=0 x2a=2 x2b=3 x2c=0/1 */
+            if (za == 0 && zb == 1 && ve == 0 && x2a == 2 && x2b == 3 &&
+                (x2c == 0 || x2c == 1)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (x2c == 0) {
+                    gen_helper_pmin2(res, tcg_env, a, b);
+                } else {
+                    gen_helper_pmax2(res, tcg_env, a, b);
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 psad1: za=0 zb=0 ve=0 x2a=2 x2b=3 x2c=2 */
+            if (za == 0 && zb == 0 && ve == 0 && x2a == 2 && x2b == 3 && x2c == 2) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                gen_helper_psad1(res, tcg_env, a, b);
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], res);
                 }

@@ -13,6 +13,7 @@ Environment overrides:
   IA64_LD            (default: ia64-suse-linux-ld)
   IA64_STRIP         (default: ia64-suse-linux-strip)
   IA64_GEN_INIT_CPIO (default: stuff/linux-ia64/usr/gen_init_cpio)
+  IA64_INIT_SRC      (default: scripts/ia64-initramfs/init.S)
 EOF
 }
 
@@ -27,7 +28,7 @@ ld_bin="${IA64_LD:-ia64-suse-linux-ld}"
 strip_bin="${IA64_STRIP:-ia64-suse-linux-strip}"
 gen_cpio="${IA64_GEN_INIT_CPIO:-stuff/linux-ia64/usr/gen_init_cpio}"
 
-src="scripts/ia64-initramfs/init.S"
+src="${IA64_INIT_SRC:-scripts/ia64-initramfs/init.S}"
 obj="$outdir/init.o"
 init="$outdir/init"
 list="$outdir/initramfs.list"
@@ -35,6 +36,11 @@ cpio="$outdir/initramfs.cpio"
 gz="$outdir/initramfs.cpio.gz"
 
 mkdir -p "$outdir"
+
+if [[ ! -f "$src" ]]; then
+  echo "init source not found: $src" >&2
+  exit 1
+fi
 
 "$as_bin" -o "$obj" "$src"
 "$ld_bin" -static -nostdlib -e _start -o "$init" "$obj"

@@ -52,15 +52,78 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
 - Fix NaT propagation for implemented I-unit `op=7` scalar forms
   (`popcnt`, `mux1`, `mux2`, `shl`, `shr/shr.u`)
   (`target/ia64/translate.c`).
+- Complete remaining I-unit `op=7` multimedia families:
+  `pmpyshr2(.u)`, `pmpy2.{r,l}`, `pmin1.u`, `pmax1.u`, `pmin2`, `pmax2`,
+  `psad1`
+  (`target/ia64/translate.c`, `target/ia64/helper.c`, `target/ia64/helper.h`).
+- Add directed `op=7` bare-kernel selftest harness and runner
+  (`scripts/ia64-op7-selftest.S`, `scripts/run-ia64-op7-tests.sh`).
+- Add targeted PEI copy-path tracing hooks and summarizer script for the
+  `0xffe7b1e0` byte-copy blocker
+  (`target/ia64/translate.c`, `target/ia64/helper.c`,
+  `scripts/ia64-pei-copy-report.sh`).
+- Add pre-trigger copy-path history ring and targeted writer tracker for
+  `sp+0x08` setup-count triage (with setup-stage-only trigger to avoid
+  zero-count exit false positives)
+  (`target/ia64/helper.c`, `target/ia64/translate.c`,
+  `scripts/run-ia64-firmware.sh`).
+- Add first-bad PEI status provenance probes and a non-trace-gated
+  StatusCode `PeiLocatePpi` corrective return path (env-gated via
+  `QEMU_IA64_PEI_LOCATE_FIX`, default on)
+  (`target/ia64/helper.c`, `target/ia64/translate.c`,
+  `scripts/run-ia64-firmware.sh`).
+- Add first-bad producer-path tracing (PEI call-history ring, status-transition
+  logs, RSE chain + dispatch-state dump) to pinpoint the exact `EFI_END_OF_MEDIA`
+  production chain
+  (`target/ia64/helper.c`, `scripts/run-ia64-firmware.sh`).
+- Add `report_status_code` early-phase soft-fail guard so `EFI_NOT_FOUND` /
+  `EFI_END_OF_MEDIA` from status-code reporting does not propagate as fatal
+  while PPI DB is still empty (`ppi_end <= 0`)
+  (`target/ia64/helper.c`, `scripts/run-ia64-firmware.sh`).
+- Add default-on StatusCode semantic fix path and optional-path first-bad
+  suppression for unresolved StatusCode report flow, with compatibility knobs
+  retained for bisecting
+  (`target/ia64/helper.c`, `scripts/run-ia64-firmware.sh`,
+  `docs/ia64-environment-variables.md`).
+- Seed/repair PEI core HOB pointer slot `+0x470` when missing (including
+  relocated core discovery paths) so core-side HOB pointer state does not stay
+  null when a validated list is already available via `+0x260`/`+0x478`
+  (`target/ia64/helper.c`).
+- Add bounded PEI HOB-flow contract tracing and `GetHobList` null-out pointer
+  repair path (`QEMU_IA64_PEI_HOB_FLOW_TRACE`, `QEMU_IA64_PEI_HOB_PTR_FIX`,
+  `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD`) to prevent the early
+  `pc=0xffe24e80` OOR cascade in baseline runs
+  (`target/ia64/helper.c`, `scripts/run-ia64-firmware.sh`,
+  `docs/ia64-environment-variables.md`).
+- Fix tested system-memory HOB coverage synthesis to use current PHIT physical
+  bounds so DXE GCD preconditions can be materialized in HOB patch mode
+  (`target/ia64/helper.c`, `scripts/run-ia64-firmware.sh`).
+- Add bounded null `br.call` target repair for the post-GCD DXE control-flow
+  path (`pc=0x1ff4f520`) with per-callsite/target cache and wrapper knobs
+  (`target/ia64/helper.c`, `target/ia64/translate.c`, `target/ia64/cpu.h`,
+  `target/ia64/helper.h`, `scripts/run-ia64-firmware.sh`).
 
 ## Open issues (needs work)
 
-- Firmware now reaches DXE IPL but asserts in `DxeLoad.c` line 790 with a
-  negative Status value; need to identify the failing service or missing HOB
-  entry (see serial log output).
-- Firmware also hits an ASSERT in `AfterMemMP.c` line 161 and spins in a
-  dead-loop around `pc=0xffe737a0` (RAM); hang_abort shows the file pointer in
-  r33 and line in r34, but the failing Status source still needs to be traced.
+- Firmware blocker now depends on HOB patch mode:
+  - baseline (`QEMU_IA64_EFI_HOB_PATCH` off): still asserts in
+    `Core\Dxe\Gcd\Gcd.c` line 1736 (`Descrpt: Found`).
+  - HOB patch mode (`QEMU_IA64_EFI_HOB_PATCH=1`): synthetic tested sysmem HOB
+    is now present and run progresses past `Gcd.c:1736`; bounded null-call
+    repair (`QEMU_IA64_CALL_NULL_FIX=1`, default on) now intercepts the known
+    `pc=0x1ff4f520` null-branch path and avoids immediate host abort.
+    Root-cause provenance for why this path loads a null target is still open.
+- StatusCode optional-path handling is now semantic and default-on:
+  unresolved StatusCode report flow is treated as optional at
+  `report_status_code` return and first-bad capture is skipped for this path.
+  Root production semantics in notify/dispatch chain are still not fully solved
+  and remain correlated with the baseline DXE `Gcd.c:1736` stop.
+- The early PEI `EFI_OUT_OF_RESOURCES` regression at `pc=0xffe24e80` is now
+  compatibility-mitigated by bounded `GetHobList` out-pointer repair; with
+  fixes disabled (`QEMU_IA64_PEI_HOB_PTR_FIX=0`,
+  `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD=0`) the old failure reproduces.
+  Root-cause provenance for why firmware sometimes returns/observes a null
+  `GetHobList` out pointer on that path remains open.
 - SAL systab injection can still be too late or collide with firmware memory:
   we write a synthetic SST_ into fixed low RAM and inject an EFI config entry
   without reserving/allocating space from firmware (`target/ia64/helper.c:1849`,
@@ -73,8 +136,6 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   firmware uses it.
 - NaT propagation is incomplete in A-unit integer ops (only padd/psub handle NaT);
   other integer ALU ops ignore NaT and will silently compute values (`target/ia64/translate.c:1173`).
-- I-unit `op=7` multimedia decode is still incomplete; missing families now include
-  `pmpy*`, `pmin/pmax`, `psad1` (`target/ia64/translate.c` I-slot `major=7`).
 - F-unit decode is still a bringup subset; many architected F-slot encodings still
   fall through to `gen_unimpl("F-slot")` (`target/ia64/translate.c`).
 - ALAT/advanced load modeling is minimal; advanced load exceptions and NaT

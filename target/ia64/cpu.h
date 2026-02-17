@@ -132,6 +132,16 @@ typedef struct CPUArchState {
     uint64_t prev_b0_write_insn;
     uint64_t prev_b0_write_val;
     uint64_t prev_b0_write_kind;
+    uint64_t last_b7_write_pc;
+    uint64_t last_b7_write_kind;
+    uint64_t last_b7_write_aux;
+    uint64_t last_b7_write_old;
+    uint64_t last_b7_write_val;
+    uint64_t prev_b7_write_pc;
+    uint64_t prev_b7_write_kind;
+    uint64_t prev_b7_write_aux;
+    uint64_t prev_b7_write_old;
+    uint64_t prev_b7_write_val;
 
     /* Debug: small ring buffer of recent b0 writes. */
     uint64_t b0_trace_pc[16];

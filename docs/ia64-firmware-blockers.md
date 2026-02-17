@@ -4,11 +4,107 @@ This file is the rolling blocker evidence log referenced by
 `IA64_ROADMAP.md`. Keep this focused on current symptoms, repro facts, and
 investigation breadcrumbs.
 
-- DXE GCD assert: not observed in current runs after HOB list adjustments; keep an eye on resource HOB consistency if it reappears.
-- PEI/DXE hang in byte-copy loop around `pc=0xffe7b1e0` (seen with hang heartbeats). The loop copies a byte and decrements a count loaded via `**(r12+0x30)`; in the failing case the count is a pointer (example store: `pc=0xffe7b2e0` writes `0xffffffff0011b850` to `r12+0x08`), so it takes effectively forever to reach zero.
-  - Store watch shows the count slot (`r12+0x08`) being overwritten by `st8 [r31]=r33` at `pc=0xffe24bb0`, which writes a pointer (ex: `0xffffffff0011b898`). That suggests argument/stack-slot corruption or missing initialization before the copy loop.
-  - Trace calls to `0xffe24b90` (caller `pc=0xffe24d20`) show `sol=7` and arguments passed in `r39+`; validate `alloc`/CFM and OUT->IN mapping so `r33` contains the expected size rather than a pointer.
+- DXE early failure now splits by HOB patch mode:
+  - default mode (`QEMU_IA64_EFI_HOB_PATCH` off): still reaches
+    `ASSERT ... Core\Dxe\Gcd\Gcd.c Line 1736, Descrpt: Found`.
+  - HOB patch mode (`QEMU_IA64_EFI_HOB_PATCH=1`): synthetic tested sysmem
+    resource HOB is now inserted (`RES type=0 attr=0x00002007 tested=1`), and
+    execution advances past the prior `Gcd.c:1736` stop.
+  - bounded post-GCD null-call repair is now wired and default-on:
+    `QEMU_IA64_CALL_NULL_FIX=1` repairs the known
+    `pc=0x1ff4f520` null `br.call` path (evidence:
+    `IA64: call_null_fix ... src=old_b7 ...`), avoiding immediate host abort.
+  Root-cause focus remains on why this call path resolves a null descriptor
+  target, while `Gcd.c:1736` remains the baseline-mode blocker.
+- Byte-copy helper around `pc=0xffe7b1e0` is currently treated as a
+  non-blocking trace target (not root cause yet):
+  - Probes are wired at:
+    - `0xffe24bb0/0xffe24bc0` (`GetHobList` store site)
+    - `0xffe7b220/0xffe7b280/0xffe7b2a0/0xffe7b2e0/0xffe7b310/0xffe7b3a0`
+  - New interpretation from disassembly/probes:
+    - The `slot+0x08 == 0xffffffffffffffff` observation can be a normal
+      zero-count exit transient (`cmp.eq` at `0xffe7b290` followed by
+      decrement/store at `0xffe7b2a0/0xffe7b2b0`).
+    - Triggered "pointer-like count" at loop/body PCs is therefore a
+      false-positive for corruption.
+  - Trigger mode remains useful, but now keys off setup-stage count only:
+    - `QEMU_IA64_FW_PEI_COPY_TRACE=1`
+    - `QEMU_IA64_FW_PEI_COPY_TRACE_TRIGGER=1`
+    - optional `QEMU_IA64_FW_PEI_COPY_TRACE_PTR_MIN=<hex>`
+  - Optional tooling:
+    - `scripts/ia64-pei-copy-report.sh scratch/ia64_logs/qemu.fw.log`
 - PHIT memory range mismatch: EFI HOB dump shows `mem=[7fffffff1f000000..7fffffff20000000]` (16MiB) even with `-m 512M`; serial shows `Install PeiMemory ... size = 0x1000000`. Investigate why PEI/PHIT is shrinking memory.
 - HOB list consistency: confirm the HOB list used by DXE matches the list patched by QEMU (PEI list cloned to 0x3030000). If DXE uses a different list, resource HOB fixes won't be visible.
 - FlashMap entries: multiple GUIDed HOBs for FlashMap exist; decode entries to confirm `EFI_FLASH_AREA_EFI_VARIABLES` has correct base/length.
-- PEI PPI assert: current run loops in `fw_pei_err` with `EFI_NOT_FOUND` (0x800000000000000e) / `EFI_ABORTED` (0x800000000000001c) around `pc=0xffe268b0..0xffe27400` after `InstallPeiMemory`. Identify which PPI/notify/dispatch path is returning the error; use PPI list/dispatch tracing.
+- PEI PPI assert: current run loops in `fw_pei_err` with `EFI_NOT_FOUND`
+  (`0x800000000000000e`) / `EFI_END_OF_MEDIA` (`0x800000000000001c`)
+  around `pc=0xffe268b0..0xffe27400` after `InstallPeiMemory`. Identify which
+  PPI/notify/dispatch path is returning the error; use PPI list/dispatch
+  tracing.
+- First-bad provenance (2026-02-16 run):
+  - `fw_pei_first_bad` reports first `0x800000000000001c` at
+    `pc=0xffe22560` (`site=err_watch`) with call frame resolving through
+    `PeiServices`.
+  - First StatusCode `PeiLocatePpi` calls still return
+    `EFI_NOT_FOUND (0x800000000000000e)` before later succeeding after more
+    PPI install/dispatch.
+  - A corrective locate-return path (`QEMU_IA64_PEI_LOCATE_FIX=1` default)
+    is wired, but has not yet moved the current DXE `Gcd.c:1736` assert.
+- First `0x1c` producer path is now concretely traced:
+  - Transition point:
+    - `fw_pei_status_transition pc=0xffe22560 prev=EFI_NOT_FOUND -> new=EFI_END_OF_MEDIA`.
+  - Immediate pre-transition path (from producer ring dump):
+    - `notify_ppi` call: `pc=0xffe278a0 -> tgt=0xffe268d0`
+      - descriptor: `notify_fn=0xffe2efb0`
+      - GUID: `1388066e-3a57-4efa-98f3-c12f3a958a29`
+    - Internal chain then flows through:
+      - `0xffe26ea0 -> 0xffe2bcb0`
+      - `0xffe2bd90 -> 0xffe2db30`
+      - `0xffe2dbd0 -> 0xffe2da10`
+      - `0xffe2dad0 -> 0xffe2caf0`
+    - followed by `report_status_code` (`0xffe2be10 -> 0xffe22330`) and
+      `locate_ppi` (`0xffe22410 -> 0xffe26510`, StatusCode GUID
+      `229832d3-7a30-4b36-b827-f40cb7d45436`).
+  - Next blocker step should target the notify callback/dispatch chain above,
+    not only `PeiLocatePpi` return rewriting.
+- StatusCode semantic handling is now wired (default on):
+  - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
+    report path as optional and rewrites return status at the
+    `report_status_code` boundary:
+    - `pei_report_status_fix reason=statuscode_optional_path ...`
+  - First-bad capture for this optional path is now explicitly suppressed:
+    - `fw_pei_first_bad_skip reason=statuscode_optional_path ...`
+  - Legacy knobs remain for bisecting compatibility:
+    - `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL`
+    - `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS`
+- PEI core HOB-pointer slot seeding is now active for both initial and
+  relocated core instances:
+  - `fw_pei_hob_init_fix` seeds core `+0x470` when missing.
+  - `ia64_fw_pei_find_core_from_ps()` now seeds missing `+0x470` from validated
+    `+0x260`/`+0x478`/cached HOB sources on discovery.
+  - Evidence:
+    - `fw_pei_hob_init_fix ... hob470_raw=0 ... new=0x40ef000 ...`
+    - `pei_core_hob470_seed core=0x11ba90 old=0 ... new=0x40ef000 ...`
+- PEI HOB flow contract tracing/repair is now wired (default on):
+  - `QEMU_IA64_PEI_HOB_FLOW_TRACE=1` logs `GetHobList`/`CreateHob` call-return
+    pointer contract with core/HOB provenance (`pei_hob_flow ...`).
+  - `QEMU_IA64_PEI_HOB_PTR_FIX=1` repairs successful `GetHobList` returns when
+    output HOB pointer is null/invalid
+    (`pei_hob_ptr_fix reason=get_hob_list_null_or_invalid_out ...`).
+  - `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD=1` provides a bounded guard for the
+    `CreateHob` OOR+null-out case (pointer repair only; no status rewrite).
+  - A/B evidence (2026-02-17):
+    - defaults on: no early `pc=0xffe24e80` `EFI_OUT_OF_RESOURCES` transition
+      observed in 35s baseline run window.
+    - fixes off (`...HOB_PTR_FIX=0 ...CREATE_HOB_PTR_GUARD=0`):
+      `pc=0xffe24e80` `EFI_OUT_OF_RESOURCES` regression reproduces.
+  - Residual root-cause item:
+    - underlying reason firmware writes/observes null `GetHobList` out pointers
+      on the failing path is still not fully explained; current behavior is a
+      bounded compatibility repair.
+- Tested sysmem HOB coverage fix is now in place for HOB patch mode:
+  - system-memory synthesis now validates coverage against PHIT physical
+    `EfiFreeMemoryBottom..Top` and inserts when missing.
+  - evidence:
+    - `hob_patch: inserted 1 sysmem resource HOB(s)`
+    - `efi_hob_dump: RES type=0 attr=0x00002007 tested=1 ...`
