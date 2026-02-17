@@ -2023,6 +2023,203 @@ uint64_t HELPER(pcmp4_gt)(CPUIA64State *env, uint64_t a, uint64_t b)
     return ((uint64_t)rv1 << 32) | rv0;
 }
 
+uint64_t HELPER(pack2_uss)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+
+    for (int i = 0; i < 4; i++) {
+        int16_t hv2 = (int16_t)((b >> (i * 16)) & 0xffff);
+        int16_t hv1 = (int16_t)((a >> (i * 16)) & 0xffff);
+        uint8_t lo = ia64_sat_u8((long long)hv2);
+        uint8_t hi = ia64_sat_u8((long long)hv1);
+        res |= (uint64_t)lo << (i * 8);
+        res |= (uint64_t)hi << ((i + 4) * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(pack2_sss)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+
+    for (int i = 0; i < 4; i++) {
+        int16_t hv2 = (int16_t)((b >> (i * 16)) & 0xffff);
+        int16_t hv1 = (int16_t)((a >> (i * 16)) & 0xffff);
+        uint8_t lo = ia64_sat_s8((long long)hv2);
+        uint8_t hi = ia64_sat_s8((long long)hv1);
+        res |= (uint64_t)lo << (i * 8);
+        res |= (uint64_t)hi << ((i + 4) * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(pack4_sss)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    int32_t bv0 = (int32_t)(uint32_t)b;
+    int32_t bv1 = (int32_t)(uint32_t)(b >> 32);
+    int32_t av0 = (int32_t)(uint32_t)a;
+    int32_t av1 = (int32_t)(uint32_t)(a >> 32);
+    uint16_t h0 = ia64_sat_s16((long long)bv0);
+    uint16_t h1 = ia64_sat_s16((long long)bv1);
+    uint16_t h2 = ia64_sat_s16((long long)av0);
+    uint16_t h3 = ia64_sat_s16((long long)av1);
+
+    return ((uint64_t)h3 << 48) | ((uint64_t)h2 << 32) |
+           ((uint64_t)h1 << 16) | h0;
+}
+
+uint64_t HELPER(unpack1_h)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t av = (a >> (i * 8)) & 0xff;
+        uint8_t bv = (b >> (i * 8)) & 0xff;
+        res |= (uint64_t)av << ((2 * i) * 8);
+        res |= (uint64_t)bv << ((2 * i + 1) * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(unpack1_l)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t av = (a >> ((i + 4) * 8)) & 0xff;
+        uint8_t bv = (b >> ((i + 4) * 8)) & 0xff;
+        res |= (uint64_t)av << ((2 * i) * 8);
+        res |= (uint64_t)bv << ((2 * i + 1) * 8);
+    }
+    return res;
+}
+
+uint64_t HELPER(unpack2_h)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+
+    for (int i = 0; i < 2; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        uint16_t bv = (b >> (i * 16)) & 0xffff;
+        res |= (uint64_t)av << ((2 * i) * 16);
+        res |= (uint64_t)bv << ((2 * i + 1) * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(unpack2_l)(CPUIA64State *env, uint64_t a, uint64_t b)
+{
+    (void)env;
+    uint64_t res = 0;
+
+    for (int i = 0; i < 2; i++) {
+        uint16_t av = (a >> ((i + 2) * 16)) & 0xffff;
+        uint16_t bv = (b >> ((i + 2) * 16)) & 0xffff;
+        res |= (uint64_t)av << ((2 * i) * 16);
+        res |= (uint64_t)bv << ((2 * i + 1) * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(pshl2)(CPUIA64State *env, uint64_t a, uint64_t count)
+{
+    (void)env;
+    if (count >= 16) {
+        return 0;
+    }
+
+    uint32_t cnt = (uint32_t)count;
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        uint16_t rv = (uint16_t)(av << cnt);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(pshl4)(CPUIA64State *env, uint64_t a, uint64_t count)
+{
+    (void)env;
+    if (count >= 32) {
+        return 0;
+    }
+
+    uint32_t cnt = (uint32_t)count;
+    uint32_t lo = (uint32_t)a << cnt;
+    uint32_t hi = (uint32_t)(a >> 32) << cnt;
+    return ((uint64_t)hi << 32) | lo;
+}
+
+uint64_t HELPER(pshr2)(CPUIA64State *env, uint64_t a, uint64_t count)
+{
+    (void)env;
+    uint64_t res = 0;
+
+    for (int i = 0; i < 4; i++) {
+        int16_t av = (int16_t)((a >> (i * 16)) & 0xffff);
+        uint16_t rv;
+        if (count >= 16) {
+            rv = (uint16_t)(((int64_t)av) >> 16);
+        } else {
+            rv = (uint16_t)(av >> count);
+        }
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(pshr4)(CPUIA64State *env, uint64_t a, uint64_t count)
+{
+    (void)env;
+    int32_t av0 = (int32_t)(uint32_t)a;
+    int32_t av1 = (int32_t)(uint32_t)(a >> 32);
+    uint32_t rv0, rv1;
+
+    if (count >= 32) {
+        rv0 = (uint32_t)(((int64_t)av0) >> 32);
+        rv1 = (uint32_t)(((int64_t)av1) >> 32);
+    } else {
+        rv0 = (uint32_t)(av0 >> count);
+        rv1 = (uint32_t)(av1 >> count);
+    }
+    return ((uint64_t)rv1 << 32) | rv0;
+}
+
+uint64_t HELPER(pshr2_u)(CPUIA64State *env, uint64_t a, uint64_t count)
+{
+    (void)env;
+    if (count >= 16) {
+        return 0;
+    }
+
+    uint64_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t av = (a >> (i * 16)) & 0xffff;
+        uint16_t rv = (uint16_t)(av >> count);
+        res |= (uint64_t)rv << (i * 16);
+    }
+    return res;
+}
+
+uint64_t HELPER(pshr4_u)(CPUIA64State *env, uint64_t a, uint64_t count)
+{
+    (void)env;
+    if (count >= 32) {
+        return 0;
+    }
+
+    uint32_t lo = (uint32_t)a >> count;
+    uint32_t hi = (uint32_t)(a >> 32) >> count;
+    return ((uint64_t)hi << 32) | lo;
+}
+
 uint64_t HELPER(pshladd2)(CPUIA64State *env, uint64_t a, uint64_t b, uint32_t cnt)
 {
     (void)env;

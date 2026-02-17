@@ -45,6 +45,13 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
 - Route `gen_unimpl` through IA-64 illegal-op/general exception vector
   (`0x5400`) instead of host aborting QEMU
   (`target/ia64/helper.c`, `target/ia64/cpu.h`).
+- Complete I-unit `op=7` core packed shift/pack/unpack families:
+  `pshl2/4`, `pshr2/4(.u)` (register + immediate), `pack2.*`, `pack4.sss`,
+  `unpack1/2.*`
+  (`target/ia64/translate.c`, `target/ia64/helper.c`, `target/ia64/helper.h`).
+- Fix NaT propagation for implemented I-unit `op=7` scalar forms
+  (`popcnt`, `mux1`, `mux2`, `shl`, `shr/shr.u`)
+  (`target/ia64/translate.c`).
 
 ## Open issues (needs work)
 
@@ -66,9 +73,8 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   firmware uses it.
 - NaT propagation is incomplete in A-unit integer ops (only padd/psub handle NaT);
   other integer ALU ops ignore NaT and will silently compute values (`target/ia64/translate.c:1173`).
-- I-unit `op=7` multimedia/shift decode only covers a subset (mix/unpack4/mux/shl/shr/popcnt);
-  missing families include `pmpy*`, `pack2.*`, `unpack1/2.*`, `pmin/pmax`, `psad1`,
-  `pshl2/4`, `pshr2/4` register/immediate forms (`target/ia64/translate.c` I-slot `major=7`).
+- I-unit `op=7` multimedia decode is still incomplete; missing families now include
+  `pmpy*`, `pmin/pmax`, `psad1` (`target/ia64/translate.c` I-slot `major=7`).
 - F-unit decode is still a bringup subset; many architected F-slot encodings still
   fall through to `gen_unimpl("F-slot")` (`target/ia64/translate.c`).
 - ALAT/advanced load modeling is minimal; advanced load exceptions and NaT

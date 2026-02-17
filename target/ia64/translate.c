@@ -5793,6 +5793,273 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 if (r1 != 0) {
                     tcg_gen_ctpop_i64(cpu_r[r1], src);
                 }
+                gen_a_unit_nat1(r1, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /*
+             * I8 pshl2/pshl4 immediate-count forms:
+             *   za=0 zb=1 => pshl2
+             *   za=1 zb=0 => pshl4
+             * count5 = 31 - ccount5c.
+             */
+            if (ve == 0 && x2a == 3 && x2b == 1 && x2c == 1 &&
+                ((za == 0 && zb == 1) || (za == 1 && zb == 0))) {
+                uint8_t ccount5c = extract64(insn, 20, 5);
+                uint8_t count5 = (uint8_t)(31 - ccount5c);
+
+                TCGv_i64 src = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(src, 0);
+                } else {
+                    tcg_gen_mov_i64(src, cpu_r[r2]);
+                }
+
+                if (za == 0) {
+                    gen_helper_pshl2(res, tcg_env, src, tcg_constant_i64(count5));
+                } else {
+                    gen_helper_pshl4(res, tcg_env, src, tcg_constant_i64(count5));
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat1(r1, r2);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /*
+             * I7 pshl2/pshl4 register-count forms:
+             *   za=0 zb=1 => pshl2
+             *   za=1 zb=0 => pshl4
+             */
+            if (ve == 0 && x2a == 0 && x2b == 0 && x2c == 1 &&
+                ((za == 0 && zb == 1) || (za == 1 && zb == 0))) {
+                TCGv_i64 src = tcg_temp_new_i64();
+                TCGv_i64 cnt = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(src, 0);
+                } else {
+                    tcg_gen_mov_i64(src, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(cnt, 0);
+                } else {
+                    tcg_gen_mov_i64(cnt, cpu_r[r3]);
+                }
+
+                if (za == 0) {
+                    gen_helper_pshl2(res, tcg_env, src, cnt);
+                } else {
+                    gen_helper_pshl4(res, tcg_env, src, cnt);
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /*
+             * I6 pshr2/pshr4 immediate-count forms:
+             *   x2b=3 => arithmetic
+             *   x2b=1 => logical (.u)
+             *   za=0 zb=1 => 16-bit lanes (pshr2*)
+             *   za=1 zb=0 => 32-bit lanes (pshr4*)
+             */
+            if (ve == 0 && x2a == 1 && x2c == 0 &&
+                (x2b == 1 || x2b == 3) &&
+                ((za == 0 && zb == 1) || (za == 1 && zb == 0))) {
+                uint8_t count5 = extract64(insn, 14, 5);
+
+                TCGv_i64 src = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(src, 0);
+                } else {
+                    tcg_gen_mov_i64(src, cpu_r[r3]);
+                }
+
+                if (x2b == 3) {
+                    if (za == 0) {
+                        gen_helper_pshr2(res, tcg_env, src, tcg_constant_i64(count5));
+                    } else {
+                        gen_helper_pshr4(res, tcg_env, src, tcg_constant_i64(count5));
+                    }
+                } else {
+                    if (za == 0) {
+                        gen_helper_pshr2_u(res, tcg_env, src, tcg_constant_i64(count5));
+                    } else {
+                        gen_helper_pshr4_u(res, tcg_env, src, tcg_constant_i64(count5));
+                    }
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat1(r1, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /*
+             * I5 pshr2/pshr4 register-count forms:
+             *   x2b=2 => arithmetic
+             *   x2b=0 => logical (.u)
+             *   za=0 zb=1 => 16-bit lanes (pshr2*)
+             *   za=1 zb=0 => 32-bit lanes (pshr4*)
+             */
+            if (ve == 0 && x2a == 0 && x2c == 0 &&
+                (x2b == 0 || x2b == 2) &&
+                ((za == 0 && zb == 1) || (za == 1 && zb == 0))) {
+                TCGv_i64 src = tcg_temp_new_i64();
+                TCGv_i64 cnt = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(src, 0);
+                } else {
+                    tcg_gen_mov_i64(src, cpu_r[r3]);
+                }
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(cnt, 0);
+                } else {
+                    tcg_gen_mov_i64(cnt, cpu_r[r2]);
+                }
+
+                if (x2b == 2) {
+                    if (za == 0) {
+                        gen_helper_pshr2(res, tcg_env, src, cnt);
+                    } else {
+                        gen_helper_pshr4(res, tcg_env, src, cnt);
+                    }
+                } else {
+                    if (za == 0) {
+                        gen_helper_pshr2_u(res, tcg_env, src, cnt);
+                    } else {
+                        gen_helper_pshr4_u(res, tcg_env, src, cnt);
+                    }
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 pack2.{uss,sss}: za=0 zb=1 ve=0 x2a=2 x2c=0 */
+            if (za == 0 && zb == 1 && ve == 0 && x2a == 2 && x2c == 0 &&
+                (x2b == 0 || x2b == 2)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (x2b == 0) {
+                    gen_helper_pack2_uss(res, tcg_env, a, b);
+                } else {
+                    gen_helper_pack2_sss(res, tcg_env, a, b);
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 pack4.sss: za=1 zb=0 ve=0 x2a=2 x2b=2 x2c=0 */
+            if (za == 1 && zb == 0 && ve == 0 && x2a == 2 && x2b == 2 && x2c == 0) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                gen_helper_pack4_sss(res, tcg_env, a, b);
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
+                if (skip_label) {
+                    gen_set_label(skip_label);
+                }
+                break;
+            }
+
+            /* I2 unpack1/unpack2 .{h,l}: ve=0 x2a=2 x2c=1 */
+            if (ve == 0 && x2a == 2 && x2c == 1 &&
+                za == 0 && (zb == 0 || zb == 1) &&
+                (x2b == 0 || x2b == 2)) {
+                TCGv_i64 a = tcg_temp_new_i64();
+                TCGv_i64 b = tcg_temp_new_i64();
+                TCGv_i64 res = tcg_temp_new_i64();
+                if (r2 == 0) {
+                    tcg_gen_movi_i64(a, 0);
+                } else {
+                    tcg_gen_mov_i64(a, cpu_r[r2]);
+                }
+                if (r3 == 0) {
+                    tcg_gen_movi_i64(b, 0);
+                } else {
+                    tcg_gen_mov_i64(b, cpu_r[r3]);
+                }
+
+                if (zb == 0) {
+                    if (x2b == 0) {
+                        gen_helper_unpack1_h(res, tcg_env, a, b);
+                    } else {
+                        gen_helper_unpack1_l(res, tcg_env, a, b);
+                    }
+                } else {
+                    if (x2b == 0) {
+                        gen_helper_unpack2_h(res, tcg_env, a, b);
+                    } else {
+                        gen_helper_unpack2_l(res, tcg_env, a, b);
+                    }
+                }
+
+                if (r1 != 0) {
+                    tcg_gen_mov_i64(cpu_r[r1], res);
+                }
+                gen_a_unit_nat2(r1, r2, r3);
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
@@ -5865,6 +6132,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_mov_i64(cpu_r[r1], dst);
                 }
 
+                gen_a_unit_nat1(r1, r2);
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
@@ -5911,6 +6179,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_mov_i64(cpu_r[r1], dst);
                 }
 
+                gen_a_unit_nat1(r1, r2);
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
@@ -6161,6 +6430,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     tcg_gen_movi_i64(cpu_r[r1], 0);
                     gen_set_label(done);
                 }
+                gen_a_unit_nat2(r1, r2, r3);
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
@@ -6209,6 +6479,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     }
                     gen_set_label(done);
                 }
+                gen_a_unit_nat2(r1, r2, r3);
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }
