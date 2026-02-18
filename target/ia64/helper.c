@@ -5699,6 +5699,141 @@ static int ia64_fw_progress_trace_limit(void)
 }
 
 static bool ia64_fw_progress_event_same_key(const IA64FwProgressEvent *a,
+                                            const IA64FwProgressEvent *b);
+
+static bool ia64_fw_progress_loop_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_LOOP_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_progress_loop_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 32;
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_LOOP_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static int ia64_fw_progress_loop_window(void)
+{
+    static int window = -1;
+    if (window == -1) {
+        window = 32;
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_LOOP_WINDOW");
+        if (s && *s) {
+            window = atoi(s);
+        }
+        if (window < 4) {
+            window = 4;
+        }
+        if (window > IA64_FW_PROGRESS_EVENT_MAX) {
+            window = IA64_FW_PROGRESS_EVENT_MAX;
+        }
+    }
+    return window;
+}
+
+static int ia64_fw_progress_loop_threshold(void)
+{
+    static int threshold = -1;
+    if (threshold == -1) {
+        threshold = 12;
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_LOOP_THRESHOLD");
+        if (s && *s) {
+            threshold = atoi(s);
+        }
+        if (threshold < 2) {
+            threshold = 2;
+        }
+    }
+    return threshold;
+}
+
+static uint64_t ia64_fw_progress_event_signature(const IA64FwProgressEvent *ev)
+{
+    uint64_t h = ev->pc ^ (ev->b0 << 1) ^ (ev->status << 7) ^ ev->ps_ptr;
+    h ^= ((uint64_t)ev->code_type << 32) | ev->code_value;
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= (h >> 33);
+    return h;
+}
+
+static void ia64_fw_progress_maybe_log_loop(const IA64FwProgressEvent *ev)
+{
+    if (!ia64_fw_progress_loop_trace_enabled() ||
+        !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    int window = ia64_fw_progress_loop_window();
+    uint64_t have = MIN(ev->seq, (uint64_t)IA64_FW_PROGRESS_EVENT_MAX);
+    if ((uint64_t)window > have) {
+        window = (int)have;
+    }
+    if (window < 2) {
+        return;
+    }
+
+    int repeats = 0;
+    uint64_t start = ev->seq - (uint64_t)window + 1;
+    for (uint64_t s = start; s <= ev->seq; s++) {
+        IA64FwProgressEvent *cand =
+            &ia64_fw_progress_ring[(s - 1) % IA64_FW_PROGRESS_EVENT_MAX];
+        if (cand->seq != s) {
+            continue;
+        }
+        if (ia64_fw_progress_event_same_key(ev, cand)) {
+            repeats++;
+        }
+    }
+
+    if (repeats < ia64_fw_progress_loop_threshold()) {
+        return;
+    }
+
+    static int loop_log_count;
+    static uint64_t last_sig;
+    static int last_repeats;
+    int limit = ia64_fw_progress_loop_trace_limit();
+    uint64_t sig = ia64_fw_progress_event_signature(ev);
+
+    if (loop_log_count >= limit) {
+        return;
+    }
+    if (last_sig == sig && repeats <= last_repeats) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_progress_loop repeats=%d window=%d"
+                  " seq=%" PRIu64 " sig=%016" PRIx64
+                  " ip=%016" PRIx64 " pc=%016" PRIx64
+                  " b0=%016" PRIx64 " r8=%016" PRIx64
+                  " type=%08x value=%08x ps=%016" PRIx64
+                  " prod_seq=%" PRIu64 "\n",
+                  repeats, window, ev->seq, sig,
+                  ev->ip, ev->pc, ev->b0, ev->status,
+                  ev->code_type, ev->code_value, ev->ps_ptr, ev->prod_seq);
+    loop_log_count++;
+    last_sig = sig;
+    last_repeats = repeats;
+}
+
+static bool ia64_fw_progress_event_same_key(const IA64FwProgressEvent *a,
                                             const IA64FwProgressEvent *b)
 {
     return a->pc == b->pc &&
@@ -5767,6 +5902,7 @@ static void ia64_fw_progress_record(CPUIA64State *env, uint64_t pc,
             trace_count++;
         }
     }
+    ia64_fw_progress_maybe_log_loop(&ev);
 }
 
 static bool ia64_fw_pei_report_status_is_soft_error(uint64_t status)
