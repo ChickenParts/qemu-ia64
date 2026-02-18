@@ -861,6 +861,35 @@ Logs checked:
       - `pei_report_status_fix reject=ps_epoch_mismatch ...` on stale-epoch tail recurrences.
       - `pei_279d0_event ... ps_epoch_seen=1 ps_epoch_match=1 ps_epoch_link=1 ...`
 
+## Follow-up (P3-Y PS-Epoch Tail-Recurrence Hardening + Provenance Parity)
+- Hardened selected PS-epoch continuity in `target/ia64/helper.c`:
+  - added a continuity cache for the last selected valid PS epoch event.
+  - selected epoch lookups now prefer continuity state, then ring fallback.
+  - this removes rollover-induced `ps_epoch_seen=0` false negatives.
+- Aligned `22560`/`279d0` paths to the same selected-state epoch source:
+  - both now read `IA64PeiPsEpochSelected` directly.
+  - `pei_22560_status` reject logs now split:
+    - `reject=ps_epoch_missing`
+    - `reject=ps_epoch_mismatch`
+  - reject/trace lines now include epoch provenance:
+    - source (`r32`/`r33`/`cache`)
+    - epoch sequence
+    - continuity flag.
+- Extended `pei_279d0_event` ring dumps with epoch provenance parity fields:
+  - `ps_epoch_src`, `ps_epoch_seq`, `ps_epoch_cont`.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed test:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro:
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 40s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, no host assert.
+    - `scratch/ia64_logs/qemu.fw.log` shows:
+      - `pei_22560_status ... epoch_src=... epoch_seq=... epoch_cont=...`
+      - `pei_279d0_status ... ps_epoch_src=... ps_epoch_seq=... ps_epoch_cont=...`
+      - no `ps_epoch_seen=0` tail misses in this repro window.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
