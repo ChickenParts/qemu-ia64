@@ -1144,6 +1144,8 @@ static uint64_t ia64_pc_to_phys61(uint64_t pc)
 #define IA64_FW_BREAK0_ROM_GATE_LAST  0x00000000ffffb2dfULL
 #define IA64_FW_BREAK0_WR_GATE_FIRST  0x0000000100003000ULL
 #define IA64_FW_BREAK0_WR_GATE_LAST   0x00000001000031ffULL
+#define IA64_FW_XENIPF_MPBUFFER_PC_FIRST 0x00000000ffe59800ULL
+#define IA64_FW_XENIPF_MPBUFFER_PC_LAST  0x00000000ffe59a3fULL
 
 static bool ia64_fw_break0_rom_gate_match(uint64_t pc)
 {
@@ -1151,6 +1153,22 @@ static bool ia64_fw_break0_rom_gate_match(uint64_t pc)
 
     return phys >= IA64_FW_BREAK0_ROM_GATE_FIRST &&
            phys <= IA64_FW_BREAK0_ROM_GATE_LAST;
+}
+
+static bool ia64_fw_xenipf_mpbuffer_fix_site(uint64_t pc)
+{
+    uint64_t phys = ia64_pc_to_phys61(pc);
+
+    return phys >= IA64_FW_XENIPF_MPBUFFER_PC_FIRST &&
+           phys <= IA64_FW_XENIPF_MPBUFFER_PC_LAST;
+}
+
+static bool ia64_fw_break0_wr_gate_match(uint64_t pc)
+{
+    uint64_t phys = ia64_pc_to_phys61(pc);
+
+    return phys >= IA64_FW_BREAK0_WR_GATE_FIRST &&
+           phys <= IA64_FW_BREAK0_WR_GATE_LAST;
 }
 
 static bool ia64_fw_break_hypercall_enabled(void)
@@ -1229,6 +1247,17 @@ static bool ia64_fw_break0_gate_return_enabled(void)
 
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_FW_BREAK0_GATE_RETURN");
+        enabled = (s && *s) ? (atoi(s) != 0) : 1;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_break0_wr_gate_return_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_RETURN");
         enabled = (s && *s) ? (atoi(s) != 0) : 1;
     }
     return enabled;
@@ -1328,13 +1357,18 @@ static void gen_break_common(DisasContext *ctx, uint64_t insn, uint64_t imm,
 
         if (nr == 0x0) {
             gen_helper_fw_break0(tcg_env, tcg_constant_i64(ctx->base.pc_next));
-            if (break0_fastpath &&
-                ia64_fw_break0_gate_return_enabled() &&
-                ia64_fw_break0_rom_gate_match(ctx->base.pc_next)) {
+            bool gate_return = break0_fastpath &&
+                               ((ia64_fw_break0_gate_return_enabled() &&
+                                 ia64_fw_break0_rom_gate_match(
+                                     ctx->base.pc_next)) ||
+                                (ia64_fw_break0_wr_gate_return_enabled() &&
+                                 ia64_fw_break0_wr_gate_match(
+                                     ctx->base.pc_next)));
+            if (gate_return) {
                 /*
-                 * ROM break(0) gate stubs behave as call-gates: resume at b0.
-                 * Model this as a return edge so stacked-register state tracks
-                 * br.ret-style unwind semantics before branching to b0.
+                 * Firmware break(0) gate stubs behave as call-gates: resume at
+                 * b0. Model this as a return edge so stacked-register state
+                 * tracks br.ret-style unwind semantics before branching to b0.
                  */
                 gen_helper_ret_restore_b0(tcg_env);
                 TCGv_i64 tgt = tcg_temp_new_i64();
@@ -1915,8 +1949,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
      * the signature compare executes.
      */
     if (ctx->mem_idx != MMU_USER_IDX &&
-        ctx->ri == 0 &&
-        ctx->base.pc_next == 0x00000000ffe59900ULL) {
+        ia64_fw_xenipf_mpbuffer_fix_site(ctx->base.pc_next)) {
         gen_helper_fw_xenipf_mpbuffer_fix(tcg_env,
                                           tcg_constant_i64(ctx->base.pc_next));
     }

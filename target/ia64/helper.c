@@ -5198,6 +5198,21 @@ typedef struct IA64FwProgressDedupState {
     IA64FwProgressDedupFingerprint last;
 } IA64FwProgressDedupState;
 
+typedef struct IA64FwBreak0CycleFingerprint {
+    uint64_t pc;
+    uint64_t b0;
+    uint32_t code_type;
+    uint32_t code_value;
+    uint64_t ps_ptr;
+} IA64FwBreak0CycleFingerprint;
+
+typedef struct IA64FwBreak0CycleState {
+    bool valid;
+    uint64_t cycle_id;
+    uint64_t repeat_count;
+    IA64FwBreak0CycleFingerprint last;
+} IA64FwBreak0CycleState;
+
 typedef struct IA64PeiErrFixDedupFingerprint {
     uint64_t pc;
     uint64_t b0;
@@ -5217,6 +5232,7 @@ typedef struct IA64PeiErrFixDedupState {
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_report_rewrite_dedup;
 static IA64FwProgressDedupState ia64_fw_progress_dedup;
+static IA64FwBreak0CycleState ia64_fw_break0_wr_gate_cycle;
 static IA64PeiErrFixDedupState ia64_fw_pei_err_fix_dedup;
 
 #define IA64_PEI_ERR_LOOP_EVENT_MAX 128
@@ -5769,6 +5785,83 @@ static uint64_t ia64_fw_progress_dedup_fp_id(
     h *= 0xff51afd7ed558ccdULL;
     h ^= (h >> 33);
     return h;
+}
+
+static bool ia64_fw_break0_wr_gate_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_break0_wr_gate_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 64;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static bool ia64_fw_break0_cycle_fp_equal(
+    const IA64FwBreak0CycleFingerprint *a,
+    const IA64FwBreak0CycleFingerprint *b)
+{
+    return a->pc == b->pc &&
+           a->b0 == b->b0 &&
+           a->code_type == b->code_type &&
+           a->code_value == b->code_value &&
+           a->ps_ptr == b->ps_ptr;
+}
+
+static uint64_t ia64_fw_break0_cycle_fp_id(
+    const IA64FwBreak0CycleFingerprint *fp)
+{
+    uint64_t h = fp->pc ^ (fp->b0 << 1) ^
+                 ((uint64_t)fp->code_type << 32) ^ fp->code_value ^
+                 (fp->ps_ptr << 3);
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= (h >> 33);
+    return h;
+}
+
+static void ia64_fw_break0_wr_gate_cycle_update(
+    IA64FwBreak0CycleState *state,
+    const IA64FwBreak0CycleFingerprint *fp,
+    bool *advanced_out,
+    uint64_t *cycle_id_out,
+    uint64_t *repeat_count_out)
+{
+    bool advanced = !state->valid ||
+                    !ia64_fw_break0_cycle_fp_equal(&state->last, fp);
+    if (advanced) {
+        state->cycle_id++;
+        state->repeat_count = 1;
+        state->last = *fp;
+        state->valid = true;
+    } else {
+        state->repeat_count++;
+    }
+    if (advanced_out) {
+        *advanced_out = advanced;
+    }
+    if (cycle_id_out) {
+        *cycle_id_out = state->cycle_id;
+    }
+    if (repeat_count_out) {
+        *repeat_count_out = state->repeat_count;
+    }
 }
 
 static bool ia64_fw_pei_err_fix_dedup_enabled(void)
@@ -10349,6 +10442,8 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     const hwaddr pc_phys = ia64_phys_mode_addr(pc);
     const bool rom_gate_pc = (pc_phys >= 0x00000000ffffb2a0ULL &&
                               pc_phys <= 0x00000000ffffb2dfULL);
+    const bool wr_gate_pc = (pc_phys >= 0x0000000100003000ULL &&
+                             pc_phys <= 0x00000001000031ffULL);
 
     env->dbg_tbexit_last_break0_pc = pc;
 
@@ -10587,7 +10682,25 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         .ps_ptr = ia64_fw_progress_guess_ps_ptr(env),
         .seq = ia64_fw_pei_producer_seq,
     };
+    IA64FwBreak0CycleFingerprint wr_cycle_fp = {
+        .pc = pc,
+        .b0 = env->b[0],
+        .code_type = log_code_type,
+        .code_value = log_value,
+        .ps_ptr = progress_fp.ps_ptr,
+    };
+    bool wr_cycle_advanced = false;
+    uint64_t wr_cycle_id = 0;
+    uint64_t wr_cycle_repeat = 0;
+    if (wr_gate_pc) {
+        ia64_fw_break0_wr_gate_cycle_update(&ia64_fw_break0_wr_gate_cycle,
+                                            &wr_cycle_fp,
+                                            &wr_cycle_advanced,
+                                            &wr_cycle_id,
+                                            &wr_cycle_repeat);
+    }
     uint64_t progress_fp_id = ia64_fw_progress_dedup_fp_id(&progress_fp);
+    uint64_t wr_cycle_fp_id = ia64_fw_break0_cycle_fp_id(&wr_cycle_fp);
     uint64_t progress_dedup_delta = UINT64_MAX;
     bool progress_dedup_candidate =
         !is_assert &&
@@ -10638,6 +10751,33 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                           progress_dedup_delta,
                           ia64_fw_progress_dedup_window());
             reject_log_count++;
+        }
+    }
+
+    if (wr_gate_pc && ia64_fw_break0_wr_gate_trace_enabled() &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int wr_gate_trace_count;
+        int wr_gate_trace_limit = ia64_fw_break0_wr_gate_trace_limit();
+        if (wr_gate_trace_limit == 0 || wr_gate_trace_count < wr_gate_trace_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_break0_wr_gate cycle=%" PRIu64
+                          " repeat=%" PRIu64 " advanced=%d"
+                          " ip=%016" PRIx64 " pc=%016" PRIx64
+                          " b0=%016" PRIx64 " type=%08x value=%08x"
+                          " ps=%016" PRIx64 " fp=%016" PRIx64
+                          " r8=%016" PRIx64 " r9=%016" PRIx64
+                          " r10=%016" PRIx64 " r11=%016" PRIx64
+                          " r32=%016" PRIx64 " r33=%016" PRIx64
+                          " r34=%016" PRIx64 " r35=%016" PRIx64
+                          " r36=%016" PRIx64 " r37=%016" PRIx64 "\n",
+                          wr_cycle_id, wr_cycle_repeat,
+                          wr_cycle_advanced ? 1 : 0,
+                          env->ip, pc, env->b[0], log_code_type, log_value,
+                          wr_cycle_fp.ps_ptr, wr_cycle_fp_id,
+                          env->r[8], env->r[9], env->r[10], env->r[11],
+                          env->r[32], env->r[33], env->r[34], env->r[35],
+                          env->r[36], env->r[37]);
+            wr_gate_trace_count++;
         }
     }
 
@@ -19292,6 +19432,28 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
     (void)pc;
     return;
 #else
+    static int enabled = -1;
+    static int log_limit = -1;
+    static int log_count;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_XENIPF_MPBUFFER_FIX");
+        enabled = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    if (!enabled) {
+        return;
+    }
+    if (log_limit == -1) {
+        log_limit = 16;
+        const char *s = getenv("QEMU_IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT");
+        if (s && *s) {
+            log_limit = atoi(s);
+        }
+        if (log_limit < 0) {
+            log_limit = 0;
+        }
+    }
+
     /*
      * xenipf/EDK firmware MP buffer bringup.
      *
@@ -19303,21 +19465,77 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
      * Provide a minimal MP buffer in the ia64 firmware work RAM and point the
      * scratch stack slots at it so CPU0 takes the BSP path.
      */
-    static bool logged;
+    bool do_log = qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+                  (log_limit == 0 || log_count < log_limit);
+    if (do_log) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: xenipf mpbuffer attempt pc=%016" PRIx64
+                      " r12=%016" PRIx64 " psr=%016" PRIx64 "\n",
+                      pc, env->r[12], env->psr);
+        log_count++;
+    }
     if (env->psr & IA64_PSR_DT) {
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+            (log_limit == 0 || log_count < log_limit)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: xenipf mpbuffer skip=psr_dt"
+                          " pc=%016" PRIx64 " psr=%016" PRIx64 "\n",
+                          pc, env->psr);
+            log_count++;
+        }
         return;
     }
 
     hwaddr sp = ia64_phys_mode_addr(env->r[12]);
-    uint8_t tmp[8];
-    cpu_physical_memory_read(sp + 336, tmp, sizeof(tmp));
-    uint64_t cur = ldq_le_p(tmp);
-    if (cur != 0) {
+    bool sp_in_pei_temp = sp >= 0x0000000004000000ULL &&
+                          sp < 0x0000000004300000ULL;
+    bool sp_in_fw_work = sp >= 0x0000000100000000ULL &&
+                         sp < 0x0000000101000000ULL;
+    if (!sp_in_pei_temp && !sp_in_fw_work) {
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+            (log_limit == 0 || log_count < log_limit)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: xenipf mpbuffer skip=stack_out_of_temp"
+                          " pc=%016" PRIx64 " sp=%016" HWADDR_PRIx
+                          " in_temp=%d in_work=%d\n",
+                          pc, sp, sp_in_pei_temp ? 1 : 0,
+                          sp_in_fw_work ? 1 : 0);
+            log_count++;
+        }
         return;
     }
 
     const hwaddr mp_base = 0x0000000100ffe000ULL; /* within ipf.fw-workram */
     const uint64_t bsp_sig = 0x5f5f5053425f5f20ULL; /* " __BSP__" */
+    uint8_t tmp[8];
+    cpu_physical_memory_read(sp + 336, tmp, sizeof(tmp));
+    uint64_t cur = ldq_le_p(tmp);
+    cpu_physical_memory_read(sp + 344, tmp, sizeof(tmp));
+    uint64_t cur_alt = ldq_le_p(tmp);
+    cpu_physical_memory_read(mp_base + 0x188, tmp, sizeof(tmp));
+    uint64_t sig_now = ldq_le_p(tmp);
+
+    bool slot336_match = cur && ia64_phys_mode_addr(cur) == mp_base;
+    bool slot344_match = cur_alt && ia64_phys_mode_addr(cur_alt) == mp_base;
+    bool sig_match = sig_now == bsp_sig;
+    bool seeded_ok = slot336_match && slot344_match && sig_match;
+    if (seeded_ok) {
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+            (log_limit == 0 || log_count < log_limit)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: xenipf mpbuffer skip=already_seeded"
+                          " pc=%016" PRIx64 " sp=%016" HWADDR_PRIx
+                          " slot336=%016" PRIx64 " slot344=%016" PRIx64
+                          " sig=%016" PRIx64 "\n",
+                          pc, sp, cur, cur_alt, sig_now);
+            log_count++;
+        }
+        return;
+    }
+    const char *repair_reason = (!cur && !cur_alt) ? "missing_slots"
+                              : (!slot336_match || !slot344_match) ? "slot_drift"
+                              : !sig_match ? "sig_drift"
+                              : "refresh";
 
     stq_le_p(tmp, bsp_sig);
     cpu_physical_memory_write(mp_base + 0x188, tmp, sizeof(tmp));
@@ -19326,12 +19544,18 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
     cpu_physical_memory_write(sp + 336, tmp, sizeof(tmp));
     cpu_physical_memory_write(sp + 344, tmp, sizeof(tmp));
 
-    if (!logged) {
-        logged = true;
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+        (log_limit == 0 || log_count < log_limit)) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: xenipf mpbuffer: pc=%016" PRIx64
-                      " sp=%016" HWADDR_PRIx " mp_base=%016" HWADDR_PRIx "\n",
-                      pc, sp, mp_base);
+                      "IA64: xenipf mpbuffer applied"
+                      " pc=%016" PRIx64 " sp=%016" HWADDR_PRIx
+                      " reason=%s"
+                      " mp_base=%016" HWADDR_PRIx
+                      " slot336_old=%016" PRIx64
+                      " slot344_old=%016" PRIx64
+                      " sig_old=%016" PRIx64 "\n",
+                      pc, sp, repair_reason, mp_base, cur, cur_alt, sig_now);
+        log_count++;
     }
 #endif
 }
