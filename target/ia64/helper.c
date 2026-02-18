@@ -15384,10 +15384,12 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                      ia64_fw_pei_status_rewrite_dedup_hit(
                          &ia64_fw_pei_22560_rewrite_dedup,
                          &rewrite_fp, &dedup_delta);
-    bool do_fix = do_fix_ready && !dedup_hit;
+    bool do_fix = do_fix_ready;
     if (do_fix) {
-        ia64_fw_pei_status_rewrite_dedup_remember(&ia64_fw_pei_22560_rewrite_dedup,
-                                                  &rewrite_fp);
+        if (!dedup_hit) {
+            ia64_fw_pei_status_rewrite_dedup_remember(
+                &ia64_fw_pei_22560_rewrite_dedup, &rewrite_fp);
+        }
         ia64_fw_pei_22560_fix_ctx = (IA64Pei22560FixCtx) {
             .valid = true,
             .seq = chain_seq,
@@ -15484,6 +15486,7 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                               " ps=%016" PRIx64 " type=%016" PRIx64
                               " value=%016" PRIx64 " inst=%016" PRIx64
                               " fp=%016" PRIx64
+                              " status_rewritten=1"
                               " dedup_delta=%" PRIu64
                               " dedup_window=%" PRIu64 "\n",
                               rewrite_fp.ret_pc, rewrite_fp.ps_ptr,
@@ -16086,6 +16089,7 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
                               " type=%016" PRIx64 " value=%016" PRIx64
                               " inst=%016" PRIx64
                               " fp=%016" PRIx64
+                              " status_rewritten=1"
                               " dedup_delta=%" PRIu64
                               " dedup_window=%" PRIu64 "\n",
                               ent->ret_pc, env->b[0], ent->seq, ent->ps_ptr,
@@ -16095,10 +16099,11 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
                 reject_log_count++;
             }
         }
-        return;
     }
-    ia64_fw_pei_status_rewrite_dedup_remember(&ia64_fw_pei_report_rewrite_dedup,
-                                              &rewrite_fp);
+    if (!dedup_hit) {
+        ia64_fw_pei_status_rewrite_dedup_remember(
+            &ia64_fw_pei_report_rewrite_dedup, &rewrite_fp);
+    }
 
     env->r[8] = 0;
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {

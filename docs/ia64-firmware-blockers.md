@@ -433,6 +433,23 @@ investigation breadcrumbs.
     - probe logs emitted as expected in the target window.
     - current early-window signal is mostly `r8=EFI_SUCCESS`; no host assert.
     - first blocker is unchanged in baseline profile (`DxeLoad.c:536`).
+- Status-rewrite dedup correctness fix (2026-02-18, P3-AD slice 3):
+  - root-cause classification from slice-2/3 traces:
+    - repeated optional StatusCode soft errors were still observed at
+      `pc=0xffe22560` and report-return `ret_pc=0xffe2be20`.
+    - dedup "reject" paths were suppressing rewrite application on repeated
+      fingerprints, which is semantically incorrect for optional-path handling.
+  - `target/ia64/helper.c` fix:
+    - keep dedup as log/rate control only.
+    - continue rewriting `r8 -> EFI_SUCCESS` even on dedup-repeat for both:
+      - `pei_22560_status` fix path
+      - `pei_report_status_fix` path.
+    - dedup-repeat logs now include `status_rewritten=1`.
+  - validation (`IA64_GUEST_ERRORS=1 ... timeout 35s scripts/run-ia64-firmware.sh`):
+    - `pei_report_status_fix reject=dedup_repeat ... status_rewritten=1`
+      is now present (rewrite no longer skipped on dedup hit).
+    - first blocker remains `DxeLoad.c:536`, so blocker is likely downstream of
+      register-return status propagation alone.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
