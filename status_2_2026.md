@@ -758,11 +758,43 @@ Logs checked:
     - `IA64_GUEST_ERRORS=1 timeout 30s scripts/run-ia64-firmware.sh`
       -> `rc=124` (`scratch/ia64_logs/p3u_fw_default_smoke.out`).
 
+## Follow-up (P3-V ROM Gate Return-Path Unwind Fix + Packed Shift/Add Coverage)
+- Fixed ROM `break(0)` gate return-path unwind semantics:
+  - `target/ia64/translate.c`
+    - ROM gate return fastpath now calls `ret_restore_b0` before resuming at
+      `b0`, so call-gate returns unwind modeled stacked-register state.
+  - `target/ia64/helper.c`
+    - fixed `ret_restore_b0` tail logic so non-pop (`do_pop=0`) paths correctly
+      store the current frame to backing store (removed dead nested condition).
+- Added directed packed shift/add count coverage:
+  - `scripts/ia64-op7-selftest.S`
+    - extended `pshladd2` checks to `count2={1,2,3}`
+    - extended `pshradd2` checks to `count2={1,2,3}`.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro (safe-off; fix on):
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - `timeout 90s` on the same repro knobs also -> `rc=124`.
+    - `scratch/ia64_logs/qemu.fw.log` evidence:
+      - ROM gate return now unwinds on the gate edge:
+        `ret_restore_b0 ip=0x80000000ffffb2a0 ... pop=1`
+      - prior blocker is cleared:
+        no `fault vec=0x2c00 ip=0x280` and no `IA64 UNIMPL` in the 90s window.
+  - Baseline smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 30s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+      -> `rc=137`.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
 - Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
-- Host-side `TB_EXIT_REQUESTED` assert and `0xffffb2f0` reserved-template
-  blocker are fixed in the current safe-off path; next blocker is now
-  `fault vec=0x2c00 ip=0x280` with `LAST_BR from=0xffe70310 to=0x280` in
-  `...279D0_SAFE_MODE=0` runs.
+- Host-side `TB_EXIT_REQUESTED` assert, `0xffffb2f0` reserved-template blocker,
+  and the `fault vec=0x2c00 ip=0x280` return-path blocker are fixed in the
+  current safe-off path. Next terminal blocker is no longer reached inside the
+  current 90s safe-off validation window.

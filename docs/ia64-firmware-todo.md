@@ -53,6 +53,10 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   `QEMU_IA64_FW_BREAK0_GATE_TRACE_LIMIT`)
   (`target/ia64/translate.c`, `target/ia64/helper.c`,
   `scripts/run-ia64-firmware.sh`, `docs/ia64-environment-variables.md`).
+- Unwind modeled call/RSE state on ROM gate return edges by calling
+  `ret_restore_b0` before resuming at `b0`, and fix `ret_restore_b0` non-pop
+  frame-store tail logic (dead nested condition removal)
+  (`target/ia64/translate.c`, `target/ia64/helper.c`).
 - Complete I-unit `op=7` core packed shift/pack/unpack families:
   `pshl2/4`, `pshr2/4(.u)` (register + immediate), `pack2.*`, `pack4.sss`,
   `unpack1/2.*`
@@ -66,6 +70,9 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   (`target/ia64/translate.c`, `target/ia64/helper.c`, `target/ia64/helper.h`).
 - Add directed `op=7` bare-kernel selftest harness and runner
   (`scripts/ia64-op7-selftest.S`, `scripts/run-ia64-op7-tests.sh`).
+- Extend directed `op=7` A10/A11 shift+add selftests to cover
+  `count2={1,2,3}` for both `pshladd2` and `pshradd2`
+  (`scripts/ia64-op7-selftest.S`).
 - Add targeted PEI copy-path tracing hooks and summarizer script for the
   `0xffe7b1e0` byte-copy blocker
   (`target/ia64/translate.c`, `target/ia64/helper.c`,

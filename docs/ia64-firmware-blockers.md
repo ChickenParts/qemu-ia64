@@ -220,11 +220,29 @@ investigation breadcrumbs.
       - `rc=124`.
       - `IA64 UNIMPL pc=...ffffb2f0` and `vec=0x5400 ip=...ffffb2f0`
         are cleared.
-      - next blocker advances to `fault vec=0x2c00 ip=0x280`
+      - follow-up exposed new return-path blocker:
+        `fault vec=0x2c00 ip=0x280`
         (last branch `from=0xffe70310 to=0x280`).
     - fix off (`scratch/ia64_logs/p3u_gate_ret_off_safeoff.*`, 30s):
       - reproduces prior blocker:
         `IA64 UNIMPL pc=...ffffb2f0` then `vec=0x5400`.
+- ROM gate return-path unwind fix (2026-02-18):
+  - `target/ia64/translate.c`
+    - ROM gate return fastpath now executes `ret_restore_b0` before jumping to
+      `b0`, so call-gate returns unwind modeled stacked-register state.
+  - `target/ia64/helper.c`
+    - fixed `ret_restore_b0` non-pop tail path so it stores the active frame
+      (removed dead nested `if (do_pop) { if (!do_pop) ... }` logic).
+  - validation (safe-off repro):
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1`
+      `IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1`
+      `IA64_PEI_279D0_SAFE_MODE=0 timeout 90s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - evidence in `scratch/ia64_logs/qemu.fw.log`:
+      - gate edge now unwinds:
+        `ret_restore_b0 ip=0x80000000ffffb2a0 ... pop=1`
+      - prior blocker cleared:
+        no `fault vec=0x2c00 ip=0x280` and no `IA64 UNIMPL` in the 90s window.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
