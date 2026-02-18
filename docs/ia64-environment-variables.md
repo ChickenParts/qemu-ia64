@@ -352,6 +352,7 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT` | Limit `279d0` safe-mode block/probe logs |
 | `QEMU_IA64_DXE_LOAD_TRACE` | Trace status propagation in DXE-load probe window (`pc=0xffe255a0..0xffe2572c`, default off) |
 | `QEMU_IA64_DXE_LOAD_TRACE_LIMIT` | Limit DXE-load probe trace entries |
+| `QEMU_IA64_DXE_LOAD_VALUE_TRACE` | Include DXE-load probe dereference values (`r33/r34/*r33`) and soft-error classification (default on) |
 | `QEMU_IA64_TBEXIT_TRACE` | Emit bounded IA-64 state dump when TCG hits `TB_EXIT_REQUESTED without exitreq/icount` (default off) |
 | `QEMU_IA64_TBEXIT_TRACE_LIMIT` | Limit `QEMU_IA64_TBEXIT_TRACE` dumps |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL` | Legacy report_status soft-fail path (kept for compatibility) |

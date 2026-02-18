@@ -478,6 +478,19 @@ investigation breadcrumbs.
   - blocker status:
     - active first blocker remains `DxeLoad.c:536`.
     - no regression to older MP-init AP rendezvous blocker in this profile.
+- P3-AE DXE pointer/value provenance instrumentation (2026-02-18, slice 2):
+  - extended `dxe_load_probe` with bounded pointer dereference telemetry:
+    - `dxe_load_probe_mem r33_val_ok=... r34_val_ok=... arg1_ptr_val_ok=...`
+    - includes soft-error classification for dereferenced values.
+  - new knob:
+    - `QEMU_IA64_DXE_LOAD_VALUE_TRACE` (default on when DXE probe is enabled).
+  - script/doc updates:
+    - `scripts/run-ia64-firmware.sh` now accepts `IA64_DXE_LOAD_VALUE_TRACE`.
+    - variable documented in `docs/ia64-environment-variables.md`.
+  - validation (`IA64_DXE_LOAD_TRACE=1 IA64_DXE_LOAD_TRACE_LIMIT=40 timeout 20s scripts/run-ia64-firmware.sh`):
+    - probe and mem-derivation logs are emitted.
+    - early DXE probe windows in this run show `r33/r34` unresolved
+      (`*_val_ok=0`) and no immediate soft-error payload values.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

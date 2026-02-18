@@ -55,6 +55,7 @@ Environment overrides:
   IA64_PEI_STATUS_TRANSITION_LIMIT (default: 64)
   IA64_DXE_LOAD_TRACE (default: 0; trace DXE-load status propagation window at pc=0xffe255a0..0xffe2572c)
   IA64_DXE_LOAD_TRACE_LIMIT (default: 128)
+  IA64_DXE_LOAD_VALUE_TRACE (default: 1; include r33/r34/status-pointer dereference values in DXE-load probe logs)
   IA64_PEI_STATUSCODE_SEMANTIC_FIX (default: 1; semantic StatusCode optional-path success)
   IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT (default: 64)
   IA64_PEI_NOTIFY_TRACE (default: 0; trace notify-ppi return status for traced blocker path)
@@ -283,6 +284,10 @@ fi
 
 if [[ -n "${IA64_DXE_LOAD_TRACE_LIMIT:-}" ]]; then
   export QEMU_IA64_DXE_LOAD_TRACE_LIMIT="${IA64_DXE_LOAD_TRACE_LIMIT}"
+fi
+
+if [[ -n "${IA64_DXE_LOAD_VALUE_TRACE:-}" ]]; then
+  export QEMU_IA64_DXE_LOAD_VALUE_TRACE="${IA64_DXE_LOAD_VALUE_TRACE}"
 fi
 
 if [[ -n "${IA64_PEI_STATUSCODE_SEMANTIC_FIX:-}" ]]; then

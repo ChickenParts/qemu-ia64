@@ -6559,6 +6559,20 @@ static int ia64_fw_dxe_load_trace_limit(void)
     return limit;
 }
 
+static bool ia64_fw_dxe_load_value_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DXE_LOAD_VALUE_TRACE");
+        if (!s || !*s) {
+            enabled = 1;
+        } else {
+            enabled = (strcmp(s, "0") != 0) ? 1 : 0;
+        }
+    }
+    return enabled;
+}
+
 static uint64_t ia64_fw_progress_event_signature(const IA64FwProgressEvent *ev)
 {
     uint64_t h = ev->pc ^ (ev->b0 << 1) ^ (ev->status << 7) ^ ev->ps_ptr;
@@ -21470,9 +21484,19 @@ void HELPER(fw_dxe_load_status_probe)(CPUIA64State *env,
     uint64_t ps_ptr = ia64_fw_progress_guess_ps_ptr(env);
     uint64_t arg0_ptr = 0;
     uint64_t arg1_ptr = 0;
+    uint64_t r33_val = 0;
+    uint64_t r34_val = 0;
+    uint64_t arg1_ptr_val = 0;
     CPUState *cs = env_cpu(env);
     bool arg0_ptr_ok = env->r[32] && ia64_fw_read_u64(cs, env->r[32], &arg0_ptr);
     bool arg1_ptr_ok = env->r[33] && ia64_fw_read_u64(cs, env->r[33], &arg1_ptr);
+    bool val_trace = ia64_fw_dxe_load_value_trace_enabled();
+    bool r33_val_ok = val_trace && env->r[33] &&
+                      ia64_fw_read_u64(cs, env->r[33], &r33_val);
+    bool r34_val_ok = val_trace && env->r[34] &&
+                      ia64_fw_read_u64(cs, env->r[34], &r34_val);
+    bool arg1_ptr_val_ok = val_trace && arg1_ptr_ok && arg1_ptr &&
+                           ia64_fw_read_u64(cs, arg1_ptr, &arg1_ptr_val);
     bool have_pending_report = ia64_fw_pei_report_status_sp > 0;
     IA64PeiReportStatusCall pending_report = { 0 };
     if (have_pending_report) {
@@ -21526,6 +21550,30 @@ void HELPER(fw_dxe_load_status_probe)(CPUIA64State *env,
                   arg0_ptr_ok ? arg0_ptr : 0,
                   arg1_ptr_ok ? arg1_ptr : 0,
                   repeated ? 1 : 0, repeated_count);
+    if (val_trace) {
+        bool r33_soft_err = r33_val_ok &&
+                            ia64_fw_pei_report_status_is_soft_error(r33_val);
+        bool r34_soft_err = r34_val_ok &&
+                            ia64_fw_pei_report_status_is_soft_error(r34_val);
+        bool arg1_soft_err = arg1_ptr_val_ok &&
+                             ia64_fw_pei_report_status_is_soft_error(arg1_ptr_val);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: dxe_load_probe_mem"
+                      " r33_val_ok=%d r33_val=%016" PRIx64
+                      " r34_val_ok=%d r34_val=%016" PRIx64
+                      " arg1_ptr_val_ok=%d arg1_ptr_val=%016" PRIx64
+                      " r33_soft=%d r34_soft=%d arg1_soft=%d"
+                      " pending_report=%d rpt_ret=%016" PRIx64 "\n",
+                      r33_val_ok ? 1 : 0, r33_val_ok ? r33_val : 0,
+                      r34_val_ok ? 1 : 0, r34_val_ok ? r34_val : 0,
+                      arg1_ptr_val_ok ? 1 : 0,
+                      arg1_ptr_val_ok ? arg1_ptr_val : 0,
+                      r33_soft_err ? 1 : 0,
+                      r34_soft_err ? 1 : 0,
+                      arg1_soft_err ? 1 : 0,
+                      have_pending_report ? 1 : 0,
+                      pending_report.ret_pc);
+    }
     if (ia64_fw_efi_status_maybe(env->r[8])) {
         ia64_fw_pei_log_efi_status("dxe_load_probe", "r8", env->r[8]);
     }
