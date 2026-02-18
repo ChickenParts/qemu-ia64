@@ -2289,6 +2289,15 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                         tcg_constant_i64(ctx->base.pc_next));
         }
     }
+    if (ctx->mem_idx != MMU_USER_IDX) {
+        uint64_t pc_lo = ctx->base.pc_next & ((1ULL << 61) - 1);
+        if ((pc_lo >= 0xffe255a0ULL && pc_lo <= 0xffe25620ULL) ||
+            (pc_lo >= 0xffe256a0ULL && pc_lo <= 0xffe2572cULL)) {
+            gen_helper_fw_dxe_load_status_probe(tcg_env,
+                                                tcg_constant_i64(ctx->base.pc_next),
+                                                tcg_constant_i32(ctx->ri));
+        }
+    }
     if (ctx->mem_idx != MMU_USER_IDX &&
         ctx->ri == 0 &&
         (ctx->base.pc_next == 0x80000000ffe22560ULL ||

@@ -6533,6 +6533,32 @@ static int ia64_fw_progress_loop_threshold(void)
     return threshold;
 }
 
+static bool ia64_fw_dxe_load_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DXE_LOAD_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_dxe_load_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 128;
+        const char *s = getenv("QEMU_IA64_DXE_LOAD_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
 static uint64_t ia64_fw_progress_event_signature(const IA64FwProgressEvent *ev)
 {
     uint64_t h = ev->pc ^ (ev->b0 << 1) ^ (ev->status << 7) ^ ev->ps_ptr;
@@ -21409,6 +21435,99 @@ void HELPER(fw_pei_first_bad_status_probe)(CPUIA64State *env, uint64_t pc,
             ia64_fw_pei_first_bad_dump_bytes(env, "*arg0", arg0_ptr, dump_len);
         }
     }
+#endif
+}
+
+void HELPER(fw_dxe_load_status_probe)(CPUIA64State *env,
+                                      uint64_t pc, uint32_t ri)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    (void)ri;
+    return;
+#else
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR) ||
+        !ia64_fw_dxe_load_trace_enabled()) {
+        return;
+    }
+
+    static int trace_count;
+    static uint64_t last_fp;
+    static uint64_t last_seq;
+    static uint64_t repeat_count;
+
+    int limit = ia64_fw_dxe_load_trace_limit();
+    if (limit == 0 || trace_count >= limit) {
+        return;
+    }
+
+    uint64_t ps_ptr = ia64_fw_progress_guess_ps_ptr(env);
+    uint64_t arg0_ptr = 0;
+    uint64_t arg1_ptr = 0;
+    CPUState *cs = env_cpu(env);
+    bool arg0_ptr_ok = env->r[32] && ia64_fw_read_u64(cs, env->r[32], &arg0_ptr);
+    bool arg1_ptr_ok = env->r[33] && ia64_fw_read_u64(cs, env->r[33], &arg1_ptr);
+    bool have_pending_report = ia64_fw_pei_report_status_sp > 0;
+    IA64PeiReportStatusCall pending_report = { 0 };
+    if (have_pending_report) {
+        pending_report =
+            ia64_fw_pei_report_status_stack[ia64_fw_pei_report_status_sp - 1];
+    }
+
+    uint64_t fp = pc ^ ((uint64_t)ri << 56) ^
+                  (env->b[0] << 1) ^ (env->r[8] << 7) ^ (env->r[9] << 11) ^
+                  (env->r[32] << 13) ^ (env->r[33] << 17) ^
+                  (env->r[34] << 19) ^ (env->r[35] << 23) ^
+                  (ps_ptr << 29) ^ ia64_fw_pei_producer_seq;
+    if (have_pending_report) {
+        fp ^= pending_report.ret_pc ^ pending_report.type ^
+              pending_report.value ^ pending_report.seq;
+    }
+
+    uint64_t seq_delta = ia64_fw_pei_status_rewrite_seq_delta(
+        ia64_fw_pei_producer_seq, last_seq);
+    if (last_fp == fp && seq_delta <= 8) {
+        repeat_count++;
+        return;
+    }
+
+    bool repeated = repeat_count > 0;
+    uint64_t repeated_count = repeat_count;
+    repeat_count = 0;
+    last_fp = fp;
+    last_seq = ia64_fw_pei_producer_seq;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: dxe_load_probe pc=%016" PRIx64
+                  " ri=%u b0=%016" PRIx64
+                  " r8=%016" PRIx64 " r9=%016" PRIx64
+                  " r12=%016" PRIx64
+                  " r32=%016" PRIx64 " r33=%016" PRIx64
+                  " r34=%016" PRIx64 " r35=%016" PRIx64
+                  " r36=%016" PRIx64 " r37=%016" PRIx64
+                  " ps=%016" PRIx64 " prod_seq=%" PRIu64
+                  " pending_report=%d rpt_ret=%016" PRIx64
+                  " rpt_type=%016" PRIx64 " rpt_value=%016" PRIx64
+                  " rpt_seq=%" PRIu64
+                  " arg0_ptr=%016" PRIx64 " arg1_ptr=%016" PRIx64
+                  " repeated=%d repeat_count=%" PRIu64 "\n",
+                  pc, ri, env->b[0], env->r[8], env->r[9],
+                  env->r[12], env->r[32], env->r[33], env->r[34], env->r[35],
+                  env->r[36], env->r[37], ps_ptr, ia64_fw_pei_producer_seq,
+                  have_pending_report ? 1 : 0,
+                  pending_report.ret_pc, pending_report.type,
+                  pending_report.value, pending_report.seq,
+                  arg0_ptr_ok ? arg0_ptr : 0,
+                  arg1_ptr_ok ? arg1_ptr : 0,
+                  repeated ? 1 : 0, repeated_count);
+    if (ia64_fw_efi_status_maybe(env->r[8])) {
+        ia64_fw_pei_log_efi_status("dxe_load_probe", "r8", env->r[8]);
+    }
+    if (ia64_fw_efi_status_maybe(env->r[9]) && env->r[9] != env->r[8]) {
+        ia64_fw_pei_log_efi_status("dxe_load_probe", "r9", env->r[9]);
+    }
+    trace_count++;
 #endif
 }
 

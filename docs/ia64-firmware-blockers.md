@@ -418,6 +418,21 @@ investigation breadcrumbs.
   - blocker classification (current):
     - active first blocker remains `DxeLoad.c:536`.
     - prior MP-init AP-path blocker remains suppressed in this repro profile.
+- DXE-load status provenance instrumentation (2026-02-18, P3-AD slice 2):
+  - `target/ia64/translate.c` now probes the DXE-load status window at:
+    - `pc=0xffe255a0..0xffe25620`
+    - `pc=0xffe256a0..0xffe2572c`
+  - `target/ia64/helper.c` adds bounded probe logging:
+    - `IA64: dxe_load_probe ... pending_report=... rpt_ret=...`
+    - captures `r8/r9`, argument pointers, `ps`, `producer_seq`, and top
+      `report_status_code` stack metadata for propagation analysis.
+  - knobs:
+    - `QEMU_IA64_DXE_LOAD_TRACE`
+    - `QEMU_IA64_DXE_LOAD_TRACE_LIMIT`.
+  - validation (`IA64_DXE_LOAD_TRACE=1 IA64_DXE_LOAD_TRACE_LIMIT=40 ... timeout 20s scripts/run-ia64-firmware.sh`):
+    - probe logs emitted as expected in the target window.
+    - current early-window signal is mostly `r8=EFI_SUCCESS`; no host assert.
+    - first blocker is unchanged in baseline profile (`DxeLoad.c:536`).
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
