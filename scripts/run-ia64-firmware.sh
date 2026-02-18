@@ -53,6 +53,8 @@ Environment overrides:
   IA64_PEI_279D0_STATUS_FIX (default: 0; bounded rewrite for non-EFI status at pc=0xffe279d0..0xffe27a10)
   IA64_PEI_279D0_STATUS_FIX_ALWAYS (default: 0; allow ps-link fallback guard for 0xffe279d0 fix)
   IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT (default: 64)
+  IA64_PEI_279D0_SAFE_MODE (default: 1; quarantine 279d0 rewrite path and log bundle probes)
+  IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT (default: 64)
   IA64_PEI_REPORT_STATUS_SOFTFAIL (default: 1; treat early StatusCode report errors as non-fatal)
   IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS (default: 0; softfail regardless of ppi_end)
   IA64_PEI_HOB_FLOW_TRACE (default: 0; trace GetHobList/CreateHob call-return contract)
@@ -253,6 +255,14 @@ fi
 
 if [[ -n "${IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT:-}" ]]; then
   export QEMU_IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT="${IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT}"
+fi
+
+if [[ -n "${IA64_PEI_279D0_SAFE_MODE:-}" ]]; then
+  export QEMU_IA64_PEI_279D0_SAFE_MODE="${IA64_PEI_279D0_SAFE_MODE}"
+fi
+
+if [[ -n "${IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT:-}" ]]; then
+  export QEMU_IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT="${IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT}"
 fi
 
 if [[ -n "${IA64_PEI_REPORT_STATUS_SOFTFAIL:-}" ]]; then

@@ -126,6 +126,29 @@ investigation breadcrumbs.
     - `279d0` rewrite remains default-off and investigation-only.
     - immediate next blocker is the TCG assert path reached after this bounded
       rewrite, before additional PEI/DXE forward progress can be claimed.
+- `pc=0xffe279d0` safe-mode quarantine guard (2026-02-18):
+  - Added new safe-mode controls:
+    - `QEMU_IA64_PEI_279D0_SAFE_MODE` (default on)
+    - `QEMU_IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT`
+  - Safe mode now quarantines the `279d0` rewrite path even when
+    `...279D0_STATUS_FIX=1`:
+    - mutation context is still traced (`pei_279d0_status ...`)
+    - helper captures a probe bundle at `0x80000000ffffb2b0` /
+      `0x00000000ffffb2b0` (`pei_279d0_status safe_probe ...`)
+    - status rewrite is suppressed (`safe_quarantine=1`, `fixed=0`)
+  - A/B evidence (`scratch/ia64_logs/p3q/*`, 45s windows):
+    - `safe_default`
+      (`22560 fix on`, `279d0 trace on`, `279d0 fix on`, safe-mode default):
+      `rc=124`, `trace_279d0=4`, `fix_279d0=0`, `safe_quarantine=4`,
+      no host assert.
+    - `safe_off`
+      (`...279D0_SAFE_MODE=0`):
+      `rc=134`, `fix_279d0=1`, host assert reproduced
+      (`TB_EXIT_REQUESTED without exitreq/icount`).
+  - Current stance:
+    - keep safe mode default-on to prevent host abort in fix-enabled runs.
+    - retain `...SAFE_MODE=0` as repro switch for root-cause analysis of the
+      post-`279d0` TCG assert path.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

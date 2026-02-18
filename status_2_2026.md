@@ -579,10 +579,55 @@ Logs checked:
   - UNIMPL refresh:
     - no `IA64 UNIMPL` lines in fresh smoke logs.
 
+## Follow-up (P3-Q `279d0` Safe-Mode Quarantine for TCG Assert Path)
+- Added bounded safe-mode guard for the `279d0` rewrite path in
+  `target/ia64/helper.c`:
+  - new env controls:
+    - `QEMU_IA64_PEI_279D0_SAFE_MODE` (default on)
+    - `QEMU_IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT`
+  - when safe mode is active and the bounded `279d0` fix predicate matches:
+    - trace context is retained (`pei_279d0_status ...`)
+    - helper captures/signals bundle probe state
+      (`pei_279d0_status safe_probe ...`)
+    - rewrite is quarantined (`safe_quarantine=1`, `fixed=0`).
+- `scripts/run-ia64-firmware.sh` now exports wrappers:
+  - `IA64_PEI_279D0_SAFE_MODE`
+  - `IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT`
+- `docs/ia64-environment-variables.md` documents the new knobs.
+- Validation (2026-02-18, `scratch/ia64_logs/p3q/*`, 45s windows):
+  - `safe_default`
+    (`22560 fix on`, `279d0 trace on`, `279d0 fix on`, safe mode default):
+    - `rc=124`
+    - `transition_279d0=1`, `trace_279d0=4`
+    - `fix_279d0=0`, `safe_probe=4`, `safe_quarantine=4`
+    - no host assert.
+  - `safe_off`
+    (`...279D0_SAFE_MODE=0`):
+    - `rc=134`
+    - `fix_279d0=1`
+    - host assert reproduced:
+      `TB_EXIT_REQUESTED without exitreq/icount`.
+  - `trace_only` (`279d0 fix off`): unchanged baseline profile, `rc=124`.
+- Regression/smoke after safe-mode wiring:
+  - directed tests passed:
+    - `scripts/run-ia64-fslot-tests.sh 15s`
+    - `scripts/run-ia64-op7-tests.sh 12s`
+    - `scripts/run-ia64-nat-tests.sh 12s`
+    - `scripts/run-ia64-rse-tests.sh 12s`
+    - `scripts/run-ia64-alat-tests.sh 12s`
+  - runtime smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+      -> `rc=137`.
+  - UNIMPL refresh:
+    - `scripts/ia64-unimpl-report.sh --format tsv --top 50 ...`
+      reported no `IA64 UNIMPL` lines in fresh smoke logs.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
 - Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
-- New host-side blocker under `QEMU_IA64_PEI_279D0_STATUS_FIX=1`:
-  TCG assert (`TB_EXIT_REQUESTED without exitreq/icount`) during firmware
-  progression after the bounded `279d0` rewrite path.
+- Root-cause of the post-`279d0` host-side TCG assert remains open; safe-mode
+  quarantine is now default-on and `...279D0_SAFE_MODE=0` reproduces for
+  investigation.
