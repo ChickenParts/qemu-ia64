@@ -290,6 +290,25 @@ investigation breadcrumbs.
     - `pei_22560_status ... epoch_seen=1 epoch_match=1 ...` on matched path.
     - stale-epoch tail recurrences are now rejected/logged instead of silently
       rewritten.
+- Firmware progress-loop telemetry + bounded rewrite de-dup (2026-02-18):
+  - `target/ia64/helper.c`:
+    - added bounded `fw_progress` marker ring and optional loop detector for
+      repeated `break(0)`/StatusCode signatures.
+    - added rewrite de-dup guard (default on) for both:
+      - `pc=0xffe22560` rewrite path
+      - semantic `pei_report_status_fix` rewrite path.
+    - first-bad optional-path skip logs now include rewrite de-dup state:
+      `rewrite_dedup`, `rewrite_dedup_delta`, `rewrite_fp`.
+  - knobs:
+    - `QEMU_IA64_PEI_PROGRESS_TRACE`
+    - `QEMU_IA64_PEI_PROGRESS_LOOP_TRACE`
+    - `QEMU_IA64_PEI_STATUS_REWRITE_DEDUP`
+    - `QEMU_IA64_PEI_STATUS_REWRITE_DEDUP_WINDOW`.
+  - validation (`IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`):
+    - `rc=124`, no host assert.
+    - evidence now shows bounded duplicate suppression:
+      - `pei_report_status_fix reject=dedup_repeat ... dedup_delta=...`
+      - `fw_pei_first_bad_skip ... rewrite_dedup=1 ...`
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

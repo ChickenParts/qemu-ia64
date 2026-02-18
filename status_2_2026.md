@@ -890,6 +890,43 @@ Logs checked:
       - `pei_279d0_status ... ps_epoch_src=... ps_epoch_seq=... ps_epoch_cont=...`
       - no `ps_epoch_seen=0` tail misses in this repro window.
 
+## Follow-up (P3-Z Firmware Progress Loop Telemetry + Rewrite De-dup)
+- Added bounded firmware progress marker telemetry in `target/ia64/helper.c`:
+  - `fw_progress` ring captures:
+    - `ip`, `pc`, `b0`, `r8`, statuscode type/value, PS pointer, producer seq.
+  - trace knobs (default off):
+    - `QEMU_IA64_PEI_PROGRESS_TRACE`
+    - `QEMU_IA64_PEI_PROGRESS_TRACE_LIMIT`.
+- Added progress loop detector (trace-only, default off):
+  - emits `fw_progress_loop` when a signature repeats in a bounded window.
+  - knobs:
+    - `QEMU_IA64_PEI_PROGRESS_LOOP_TRACE`
+    - `QEMU_IA64_PEI_PROGRESS_LOOP_TRACE_LIMIT`
+    - `QEMU_IA64_PEI_PROGRESS_LOOP_WINDOW`
+    - `QEMU_IA64_PEI_PROGRESS_LOOP_THRESHOLD`.
+- Added bounded rewrite de-dup for StatusCode rewrites (default on):
+  - `QEMU_IA64_PEI_STATUS_REWRITE_DEDUP=1`
+  - `QEMU_IA64_PEI_STATUS_REWRITE_DEDUP_WINDOW=64`
+  - applied to:
+    - `pc=0xffe22560` rewrite path
+    - semantic `pei_report_status_fix` rewrite path.
+  - new reject signal:
+    - `reject=dedup_repeat ...`.
+- Added first-bad correlation fields for optional-path suppression:
+  - `rewrite_dedup`, `rewrite_dedup_delta`, `rewrite_fp`.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro:
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, no host assert.
+    - `scratch/ia64_logs/qemu.fw.log` now shows:
+      - `pei_report_status_fix reject=dedup_repeat ... dedup_delta=...`
+      - `fw_pei_first_bad_skip ... rewrite_dedup=1 rewrite_dedup_delta=...`
+      - bounded resumption of rewrite when sequence delta exceeds dedup window.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
