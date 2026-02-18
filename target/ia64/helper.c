@@ -6675,6 +6675,35 @@ static int ia64_fw_dxe_assert_trace_limit(void)
     return limit;
 }
 
+static bool ia64_fw_dxe_assert_scan_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DXE_ASSERT_SCAN_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_dxe_assert_scan_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 128;
+        const char *s = getenv("QEMU_IA64_DXE_ASSERT_SCAN_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+        if (limit > 4096) {
+            limit = 4096;
+        }
+    }
+    return limit;
+}
+
 static int ia64_fw_dxe_load_trace_limit(void)
 {
     static int limit = -1;
@@ -6722,6 +6751,136 @@ static bool ia64_fw_dxe_load_value_trace_enabled(void)
         }
     }
     return enabled;
+}
+
+typedef struct IA64DxeAssertScanMatch {
+    bool matched;
+    uint8_t file_arg;
+    uint8_t line_arg;
+    uint8_t status_arg;
+    bool line_valid;
+    bool status_valid;
+    uint64_t file_ptr;
+    uint64_t line;
+    uint64_t status;
+    char file[160];
+    const char *file_enc;
+} IA64DxeAssertScanMatch;
+
+static bool ia64_fw_scan_read_file_string(CPUState *cs, uint64_t ptr,
+                                          IA64DxeAssertScanMatch *out)
+{
+    if (ptr < 0x1000) {
+        return false;
+    }
+    if (ia64_fw_read_ascii_string(cs, ptr, out->file, sizeof(out->file)) != 0) {
+        out->file_enc = "ascii";
+        return true;
+    }
+    if (ia64_fw_read_ucs2le_string(cs, ptr, out->file, sizeof(out->file)) != 0) {
+        out->file_enc = "ucs2";
+        return true;
+    }
+    return false;
+}
+
+static bool ia64_fw_dxe_assert_scan_match(CPUIA64State *env,
+                                          const uint64_t *args,
+                                          size_t nargs,
+                                          IA64DxeAssertScanMatch *out)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)args;
+    (void)nargs;
+    (void)out;
+    return false;
+#else
+    CPUState *cs = env_cpu(env);
+    memset(out, 0, sizeof(*out));
+    out->file_arg = UINT8_MAX;
+    out->line_arg = UINT8_MAX;
+    out->status_arg = UINT8_MAX;
+
+    for (size_t i = 0; i < nargs; i++) {
+        if (!ia64_fw_scan_read_file_string(cs, args[i], out)) {
+            continue;
+        }
+        if (strstr(out->file, "DxeLoad.c") == NULL) {
+            out->file[0] = '\0';
+            out->file_enc = NULL;
+            continue;
+        }
+        out->matched = true;
+        out->file_ptr = args[i];
+        out->file_arg = (uint8_t)i;
+        break;
+    }
+    if (!out->matched) {
+        return false;
+    }
+
+    int prefer_line = ((int)out->file_arg + 1 < (int)nargs)
+                      ? ((int)out->file_arg + 1) : -1;
+    if (prefer_line >= 0) {
+        uint64_t v = args[prefer_line];
+        if (v > 0 && v <= 0x100000) {
+            out->line_valid = true;
+            out->line_arg = (uint8_t)prefer_line;
+            out->line = v;
+        }
+    }
+    if (!out->line_valid) {
+        for (size_t i = 0; i < nargs; i++) {
+            if (i == out->file_arg) {
+                continue;
+            }
+            uint64_t v = args[i];
+            if (v > 0 && v <= 0x100000) {
+                out->line_valid = true;
+                out->line_arg = (uint8_t)i;
+                out->line = v;
+                break;
+            }
+        }
+    }
+
+    int prefer_status = (out->file_arg > 0) ? ((int)out->file_arg - 1) : 0;
+    if (prefer_status >= 0 && prefer_status < (int)nargs) {
+        uint64_t cand = args[prefer_status];
+        bool maybe_status = ia64_fw_efi_status_maybe(cand);
+        bool likely_status = (cand == 0) ||
+                             ((cand & IA64_EFI_STATUS_ERROR_BIT) != 0) ||
+                             (cand <= 0x3f);
+        bool line_alias = out->line_valid &&
+                          (out->line_arg == (uint8_t)prefer_status ||
+                           out->line == cand);
+        if (maybe_status && likely_status && !line_alias) {
+            out->status_valid = true;
+            out->status_arg = (uint8_t)prefer_status;
+            out->status = cand;
+        }
+    }
+    if (!out->status_valid) {
+        for (size_t i = 0; i < nargs; i++) {
+            uint64_t cand = args[i];
+            bool maybe_status = ia64_fw_efi_status_maybe(cand);
+            bool likely_status = (cand == 0) ||
+                                 ((cand & IA64_EFI_STATUS_ERROR_BIT) != 0) ||
+                                 (cand <= 0x3f);
+            bool line_alias = out->line_valid &&
+                              (out->line_arg == (uint8_t)i ||
+                               out->line == cand);
+            if (maybe_status && likely_status && !line_alias) {
+                out->status_valid = true;
+                out->status_arg = (uint8_t)i;
+                out->status = cand;
+                break;
+            }
+        }
+    }
+    return true;
+#endif
 }
 
 static uint64_t ia64_fw_progress_event_signature(const IA64FwProgressEvent *ev)
@@ -13395,6 +13554,77 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                                   call_a0, ia64_fw_efi_status_name(call_a0));
                 }
                 dxe_assert_trace_count++;
+            }
+        }
+    }
+
+    if (ia64_fw_dxe_assert_scan_trace_enabled() &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int dxe_assert_scan_count;
+        int trace_limit = ia64_fw_dxe_assert_scan_trace_limit();
+        if (trace_limit == 0 || dxe_assert_scan_count < trace_limit) {
+            uint64_t args[6] = {
+                call_a0, call_a1, call_a2, call_a3, call_a4, call_a5
+            };
+            IA64DxeAssertScanMatch scan = { 0 };
+            if (ia64_fw_dxe_assert_scan_match(env, args, ARRAY_SIZE(args),
+                                              &scan)) {
+                bool have_last_prod = ia64_fw_pei_producer_seq > 0;
+                IA64PeiProducerCall last_prod = { 0 };
+                if (have_last_prod) {
+                    last_prod = ia64_fw_pei_producer_ring[
+                        (ia64_fw_pei_producer_seq - 1) %
+                        IA64_PEI_PRODUCER_MAX];
+                }
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: dxe_assert_scan pc=%016" PRIx64
+                              " tgt=%016" PRIx64
+                              " file_arg=a%u file_ptr=%016" PRIx64
+                              " file_enc=%s file=\"%s\""
+                              " line_ok=%d line_arg=%s line=%" PRIu64
+                              " status_ok=%d status_arg=%s status=%016" PRIx64
+                              " prod_seq=%" PRIu64
+                              " last_prod=%d last_prod_seq=%" PRIu64
+                              " last_prod_svc=%s"
+                              " last_prod_call=%016" PRIx64
+                              " last_prod_tgt=%016" PRIx64 "\n",
+                              pc, tgt,
+                              (unsigned)scan.file_arg, scan.file_ptr,
+                              scan.file_enc ? scan.file_enc : "none",
+                              scan.file,
+                              scan.line_valid ? 1 : 0,
+                              scan.line_valid ? (scan.line_arg == 0 ? "a0" :
+                                                scan.line_arg == 1 ? "a1" :
+                                                scan.line_arg == 2 ? "a2" :
+                                                scan.line_arg == 3 ? "a3" :
+                                                scan.line_arg == 4 ? "a4" :
+                                                                     "a5")
+                                              : "-",
+                              scan.line_valid ? scan.line : 0,
+                              scan.status_valid ? 1 : 0,
+                              scan.status_valid ? (scan.status_arg == 0 ? "a0" :
+                                                  scan.status_arg == 1 ? "a1" :
+                                                  scan.status_arg == 2 ? "a2" :
+                                                  scan.status_arg == 3 ? "a3" :
+                                                  scan.status_arg == 4 ? "a4" :
+                                                                         "a5")
+                                                : "-",
+                              scan.status_valid ? scan.status : 0,
+                              ia64_fw_pei_producer_seq,
+                              have_last_prod ? 1 : 0,
+                              have_last_prod ? last_prod.seq : 0,
+                              have_last_prod ? ia64_fw_pei_service_name(last_prod.svc_id) :
+                                               "none",
+                              have_last_prod ? last_prod.pc : 0,
+                              have_last_prod ? last_prod.tgt : 0);
+                if (scan.status_valid && ia64_fw_efi_status_maybe(scan.status)) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: dxe_assert_scan status=%016" PRIx64
+                                  " %s\n",
+                                  scan.status,
+                                  ia64_fw_efi_status_name(scan.status));
+                }
+                dxe_assert_scan_count++;
             }
         }
     }

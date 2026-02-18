@@ -362,6 +362,8 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_DXE_LOAD_VALUE_TRACE` | Include DXE-load probe dereference values (`r33/r34/*r33`) and soft-error classification (default on) |
 | `QEMU_IA64_DXE_ASSERT_TRACE` | Trace calls into the DxeIpl assert helper target (`0xffe7e620`) with status/file/line payload |
 | `QEMU_IA64_DXE_ASSERT_TRACE_LIMIT` | Limit DxeIpl assert-call trace entries |
+| `QEMU_IA64_DXE_ASSERT_SCAN_TRACE` | Scan call payloads for DxeLoad assert-like signatures (file string + line + status shape) to find real assert emit callsites |
+| `QEMU_IA64_DXE_ASSERT_SCAN_TRACE_LIMIT` | Limit DxeLoad assert-scan trace entries |
 | `QEMU_IA64_TBEXIT_TRACE` | Emit bounded IA-64 state dump when TCG hits `TB_EXIT_REQUESTED without exitreq/icount` (default off) |
 | `QEMU_IA64_TBEXIT_TRACE_LIMIT` | Limit `QEMU_IA64_TBEXIT_TRACE` dumps |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL` | Legacy report_status soft-fail path (kept for compatibility) |
