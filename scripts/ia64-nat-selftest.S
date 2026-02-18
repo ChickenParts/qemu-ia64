@@ -71,6 +71,28 @@ test_getf_exp_clears_nat:
 1:
 	getf.exp r19 = f0
 	tnat.z p6,p7 = r19
+(p6)	br.cond.spnt test_ld4_c_nc_clears_nat
+	br.sptk.many fail
+
+test_ld4_c_nc_clears_nat:
+	mov r19 = r14
+	tnat.z p6,p7 = r19
+(p7)	br.cond.spnt 1f
+	br.sptk.many fail
+1:
+	ld4.c.nc r19 = [r12]
+	tnat.z p6,p7 = r19
+(p6)	br.cond.spnt test_ld8_c_clr_clears_nat
+	br.sptk.many fail
+
+test_ld8_c_clr_clears_nat:
+	mov r19 = r14
+	tnat.z p6,p7 = r19
+(p7)	br.cond.spnt 1f
+	br.sptk.many fail
+1:
+	ld8.c.clr r19 = [r12]
+	tnat.z p6,p7 = r19
 (p6)	br.cond.spnt pass
 	br.sptk.many fail
 

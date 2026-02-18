@@ -5044,6 +5044,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UB);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
@@ -5064,6 +5066,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UW);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
@@ -5084,6 +5088,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UL);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
@@ -5104,6 +5110,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_64);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
@@ -5124,6 +5132,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UL);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
@@ -5144,6 +5154,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UB);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
@@ -5164,6 +5176,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_UW);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
@@ -5184,6 +5198,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_qemu_ld_i64(cpu_r[r1], mem_addr, ctx->mem_idx,
                                             MO_TE | MO_64);
                     }
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 if (is_imm && r3 != 0 && imm9) {
                     tcg_gen_addi_i64(cpu_r[r3], base, imm9);
