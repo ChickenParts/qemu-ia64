@@ -187,6 +187,44 @@ investigation breadcrumbs.
     - new first blocker is:
       - `IA64 UNIMPL: pc=80000000ffffb2f0 ... reserved template`
       - then illegal-op/general-exception path at `vec=0x5400`.
+- `fw_break0` strict-gate allowlist alignment (2026-02-18):
+  - `target/ia64/translate.c` now allowlists known break(0) gate regions
+    (canonical physical space) instead of a single PC:
+    - ROM gate cluster: `0x00000000ffffb2a0..0x00000000ffffb2df`
+      (covers observed `...b2a0` and `...b2d0`).
+    - SAL/PCI work-RAM stubs:
+      `0x0000000100003000..0x00000001000031ff`
+      (covers observed `0x100003000`, `0x1000030c0`, `0x100003120`).
+  - keeps `QEMU_IA64_FW_BREAK0_STRICT_GATE` default-on semantics, while
+    restoring legitimate firmware break(0) hooks that regressed with the
+    single-PC gate.
+  - validation (`scratch/ia64_logs/p3t_strict_gate_safeoff.*`, 30s):
+    - `rc=124`.
+    - no early `fault vec=0x2c00 ip=0x100003000` recursion.
+    - first blocker remains the expected:
+      `IA64 UNIMPL: pc=80000000ffffb2f0 ... reserved template`,
+      then `vec=0x5400`.
+- ROM `break(0)` gate return semantics + provenance (2026-02-18):
+  - `target/ia64/translate.c` now adds a ROM-gate return path for
+    strict-allowlisted `break(0)` sites:
+    - when `pc in 0x00000000ffffb2a0..0x00000000ffffb2df`,
+      `fw_break0` now resumes at `b0` (`pc = b0 & ~0xF`, `ri = 0`)
+      instead of falling through into gate data.
+    - env knob: `QEMU_IA64_FW_BREAK0_GATE_RETURN` (default: on).
+  - `target/ia64/helper.c` adds focused ROM-gate trace hooks:
+    - `QEMU_IA64_FW_BREAK0_GATE_TRACE`
+    - `QEMU_IA64_FW_BREAK0_GATE_TRACE_LIMIT`
+    - trace line tag: `fw_break0_gate rom_gate_break0 ...`
+  - validation (safe-off repro):
+    - fix on (`scratch/ia64_logs/p3u_gate_ret_safeoff.*`, 45s):
+      - `rc=124`.
+      - `IA64 UNIMPL pc=...ffffb2f0` and `vec=0x5400 ip=...ffffb2f0`
+        are cleared.
+      - next blocker advances to `fault vec=0x2c00 ip=0x280`
+        (last branch `from=0xffe70310 to=0x280`).
+    - fix off (`scratch/ia64_logs/p3u_gate_ret_off_safeoff.*`, 30s):
+      - reproduces prior blocker:
+        `IA64 UNIMPL pc=...ffffb2f0` then `vec=0x5400`.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

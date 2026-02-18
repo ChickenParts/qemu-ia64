@@ -1117,6 +1117,7 @@ static const uint8_t template_stop_mask[32] = {
 };
 
 static TCGLabel *gen_qp_skip(uint8_t qp);
+static void gen_set_ri_const(uint8_t ri);
 
 static bool ia64_pc_in_fw(uint64_t pc)
 {
@@ -1129,6 +1130,27 @@ static bool ia64_pc_in_fw(uint64_t pc)
                     (uint32_t)pc : (pc & ((1ULL << 61) - 1));
     return (phys >= fw_base && phys < fw_end) ||
            (phys >= fw_wr_base && phys < fw_wr_end);
+}
+
+static uint64_t ia64_pc_to_phys61(uint64_t pc)
+{
+    uint64_t hi32 = pc & 0xffffffff00000000ULL;
+
+    return (hi32 == 0 || hi32 == 0xffffffff00000000ULL) ?
+           (uint32_t)pc : (pc & ((1ULL << 61) - 1));
+}
+
+#define IA64_FW_BREAK0_ROM_GATE_FIRST 0x00000000ffffb2a0ULL
+#define IA64_FW_BREAK0_ROM_GATE_LAST  0x00000000ffffb2dfULL
+#define IA64_FW_BREAK0_WR_GATE_FIRST  0x0000000100003000ULL
+#define IA64_FW_BREAK0_WR_GATE_LAST   0x00000001000031ffULL
+
+static bool ia64_fw_break0_rom_gate_match(uint64_t pc)
+{
+    uint64_t phys = ia64_pc_to_phys61(pc);
+
+    return phys >= IA64_FW_BREAK0_ROM_GATE_FIRST &&
+           phys <= IA64_FW_BREAK0_ROM_GATE_LAST;
 }
 
 static bool ia64_fw_break_hypercall_enabled(void)
@@ -1159,6 +1181,68 @@ static void ia64_fw_break_hypercall_log(uint64_t pc, uint64_t imm, bool in_fw,
                   pc, imm, in_fw ? 1 : 0, enabled ? 1 : 0);
 }
 
+static bool ia64_fw_break0_strict_gate_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_STRICT_GATE");
+        enabled = (s && *s) ? (atoi(s) != 0) : 1;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_break0_gate_match(uint64_t pc)
+{
+    /*
+     * Known firmware break(0) gate regions for the current Flash.fd bringup.
+     * Compare in canonicalized physical space so high/low aliases match.
+     */
+    static const struct {
+        uint64_t first;
+        uint64_t last;
+    } gate_ranges[] = {
+        /*
+         * ROM break-gate cluster. We currently observe legal break(0) gates
+         * at ...ffffb2a0 and ...ffffb2d0.
+         */
+        { IA64_FW_BREAK0_ROM_GATE_FIRST, IA64_FW_BREAK0_ROM_GATE_LAST },
+        /*
+         * SAL/PCI work-RAM break-gate stubs (for example 0x100003000,
+         * 0x1000030c0, 0x100003120).
+         */
+        { IA64_FW_BREAK0_WR_GATE_FIRST, IA64_FW_BREAK0_WR_GATE_LAST },
+    };
+    uint64_t phys = ia64_pc_to_phys61(pc);
+
+    for (size_t i = 0; i < ARRAY_SIZE(gate_ranges); i++) {
+        if (phys >= gate_ranges[i].first && phys <= gate_ranges[i].last) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ia64_fw_break0_gate_return_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_GATE_RETURN");
+        enabled = (s && *s) ? (atoi(s) != 0) : 1;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_break0_fastpath_allowed(uint64_t pc, bool in_fw,
+                                            bool fw_hypercall)
+{
+    if (ia64_fw_break0_strict_gate_enabled()) {
+        return ia64_fw_break0_gate_match(pc);
+    }
+    return in_fw || fw_hypercall;
+}
+
 static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)
 {
     uint8_t qp = insn & 0x3f;
@@ -1174,6 +1258,112 @@ static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)
     if (skip) {
         gen_set_label(skip);
     } else {
+        ctx->base.is_jmp = DISAS_NORETURN;
+    }
+}
+
+static void gen_break_common(DisasContext *ctx, uint64_t insn, uint64_t imm,
+                             uint8_t qp, const char *unimpl_msg)
+{
+    bool in_fw = ia64_pc_in_fw(ctx->base.pc_next);
+    bool fw_hypercall = ia64_fw_break_hypercall_enabled();
+    bool break0_fastpath = ia64_fw_break0_fastpath_allowed(ctx->base.pc_next,
+                                                            in_fw,
+                                                            fw_hypercall);
+
+    ia64_fw_break_hypercall_log(ctx->base.pc_next, imm, in_fw, fw_hypercall);
+
+    if (imm == 0x80000 || imm == 0x80001) {
+        TCGv_i64 timm = tcg_temp_new_i64();
+        TCGv_i64 ret = tcg_temp_new_i64();
+
+        tcg_gen_movi_i64(timm, imm);
+        gen_helper_ssc(ret, tcg_env, timm);
+        tcg_gen_mov_i64(cpu_r[8], ret);
+        return;
+    }
+
+    if ((imm & 0xff) == 0) {
+        uint64_t nr = imm >> 8;
+        bool allow_fw = in_fw || fw_hypercall;
+
+        /*
+         * Keep break(0) fastpath strictly allowlisted to avoid consuming
+         * vector-side break(0) instructions as fw_break0 hooks.
+         */
+        if (nr == 0x0 && !break0_fastpath) {
+            gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+            if (qp == 0) {
+                ctx->base.is_jmp = DISAS_NORETURN;
+            }
+            return;
+        }
+
+        if (!allow_fw) {
+            TCGLabel *do_break = gen_new_label();
+            TCGLabel *done = gen_new_label();
+            TCGv_i64 active = tcg_temp_new_i64();
+
+            tcg_gen_ld_i64(active, tcg_env,
+                           offsetof(CPUIA64State, fw_preboot_active));
+            tcg_gen_brcondi_i64(TCG_COND_EQ, active, 0, do_break);
+
+            if (nr == 0x0) {
+                gen_helper_fw_break0(tcg_env,
+                                     tcg_constant_i64(ctx->base.pc_next));
+            } else if (nr == 0x1100) {
+                gen_helper_fw_sal_break(tcg_env);
+            } else if (nr == 0x1000) {
+                gen_helper_fw_pal(tcg_env);
+            } else {
+                gen_unimpl(ctx, insn, unimpl_msg);
+            }
+
+            tcg_gen_br(done);
+            gen_set_label(do_break);
+            gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+            gen_set_label(done);
+            return;
+        }
+
+        if (nr == 0x0) {
+            gen_helper_fw_break0(tcg_env, tcg_constant_i64(ctx->base.pc_next));
+            if (break0_fastpath &&
+                ia64_fw_break0_gate_return_enabled() &&
+                ia64_fw_break0_rom_gate_match(ctx->base.pc_next)) {
+                /*
+                 * ROM break(0) gate stubs behave as call-gates: resume at b0.
+                 * Without this, execution can fall through into data at
+                 * 0xffffb2f0 and raise a spurious reserved-template fault.
+                 */
+                TCGv_i64 tgt = tcg_temp_new_i64();
+                tcg_gen_andi_i64(tgt, cpu_b[0], ~0xFULL);
+                tcg_gen_mov_i64(cpu_pc, tgt);
+                gen_set_ri_const(0);
+                if (qp == 0) {
+                    ctx->base.is_jmp = DISAS_NORETURN;
+                }
+                tcg_gen_exit_tb(NULL, 0);
+            }
+        } else if (nr == 0x1100) {
+            gen_helper_fw_sal_break(tcg_env);
+        } else if (nr == 0x1000) {
+            gen_helper_fw_pal(tcg_env);
+        } else {
+            if (in_fw) {
+                gen_unimpl(ctx, insn, unimpl_msg);
+            } else {
+                gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+                if (qp == 0) {
+                    ctx->base.is_jmp = DISAS_NORETURN;
+                }
+            }
+        }
+        return;
+    }
+
+    gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+    if (qp == 0) {
         ctx->base.is_jmp = DISAS_NORETURN;
     }
 }
@@ -3715,98 +3905,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 /* M37: break.m imm21 */
                 uint64_t imm = (extract64(insn, 36, 1) << 20) |
                                extract64(insn, 6, 20);
-                bool in_fw = ia64_pc_in_fw(ctx->base.pc_next);
-                bool fw_hypercall = ia64_fw_break_hypercall_enabled();
-                ia64_fw_break_hypercall_log(ctx->base.pc_next, imm, in_fw, fw_hypercall);
-                if (imm == 0x80000 || imm == 0x80001) {
-                    TCGv_i64 timm = tcg_temp_new_i64();
-                    tcg_gen_movi_i64(timm, imm);
-                    TCGv_i64 ret = tcg_temp_new_i64();
-                    gen_helper_ssc(ret, tcg_env, timm);
-                    tcg_gen_mov_i64(cpu_r[8], ret);
-                } else if ((imm & 0xff) == 0) {
-                    /*
-                     * Xen IA-64 guest firmware hypercalls encode the call
-                     * number in the BREAK immediate shifted left by 8:
-                     *   imm = hypercall_nr << 8
-                     *
-                     * Handle the essential PAL/SAL calls directly so the GFW
-                     * can run under TCG without taking a break fault.
-                     */
-                    uint64_t nr = imm >> 8;
-                    bool allow_fw = in_fw || fw_hypercall;
-                    if (!allow_fw) {
-                        TCGLabel *do_break = gen_new_label();
-                        TCGLabel *done = gen_new_label();
-                        TCGv_i64 active = tcg_temp_new_i64();
-
-                        tcg_gen_ld_i64(active, tcg_env,
-                                       offsetof(CPUIA64State, fw_preboot_active));
-                        tcg_gen_brcondi_i64(TCG_COND_EQ, active, 0, do_break);
-
-                        if (nr == 0x0) {
-                            /*
-                             * Firmware break(0) call gate.
-                             *
-                             * Some xenipf/EDK paths end up executing a break(0)
-                             * without a proper IVT installed yet. Handle it as a
-                             * firmware status hook to avoid trapping into the
-                             * empty break vector.
-                             */
-                            gen_helper_fw_break0(tcg_env,
-                                                 tcg_constant_i64(ctx->base.pc_next));
-                        } else if (nr == 0x1100) {
-                            /* FW_HYPERCALL_SAL_CALL */
-                            gen_helper_fw_sal_break(tcg_env);
-                        } else if (nr == 0x1000) {
-                            /* FW_HYPERCALL_PAL_CALL */
-                            gen_helper_fw_pal(tcg_env);
-                        } else {
-                            gen_unimpl(ctx, insn, "break.m hypercall");
-                        }
-
-                        tcg_gen_br(done);
-                        gen_set_label(do_break);
-                        gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                        /*
-                         * Do not mark the TB as DISAS_NORETURN here: the
-                         * fast path above can call fw_break0(), which returns
-                         * normally when fw_preboot_active is set.
-                         */
-                        gen_set_label(done);
-                    } else if (nr == 0x0) {
-                        /*
-                         * Firmware break(0) call gate.
-                         *
-                         * Some xenipf/EDK paths end up executing a break(0)
-                         * without a proper IVT installed yet. Handle it as a
-                         * firmware status hook to avoid trapping into the
-                         * empty break vector.
-                         */
-                        gen_helper_fw_break0(tcg_env,
-                                             tcg_constant_i64(ctx->base.pc_next));
-                    } else if (nr == 0x1100) {
-                        /* FW_HYPERCALL_SAL_CALL */
-                        gen_helper_fw_sal_break(tcg_env);
-                    } else if (nr == 0x1000) {
-                        /* FW_HYPERCALL_PAL_CALL */
-                        gen_helper_fw_pal(tcg_env);
-                    } else {
-                        if (in_fw) {
-                            gen_unimpl(ctx, insn, "break.m hypercall");
-                        } else {
-                            gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                            if (qp == 0) {
-                                ctx->base.is_jmp = DISAS_NORETURN;
-                            }
-                        }
-                    }
-                } else {
-                    gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                    if (qp == 0) {
-                        ctx->base.is_jmp = DISAS_NORETURN;
-                    }
-                }
+                gen_break_common(ctx, insn, imm, qp, "break.m hypercall");
             } else {
                 gen_unimpl(ctx, insn, "M-slot");
             }
@@ -5936,71 +6035,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
                 uint64_t imm = (extract64(insn, 36, 1) << 20) | extract64(insn, 6, 20);
-                bool in_fw = ia64_pc_in_fw(ctx->base.pc_next);
-                bool fw_hypercall = ia64_fw_break_hypercall_enabled();
-                ia64_fw_break_hypercall_log(ctx->base.pc_next, imm, in_fw,
-                                            fw_hypercall);
-                if (imm == 0x80000 || imm == 0x80001) {
-                    TCGv_i64 timm = tcg_temp_new_i64();
-                    tcg_gen_movi_i64(timm, imm);
-                    TCGv_i64 ret = tcg_temp_new_i64();
-                    gen_helper_ssc(ret, tcg_env, timm);
-                    tcg_gen_mov_i64(cpu_r[8], ret);
-                } else if ((imm & 0xff) == 0) {
-                    uint64_t nr = imm >> 8;
-                    bool allow_fw = in_fw || fw_hypercall;
-
-                    if (!allow_fw) {
-                        TCGLabel *do_break = gen_new_label();
-                        TCGLabel *done = gen_new_label();
-                        TCGv_i64 active = tcg_temp_new_i64();
-
-                        tcg_gen_ld_i64(active, tcg_env,
-                                       offsetof(CPUIA64State, fw_preboot_active));
-                        tcg_gen_brcondi_i64(TCG_COND_EQ, active, 0, do_break);
-
-                        if (nr == 0x0) {
-                            gen_helper_fw_break0(tcg_env,
-                                                 tcg_constant_i64(ctx->base.pc_next));
-                        } else if (nr == 0x1100) {
-                            gen_helper_fw_sal_break(tcg_env);
-                        } else if (nr == 0x1000) {
-                            gen_helper_fw_pal(tcg_env);
-                        } else {
-                            gen_unimpl(ctx, insn, "break.i hypercall");
-                        }
-
-                        tcg_gen_br(done);
-                        gen_set_label(do_break);
-                        gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                        /*
-                         * Do not mark this path noreturn: firmware fast-path
-                         * handling above can return normally.
-                         */
-                        gen_set_label(done);
-                    } else if (nr == 0x0) {
-                        gen_helper_fw_break0(tcg_env,
-                                             tcg_constant_i64(ctx->base.pc_next));
-                    } else if (nr == 0x1100) {
-                        gen_helper_fw_sal_break(tcg_env);
-                    } else if (nr == 0x1000) {
-                        gen_helper_fw_pal(tcg_env);
-                    } else {
-                        if (in_fw) {
-                            gen_unimpl(ctx, insn, "break.i hypercall");
-                        } else {
-                            gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                            if (qp == 0) {
-                                ctx->base.is_jmp = DISAS_NORETURN;
-                            }
-                        }
-                    }
-                } else {
-                    gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                    if (qp == 0) {
-                        ctx->base.is_jmp = DISAS_NORETURN;
-                    }
-                }
+                gen_break_common(ctx, insn, imm, qp, "break.i hypercall");
                 if (skip_label) {
                     gen_set_label(skip_label);
                 }

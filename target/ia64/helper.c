@@ -9379,6 +9379,12 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     static int scan_always = -1;
     static int scan_limit = -1;
     static int scan_count;
+    static int gate_trace_enabled = -1;
+    static int gate_trace_limit = -1;
+    static int gate_trace_count;
+    const hwaddr pc_phys = ia64_phys_mode_addr(pc);
+    const bool rom_gate_pc = (pc_phys >= 0x00000000ffffb2a0ULL &&
+                              pc_phys <= 0x00000000ffffb2dfULL);
 
     env->dbg_tbexit_last_break0_pc = pc;
 
@@ -9549,6 +9555,41 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         if (log_limit < 0) {
             log_limit = 0;
         }
+    }
+    if (gate_trace_enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_GATE_TRACE");
+        gate_trace_enabled = (s && *s) ? 1 : 0;
+    }
+    if (gate_trace_limit == -1) {
+        gate_trace_limit = 64;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_GATE_TRACE_LIMIT");
+        if (s && *s) {
+            gate_trace_limit = atoi(s);
+        }
+        if (gate_trace_limit < 0) {
+            gate_trace_limit = 0;
+        }
+    }
+
+    if (rom_gate_pc && gate_trace_enabled &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+        (gate_trace_limit == 0 || gate_trace_count++ < gate_trace_limit)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_break0_gate rom_gate_break0 ip=%016" PRIx64
+                      " pc=%016" PRIx64 " b0=%016" PRIx64
+                      " last_br from=%016" PRIx64 " to=%016" PRIx64
+                      " kind=%" PRIu64 " insn=%011" PRIx64
+                      " r8=%016" PRIx64 " r9=%016" PRIx64
+                      " r10=%016" PRIx64 " r11=%016" PRIx64
+                      " r32=%016" PRIx64 " r33=%016" PRIx64
+                      " r34=%016" PRIx64 " r35=%016" PRIx64
+                      " r36=%016" PRIx64 " r37=%016" PRIx64 "\n",
+                      env->ip, pc, env->b[0],
+                      env->last_branch_from, env->last_branch_to,
+                      env->last_branch_kind & 0xff, env->last_branch_insn,
+                      env->r[8], env->r[9], env->r[10], env->r[11],
+                      env->r[32], env->r[33], env->r[34], env->r[35],
+                      env->r[36], env->r[37]);
     }
 
     uint16_t post_code = (uint16_t)value;

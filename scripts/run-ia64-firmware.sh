@@ -15,6 +15,10 @@ Environment overrides:
   IA64_FW_FASTPATH (default: 0; enable memcpy/memset accel)
   IA64_GUEST_ERRORS (default: 0; enable -d guest_errors/-D)
   IA64_HANG_ABORT (default: 0; empty/0 disables)
+  IA64_FW_BREAK0_STRICT_GATE (default: inherited/1; allow fw_break0 only on known call-gate regions)
+  IA64_FW_BREAK0_GATE_RETURN (default: inherited/1; return to b0 from known ROM break(0) call-gates)
+  IA64_FW_BREAK0_GATE_TRACE (default: inherited/off; trace ROM break(0) call-gate flow)
+  IA64_FW_BREAK0_GATE_TRACE_LIMIT (default: inherited/64)
   IA64_EFI_HOB_PATCH (default: inherited/off; enable EFI HOB repair path)
   IA64_EFI_HOB_PATCH_TRACE (default: inherited/off; verbose HOB patch logs)
   IA64_CALL_NULL_FIX (default: inherited/off; bisect-only guard for known null br.call target path)
@@ -100,6 +104,22 @@ fi
 hang_abort="${IA64_HANG_ABORT:-0}"
 if [[ -n "${hang_abort:-}" && "${hang_abort:-0}" != "0" ]]; then
   export QEMU_IA64_HANG_ABORT="$hang_abort"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_STRICT_GATE:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_STRICT_GATE="${IA64_FW_BREAK0_STRICT_GATE}"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_GATE_RETURN:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_GATE_RETURN="${IA64_FW_BREAK0_GATE_RETURN}"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_GATE_TRACE:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_GATE_TRACE="${IA64_FW_BREAK0_GATE_TRACE}"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_GATE_TRACE_LIMIT:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_GATE_TRACE_LIMIT="${IA64_FW_BREAK0_GATE_TRACE_LIMIT}"
 fi
 
 if [[ -n "${IA64_EFI_HOB_PATCH:-}" ]]; then

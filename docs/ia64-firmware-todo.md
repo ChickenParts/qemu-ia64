@@ -45,6 +45,14 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
 - Route `gen_unimpl` through IA-64 illegal-op/general exception vector
   (`0x5400`) instead of host aborting QEMU
   (`target/ia64/helper.c`, `target/ia64/cpu.h`).
+- Add strict-gated ROM `break(0)` call-gate return semantics
+  (`QEMU_IA64_FW_BREAK0_GATE_RETURN`, default on) so known gate bundles
+  return via `b0` instead of falling through into `0xffffb2f0` gate data;
+  add focused ROM gate provenance tracing
+  (`QEMU_IA64_FW_BREAK0_GATE_TRACE`,
+  `QEMU_IA64_FW_BREAK0_GATE_TRACE_LIMIT`)
+  (`target/ia64/translate.c`, `target/ia64/helper.c`,
+  `scripts/run-ia64-firmware.sh`, `docs/ia64-environment-variables.md`).
 - Complete I-unit `op=7` core packed shift/pack/unpack families:
   `pshl2/4`, `pshr2/4(.u)` (register + immediate), `pack2.*`, `pack4.sss`,
   `unpack1/2.*`

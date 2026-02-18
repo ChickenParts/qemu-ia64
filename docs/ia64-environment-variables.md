@@ -231,6 +231,10 @@ Environment variables are organized into the following categories:
 |----------|-------------|
 | `QEMU_IA64_FW_BREAK_HYPERCALL` | Break on hypercall |
 | `QEMU_IA64_FW_BREAK_LOG` | Log firmware breaks |
+| `QEMU_IA64_FW_BREAK0_STRICT_GATE` | Restrict `fw_break0` fastpath to known firmware gate regions (default: on) |
+| `QEMU_IA64_FW_BREAK0_GATE_RETURN` | Return to `b0` for known ROM `break(0)` call-gates (default: on) |
+| `QEMU_IA64_FW_BREAK0_GATE_TRACE` | Trace ROM `break(0)` call-gate flow |
+| `QEMU_IA64_FW_BREAK0_GATE_TRACE_LIMIT` | Limit ROM `break(0)` call-gate traces |
 | `QEMU_IA64_FW_BREAK0_DUMP` | Dump on break 0 |
 | `QEMU_IA64_FW_BREAK0_DUMP_LEN` | Length of break 0 dump |
 | `QEMU_IA64_FW_BREAK0_ABORT_ASSERT` | Abort on firmware assert |

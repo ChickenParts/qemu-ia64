@@ -689,11 +689,80 @@ Logs checked:
       - `IA64 UNIMPL: pc=80000000ffffb2f0 ... reserved template`
       - followed by general-exception vector handling (`vec=0x5400`).
 
+## Follow-up (P3-T `fw_break0` Strict-Gate Region Alignment)
+- Refined `QEMU_IA64_FW_BREAK0_STRICT_GATE` fastpath matching in
+  `target/ia64/translate.c`:
+  - switched from single-PC match to canonical physical-region allowlist.
+  - gate regions now include:
+    - ROM gate cluster `0x00000000ffffb2a0..0x00000000ffffb2df`
+      (observed `...b2a0` and `...b2d0`).
+    - SAL/PCI work-RAM stubs `0x0000000100003000..0x00000001000031ff`
+      (observed `0x100003000`, `0x1000030c0`, `0x100003120`).
+- Updated user-facing docs/wrapper wording:
+  - `docs/ia64-environment-variables.md` (`...STRICT_GATE` description now
+    references known gate regions).
+  - `scripts/run-ia64-firmware.sh` help text mirrors region-based gate wording.
+- Validation (2026-02-18):
+  - build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - directed test:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - firmware repro (`IA64_GUEST_ERRORS=1`, `...279D0_SAFE_MODE=0`, 30s):
+    - `scratch/ia64_logs/p3t_strict_gate_safeoff.out`: `rc=124`.
+    - `scratch/ia64_logs/p3t_strict_gate_safeoff.qemu.log` shows:
+      - `fw_break0` at `ip=pc=0x100003000` (no early `ip=0x100003000` fault
+        recursion).
+      - first blocker remains expected:
+        `IA64 UNIMPL: pc=80000000ffffb2f0 ... reserved template`,
+        followed by `fault vec=0x5400`.
+
+## Follow-up (P3-U ROM `break(0)` Gate Return + Callflow Provenance)
+- Added ROM gate return semantics in `target/ia64/translate.c` for strict-gated
+  firmware `break(0)` call-gates:
+  - for ROM gate range `0x00000000ffffb2a0..0x00000000ffffb2df`,
+    `fw_break0` now resumes at `b0` (`pc = b0 & ~0xF`, `ri = 0`) instead of
+    falling through into gate data.
+  - new env knob:
+    - `QEMU_IA64_FW_BREAK0_GATE_RETURN` (default: on; bisect via `0`).
+- Added focused ROM gate provenance trace in `target/ia64/helper.c`:
+  - `QEMU_IA64_FW_BREAK0_GATE_TRACE`
+  - `QEMU_IA64_FW_BREAK0_GATE_TRACE_LIMIT`
+  - log tag: `fw_break0_gate rom_gate_break0 ...`
+- Updated wrapper/docs:
+  - `scripts/run-ia64-firmware.sh` exports:
+    - `IA64_FW_BREAK0_GATE_RETURN`
+    - `IA64_FW_BREAK0_GATE_TRACE`
+    - `IA64_FW_BREAK0_GATE_TRACE_LIMIT`
+  - `docs/ia64-environment-variables.md` documents corresponding
+    `QEMU_IA64_*` knobs.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed test:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro (safe-off; fix on):
+    - `scratch/ia64_logs/p3u_gate_ret_safeoff.out`: `rc=124`.
+    - `scratch/ia64_logs/p3u_gate_ret_safeoff.qemu.log`:
+      - `fw_break0_gate rom_gate_break0 ...` observed.
+      - prior `IA64 UNIMPL pc=...ffffb2f0` and `vec=0x5400 ip=...ffffb2f0`
+        are cleared.
+      - next blocker advances to:
+        `fault vec=0x2c00 ip=0x280`
+        with `LAST_BR from=00000000ffe70310 to=0000000000000280`.
+  - Firmware repro (safe-off; fix off bisect):
+    - `scratch/ia64_logs/p3u_gate_ret_off_safeoff.out`: `rc=124`.
+    - `scratch/ia64_logs/p3u_gate_ret_off_safeoff.qemu.log` reproduces
+      prior blocker:
+      `IA64 UNIMPL pc=...ffffb2f0` then `fault vec=0x5400`.
+  - Baseline smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 30s scripts/run-ia64-firmware.sh`
+      -> `rc=124` (`scratch/ia64_logs/p3u_fw_default_smoke.out`).
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
 - Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
-- Host-side `TB_EXIT_REQUESTED` assert is fixed; next blocker is guest-side
-  `IA64 UNIMPL` at `0x80000000ffffb2f0` (`reserved template`) reached after
-  the former `0xffffb2b0`/`0x2c00` path is cleared in
+- Host-side `TB_EXIT_REQUESTED` assert and `0xffffb2f0` reserved-template
+  blocker are fixed in the current safe-off path; next blocker is now
+  `fault vec=0x2c00 ip=0x280` with `LAST_BR from=0xffe70310 to=0x280` in
   `...279D0_SAFE_MODE=0` runs.
