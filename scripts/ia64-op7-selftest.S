@@ -42,6 +42,20 @@ test_pshladd2:
 	pshladd2 r16 = r14, 1, r15
 	movl r17 = 0xff007ffd8003246a
 	cmp.eq p6,p0 = r16, r17
+	(p6)	br.cond.spnt test_pshladd2_cnt2
+	br.sptk.many fail
+
+test_pshladd2_cnt2:
+	pshladd2 r16 = r14, 2, r15
+	movl r17 = 0xfd007ffd800348d2
+	cmp.eq p6,p0 = r16, r17
+	(p6)	br.cond.spnt test_pshladd2_cnt3
+	br.sptk.many fail
+
+test_pshladd2_cnt3:
+	pshladd2 r16 = r14, 3, r15
+	movl r17 = 0xf9007ffd80037fff
+	cmp.eq p6,p0 = r16, r17
 	(p6)	br.cond.spnt test_pshradd2
 	br.sptk.many fail
 
@@ -49,6 +63,20 @@ test_pshradd2:
 	/* A10/A11: pshradd2 r1 = r2, count2, r3 */
 	pshradd2 r16 = r14, 1, r15
 	movl r17 = 0x00803ffdc003091c
+	cmp.eq p6,p0 = r16, r17
+	(p6)	br.cond.spnt test_pshradd2_cnt2
+	br.sptk.many fail
+
+test_pshradd2_cnt2:
+	pshradd2 r16 = r14, 2, r15
+	movl r17 = 0x00c01ffde003048f
+	cmp.eq p6,p0 = r16, r17
+	(p6)	br.cond.spnt test_pshradd2_cnt3
+	br.sptk.many fail
+
+test_pshradd2_cnt3:
+	pshradd2 r16 = r14, 3, r15
+	movl r17 = 0x00e00ffdf0030248
 	cmp.eq p6,p0 = r16, r17
 	(p6)	br.cond.spnt test_pmin1_u
 	br.sptk.many fail
