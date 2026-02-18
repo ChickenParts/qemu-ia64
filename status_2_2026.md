@@ -661,10 +661,39 @@ Logs checked:
 - Regression/smoke:
   - `scripts/run-ia64-op7-tests.sh 12s` passed.
 
+## Follow-up (P3-S A10/A11 Packed Shift+Add + I-slot break(0) Contract Parity)
+- Extended A-unit packed shift+add decode coverage in `target/ia64/translate.c`:
+  - added A10/A11 `pshladd2`/`pshradd2` handling for major `0xF`
+    (`op={4,7}` for `pshladd2`, `op={5,6}` for `pshradd2`).
+  - corrected `count2` decode to architectural range `[1..3]`
+    (`x2b + 1`, guarded by `x2b < 3`) for both major `0x8` and `0xF` forms.
+  - enabled major `0xF` A-unit dispatch in I-slot and M-slot pre-decode.
+- Added directed selftest coverage in `scripts/ia64-op7-selftest.S`:
+  - `pshladd2 r16 = r14, 1, r15`
+  - `pshradd2 r16 = r14, 1, r15`
+- Hardened I-slot `break.i` hypercall decode to match M-slot mixed-path rules:
+  - firmware `break(0)` now routes through `fw_break0` in I-slot hypercall
+    encodings, avoiding immediate break-vector recursion.
+  - mixed return/no-return path no longer relies on unconditional
+    `DISAS_NORETURN`.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro (`IA64_GUEST_ERRORS=1`, `...279D0_SAFE_MODE=0`, 45s):
+    - `rc=124` (no host assert).
+    - `IA64 UNIMPL` at `pc=80000000ffffb2b0` is gone.
+    - prior break-vector `0x2c00` recursion is no longer the first blocker.
+    - new first blocker in this mode is:
+      - `IA64 UNIMPL: pc=80000000ffffb2f0 ... reserved template`
+      - followed by general-exception vector handling (`vec=0x5400`).
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
 - Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
 - Host-side `TB_EXIT_REQUESTED` assert is fixed; next blocker is guest-side
-  `IA64 UNIMPL` at `0x80000000ffffb2b0` and subsequent break-vector
-  (`0x2c00`) loop in `...279D0_SAFE_MODE=0` runs.
+  `IA64 UNIMPL` at `0x80000000ffffb2f0` (`reserved template`) reached after
+  the former `0xffffb2b0`/`0x2c00` path is cleared in
+  `...279D0_SAFE_MODE=0` runs.

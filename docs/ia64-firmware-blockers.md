@@ -171,6 +171,22 @@ investigation breadcrumbs.
     - run now reaches guest-side `IA64 UNIMPL` at
       `pc=80000000ffffb2b0` and then loops in break vector `0x2c00`
       (repeated `fw_break0`/`fault vec=0x2c00`).
+- `pc=0x80000000ffffb2b0` A10/A11 decode + I-slot break(0) parity pass
+  (2026-02-18):
+  - `target/ia64/translate.c` now covers A10/A11 `pshladd2`/`pshradd2` in the
+    major-`0xF` A-unit form and maps `count2` as `[1..3]` (`x2b + 1`).
+  - major `0xF` A-unit dispatch is now enabled for I-slot predecode.
+  - I-slot `break.i` hypercall decode now mirrors M-slot mixed-path handling
+    so firmware `break(0)` routes through `fw_break0` instead of immediately
+    faulting into `0x2c00`.
+  - validation (`IA64_GUEST_ERRORS=1`, `...279D0_SAFE_MODE=0`, 45s):
+    - `rc=124`, no host assert.
+    - prior `IA64 UNIMPL pc=...ffffb2b0` is cleared.
+    - prior repeated `fault vec=0x2c00 ip=0x2c00` loop is no longer the first
+      blocker.
+    - new first blocker is:
+      - `IA64 UNIMPL: pc=80000000ffffb2f0 ... reserved template`
+      - then illegal-op/general-exception path at `vec=0x5400`.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
