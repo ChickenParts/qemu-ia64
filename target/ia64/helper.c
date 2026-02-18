@@ -5351,6 +5351,20 @@ static int ia64_fw_pei_ps_epoch_trace_limit(void)
     return limit;
 }
 
+static bool ia64_fw_pei_ps_select_strict_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PS_SELECT_STRICT");
+        if (!s || !*s) {
+            enabled = 1;
+        } else {
+            enabled = (strcmp(s, "0") != 0) ? 1 : 0;
+        }
+    }
+    return enabled;
+}
+
 static bool ia64_fw_pei_report_status_softfail_enabled(void)
 {
     static int enabled = -1;
@@ -13453,32 +13467,183 @@ static IA64Pei22560FixCtx ia64_fw_pei_22560_fix_ctx;
 static IA64Pei279d0Event ia64_fw_pei_279d0_event_ring[IA64_PEI_STATUS_279D0_EVENT_MAX];
 static uint64_t ia64_fw_pei_279d0_event_seq;
 
+static bool ia64_fw_pei_statuscode_chain_hint(CPUIA64State *env,
+                                              uint64_t *ps_out)
+{
+    uint64_t seq = ia64_fw_pei_producer_seq;
+    IA64PeiProducerCall locate = { 0 };
+    IA64PeiProducerCall report = { 0 };
+    bool locate_seen = false;
+    bool report_seen = false;
+
+    for (int i = 0; i < IA64_PEI_STATUS_279D0_SUMMARY_WINDOW && seq > 0;
+         i++, seq--) {
+        IA64PeiProducerCall *ent =
+            &ia64_fw_pei_producer_ring[(seq - 1) % IA64_PEI_PRODUCER_MAX];
+        if (ent->seq != seq) {
+            continue;
+        }
+        if (!locate_seen && ent->svc_id == IA64_PEI_SVC_LOCATE_PPI && ent->a1) {
+            IA64EfiGuid guid;
+            if (ia64_fw_read_guid(env, ent->a1, &guid) &&
+                ia64_fw_guid_equal(&guid, &ia64_efi_guid_status_code_ppi)) {
+                locate = *ent;
+                locate_seen = true;
+            }
+        }
+        if (!report_seen && ent->svc_id == IA64_PEI_SVC_REPORT_STATUS_CODE) {
+            report = *ent;
+            report_seen = true;
+        }
+        if (locate_seen && report_seen) {
+            break;
+        }
+    }
+
+    if (!locate_seen || !report_seen || locate.seq < report.seq) {
+        return false;
+    }
+    if ((locate.seq - report.seq) > IA64_PEI_STATUS_CHAIN_WINDOW) {
+        return false;
+    }
+
+    uint64_t ps = locate.ps_ptr ? locate.ps_ptr : report.ps_ptr;
+    if (!ps) {
+        return false;
+    }
+    if (ps_out) {
+        *ps_out = ps;
+    }
+    return true;
+}
+
+static unsigned ia64_fw_pei_ps_candidate_score(uint32_t source,
+                                               bool chain_match,
+                                               bool dispatch_nonzero)
+{
+    unsigned score = 0;
+    if (source & IA64_PEI_PS_SRC_R32) {
+        score = 300;
+    } else if (source & IA64_PEI_PS_SRC_R33) {
+        score = 200;
+    } else if (source & IA64_PEI_PS_SRC_CACHE) {
+        score = 100;
+    }
+    if (chain_match) {
+        score += 40;
+    }
+    if (dispatch_nonzero) {
+        score += 10;
+    }
+    return score;
+}
+
 static uint64_t ia64_fw_pei_current_ps_ptr(CPUIA64State *env)
 {
 #ifdef CONFIG_USER_ONLY
     (void)env;
     return 0;
 #else
-    CPUState *cs = env_cpu(env);
-    uint64_t ps_ptr = env->fw_pei_ps;
-    if (ps_ptr && ia64_fw_pei_is_ps_table(cs, ps_ptr)) {
-        ia64_fw_pei_ps_epoch_record(env, env->ip, ps_ptr,
-                                    IA64_PEI_SVC_NONE,
-                                    IA64_PEI_PS_SRC_CACHE, true);
-        return ps_ptr;
-    }
+    typedef struct IA64PeiPsCandidate {
+        uint64_t ps_ptr;
+        uint32_t source;
+        uint64_t core;
+        int64_t ppi_end;
+        int64_t notify_end;
+        int64_t dispatch_end;
+        bool valid;
+        bool chain_match;
+        bool dispatch_nonzero;
+        unsigned score;
+    } IA64PeiPsCandidate;
 
+    IA64PeiPsCandidate cand[3] = { 0 };
+    int n = 0;
+    CPUState *cs = env_cpu(env);
+    uint64_t ps_ptr = 0;
     if (ia64_fw_pei_get_ps_ptr(env, env->r[32], &ps_ptr)) {
-        ia64_fw_pei_ps_epoch_record(env, env->ip, ps_ptr,
-                                    IA64_PEI_SVC_NONE,
-                                    IA64_PEI_PS_SRC_R32, true);
-        return ps_ptr;
+        cand[n++] = (IA64PeiPsCandidate) {
+            .ps_ptr = ps_ptr,
+            .source = IA64_PEI_PS_SRC_R32,
+        };
     }
     if (ia64_fw_pei_get_ps_ptr(env, env->r[33], &ps_ptr)) {
-        ia64_fw_pei_ps_epoch_record(env, env->ip, ps_ptr,
+        cand[n++] = (IA64PeiPsCandidate) {
+            .ps_ptr = ps_ptr,
+            .source = IA64_PEI_PS_SRC_R33,
+        };
+    }
+    ps_ptr = env->fw_pei_ps;
+    if (ps_ptr && ia64_fw_pei_is_ps_table(cs, ps_ptr)) {
+        cand[n++] = (IA64PeiPsCandidate) {
+            .ps_ptr = ps_ptr,
+            .source = IA64_PEI_PS_SRC_CACHE,
+        };
+    }
+
+    bool strict = ia64_fw_pei_ps_select_strict_enabled();
+    uint64_t chain_ps = 0;
+    bool chain_hint = strict && ia64_fw_pei_statuscode_chain_hint(env, &chain_ps);
+    int best = -1;
+    unsigned best_score = 0;
+
+    for (int i = 0; i < n; i++) {
+        cand[i].valid = ia64_fw_pei_read_core_state(env, cand[i].ps_ptr,
+                                                    &cand[i].core,
+                                                    &cand[i].ppi_end,
+                                                    &cand[i].notify_end,
+                                                    &cand[i].dispatch_end);
+        cand[i].chain_match = chain_hint && cand[i].ps_ptr == chain_ps;
+        cand[i].dispatch_nonzero = cand[i].valid &&
+                                   (cand[i].dispatch_end > 0 ||
+                                    cand[i].notify_end > 0 ||
+                                    cand[i].ppi_end > 0);
+        cand[i].score = cand[i].valid ?
+                        ia64_fw_pei_ps_candidate_score(cand[i].source,
+                                                       cand[i].chain_match,
+                                                       cand[i].dispatch_nonzero)
+                        : 0;
+
+        bool selected = false;
+        if (strict) {
+            if (cand[i].score > best_score) {
+                best_score = cand[i].score;
+                best = i;
+            }
+        } else {
+            /* Legacy selection order for bisecting: cache -> r32 -> r33. */
+            if (best == -1 && cand[i].source == IA64_PEI_PS_SRC_CACHE) {
+                best = i;
+            }
+        }
+        ia64_fw_pei_ps_epoch_record(env, env->ip, cand[i].ps_ptr,
                                     IA64_PEI_SVC_NONE,
-                                    IA64_PEI_PS_SRC_R33, true);
-        return ps_ptr;
+                                    cand[i].source, selected);
+    }
+
+    if (!strict && best == -1) {
+        for (int i = 0; i < n; i++) {
+            if (cand[i].source == IA64_PEI_PS_SRC_R32) {
+                best = i;
+                break;
+            }
+        }
+    }
+    if (!strict && best == -1) {
+        for (int i = 0; i < n; i++) {
+            if (cand[i].source == IA64_PEI_PS_SRC_R33) {
+                best = i;
+                break;
+            }
+        }
+    }
+
+    if (best >= 0 && cand[best].ps_ptr && (!strict || cand[best].valid)) {
+        ia64_fw_pei_ps_epoch_record(env, env->ip, cand[best].ps_ptr,
+                                    IA64_PEI_SVC_NONE,
+                                    cand[best].source, true);
+        env->fw_pei_ps = cand[best].ps_ptr;
+        return cand[best].ps_ptr;
     }
     return 0;
 #endif
