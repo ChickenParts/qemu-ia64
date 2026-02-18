@@ -64,6 +64,44 @@ test_fcmp_unord_ordered:
 
 test_fcmp_unord_ordered_p12:
 (p12)	br.sptk.many fail
+	br.cond.spnt test_fp_inf_overflow
+
+test_fp_inf_overflow:
+	/* Large but representable finite value + self add => +Inf. */
+	movl r25 = 0x13ffe
+	setf.exp f16 = r25
+	fadd.s f17 = f16, f16
+	getf.exp r26 = f17
+	movl r27 = 0x1ffff
+	cmp.eq p6,p7 = r26, r27
+(p6)	br.cond.spnt test_fp_inf_sig
+	br.sptk.many fail
+
+test_fp_inf_sig:
+	getf.sig r28 = f17
+	movl r29 = 0x8000000000000000
+	cmp.eq p6,p7 = r28, r29
+(p6)	br.cond.spnt test_fp_inf_order
+	br.sptk.many fail
+
+test_fp_inf_order:
+	fcmp.lt p14,p15 = f16, f17
+(p14)	br.cond.spnt test_fp_inf_order_p15
+	br.sptk.many fail
+
+test_fp_inf_order_p15:
+(p15)	br.sptk.many fail
+	br.cond.spnt test_fp_nan_unord
+
+test_fp_nan_unord:
+	/* +Inf - +Inf => NaN; unordered compare must be true. */
+	fsub.s f18 = f17, f17
+	fcmp.unord p16,p17 = f18, f18
+(p16)	br.cond.spnt test_fp_nan_unord_p17
+	br.sptk.many fail
+
+test_fp_nan_unord_p17:
+(p17)	br.sptk.many fail
 	br.cond.spnt pass
 
 pass:

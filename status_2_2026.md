@@ -395,6 +395,137 @@ Logs checked:
     - `scripts/ia64-unimpl-report.sh --format tsv --top 50 ...`
       reported no `IA64 UNIMPL` lines in fresh logs.
 
+## Follow-up (CPU-C5 FP Special-Value Correctness)
+- Corrected IA-64 FP helper conversion semantics in `target/ia64/helper.c`:
+  - `ia64_fp_to_ld` now decodes special exponent (`0x1ffff`) as:
+    - infinity when mantissa is `1<<63`
+    - NaN otherwise
+  - `ia64_ld_to_fp` now preserves special results instead of collapsing to
+    zero:
+    - signed zero
+    - infinity
+    - canonical quiet NaN
+  - fixed exponent handling to avoid wraparound on overflow/underflow:
+    - overflow now maps to infinity
+    - underflow maps to signed zero
+- Extended directed F-slot coverage in `scripts/ia64-fslot-selftest.S`:
+  - overflow-to-infinity path via `fadd.s`
+  - infinity ordering (`fcmp.lt` finite vs +Inf)
+  - NaN unordered compare (`fcmp.unord` true for NaN input)
+- Validation (2026-02-17):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-fslot-tests.sh 20s` passed.
+    - regression passes:
+      - `scripts/run-ia64-op7-tests.sh 12s`
+      - `scripts/run-ia64-nat-tests.sh 12s`
+      - `scripts/run-ia64-rse-tests.sh 12s`
+      - `scripts/run-ia64-alat-tests.sh 12s`
+  - Runtime smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+      -> `rc=137`.
+  - UNIMPL refresh:
+    - no `IA64 UNIMPL` lines in fresh firmware/kernel logs.
+
+## Follow-up (P3-N Notify Return Trace + Bounded Fix Probe)
+- Implemented notify-return tracking in `target/ia64/helper.c`:
+  - Added bounded notify call stack (`IA64PeiNotifyCall`) wired from
+    `IA64_PEI_SVC_NOTIFY_PPI` producer calls.
+  - Added notify descriptor/GUID decode helper and return-side trace/fix hook
+    on `ret_restore` / `ret_restore_b0`.
+  - Added bounded knobs:
+    - `QEMU_IA64_PEI_NOTIFY_TRACE`
+    - `QEMU_IA64_PEI_NOTIFY_TRACE_LIMIT`
+    - `QEMU_IA64_PEI_NOTIFY_TRACE_ONESHOT`
+    - `QEMU_IA64_PEI_NOTIFY_STATUS_FIX`
+    - `QEMU_IA64_PEI_NOTIFY_STATUS_FIX_ALWAYS`
+    - `QEMU_IA64_PEI_NOTIFY_STATUS_FIX_LOG_LIMIT`
+  - Hardened return matching to pop by `b0` search (not strict top-only) so
+    non-local unwind/noisy returns do not strand notify frames.
+- `scripts/run-ia64-firmware.sh` now exports the new `IA64_PEI_NOTIFY_*`
+  wrappers.
+- Validation (2026-02-18, `scratch/ia64_logs/p3n/*`, 45s windows):
+  - `base`: `rc=124`, `notify_ret=0`, `status_pc_ffe22560=4`.
+  - `notify_fix_on`: `rc=124`, `notify_ret=8`, `notify_fixed=0`,
+    `status_pc_ffe22560=4`.
+  - `sem0`: `rc=124`, `notify_ret=8`, `notify_fixed=0`,
+    `status_pc_ffe22560=4`, first-bad capture active.
+  - `sem0_notify_fix_on`: `rc=124`, `notify_ret=8`, `notify_fixed=0`,
+    `status_pc_ffe22560=4`, first-bad capture active.
+  - Key evidence:
+    - traced target notify return
+      (`call_pc=0xffe278a0`, `tgt=0xffe268d0`,
+      GUID `1388066e-3a57-4efa-98f3-c12f3a958a29`) consistently returns
+      `status=0` (`soft=0`), so bounded notify-return rewrite does not fire.
+    - current blocker status transition remains at
+      `pc=0xffe22560` (`EFI_NOT_FOUND -> EFI_END_OF_MEDIA`) with no behavior
+      change from notify-return rewrite enablement.
+- Regression/smoke after notify instrumentation changes:
+  - `scripts/run-ia64-fslot-tests.sh 15s` passed.
+  - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - `scripts/run-ia64-nat-tests.sh 12s` passed.
+  - `scripts/run-ia64-rse-tests.sh 12s` passed.
+  - `scripts/run-ia64-alat-tests.sh 12s` passed.
+  - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+    -> `rc=124`.
+  - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+    -> `rc=137`.
+
+## Follow-up (P3-O `pc=0xffe22560` Mutation Attribution + Bounded Rewrite)
+- Implemented post-notify mutation-site tracing/fix in `target/ia64/helper.c`:
+  - added bounded env controls:
+    - `QEMU_IA64_PEI_22560_TRACE`
+    - `QEMU_IA64_PEI_22560_TRACE_LIMIT`
+    - `QEMU_IA64_PEI_22560_STATUS_FIX`
+    - `QEMU_IA64_PEI_22560_STATUS_FIX_ALWAYS`
+    - `QEMU_IA64_PEI_22560_STATUS_FIX_LOG_LIMIT`
+  - new mutation-site handler:
+    - `ia64_fw_pei_maybe_fix_status_transition_ffe22560(...)`
+    - called from `fw_pei_err_watch` after transition logging and before
+      first-bad capture.
+  - bounded rewrite guard requires:
+    - `pc=0xffe22560`
+    - soft EFI status (`EFI_NOT_FOUND`/`EFI_END_OF_MEDIA`)
+    - unresolved StatusCode optional path (unless `...STATUS_FIX_ALWAYS=1`)
+    - recent producer-chain match:
+      `report_status_code` + `locate_ppi` StatusCode GUID
+      `229832d3-7a30-4b36-b827-f40cb7d45436`
+      within bounded sequence window.
+- `scripts/run-ia64-firmware.sh` now exports `IA64_PEI_22560_*` wrappers.
+- Validation (2026-02-18, `scratch/ia64_logs/p3o/*`, 45s windows):
+  - `base`: `rc=124`, `transition_22560=4`, `22560_trace=0`,
+    `22560_fixed=0`.
+  - `trace_only`: `rc=124`, `transition_22560=4`, `22560_trace=4`,
+    `22560_fixed=0`.
+  - `fix_on`: `rc=124`, `transition_22560=5`, `22560_trace=5`,
+    `22560_fixed=5`.
+  - `sem0_fix_on`: `rc=124`, `transition_22560=5`, `22560_trace=5`,
+    `22560_fixed=5`, `first_bad=1`.
+  - key evidence:
+    - bounded site-fix fires on matched chain:
+      `pei_22560_status status=...001c fixed=1 ... chain=1 ...`
+    - residual first-bad in `sem0_fix_on` is a later recurrence with changed
+      context after non-EFI `r8=ffffffff0011fff0` transition; root cause is
+      narrowed but not fully closed.
+- Regression/smoke:
+  - directed tests passed:
+    - `scripts/run-ia64-fslot-tests.sh 15s`
+    - `scripts/run-ia64-op7-tests.sh 12s`
+    - `scripts/run-ia64-nat-tests.sh 12s`
+    - `scripts/run-ia64-rse-tests.sh 12s`
+    - `scripts/run-ia64-alat-tests.sh 12s`
+  - runtime smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+      -> `rc=137`.
+  - UNIMPL refresh:
+    - `scripts/ia64-unimpl-report.sh --format tsv --top 50 ...`
+      reported no `IA64 UNIMPL` lines in fresh smoke logs.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

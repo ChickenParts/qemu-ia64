@@ -37,6 +37,17 @@ Environment overrides:
   IA64_PEI_STATUS_TRANSITION_LIMIT (default: 64)
   IA64_PEI_STATUSCODE_SEMANTIC_FIX (default: 1; semantic StatusCode optional-path success)
   IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT (default: 64)
+  IA64_PEI_NOTIFY_TRACE (default: 0; trace notify-ppi return status for traced blocker path)
+  IA64_PEI_NOTIFY_TRACE_LIMIT (default: 64)
+  IA64_PEI_NOTIFY_TRACE_ONESHOT (default: 1; only log first soft-error notify return)
+  IA64_PEI_NOTIFY_STATUS_FIX (default: 0; bounded notify-ppi soft-error rewrite for traced GUID/path)
+  IA64_PEI_NOTIFY_STATUS_FIX_ALWAYS (default: 0; ignore unresolved-path guard for notify fix)
+  IA64_PEI_NOTIFY_STATUS_FIX_LOG_LIMIT (default: 64)
+  IA64_PEI_22560_TRACE (default: 0; trace status mutation context at pc=0xffe22560)
+  IA64_PEI_22560_TRACE_LIMIT (default: 64)
+  IA64_PEI_22560_STATUS_FIX (default: 0; bounded status rewrite at pc=0xffe22560)
+  IA64_PEI_22560_STATUS_FIX_ALWAYS (default: 0; ignore unresolved-path guard for 0xffe22560 fix)
+  IA64_PEI_22560_STATUS_FIX_LOG_LIMIT (default: 64)
   IA64_PEI_REPORT_STATUS_SOFTFAIL (default: 1; treat early StatusCode report errors as non-fatal)
   IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS (default: 0; softfail regardless of ppi_end)
   IA64_PEI_HOB_FLOW_TRACE (default: 0; trace GetHobList/CreateHob call-return contract)
@@ -173,6 +184,50 @@ fi
 
 if [[ -n "${IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT:-}" ]]; then
   export QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT="${IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT}"
+fi
+
+if [[ -n "${IA64_PEI_NOTIFY_TRACE:-}" ]]; then
+  export QEMU_IA64_PEI_NOTIFY_TRACE="${IA64_PEI_NOTIFY_TRACE}"
+fi
+
+if [[ -n "${IA64_PEI_NOTIFY_TRACE_LIMIT:-}" ]]; then
+  export QEMU_IA64_PEI_NOTIFY_TRACE_LIMIT="${IA64_PEI_NOTIFY_TRACE_LIMIT}"
+fi
+
+if [[ -n "${IA64_PEI_NOTIFY_TRACE_ONESHOT:-}" ]]; then
+  export QEMU_IA64_PEI_NOTIFY_TRACE_ONESHOT="${IA64_PEI_NOTIFY_TRACE_ONESHOT}"
+fi
+
+if [[ -n "${IA64_PEI_NOTIFY_STATUS_FIX:-}" ]]; then
+  export QEMU_IA64_PEI_NOTIFY_STATUS_FIX="${IA64_PEI_NOTIFY_STATUS_FIX}"
+fi
+
+if [[ -n "${IA64_PEI_NOTIFY_STATUS_FIX_ALWAYS:-}" ]]; then
+  export QEMU_IA64_PEI_NOTIFY_STATUS_FIX_ALWAYS="${IA64_PEI_NOTIFY_STATUS_FIX_ALWAYS}"
+fi
+
+if [[ -n "${IA64_PEI_NOTIFY_STATUS_FIX_LOG_LIMIT:-}" ]]; then
+  export QEMU_IA64_PEI_NOTIFY_STATUS_FIX_LOG_LIMIT="${IA64_PEI_NOTIFY_STATUS_FIX_LOG_LIMIT}"
+fi
+
+if [[ -n "${IA64_PEI_22560_TRACE:-}" ]]; then
+  export QEMU_IA64_PEI_22560_TRACE="${IA64_PEI_22560_TRACE}"
+fi
+
+if [[ -n "${IA64_PEI_22560_TRACE_LIMIT:-}" ]]; then
+  export QEMU_IA64_PEI_22560_TRACE_LIMIT="${IA64_PEI_22560_TRACE_LIMIT}"
+fi
+
+if [[ -n "${IA64_PEI_22560_STATUS_FIX:-}" ]]; then
+  export QEMU_IA64_PEI_22560_STATUS_FIX="${IA64_PEI_22560_STATUS_FIX}"
+fi
+
+if [[ -n "${IA64_PEI_22560_STATUS_FIX_ALWAYS:-}" ]]; then
+  export QEMU_IA64_PEI_22560_STATUS_FIX_ALWAYS="${IA64_PEI_22560_STATUS_FIX_ALWAYS}"
+fi
+
+if [[ -n "${IA64_PEI_22560_STATUS_FIX_LOG_LIMIT:-}" ]]; then
+  export QEMU_IA64_PEI_22560_STATUS_FIX_LOG_LIMIT="${IA64_PEI_22560_STATUS_FIX_LOG_LIMIT}"
 fi
 
 if [[ -n "${IA64_PEI_REPORT_STATUS_SOFTFAIL:-}" ]]; then

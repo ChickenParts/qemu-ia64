@@ -70,6 +70,39 @@ investigation breadcrumbs.
       `229832d3-7a30-4b36-b827-f40cb7d45436`).
   - Next blocker step should target the notify callback/dispatch chain above,
     not only `PeiLocatePpi` return rewriting.
+- Notify-return instrumentation/fix probe (2026-02-18):
+  - New bounded notify-return tracing is wired on
+    `NotifyPpi` call/return (`ret_restore`/`ret_restore_b0`) with GUID decode.
+  - Traced target callback return (`call_pc=0xffe278a0`,
+    `tgt=0xffe268d0`, GUID `1388066e-3a57-4efa-98f3-c12f3a958a29`) returns
+    `status=0` (`soft=0`) in current baseline windows.
+  - As a result, bounded notify-return rewrite
+    (`QEMU_IA64_PEI_NOTIFY_STATUS_FIX=1`) does not trigger
+    (`notify_fixed=0`) and does not alter the observed
+    `pc=0xffe22560` `EFI_NOT_FOUND -> EFI_END_OF_MEDIA` transition.
+  - Updated focus: status mutation to `0x1c` occurs after notify return; next
+    corrective hook should target the post-notify/report-status chain
+    (`pc=0xffe22560` path), not notify return itself.
+- `pc=0xffe22560` status-mutation attribution/fix probe (2026-02-18):
+  - New bounded trace/fix path is wired at the mutation site:
+    - `QEMU_IA64_PEI_22560_TRACE=1`
+    - `QEMU_IA64_PEI_22560_STATUS_FIX=1`
+  - Fix guard conditions require all of:
+    - soft EFI status in `r8`
+    - unresolved optional StatusCode path
+    - recent producer-chain match (`report_status_code` + `locate_ppi`
+      with StatusCode GUID `229832d3-7a30-4b36-b827-f40cb7d45436`)
+      within bounded sequence window.
+  - A/B evidence (`scratch/ia64_logs/p3o/*`, 45s windows):
+    - baseline: `transition_22560=4`, `22560_trace=0`, `22560_fixed=0`
+    - trace-only: `transition_22560=4`, `22560_trace=4`, `22560_fixed=0`
+    - fix-on: `transition_22560=5`, `22560_trace=5`, `22560_fixed=5`
+  - Result:
+    - target path at `pc=0xffe22560` is now actively recognized and rewritten
+      under bounded guards (`pei_22560_status ... fixed=1 ... chain=1`).
+    - residual first-bad in `sem0_fix_on` comes from a later recurrence with
+      changed context (post transition through non-EFI `r8=ffffffff0011fff0`),
+      so blocker root-cause is narrowed but not fully eliminated.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
