@@ -107,6 +107,9 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   path (`pc=0x1ff4f520`) with per-callsite/target cache and wrapper knobs
   (`target/ia64/helper.c`, `target/ia64/translate.c`, `target/ia64/cpu.h`,
   `target/ia64/helper.h`, `scripts/run-ia64-firmware.sh`).
+- Add directed A-unit NaT propagation selftest harness (`add`, `and`,
+  `shladd`, `adds`, `pavg2`) and runner
+  (`scripts/ia64-nat-selftest.S`, `scripts/run-ia64-nat-tests.sh`).
 
 ## Open issues (needs work)
 
@@ -115,9 +118,9 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
     `Core\Dxe\Gcd\Gcd.c` line 1736 (`Descrpt: Found`).
   - HOB patch mode (`QEMU_IA64_EFI_HOB_PATCH=1`): synthetic tested sysmem HOB
     is now present and run progresses past `Gcd.c:1736`; bounded null-call
-    repair (`QEMU_IA64_CALL_NULL_FIX=1`, default on) now intercepts the known
-    `pc=0x1ff4f520` null-branch path and avoids immediate host abort.
-    Root-cause provenance for why this path loads a null target is still open.
+    repair (`QEMU_IA64_CALL_NULL_FIX=1`) is retained as an opt-in bisect
+    guard, but default is now off and the historical null-branch path is not
+    reproducing in the current 90s run window.
 - StatusCode optional-path handling is now semantic and default-on:
   unresolved StatusCode report flow is treated as optional at
   `report_status_code` return and first-bad capture is skipped for this path.
@@ -133,8 +136,6 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   PCI width/address ordering is correct for all firmware calls.
 - Extended PCI config (type=1) is not implemented; add ECAM handling if
   firmware uses it.
-- NaT propagation is incomplete in A-unit integer ops (only padd/psub handle NaT);
-  other integer ALU ops ignore NaT and will silently compute values (`target/ia64/translate.c:1173`).
 - F-unit decode is still a bringup subset; many architected F-slot encodings still
   fall through to `gen_unimpl("F-slot")` (`target/ia64/translate.c`).
 - ALAT/advanced load modeling is minimal; advanced load exceptions and NaT

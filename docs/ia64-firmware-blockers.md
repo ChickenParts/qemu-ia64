@@ -10,12 +10,15 @@ investigation breadcrumbs.
   - HOB patch mode (`QEMU_IA64_EFI_HOB_PATCH=1`): synthetic tested sysmem
     resource HOB is now inserted (`RES type=0 attr=0x00002007 tested=1`), and
     execution advances past the prior `Gcd.c:1736` stop.
-  - bounded post-GCD null-call repair is now wired and default-on:
-    `QEMU_IA64_CALL_NULL_FIX=1` repairs the known
-    `pc=0x1ff4f520` null `br.call` path (evidence:
-    `IA64: call_null_fix ... src=old_b7 ...`), avoiding immediate host abort.
-  Root-cause focus remains on why this call path resolves a null descriptor
-  target, while `Gcd.c:1736` remains the baseline-mode blocker.
+  - bounded post-GCD null-call repair is retained as a bisect guard but is now
+    default-off:
+    `QEMU_IA64_CALL_NULL_FIX=1` (opt-in) repairs the historical
+    `pc=0x1ff4f520` null `br.call` path.
+  - current 90s HOB-patch run window with default-off call fix shows no
+    `call_null_fix` and no null-branch abort; this path is not currently
+    reproducing in the active baseline.
+  Root-cause focus remains on DXE progression and reproducing the exact
+  post-GCD call-path failure with current firmware state.
 - Byte-copy helper around `pc=0xffe7b1e0` is currently treated as a
   non-blocking trace target (not root cause yet):
   - Probes are wired at:
@@ -85,7 +88,8 @@ investigation breadcrumbs.
   - Evidence:
     - `pei_core_hob_seed core=... off=0x260 old=0 ... new=0x40ef000 ...`
     - `pei_core_hob_seed core=... off=0x470 old=0 ... new=0x40ef000 ...`
-- PEI HOB flow contract tracing/repair is now wired (default on):
+- PEI HOB flow contract tracing/repair remains available as a bisect guard
+  (default off):
   - `QEMU_IA64_PEI_HOB_FLOW_TRACE=1` logs `GetHobList`/`CreateHob` call-return
     pointer contract with core/HOB provenance (`pei_hob_flow ...`).
   - `QEMU_IA64_PEI_HOB_PTR_FIX=1` repairs successful `GetHobList` returns when
@@ -94,11 +98,11 @@ investigation breadcrumbs.
   - `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD=1` provides a bounded guard for the
     `CreateHob` OOR+null-out case (pointer repair only; no status rewrite).
   - A/B evidence (2026-02-17):
-    - defaults on: no early `pc=0xffe24e80` `EFI_OUT_OF_RESOURCES` transition
-      observed in 35s baseline run window.
     - fixes off (`...HOB_PTR_FIX=0 ...CREATE_HOB_PTR_GUARD=0`) after slot
-      coherence seeding: no early `pc=0xffe24e80` transition in the same run
-      window, and no `pei_hob_ptr_fix` events required.
+      coherence seeding: no early `pc=0xffe24e80` transition in repeated
+      baseline windows, and no `pei_hob_ptr_fix` events required.
+    - defaults were flipped to off to keep root-cause behavior primary and
+      retain repair logic only for bisect compatibility.
   - Root-cause update:
     - early OOR path was driven by core `+0x260` being left null/invalid while
       `+0x470` was valid; `GetHobList`/`CreateHob` consumers on that path read

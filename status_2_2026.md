@@ -276,6 +276,47 @@ Logs checked:
     - `pei_core_hob_seed core=... off=0x260 old=0 ... new=0x40ef000 ...`
     - no `pei_hob_ptr_fix` events required in the above windows.
 
+## Follow-up (P3-L Retire PEI HOB Pointer Compatibility Shims by Default)
+- Default behavior changed to root-cause-first:
+  - `QEMU_IA64_PEI_HOB_FLOW_TRACE` default is now off.
+  - `QEMU_IA64_PEI_HOB_PTR_FIX` default is now off.
+  - `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD` default is now off.
+  - knobs remain available for bisect compatibility.
+- Validation (2026-02-17):
+  - 5x repeated baseline windows with fixes explicitly off
+    (`...HOB_PTR_FIX=0 ...CREATE_HOB_PTR_GUARD=0`): all timed out cleanly
+    (`rc=124`), no early `pc=0xffe24e80` OOR transition, no
+    `pei_hob_ptr_fix` events.
+  - 3x default-mode baseline windows after default flip: same outcome.
+
+## Follow-up (P3-M Null `br.call` Guard De-Prioritized/Default-Off)
+- `QEMU_IA64_CALL_NULL_FIX` is now default-off (retained as opt-in bisect
+  guard).
+- Validation:
+  - `IA64_EFI_HOB_PATCH=1` with default-off call fix, 90s window:
+    no `call_null_fix` logs and no null-branch abort.
+  - Historical `pc=0x1ff4f520` null call path is not reproducing in current
+    baseline windows; root-cause remains open pending a fresh reproducer.
+
+## Follow-up (CPU-C1 A-unit NaT Test Coverage)
+- Added directed bare-kernel NaT propagation selftest:
+  - `scripts/ia64-nat-selftest.S`
+  - `scripts/run-ia64-nat-tests.sh`
+- Coverage includes A-unit integer forms:
+  - `add`, `and`, `shladd`, `adds`, `pavg2`.
+- Validation:
+  - `scripts/run-ia64-nat-tests.sh 15s` passed
+    (PASS marker `r8=0x6e617470`, no FAIL marker).
+
+## Follow-up (CPU-C2 Fresh UNIMPL Inventory Refresh)
+- Re-ran fresh baseline inventory:
+  - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+  - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+  - `scripts/ia64-unimpl-report.sh --format tsv --top 30 ...`
+- Result:
+  - no `IA64 UNIMPL` lines in fresh firmware/kernel logs.
+  - no actionable fresh F-slot hit table for this tranche.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

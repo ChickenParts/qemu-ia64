@@ -17,7 +17,7 @@ Environment overrides:
   IA64_HANG_ABORT (default: 0; empty/0 disables)
   IA64_EFI_HOB_PATCH (default: inherited/off; enable EFI HOB repair path)
   IA64_EFI_HOB_PATCH_TRACE (default: inherited/off; verbose HOB patch logs)
-  IA64_CALL_NULL_FIX (default: inherited/on; repair known null br.call target path)
+  IA64_CALL_NULL_FIX (default: inherited/off; bisect-only guard for known null br.call target path)
   IA64_CALL_NULL_FIX_LOG_LIMIT (default: helper default)
   IA64_FW_PEI_COPY_TRACE (default: 0; enable fw_pei_copy probes)
   IA64_FW_PEI_COPY_TRACE_LIMIT (default: helper default)
@@ -39,11 +39,11 @@ Environment overrides:
   IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT (default: 64)
   IA64_PEI_REPORT_STATUS_SOFTFAIL (default: 1; treat early StatusCode report errors as non-fatal)
   IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS (default: 0; softfail regardless of ppi_end)
-  IA64_PEI_HOB_FLOW_TRACE (default: 1; trace GetHobList/CreateHob call-return contract)
+  IA64_PEI_HOB_FLOW_TRACE (default: 0; trace GetHobList/CreateHob call-return contract)
   IA64_PEI_HOB_FLOW_TRACE_LIMIT (default: 128)
-  IA64_PEI_HOB_PTR_FIX (default: 1; repair success-returned GetHobList with null/invalid out pointer)
+  IA64_PEI_HOB_PTR_FIX (default: 0; repair success-returned GetHobList with null/invalid out pointer)
   IA64_PEI_HOB_PTR_FIX_LOG_LIMIT (default: 64)
-  IA64_PEI_CREATE_HOB_PTR_GUARD (default: 1; guard CreateHob OOR path when out pointer is null/invalid)
+  IA64_PEI_CREATE_HOB_PTR_GUARD (default: 0; guard CreateHob OOR path when out pointer is null/invalid)
 
 Outputs:
   - Serial log is timestamped (kept):  $IA64_LOGDIR/serial.fw.<ts>.log

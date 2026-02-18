@@ -323,11 +323,11 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT` | Limit StatusCode semantic-fix logs |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL` | Legacy report_status soft-fail path (kept for compatibility) |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS` | Legacy override to always soft-fail report_status errors |
-| `QEMU_IA64_PEI_HOB_FLOW_TRACE` | Trace PEI `GetHobList`/`CreateHob` call-return pointer contract |
+| `QEMU_IA64_PEI_HOB_FLOW_TRACE` | Trace PEI `GetHobList`/`CreateHob` call-return pointer contract (default off) |
 | `QEMU_IA64_PEI_HOB_FLOW_TRACE_LIMIT` | Limit PEI HOB-flow trace entries |
-| `QEMU_IA64_PEI_HOB_PTR_FIX` | Repair successful `GetHobList` returns with null/invalid out HOB pointer |
+| `QEMU_IA64_PEI_HOB_PTR_FIX` | Repair successful `GetHobList` returns with null/invalid out HOB pointer (default off; bisect guard) |
 | `QEMU_IA64_PEI_HOB_PTR_FIX_LOG_LIMIT` | Limit PEI HOB-pointer fix logs |
-| `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD` | Guard `CreateHob` OOR returns when output HOB pointer is null/invalid |
+| `QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD` | Guard `CreateHob` OOR returns when output HOB pointer is null/invalid (default off; bisect guard) |
 | `QEMU_IA64_PSR_LOG` | Log PSR (Processor Status Register) changes |
 
 ## HOB (Hand-Off Block) Debugging
@@ -371,7 +371,7 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_DBG_DUMP_BUNDLES` | Number of bundles to dump |
 | `QEMU_IA64_ABORT_NULL_BRANCH` | Abort on null branch target |
 | `QEMU_IA64_ABORT_BRANCH_TO` | Abort when branching to address |
-| `QEMU_IA64_CALL_NULL_FIX` | Repair known firmware null `br.call` target path (`pc=0x1ff4f520`) |
+| `QEMU_IA64_CALL_NULL_FIX` | Repair known firmware null `br.call` target path (`pc=0x1ff4f520`) (default off; bisect guard) |
 | `QEMU_IA64_CALL_NULL_FIX_LOG_LIMIT` | Limit null-call fix log entries |
 | `QEMU_IA64_UNIMPL_DUMP` | Dump bundles when hitting an unimplemented instruction |
 | `QEMU_IA64_UNIMPL_DUMP_BUNDLES` | Bundles to dump for unimplemented instructions |

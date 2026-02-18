@@ -1145,7 +1145,7 @@ static bool ia64_fw_call_fix_enabled(void)
     static int enabled = -1;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_CALL_NULL_FIX");
-        enabled = (s && *s) ? (ia64_env_truthy(s) ? 1 : 0) : 1;
+        enabled = (s && *s) ? (ia64_env_truthy(s) ? 1 : 0) : 0;
     }
     return enabled;
 }
@@ -4939,7 +4939,7 @@ static bool ia64_fw_pei_hob_flow_trace_enabled(void)
     static int enabled = -1;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_PEI_HOB_FLOW_TRACE");
-        enabled = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
     }
     return enabled;
 }
@@ -4965,7 +4965,7 @@ static bool ia64_fw_pei_hob_ptr_fix_enabled(void)
     static int enabled = -1;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_PEI_HOB_PTR_FIX");
-        enabled = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
     }
     return enabled;
 }
@@ -4991,7 +4991,7 @@ static bool ia64_fw_pei_create_hob_ptr_guard_enabled(void)
     static int enabled = -1;
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_PEI_CREATE_HOB_PTR_GUARD");
-        enabled = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
     }
     return enabled;
 }
