@@ -526,7 +526,63 @@ Logs checked:
     - `scripts/ia64-unimpl-report.sh --format tsv --top 50 ...`
       reported no `IA64 UNIMPL` lines in fresh smoke logs.
 
+## Follow-up (P3-P `pc=0xffe279d0` Non-EFI Status Attribution + Bridge Probe)
+- Implemented post-`22560` non-EFI status-path instrumentation in
+  `target/ia64/helper.c`:
+  - new bounded env controls:
+    - `QEMU_IA64_PEI_279D0_TRACE`
+    - `QEMU_IA64_PEI_279D0_TRACE_LIMIT`
+    - `QEMU_IA64_PEI_279D0_STATUS_FIX`
+    - `QEMU_IA64_PEI_279D0_STATUS_FIX_ALWAYS`
+    - `QEMU_IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT`
+  - new handler:
+    - `ia64_fw_pei_maybe_handle_status_transition_ffe279d0(...)`
+    - called from `fw_pei_err_watch` after `22560` handling and before
+      first-bad capture.
+  - trace/fix path targets bounded signature:
+    - `pc` in `0xffe279d0..0xffe27a10`
+    - `r8` in `{0xffffffff0011fff0, 0xffffffff0011bff0}`
+    - recent `22560`-fix context link (`seq` delta window + PS linkage).
+  - producer-ring capture is now retained for `279d0` flow even when
+    producer-path dump tracing is disabled.
+- `scripts/run-ia64-firmware.sh` now exports `IA64_PEI_279D0_*` wrappers.
+- Validation (2026-02-18, `scratch/ia64_logs/p3p/*`, 45s windows):
+  - `base`: `rc=124`, no `279d0` transitions/hits.
+  - `p3p_trace_only`
+    (`22560 fix on`, `279d0 trace on`, `279d0 fix off`):
+    - `transition_279d0=1`, `transition_279f0=1`,
+      `err_279d0_window=5`, `trace_279d0=4`, `fix_279d0=0`, `rc=124`.
+  - `p3p_fix_on` (`279d0 fix on`):
+    - `transition_279d0=1`, `transition_279f0=1`,
+      `err_279d0_window=3`, `trace_279d0=1`, `fix_279d0=1`,
+      `rc=134` (host assert).
+  - `p3p_sem0_fix_on` (semantic fix off + `279d0 fix on`):
+    - same `279d0` firing pattern; `first_bad=1`, `rc=134`.
+  - key evidence:
+    - rewrite fires under bounded link:
+      `pei_279d0_status status=ffffffff0011fff0 fixed=1 ... seq_link=1 ...`
+    - fix-on runs expose host-side TCG assert:
+      `TB_EXIT_REQUESTED without exitreq/icount`
+      (`cpu_loop_exec_tb` assertion).
+- Regression/smoke (default knob baseline):
+  - directed tests passed:
+    - `scripts/run-ia64-fslot-tests.sh 15s`
+    - `scripts/run-ia64-op7-tests.sh 12s`
+    - `scripts/run-ia64-nat-tests.sh 12s`
+    - `scripts/run-ia64-rse-tests.sh 12s`
+    - `scripts/run-ia64-alat-tests.sh 12s`
+  - runtime smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+      -> `rc=137`.
+  - UNIMPL refresh:
+    - no `IA64 UNIMPL` lines in fresh smoke logs.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
 - Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
+- New host-side blocker under `QEMU_IA64_PEI_279D0_STATUS_FIX=1`:
+  TCG assert (`TB_EXIT_REQUESTED without exitreq/icount`) during firmware
+  progression after the bounded `279d0` rewrite path.

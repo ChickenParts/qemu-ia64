@@ -103,6 +103,29 @@ investigation breadcrumbs.
     - residual first-bad in `sem0_fix_on` comes from a later recurrence with
       changed context (post transition through non-EFI `r8=ffffffff0011fff0`),
       so blocker root-cause is narrowed but not fully eliminated.
+- `pc=0xffe279d0..0xffe27a10` non-EFI status probe (2026-02-18):
+  - Added bounded attribution/fix hooks:
+    - `QEMU_IA64_PEI_279D0_TRACE=1`
+    - `QEMU_IA64_PEI_279D0_STATUS_FIX=1`
+  - Trace confirms post-`22560` mutation recurrence:
+    - `fw_pei_status_transition pc=0xffe279d0 ... new=ffffffff0011fff0`
+    - `fw_pei_status_transition pc=0xffe279f0 ... new=ffffffff0011bff0`
+  - Guarded rewrite path links to recent successful `22560` chain context
+    (`seq_link=1`, `delta=10`, `ps_match=1`) and rewrites this signature
+    when enabled.
+  - A/B evidence (`scratch/ia64_logs/p3p/*`, 45s windows):
+    - `p3p_trace_only`: `trace_279d0=4`, `fix_279d0=0`,
+      `err_279d0_window=5`, `rc=124`.
+    - `p3p_fix_on`: `trace_279d0=1`, `fix_279d0=1`,
+      `err_279d0_window=3`, `rc=134`.
+  - New blocker uncovered:
+    - with `...279D0_STATUS_FIX=1`, firmware run hits host assert:
+      `TCG BUG: TB_EXIT_REQUESTED without exitreq/icount`
+      (`cpu_loop_exec_tb` assertion in `accel/tcg/cpu-exec.c`).
+  - Current stance:
+    - `279d0` rewrite remains default-off and investigation-only.
+    - immediate next blocker is the TCG assert path reached after this bounded
+      rewrite, before additional PEI/DXE forward progress can be claimed.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

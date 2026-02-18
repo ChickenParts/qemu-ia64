@@ -336,6 +336,11 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_22560_STATUS_FIX` | Enable bounded soft-error rewrite at `pc=0xffe22560` when StatusCode locate/report chain matches (default off) |
 | `QEMU_IA64_PEI_22560_STATUS_FIX_ALWAYS` | Ignore unresolved-path guard for `pc=0xffe22560` rewrite |
 | `QEMU_IA64_PEI_22560_STATUS_FIX_LOG_LIMIT` | Limit `pc=0xffe22560` rewrite logs |
+| `QEMU_IA64_PEI_279D0_TRACE` | Trace non-EFI status mutation path at `pc=0xffe279d0..0xffe27a10` (default off) |
+| `QEMU_IA64_PEI_279D0_TRACE_LIMIT` | Limit `pc=0xffe279d0..0xffe27a10` trace entries |
+| `QEMU_IA64_PEI_279D0_STATUS_FIX` | Enable bounded rewrite for non-EFI status signature (`0xffffffff0011fff0/0xffffffff0011bff0`) in the `pc=0xffe279d0..0xffe27a10` window (default off) |
+| `QEMU_IA64_PEI_279D0_STATUS_FIX_ALWAYS` | Allow fallback PS-link guard bypass for `pc=0xffe279d0` bounded rewrite |
+| `QEMU_IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT` | Limit `pc=0xffe279d0` rewrite logs |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL` | Legacy report_status soft-fail path (kept for compatibility) |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS` | Legacy override to always soft-fail report_status errors |
 | `QEMU_IA64_PEI_HOB_FLOW_TRACE` | Trace PEI `GetHobList`/`CreateHob` call-return pointer contract (default off) |

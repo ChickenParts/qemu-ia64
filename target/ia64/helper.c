@@ -5464,6 +5464,68 @@ static int ia64_fw_pei_22560_status_fix_log_limit(void)
     return limit;
 }
 
+static bool ia64_fw_pei_279d0_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_279D0_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_pei_279d0_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 64;
+        const char *s = getenv("QEMU_IA64_PEI_279D0_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static bool ia64_fw_pei_279d0_status_fix_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_279D0_STATUS_FIX");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_pei_279d0_status_fix_always(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_279D0_STATUS_FIX_ALWAYS");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_pei_279d0_status_fix_log_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 64;
+        const char *s = getenv("QEMU_IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
 static bool ia64_fw_pei_report_status_is_soft_error(uint64_t status)
 {
     return status == (IA64_EFI_STATUS_ERROR_BIT | 14) || /* EFI_NOT_FOUND */
@@ -5732,12 +5794,15 @@ static void ia64_fw_pei_producer_record_call(CPUIA64State *env,
     bool want_report_fix = want_status_semantic_fix || want_report_softfail;
     bool want_22560_flow = ia64_fw_pei_22560_trace_enabled() ||
                            ia64_fw_pei_22560_status_fix_enabled();
+    bool want_279d0_flow = ia64_fw_pei_279d0_trace_enabled() ||
+                           ia64_fw_pei_279d0_status_fix_enabled();
     bool want_notify_flow = ia64_fw_pei_notify_trace_enabled() ||
                             ia64_fw_pei_notify_status_fix_enabled();
     bool want_hob_flow = ia64_fw_pei_hob_flow_trace_enabled() ||
                          ia64_fw_pei_hob_ptr_fix_enabled() ||
                          ia64_fw_pei_create_hob_ptr_guard_enabled();
     if (!want_trace && !want_report_fix && !want_22560_flow &&
+        !want_279d0_flow &&
         !want_notify_flow && !want_hob_flow) {
         return;
     }
@@ -5769,7 +5834,7 @@ static void ia64_fw_pei_producer_record_call(CPUIA64State *env,
                                   ps_ptr, a1, a2, a3);
     }
 
-    if (!want_trace && !want_22560_flow) {
+    if (!want_trace && !want_22560_flow && !want_279d0_flow) {
         return;
     }
 
@@ -12955,6 +13020,14 @@ static bool ia64_fw_pei_statuscode_optional_path_unresolved(CPUIA64State *env,
 
 #define IA64_PEI_STATUS_PC_22560 0x00000000ffe22560ULL
 #define IA64_PEI_STATUS_CHAIN_WINDOW 8
+#define IA64_PEI_STATUS_PC_279D0 0x00000000ffe279d0ULL
+#define IA64_PEI_STATUS_PC_279F0 0x00000000ffe279f0ULL
+#define IA64_PEI_STATUS_PC_27A00 0x00000000ffe27a00ULL
+#define IA64_PEI_STATUS_PC_27A10 0x00000000ffe27a10ULL
+#define IA64_PEI_STATUS_279D0_SEQ_WINDOW 64
+#define IA64_PEI_STATUS_279D0_SUMMARY_WINDOW 24
+#define IA64_PEI_STATUS_279D0_ERR0 0xffffffff0011fff0ULL
+#define IA64_PEI_STATUS_279D0_ERR1 0xffffffff0011bff0ULL
 
 typedef struct IA64Pei22560Chain {
     bool locate_seen;
@@ -12966,6 +13039,37 @@ typedef struct IA64Pei22560Chain {
     IA64PeiProducerCall report;
     bool chain_match;
 } IA64Pei22560Chain;
+
+typedef struct IA64Pei22560FixCtx {
+    bool valid;
+    uint64_t seq;
+    uint64_t pc;
+    uint64_t b0;
+    uint64_t ps_ptr;
+    uint64_t r33;
+    uint64_t r34;
+} IA64Pei22560FixCtx;
+
+typedef struct IA64Pei279d0Summary {
+    uint64_t first_seq;
+    uint64_t last_seq;
+    int scanned;
+    bool locate_seen;
+    bool locate_guid_ok;
+    bool locate_guid_match;
+    IA64EfiGuid locate_guid;
+    IA64PeiProducerCall locate;
+    bool report_seen;
+    IA64PeiProducerCall report;
+    bool install_mem_seen;
+    IA64PeiProducerCall install_mem;
+    bool get_hob_seen;
+    IA64PeiProducerCall get_hob;
+    bool create_hob_seen;
+    IA64PeiProducerCall create_hob;
+} IA64Pei279d0Summary;
+
+static IA64Pei22560FixCtx ia64_fw_pei_22560_fix_ctx;
 
 static uint64_t ia64_fw_pei_current_ps_ptr(CPUIA64State *env)
 {
@@ -13042,6 +13146,79 @@ static void ia64_fw_pei_22560_collect_chain(CPUIA64State *env,
         (out->locate.seq - out->report.seq) <= IA64_PEI_STATUS_CHAIN_WINDOW;
 }
 
+static bool ia64_fw_pei_is_279d0_window_pc(uint64_t pc)
+{
+    return ia64_fw_pc_match_bundle(pc, IA64_PEI_STATUS_PC_279D0) ||
+           ia64_fw_pc_match_bundle(pc, IA64_PEI_STATUS_PC_279F0) ||
+           ia64_fw_pc_match_bundle(pc, IA64_PEI_STATUS_PC_27A00) ||
+           ia64_fw_pc_match_bundle(pc, IA64_PEI_STATUS_PC_27A10);
+}
+
+static bool ia64_fw_pei_is_279d0_non_efi_status(uint64_t status)
+{
+    return status == IA64_PEI_STATUS_279D0_ERR0 ||
+           status == IA64_PEI_STATUS_279D0_ERR1;
+}
+
+static void ia64_fw_pei_279d0_collect_summary(CPUIA64State *env,
+                                              uint64_t ps_ptr,
+                                              IA64Pei279d0Summary *out)
+{
+    *out = (IA64Pei279d0Summary) { 0 };
+
+    uint64_t seq = ia64_fw_pei_producer_seq;
+    if (seq == 0) {
+        return;
+    }
+    out->last_seq = seq;
+
+    for (int i = 0; i < IA64_PEI_STATUS_279D0_SUMMARY_WINDOW && seq > 0;
+         i++, seq--) {
+        IA64PeiProducerCall *ent =
+            &ia64_fw_pei_producer_ring[(seq - 1) % IA64_PEI_PRODUCER_MAX];
+        if (ent->seq != seq) {
+            continue;
+        }
+        out->scanned++;
+        out->first_seq = ent->seq;
+
+        if (ps_ptr && ent->ps_ptr && ent->ps_ptr != ps_ptr) {
+            continue;
+        }
+
+        if (!out->locate_seen && ent->svc_id == IA64_PEI_SVC_LOCATE_PPI) {
+            out->locate_seen = true;
+            out->locate = *ent;
+            if (ent->a1 && ia64_fw_read_guid(env, ent->a1, &out->locate_guid)) {
+                out->locate_guid_ok = true;
+                out->locate_guid_match =
+                    ia64_fw_guid_equal(&out->locate_guid,
+                                       &ia64_efi_guid_status_code_ppi);
+            }
+        }
+        if (!out->report_seen &&
+            ent->svc_id == IA64_PEI_SVC_REPORT_STATUS_CODE) {
+            out->report_seen = true;
+            out->report = *ent;
+        }
+        if (!out->install_mem_seen &&
+            ent->svc_id == IA64_PEI_SVC_INSTALL_PEI_MEMORY) {
+            out->install_mem_seen = true;
+            out->install_mem = *ent;
+        }
+        if (!out->get_hob_seen &&
+            ent->svc_id == IA64_PEI_SVC_GET_HOB_LIST) {
+            out->get_hob_seen = true;
+            out->get_hob = *ent;
+        }
+        if (!out->create_hob_seen &&
+            ent->svc_id == IA64_PEI_SVC_CREATE_HOB) {
+            out->create_hob_seen = true;
+            out->create_hob = *ent;
+        }
+    }
+}
+
 static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                                                               uint64_t pc)
 {
@@ -13078,6 +13255,18 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                   chain.chain_match &&
                   (ia64_fw_pei_22560_status_fix_always() || unresolved);
     if (do_fix) {
+        uint64_t chain_seq = chain.locate_seen ? chain.locate.seq
+                           : chain.report_seen ? chain.report.seq
+                           : ia64_fw_pei_producer_seq;
+        ia64_fw_pei_22560_fix_ctx = (IA64Pei22560FixCtx) {
+            .valid = true,
+            .seq = chain_seq,
+            .pc = pc,
+            .b0 = env->b[0],
+            .ps_ptr = ps_ptr,
+            .r33 = env->r[33],
+            .r34 = env->r[34],
+        };
         env->r[8] = 0;
     }
 
@@ -13158,6 +13347,170 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                               chain.report.pc, chain.report.tgt,
                               chain.report.a1, chain.report.a2,
                               chain.report.a3, chain.report.ps_ptr);
+            }
+        }
+    }
+#endif
+}
+
+static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *env,
+                                                                 uint64_t pc)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)pc;
+    return;
+#else
+    bool trace_enabled = ia64_fw_pei_279d0_trace_enabled();
+    bool fix_enabled = ia64_fw_pei_279d0_status_fix_enabled();
+    if (!trace_enabled && !fix_enabled) {
+        return;
+    }
+    if (!ia64_fw_pei_is_279d0_window_pc(pc)) {
+        return;
+    }
+
+    uint64_t status = env->r[8];
+    if (ia64_fw_efi_status_maybe(status) ||
+        !ia64_fw_pei_is_279d0_non_efi_status(status)) {
+        return;
+    }
+
+    uint64_t ps_ptr = ia64_fw_pei_current_ps_ptr(env);
+    int64_t ppi_end = -1;
+    bool ppi_found = false;
+    bool unresolved = ia64_fw_pei_statuscode_optional_path_unresolved(env, ps_ptr,
+                                                                       &ppi_end,
+                                                                       &ppi_found);
+
+    IA64Pei279d0Summary summary;
+    ia64_fw_pei_279d0_collect_summary(env, ps_ptr, &summary);
+
+    uint64_t seq_now = ia64_fw_pei_producer_seq;
+    uint64_t seq_delta = UINT64_MAX;
+    bool seq_link_ok = false;
+    if (ia64_fw_pei_22560_fix_ctx.valid &&
+        seq_now >= ia64_fw_pei_22560_fix_ctx.seq) {
+        seq_delta = seq_now - ia64_fw_pei_22560_fix_ctx.seq;
+        seq_link_ok = seq_delta <= IA64_PEI_STATUS_279D0_SEQ_WINDOW;
+    }
+
+    CPUState *cs = env_cpu(env);
+    bool ps_valid = ps_ptr && ia64_fw_pei_is_ps_table(cs, ps_ptr);
+    bool ps_match = ia64_fw_pei_22560_fix_ctx.valid &&
+                    ps_ptr && ia64_fw_pei_22560_fix_ctx.ps_ptr &&
+                    ps_ptr == ia64_fw_pei_22560_fix_ctx.ps_ptr;
+    bool ps_link_ok = ps_match ||
+        (ia64_fw_pei_279d0_status_fix_always() && ps_valid);
+
+    bool do_fix = fix_enabled && seq_link_ok && ps_link_ok;
+    if (do_fix) {
+        env->r[8] = 0;
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int trace_count;
+        static int fix_count;
+
+        bool trace_log = trace_enabled &&
+                         trace_count < ia64_fw_pei_279d0_trace_limit();
+        if (trace_log) {
+            trace_count++;
+        }
+        bool fix_log = do_fix &&
+                       fix_count < ia64_fw_pei_279d0_status_fix_log_limit();
+        if (fix_log) {
+            fix_count++;
+        }
+
+        if (trace_log || fix_log) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_279d0_status status=%016" PRIx64
+                          " fixed=%d pc=%016" PRIx64 " b0=%016" PRIx64
+                          " ps=%016" PRIx64 " unresolved=%d"
+                          " ppi_end=%" PRIi64 " ppi_found=%d"
+                          " seq_now=%" PRIu64 " seq_link=%d delta=%" PRIu64
+                          " ps_match=%d ps_link=%d\n",
+                          status, do_fix ? 1 : 0, pc, env->b[0], ps_ptr,
+                          unresolved ? 1 : 0, ppi_end, ppi_found ? 1 : 0,
+                          seq_now, seq_link_ok ? 1 : 0, seq_delta,
+                          ps_match ? 1 : 0, ps_link_ok ? 1 : 0);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_279d0_status regs"
+                          " r9=%016" PRIx64 " r32=%016" PRIx64
+                          " r33=%016" PRIx64 " r34=%016" PRIx64
+                          " r35=%016" PRIx64 " r36=%016" PRIx64
+                          " r37=%016" PRIx64 " cfm=%016" PRIx64
+                          " pfs=%016" PRIx64 "\n",
+                          env->r[9], env->r[32], env->r[33], env->r[34],
+                          env->r[35], env->r[36], env->r[37], env->cfm,
+                          env->ar[IA64_AR_PFS]);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_279d0_status summary"
+                          " first_seq=%" PRIu64 " last_seq=%" PRIu64
+                          " scanned=%d locate=%d report=%d install_mem=%d"
+                          " get_hob=%d create_hob=%d locate_guid_ok=%d"
+                          " locate_guid_match=%d\n",
+                          summary.first_seq, summary.last_seq, summary.scanned,
+                          summary.locate_seen ? 1 : 0,
+                          summary.report_seen ? 1 : 0,
+                          summary.install_mem_seen ? 1 : 0,
+                          summary.get_hob_seen ? 1 : 0,
+                          summary.create_hob_seen ? 1 : 0,
+                          summary.locate_guid_ok ? 1 : 0,
+                          summary.locate_guid_match ? 1 : 0);
+            if (summary.locate_seen) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_279d0_status locate"
+                              " seq=%" PRIu64 " pc=%016" PRIx64
+                              " tgt=%016" PRIx64 " ps=%016" PRIx64
+                              " a1=%016" PRIx64 " a2=%016" PRIx64
+                              " a3=%016" PRIx64 "\n",
+                              summary.locate.seq, summary.locate.pc,
+                              summary.locate.tgt, summary.locate.ps_ptr,
+                              summary.locate.a1, summary.locate.a2,
+                              summary.locate.a3);
+                if (summary.locate_guid_ok) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: pei_279d0_status locate_guid="
+                                  "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                  summary.locate_guid.data1,
+                                  summary.locate_guid.data2,
+                                  summary.locate_guid.data3,
+                                  summary.locate_guid.data4[0],
+                                  summary.locate_guid.data4[1],
+                                  summary.locate_guid.data4[2],
+                                  summary.locate_guid.data4[3],
+                                  summary.locate_guid.data4[4],
+                                  summary.locate_guid.data4[5],
+                                  summary.locate_guid.data4[6],
+                                  summary.locate_guid.data4[7]);
+                }
+            }
+            if (summary.report_seen) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_279d0_status report"
+                              " seq=%" PRIu64 " pc=%016" PRIx64
+                              " tgt=%016" PRIx64 " ps=%016" PRIx64
+                              " type=%016" PRIx64 " value=%016" PRIx64
+                              " inst=%016" PRIx64 "\n",
+                              summary.report.seq, summary.report.pc,
+                              summary.report.tgt, summary.report.ps_ptr,
+                              summary.report.a1, summary.report.a2,
+                              summary.report.a3);
+            }
+            if (ia64_fw_pei_22560_fix_ctx.valid) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_279d0_status link22560"
+                              " seq=%" PRIu64 " pc=%016" PRIx64
+                              " b0=%016" PRIx64 " ps=%016" PRIx64
+                              " r33=%016" PRIx64 " r34=%016" PRIx64 "\n",
+                              ia64_fw_pei_22560_fix_ctx.seq,
+                              ia64_fw_pei_22560_fix_ctx.pc,
+                              ia64_fw_pei_22560_fix_ctx.b0,
+                              ia64_fw_pei_22560_fix_ctx.ps_ptr,
+                              ia64_fw_pei_22560_fix_ctx.r33,
+                              ia64_fw_pei_22560_fix_ctx.r34);
             }
         }
     }
@@ -18614,6 +18967,11 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
         ia64_fw_pei_log_efi_status("fw_pei_status_transition", "new", r8);
     }
     ia64_fw_pei_maybe_fix_status_transition_ffe22560(env, pc);
+    r8 = env->r[8];
+    if (!(r8 & (1ULL << 63))) {
+        return;
+    }
+    ia64_fw_pei_maybe_handle_status_transition_ffe279d0(env, pc);
     r8 = env->r[8];
     if (!(r8 & (1ULL << 63))) {
         return;
