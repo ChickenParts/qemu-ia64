@@ -309,6 +309,25 @@ investigation breadcrumbs.
     - evidence now shows bounded duplicate suppression:
       - `pei_report_status_fix reject=dedup_repeat ... dedup_delta=...`
       - `fw_pei_first_bad_skip ... rewrite_dedup=1 ...`
+- Rewrite de-dup transition safeguards/logging (2026-02-18):
+  - `target/ia64/helper.c` now classifies dedup transition causes for
+    rewrite fingerprints:
+    - context transitions:
+      `ret_pc`, `ps_ptr`, `type`, `value`, `instance`
+    - sequence transitions:
+      `seq_gap`, `seq_rewind`.
+  - transition logs now fire on dedup resume paths for both rewrite sites:
+    - `pei_22560_status dedup_transition=...`
+    - `pei_report_status_fix dedup_transition=...`
+    - each log includes `prev_fp/new_fp`, `prev_seq/new_seq`,
+      `dedup_window`.
+  - validation (`IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`):
+    - `rc=124`, no host assert.
+    - evidence in `scratch/ia64_logs/qemu.fw.log`:
+      - `pei_22560_status dedup_transition=type|value ...`
+      - `pei_22560_status dedup_transition=seq_gap ...`
+      - `pei_report_status_fix dedup_transition=seq_gap ...`
+      - `pei_report_status_fix dedup_transition=ret_pc|type|value ...`
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

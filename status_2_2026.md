@@ -927,6 +927,37 @@ Logs checked:
       - `fw_pei_first_bad_skip ... rewrite_dedup=1 rewrite_dedup_delta=...`
       - bounded resumption of rewrite when sequence delta exceeds dedup window.
 
+## Follow-up (P3-AA Rewrite De-dup Transition Safeguard + Transition Logs)
+- Added explicit rewrite-transition classification for StatusCode rewrite dedup:
+  - transition mask covers:
+    - `ret_pc`, `ps_ptr`, `type`, `value`, `instance`
+    - sequence anomalies (`seq_gap`, `seq_rewind`).
+  - helper paths:
+    - `ia64_fw_pei_status_rewrite_transition_mask(...)`
+    - `ia64_fw_pei_status_rewrite_transition_desc(...)`.
+- Wired transition logging into both rewrite paths in `target/ia64/helper.c`:
+  - `pei_22560_status dedup_transition=...`
+  - `pei_report_status_fix dedup_transition=...`
+  - logs include `prev_fp/new_fp`, `prev_seq/new_seq`, and active dedup window.
+- Intent:
+  - preserve existing bounded dedup behavior while surfacing when rewrites
+    are correctly resumed because context changed (or sequence moved beyond
+    dedup window), instead of appearing as unexplained churn.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro:
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, no host assert.
+    - `scratch/ia64_logs/qemu.fw.log` now shows transition evidence, for
+      example:
+      - `pei_22560_status dedup_transition=type|value ...`
+      - `pei_22560_status dedup_transition=seq_gap ...`
+      - `pei_report_status_fix dedup_transition=seq_gap ...`
+      - `pei_report_status_fix dedup_transition=ret_pc|type|value ...`
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

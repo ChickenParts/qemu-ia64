@@ -5174,6 +5174,16 @@ typedef struct IA64PeiStatusRewriteDedupState {
     IA64PeiStatusRewriteFingerprint last;
 } IA64PeiStatusRewriteDedupState;
 
+enum {
+    IA64_PEI_REWRITE_TRANS_RET_PC = 1u << 0,
+    IA64_PEI_REWRITE_TRANS_PS_PTR = 1u << 1,
+    IA64_PEI_REWRITE_TRANS_TYPE = 1u << 2,
+    IA64_PEI_REWRITE_TRANS_VALUE = 1u << 3,
+    IA64_PEI_REWRITE_TRANS_INSTANCE = 1u << 4,
+    IA64_PEI_REWRITE_TRANS_SEQ_GAP = 1u << 5,
+    IA64_PEI_REWRITE_TRANS_SEQ_REWIND = 1u << 6,
+};
+
 typedef struct IA64FwProgressDedupFingerprint {
     uint64_t pc;
     uint64_t b0;
@@ -5240,6 +5250,11 @@ static uint64_t ia64_fw_pei_status_rewrite_fp_id(
     const IA64PeiStatusRewriteFingerprint *fp);
 static uint64_t ia64_fw_pei_status_rewrite_seq_delta(uint64_t seq_now,
                                                      uint64_t seq_prev);
+static uint32_t ia64_fw_pei_status_rewrite_transition_mask(
+    const IA64PeiStatusRewriteFingerprint *last,
+    const IA64PeiStatusRewriteFingerprint *cur);
+static void ia64_fw_pei_status_rewrite_transition_desc(uint32_t mask,
+                                                       char *buf, size_t buf_size);
 
 static bool ia64_fw_pei_hob_flow_trace_enabled(void)
 {
@@ -5609,6 +5624,68 @@ static uint64_t ia64_fw_pei_status_rewrite_seq_delta(uint64_t seq_now,
         return UINT64_MAX;
     }
     return seq_now - seq_prev;
+}
+
+static uint32_t ia64_fw_pei_status_rewrite_transition_mask(
+    const IA64PeiStatusRewriteFingerprint *last,
+    const IA64PeiStatusRewriteFingerprint *cur)
+{
+    uint32_t mask = 0;
+    if (last->ret_pc != cur->ret_pc) {
+        mask |= IA64_PEI_REWRITE_TRANS_RET_PC;
+    }
+    if (last->ps_ptr != cur->ps_ptr) {
+        mask |= IA64_PEI_REWRITE_TRANS_PS_PTR;
+    }
+    if (last->type != cur->type) {
+        mask |= IA64_PEI_REWRITE_TRANS_TYPE;
+    }
+    if (last->value != cur->value) {
+        mask |= IA64_PEI_REWRITE_TRANS_VALUE;
+    }
+    if (last->instance != cur->instance) {
+        mask |= IA64_PEI_REWRITE_TRANS_INSTANCE;
+    }
+    if (cur->seq < last->seq) {
+        mask |= IA64_PEI_REWRITE_TRANS_SEQ_REWIND;
+    } else if ((cur->seq - last->seq) > ia64_fw_pei_status_rewrite_dedup_window()) {
+        mask |= IA64_PEI_REWRITE_TRANS_SEQ_GAP;
+    }
+    return mask;
+}
+
+static void ia64_fw_pei_status_rewrite_transition_desc(uint32_t mask,
+                                                       char *buf, size_t buf_size)
+{
+    if (!buf || buf_size == 0) {
+        return;
+    }
+    if (!mask) {
+        snprintf(buf, buf_size, "none");
+        return;
+    }
+    size_t pos = 0;
+    if (mask & IA64_PEI_REWRITE_TRANS_RET_PC) {
+        pos += snprintf(buf + pos, buf_size - pos, "%sret_pc", pos ? "|" : "");
+    }
+    if (mask & IA64_PEI_REWRITE_TRANS_PS_PTR) {
+        pos += snprintf(buf + pos, buf_size - pos, "%sps_ptr", pos ? "|" : "");
+    }
+    if (mask & IA64_PEI_REWRITE_TRANS_TYPE) {
+        pos += snprintf(buf + pos, buf_size - pos, "%stype", pos ? "|" : "");
+    }
+    if (mask & IA64_PEI_REWRITE_TRANS_VALUE) {
+        pos += snprintf(buf + pos, buf_size - pos, "%svalue", pos ? "|" : "");
+    }
+    if (mask & IA64_PEI_REWRITE_TRANS_INSTANCE) {
+        pos += snprintf(buf + pos, buf_size - pos, "%sinstance", pos ? "|" : "");
+    }
+    if (mask & IA64_PEI_REWRITE_TRANS_SEQ_GAP) {
+        pos += snprintf(buf + pos, buf_size - pos, "%sseq_gap", pos ? "|" : "");
+    }
+    if (mask & IA64_PEI_REWRITE_TRANS_SEQ_REWIND) {
+        pos += snprintf(buf + pos, buf_size - pos, "%sseq_rewind", pos ? "|" : "");
+    }
 }
 
 static bool ia64_fw_progress_dedup_enabled(void)
@@ -14975,6 +15052,16 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
         .seq = chain_seq,
     };
     uint64_t rewrite_fp_id = ia64_fw_pei_status_rewrite_fp_id(&rewrite_fp);
+    uint32_t rewrite_trans_mask = 0;
+    char rewrite_trans_desc[96] = { 0 };
+    if (ia64_fw_pei_status_rewrite_dedup_enabled() &&
+        ia64_fw_pei_22560_rewrite_dedup.valid) {
+        rewrite_trans_mask = ia64_fw_pei_status_rewrite_transition_mask(
+            &ia64_fw_pei_22560_rewrite_dedup.last, &rewrite_fp);
+        ia64_fw_pei_status_rewrite_transition_desc(rewrite_trans_mask,
+                                                   rewrite_trans_desc,
+                                                   sizeof(rewrite_trans_desc));
+    }
     uint64_t dedup_delta = UINT64_MAX;
     bool do_fix_ready = fix_enabled &&
                         chain.chain_match &&
@@ -15017,6 +15104,27 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
         }
 
         if (trace_log || fix_log) {
+            if (fix_enabled && do_fix_ready && rewrite_trans_mask) {
+                static int trans_log_count;
+                int log_limit = ia64_fw_pei_22560_status_fix_log_limit();
+                if (trans_log_count < log_limit) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: pei_22560_status dedup_transition=%s"
+                                  " prev_fp=%016" PRIx64
+                                  " new_fp=%016" PRIx64
+                                  " prev_seq=%" PRIu64
+                                  " new_seq=%" PRIu64
+                                  " dedup_window=%" PRIu64 "\n",
+                                  rewrite_trans_desc,
+                                  ia64_fw_pei_status_rewrite_fp_id(
+                                      &ia64_fw_pei_22560_rewrite_dedup.last),
+                                  rewrite_fp_id,
+                                  ia64_fw_pei_22560_rewrite_dedup.last.seq,
+                                  rewrite_fp.seq,
+                                  ia64_fw_pei_status_rewrite_dedup_window());
+                    trans_log_count++;
+                }
+            }
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_22560_status status=%016" PRIx64
                           " fixed=%d pc=%016" PRIx64 " b0=%016" PRIx64
@@ -15618,9 +15726,40 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
         .seq = ent->seq,
     };
     uint64_t rewrite_fp_id = ia64_fw_pei_status_rewrite_fp_id(&rewrite_fp);
+    uint32_t rewrite_trans_mask = 0;
+    char rewrite_trans_desc[96] = { 0 };
+    if (ia64_fw_pei_status_rewrite_dedup_enabled() &&
+        ia64_fw_pei_report_rewrite_dedup.valid) {
+        rewrite_trans_mask = ia64_fw_pei_status_rewrite_transition_mask(
+            &ia64_fw_pei_report_rewrite_dedup.last, &rewrite_fp);
+        ia64_fw_pei_status_rewrite_transition_desc(rewrite_trans_mask,
+                                                   rewrite_trans_desc,
+                                                   sizeof(rewrite_trans_desc));
+    }
     uint64_t dedup_delta = UINT64_MAX;
     bool dedup_hit = ia64_fw_pei_status_rewrite_dedup_hit(
         &ia64_fw_pei_report_rewrite_dedup, &rewrite_fp, &dedup_delta);
+    if (!dedup_hit && rewrite_trans_mask && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int trans_log_count;
+        int log_limit = ia64_fw_pei_statuscode_semantic_fix_log_limit();
+        if (trans_log_count < log_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_report_status_fix dedup_transition=%s"
+                          " prev_fp=%016" PRIx64
+                          " new_fp=%016" PRIx64
+                          " prev_seq=%" PRIu64
+                          " new_seq=%" PRIu64
+                          " dedup_window=%" PRIu64 "\n",
+                          rewrite_trans_desc,
+                          ia64_fw_pei_status_rewrite_fp_id(
+                              &ia64_fw_pei_report_rewrite_dedup.last),
+                          rewrite_fp_id,
+                          ia64_fw_pei_report_rewrite_dedup.last.seq,
+                          rewrite_fp.seq,
+                          ia64_fw_pei_status_rewrite_dedup_window());
+            trans_log_count++;
+        }
+    }
     if (dedup_hit) {
         if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
             static int reject_log_count;
