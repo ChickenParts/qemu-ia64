@@ -5177,6 +5177,22 @@ typedef struct IA64PeiStatusRewriteDedupState {
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_report_rewrite_dedup;
 
+#define IA64_PEI_ERR_LOOP_EVENT_MAX 128
+typedef struct IA64PeiErrLoopEvent {
+    uint64_t seq;
+    uint64_t pc;
+    uint64_t b0;
+    uint64_t r8;
+    uint64_t r32;
+    uint64_t r33;
+    uint64_t r34;
+    uint64_t ps_ptr;
+    uint64_t prod_seq;
+} IA64PeiErrLoopEvent;
+
+static IA64PeiErrLoopEvent ia64_fw_pei_err_loop_ring[IA64_PEI_ERR_LOOP_EVENT_MAX];
+static uint64_t ia64_fw_pei_err_loop_seq;
+
 static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
                                         uint64_t ps_ptr, uint16_t svc_id,
                                         uint32_t source, bool selected);
@@ -5185,6 +5201,9 @@ static IA64PeiPsEpochSelected ia64_fw_pei_ps_epoch_selected_state(void);
 static void ia64_fw_progress_record(CPUIA64State *env, uint64_t pc,
                                     uint64_t status, uint32_t code_type,
                                     uint32_t code_value);
+static uint64_t ia64_fw_progress_guess_ps_ptr(CPUIA64State *env);
+static void ia64_fw_pei_err_loop_record(CPUIA64State *env, uint64_t pc,
+                                        uint64_t r8);
 static uint64_t ia64_fw_pei_status_rewrite_fp_id(
     const IA64PeiStatusRewriteFingerprint *fp);
 static uint64_t ia64_fw_pei_status_rewrite_seq_delta(uint64_t seq_now,
@@ -5558,6 +5577,169 @@ static uint64_t ia64_fw_pei_status_rewrite_seq_delta(uint64_t seq_now,
         return UINT64_MAX;
     }
     return seq_now - seq_prev;
+}
+
+static bool ia64_fw_pei_err_loop_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_ERR_LOOP_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_pei_err_loop_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 32;
+        const char *s = getenv("QEMU_IA64_PEI_ERR_LOOP_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static int ia64_fw_pei_err_loop_window(void)
+{
+    static int window = -1;
+    if (window == -1) {
+        window = 32;
+        const char *s = getenv("QEMU_IA64_PEI_ERR_LOOP_WINDOW");
+        if (s && *s) {
+            window = atoi(s);
+        }
+        if (window < 4) {
+            window = 4;
+        }
+        if (window > IA64_PEI_ERR_LOOP_EVENT_MAX) {
+            window = IA64_PEI_ERR_LOOP_EVENT_MAX;
+        }
+    }
+    return window;
+}
+
+static int ia64_fw_pei_err_loop_threshold(void)
+{
+    static int threshold = -1;
+    if (threshold == -1) {
+        threshold = 12;
+        const char *s = getenv("QEMU_IA64_PEI_ERR_LOOP_THRESHOLD");
+        if (s && *s) {
+            threshold = atoi(s);
+        }
+        if (threshold < 2) {
+            threshold = 2;
+        }
+    }
+    return threshold;
+}
+
+static bool ia64_fw_pei_err_loop_same_key(const IA64PeiErrLoopEvent *a,
+                                          const IA64PeiErrLoopEvent *b)
+{
+    return a->pc == b->pc &&
+           a->b0 == b->b0 &&
+           a->r8 == b->r8 &&
+           a->r32 == b->r32 &&
+           a->r33 == b->r33 &&
+           a->r34 == b->r34 &&
+           a->ps_ptr == b->ps_ptr;
+}
+
+static uint64_t ia64_fw_pei_err_loop_sig(const IA64PeiErrLoopEvent *ev)
+{
+    uint64_t h = ev->pc ^ (ev->b0 << 1) ^ (ev->r8 << 7) ^
+                 (ev->r33 << 11) ^ (ev->r34 << 13) ^ ev->ps_ptr;
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= (h >> 33);
+    return h;
+}
+
+static void ia64_fw_pei_err_loop_maybe_log(const IA64PeiErrLoopEvent *ev)
+{
+    if (!ia64_fw_pei_err_loop_trace_enabled() ||
+        !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+
+    int window = ia64_fw_pei_err_loop_window();
+    uint64_t have = MIN(ev->seq, (uint64_t)IA64_PEI_ERR_LOOP_EVENT_MAX);
+    if ((uint64_t)window > have) {
+        window = (int)have;
+    }
+    if (window < 2) {
+        return;
+    }
+
+    int repeats = 0;
+    uint64_t start = ev->seq - (uint64_t)window + 1;
+    for (uint64_t s = start; s <= ev->seq; s++) {
+        IA64PeiErrLoopEvent *cand =
+            &ia64_fw_pei_err_loop_ring[(s - 1) % IA64_PEI_ERR_LOOP_EVENT_MAX];
+        if (cand->seq != s) {
+            continue;
+        }
+        if (ia64_fw_pei_err_loop_same_key(ev, cand)) {
+            repeats++;
+        }
+    }
+
+    if (repeats < ia64_fw_pei_err_loop_threshold()) {
+        return;
+    }
+
+    static int loop_log_count;
+    static uint64_t last_sig;
+    static int last_repeats;
+    int limit = ia64_fw_pei_err_loop_trace_limit();
+    uint64_t sig = ia64_fw_pei_err_loop_sig(ev);
+    if (loop_log_count >= limit) {
+        return;
+    }
+    if (last_sig == sig && repeats <= last_repeats) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: fw_pei_err_loop repeats=%d window=%d"
+                  " seq=%" PRIu64 " sig=%016" PRIx64
+                  " pc=%016" PRIx64 " b0=%016" PRIx64
+                  " r8=%016" PRIx64 " r32=%016" PRIx64
+                  " r33=%016" PRIx64 " r34=%016" PRIx64
+                  " ps=%016" PRIx64 " prod_seq=%" PRIu64 "\n",
+                  repeats, window, ev->seq, sig, ev->pc, ev->b0,
+                  ev->r8, ev->r32, ev->r33, ev->r34,
+                  ev->ps_ptr, ev->prod_seq);
+    loop_log_count++;
+    last_sig = sig;
+    last_repeats = repeats;
+}
+
+static void ia64_fw_pei_err_loop_record(CPUIA64State *env, uint64_t pc,
+                                        uint64_t r8)
+{
+    IA64PeiErrLoopEvent ev = {
+        .seq = ++ia64_fw_pei_err_loop_seq,
+        .pc = pc,
+        .b0 = env->b[0],
+        .r8 = r8,
+        .r32 = env->r[32],
+        .r33 = env->r[33],
+        .r34 = env->r[34],
+        .ps_ptr = ia64_fw_progress_guess_ps_ptr(env),
+        .prod_seq = ia64_fw_pei_producer_seq,
+    };
+    IA64PeiErrLoopEvent *slot =
+        &ia64_fw_pei_err_loop_ring[(ev.seq - 1) % IA64_PEI_ERR_LOOP_EVENT_MAX];
+    *slot = ev;
+    ia64_fw_pei_err_loop_maybe_log(&ev);
 }
 
 static bool ia64_fw_pei_notify_trace_enabled(void)
@@ -20490,6 +20672,9 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
     r8 = env->r[8];
     if (!(r8 & (1ULL << 63))) {
         return;
+    }
+    if (r8 == (IA64_EFI_STATUS_ERROR_BIT | 14)) {
+        ia64_fw_pei_err_loop_record(env, pc, r8);
     }
     HELPER(fw_pei_first_bad_status_probe)(env, pc, 0);
     static uint64_t last_pc;
