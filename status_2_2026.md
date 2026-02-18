@@ -958,6 +958,49 @@ Logs checked:
       - `pei_report_status_fix dedup_transition=seq_gap ...`
       - `pei_report_status_fix dedup_transition=ret_pc|type|value ...`
 
+## Follow-up (P3-AB Work-RAM `break(0)` Gate Loop Trace + MP Buffer Trigger Hardening)
+- Added work-RAM gate-cycle tracing for `pc=0x100003000..0x1000031ff` in
+  `target/ia64/helper.c`:
+  - emits `fw_break0_wr_gate` with cycle key:
+    - `pc`, `b0`, status `type/value`, selected `ps`.
+  - includes:
+    - `cycle`, `repeat`, `advanced`, fingerprint id, and live register context.
+  - knobs:
+    - `QEMU_IA64_FW_BREAK0_WR_GATE_TRACE`
+    - `QEMU_IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT`.
+- Extended break(0) gate-return unwind path in `target/ia64/translate.c`:
+  - work-RAM gate region now has call-gate style return parity to `b0`
+    (via `ret_restore_b0`) under:
+    - `QEMU_IA64_FW_BREAK0_WR_GATE_RETURN=1` (default on).
+  - ROM gate return behavior is unchanged.
+- Hardened xenipf MP buffer corrective trigger:
+  - translator trigger moved from single-PC match to bounded MP-init window.
+  - helper now logs bounded `attempt/skip/applied` outcomes and repairs slot
+    drift (`slot336/slot344`) plus BSP signature drift.
+  - knobs:
+    - `QEMU_IA64_FW_XENIPF_MPBUFFER_FIX` (default on)
+    - `QEMU_IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT`.
+- Updated `scripts/run-ia64-firmware.sh` env passthrough/usage for the new
+  knobs (`IA64_FW_BREAK0_WR_GATE_RETURN`, `...WR_GATE_TRACE*`,
+  `IA64_FW_XENIPF_MPBUFFER_FIX*`).
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro:
+    - default safe-off repro:
+      `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, no host assert, no `IA64 UNIMPL`.
+    - trace probe:
+      `QEMU_IA64_FW_BREAK0_WR_GATE_TRACE=1 QEMU_IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT=32 ... timeout 25s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, with `fw_break0_wr_gate cycle=... repeat=...` evidence in
+      `scratch/ia64_logs/qemu.fw.log`.
+    - MP-buffer probe:
+      `QEMU_IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT=128 ... timeout 25s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, with `xenipf mpbuffer applied ... reason=slot_drift` and
+      bounded follow-on `skip=already_seeded` evidence.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

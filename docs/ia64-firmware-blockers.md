@@ -328,6 +328,37 @@ investigation breadcrumbs.
       - `pei_22560_status dedup_transition=seq_gap ...`
       - `pei_report_status_fix dedup_transition=seq_gap ...`
       - `pei_report_status_fix dedup_transition=ret_pc|type|value ...`
+- Work-RAM break(0) gate loop trace + MP-buffer trigger hardening (2026-02-18):
+  - `target/ia64/helper.c`:
+    - added bounded work-RAM gate cycle trace for
+      `pc=0x100003000..0x1000031ff`:
+      - `fw_break0_wr_gate cycle=... repeat=... advanced=...`
+      - cycle key includes `pc`, `b0`, status `type/value`, selected `ps`.
+    - added bounded xenipf MP-buffer trigger outcome logs:
+      - `xenipf mpbuffer attempt ...`
+      - `xenipf mpbuffer skip=...`
+      - `xenipf mpbuffer applied ... reason=...`
+    - MP-buffer repair now refreshes slot/signature drift instead of only
+      one-shot null-slot seeding.
+  - `target/ia64/translate.c`:
+    - work-RAM break(0) gates now support call-gate style return parity to
+      `b0` (`ret_restore_b0`) under
+      `QEMU_IA64_FW_BREAK0_WR_GATE_RETURN` (default on).
+    - MP-buffer fix trigger widened from a single PC to a bounded MP-init
+      window in firmware space.
+  - script env passthrough updates in `scripts/run-ia64-firmware.sh`:
+    - `IA64_FW_BREAK0_WR_GATE_RETURN`
+    - `IA64_FW_BREAK0_WR_GATE_TRACE`
+    - `IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT`
+    - `IA64_FW_XENIPF_MPBUFFER_FIX`
+    - `IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT`.
+  - validation:
+    - default safe-off repro remains stable (`rc=124`, no host assert).
+    - with `QEMU_IA64_FW_BREAK0_WR_GATE_TRACE=1`, log now provides explicit
+      repeat/advance evidence for the `0x100003000` loop.
+    - MP-buffer corrective path is now actively applied on observed slot drift
+      (`... reason=slot_drift ...`) but the second `IpfEarlyMpInit` AP
+      rendezvous path still reproduces in current windows.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
