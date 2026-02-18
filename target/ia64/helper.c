@@ -5101,6 +5101,39 @@ static IA64PeiHobFlowCall
     ia64_fw_pei_hob_flow_stack[IA64_PEI_HOB_FLOW_STACK_MAX];
 static uint32_t ia64_fw_pei_hob_flow_sp;
 
+#define IA64_PEI_PS_EPOCH_MAX 256
+enum {
+    IA64_PEI_PS_SRC_CACHE = 1u << 0,
+    IA64_PEI_PS_SRC_R32 = 1u << 1,
+    IA64_PEI_PS_SRC_R33 = 1u << 2,
+    IA64_PEI_PS_SRC_PRODUCER = 1u << 3,
+};
+
+typedef struct IA64PeiPsEpochEvent {
+    uint64_t seq;
+    uint64_t prod_seq;
+    uint64_t pc;
+    uint64_t ps_ptr;
+    uint64_t core;
+    int64_t ppi_end;
+    int64_t notify_end;
+    int64_t dispatch_end;
+    uint64_t r33;
+    uint64_t r34;
+    uint16_t svc_id;
+    uint32_t source;
+    bool selected;
+    bool valid;
+} IA64PeiPsEpochEvent;
+
+static IA64PeiPsEpochEvent ia64_fw_pei_ps_epoch_ring[IA64_PEI_PS_EPOCH_MAX];
+static uint64_t ia64_fw_pei_ps_epoch_seq;
+
+static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
+                                        uint64_t ps_ptr, uint16_t svc_id,
+                                        uint32_t source, bool selected);
+static void ia64_fw_pei_ps_epoch_dump_history(const char *tag, uint64_t pc);
+
 static bool ia64_fw_pei_hob_flow_trace_enabled(void)
 {
     static int enabled = -1;
@@ -5290,6 +5323,32 @@ static bool ia64_fw_pei_resolve_hob_source(CPUIA64State *env, uint64_t ps_hint,
     }
     return src_raw != 0;
 #endif
+}
+
+static bool ia64_fw_pei_ps_epoch_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PS_EPOCH_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_pei_ps_epoch_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 64;
+        const char *s = getenv("QEMU_IA64_PEI_PS_EPOCH_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
 }
 
 static bool ia64_fw_pei_report_status_softfail_enabled(void)
@@ -5895,6 +5954,10 @@ static void ia64_fw_pei_producer_record_call(CPUIA64State *env,
         .ps_ptr = ps_ptr,
         .svc_id = svc_id,
     };
+    if (ps_ptr) {
+        ia64_fw_pei_ps_epoch_record(env, pc, ps_ptr, svc_id,
+                                    IA64_PEI_PS_SRC_PRODUCER, false);
+    }
 #endif
 }
 
@@ -13103,6 +13166,182 @@ static bool ia64_fw_pei_statuscode_optional_path_unresolved(CPUIA64State *env,
 #endif
 }
 
+static bool ia64_fw_pei_read_core_state(CPUIA64State *env, uint64_t ps_ptr,
+                                        uint64_t *core_out,
+                                        int64_t *ppi_end_out,
+                                        int64_t *notify_end_out,
+                                        int64_t *dispatch_end_out)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)ps_ptr;
+    if (core_out) {
+        *core_out = 0;
+    }
+    if (ppi_end_out) {
+        *ppi_end_out = -1;
+    }
+    if (notify_end_out) {
+        *notify_end_out = -1;
+    }
+    if (dispatch_end_out) {
+        *dispatch_end_out = -1;
+    }
+    return false;
+#else
+    uint64_t core = 0;
+    int64_t ppi_end = -1;
+    int64_t notify_end = -1;
+    int64_t dispatch_end = -1;
+
+    if (ps_ptr && ia64_fw_pei_find_core_from_ps(env, ps_ptr, &core)) {
+        CPUState *cs = env_cpu(env);
+        uint8_t hdr[24];
+        if (ia64_fw_read_bytes_any(cs, core + 16, hdr, sizeof(hdr))) {
+            ppi_end = (int64_t)ldq_le_p(&hdr[0]);
+            notify_end = (int64_t)ldq_le_p(&hdr[8]);
+            dispatch_end = (int64_t)ldq_le_p(&hdr[16]);
+        }
+    }
+
+    if (core_out) {
+        *core_out = core;
+    }
+    if (ppi_end_out) {
+        *ppi_end_out = ppi_end;
+    }
+    if (notify_end_out) {
+        *notify_end_out = notify_end;
+    }
+    if (dispatch_end_out) {
+        *dispatch_end_out = dispatch_end;
+    }
+    return core != 0 && ppi_end >= 0 && notify_end >= 0 && dispatch_end >= 0;
+#endif
+}
+
+static const char *ia64_fw_pei_ps_source_name(uint32_t source)
+{
+    if (source & IA64_PEI_PS_SRC_R32) {
+        return "r32";
+    }
+    if (source & IA64_PEI_PS_SRC_R33) {
+        return "r33";
+    }
+    if (source & IA64_PEI_PS_SRC_CACHE) {
+        return "cache";
+    }
+    if (source & IA64_PEI_PS_SRC_PRODUCER) {
+        return "producer";
+    }
+    return "unknown";
+}
+
+static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
+                                        uint64_t ps_ptr, uint16_t svc_id,
+                                        uint32_t source, bool selected)
+{
+    uint64_t seq = ++ia64_fw_pei_ps_epoch_seq;
+    IA64PeiPsEpochEvent *ev =
+        &ia64_fw_pei_ps_epoch_ring[(seq - 1) % IA64_PEI_PS_EPOCH_MAX];
+
+    uint64_t core = 0;
+    int64_t ppi_end = -1;
+    int64_t notify_end = -1;
+    int64_t dispatch_end = -1;
+    bool valid = ia64_fw_pei_read_core_state(env, ps_ptr,
+                                             &core,
+                                             &ppi_end,
+                                             &notify_end,
+                                             &dispatch_end);
+
+    *ev = (IA64PeiPsEpochEvent) {
+        .seq = seq,
+        .prod_seq = ia64_fw_pei_producer_seq,
+        .pc = pc,
+        .ps_ptr = ps_ptr,
+        .core = core,
+        .ppi_end = ppi_end,
+        .notify_end = notify_end,
+        .dispatch_end = dispatch_end,
+        .r33 = env->r[33],
+        .r34 = env->r[34],
+        .svc_id = svc_id,
+        .source = source,
+        .selected = selected,
+        .valid = valid,
+    };
+
+    if (ia64_fw_pei_ps_epoch_trace_enabled() &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int trace_count;
+        int limit = ia64_fw_pei_ps_epoch_trace_limit();
+        if (trace_count < limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_ps_epoch seq=%" PRIu64
+                          " prod_seq=%" PRIu64 " pc=%016" PRIx64
+                          " src=%s selected=%d svc=%s ps=%016" PRIx64
+                          " valid=%d core=%016" PRIx64
+                          " ppi_end=%" PRIi64 " notify_end=%" PRIi64
+                          " dispatch_end=%" PRIi64
+                          " r33=%016" PRIx64 " r34=%016" PRIx64 "\n",
+                          ev->seq, ev->prod_seq, ev->pc,
+                          ia64_fw_pei_ps_source_name(ev->source),
+                          ev->selected ? 1 : 0,
+                          ia64_fw_pei_service_name(ev->svc_id),
+                          ev->ps_ptr, ev->valid ? 1 : 0, ev->core,
+                          ev->ppi_end, ev->notify_end, ev->dispatch_end,
+                          ev->r33, ev->r34);
+            trace_count++;
+        }
+    }
+}
+
+static void ia64_fw_pei_ps_epoch_dump_history(const char *tag, uint64_t pc)
+{
+    if (ia64_fw_pei_ps_epoch_seq == 0) {
+        return;
+    }
+
+    int want = ia64_fw_pei_producer_history_len();
+    uint64_t have = MIN(ia64_fw_pei_ps_epoch_seq,
+                        (uint64_t)IA64_PEI_PS_EPOCH_MAX);
+    if ((uint64_t)want > have) {
+        want = (int)have;
+    }
+    if (want <= 0) {
+        return;
+    }
+
+    uint64_t first = ia64_fw_pei_ps_epoch_seq - (uint64_t)want + 1;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: %s pei_ps_epoch_history pc=%016" PRIx64
+                  " seq=%" PRIu64 " showing=%d\n",
+                  tag, pc, ia64_fw_pei_ps_epoch_seq, want);
+    for (uint64_t s = first; s <= ia64_fw_pei_ps_epoch_seq; s++) {
+        IA64PeiPsEpochEvent *ev =
+            &ia64_fw_pei_ps_epoch_ring[(s - 1) % IA64_PEI_PS_EPOCH_MAX];
+        if (ev->seq != s) {
+            continue;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: %s pei_ps_epoch seq=%" PRIu64
+                      " prod_seq=%" PRIu64 " pc=%016" PRIx64
+                      " src=%s selected=%d svc=%s ps=%016" PRIx64
+                      " valid=%d core=%016" PRIx64
+                      " ppi_end=%" PRIi64 " notify_end=%" PRIi64
+                      " dispatch_end=%" PRIi64
+                      " r33=%016" PRIx64 " r34=%016" PRIx64 "\n",
+                      tag, ev->seq, ev->prod_seq, ev->pc,
+                      ia64_fw_pei_ps_source_name(ev->source),
+                      ev->selected ? 1 : 0,
+                      ia64_fw_pei_service_name(ev->svc_id),
+                      ev->ps_ptr, ev->valid ? 1 : 0, ev->core,
+                      ev->ppi_end, ev->notify_end, ev->dispatch_end,
+                      ev->r33, ev->r34);
+    }
+}
+
 #define IA64_PEI_STATUS_PC_22560 0x00000000ffe22560ULL
 #define IA64_PEI_STATUS_CHAIN_WINDOW 8
 #define IA64_PEI_STATUS_PC_279D0 0x00000000ffe279d0ULL
@@ -13223,13 +13462,22 @@ static uint64_t ia64_fw_pei_current_ps_ptr(CPUIA64State *env)
     CPUState *cs = env_cpu(env);
     uint64_t ps_ptr = env->fw_pei_ps;
     if (ps_ptr && ia64_fw_pei_is_ps_table(cs, ps_ptr)) {
+        ia64_fw_pei_ps_epoch_record(env, env->ip, ps_ptr,
+                                    IA64_PEI_SVC_NONE,
+                                    IA64_PEI_PS_SRC_CACHE, true);
         return ps_ptr;
     }
 
     if (ia64_fw_pei_get_ps_ptr(env, env->r[32], &ps_ptr)) {
+        ia64_fw_pei_ps_epoch_record(env, env->ip, ps_ptr,
+                                    IA64_PEI_SVC_NONE,
+                                    IA64_PEI_PS_SRC_R32, true);
         return ps_ptr;
     }
     if (ia64_fw_pei_get_ps_ptr(env, env->r[33], &ps_ptr)) {
+        ia64_fw_pei_ps_epoch_record(env, env->ip, ps_ptr,
+                                    IA64_PEI_SVC_NONE,
+                                    IA64_PEI_PS_SRC_R33, true);
         return ps_ptr;
     }
     return 0;
@@ -19275,6 +19523,7 @@ void HELPER(fw_pei_first_bad_status_probe)(CPUIA64State *env, uint64_t pc,
     ia64_fw_pei_first_bad_dump_rse_chain(env, "fw_pei_first_bad");
     ia64_fw_pei_first_bad_dump_dispatch_state(env, "fw_pei_first_bad", pc);
     ia64_fw_pei_producer_dump_history(env, "fw_pei_first_bad", pc);
+    ia64_fw_pei_ps_epoch_dump_history("fw_pei_first_bad", pc);
     ia64_fw_pei_279d0_dump_event_history("fw_pei_first_bad", pc);
 
     int dump_len = ia64_fw_pei_first_bad_dump_len();
