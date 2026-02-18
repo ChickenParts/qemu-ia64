@@ -5144,11 +5144,30 @@ static uint64_t ia64_fw_pei_ps_epoch_seq;
 static IA64PeiPsEpochEvent ia64_fw_pei_ps_epoch_last_selected_ev;
 static bool ia64_fw_pei_ps_epoch_last_selected_valid;
 
+#define IA64_FW_PROGRESS_EVENT_MAX 128
+typedef struct IA64FwProgressEvent {
+    uint64_t seq;
+    uint64_t ip;
+    uint64_t pc;
+    uint64_t b0;
+    uint64_t status;
+    uint32_t code_type;
+    uint32_t code_value;
+    uint64_t ps_ptr;
+    uint64_t prod_seq;
+} IA64FwProgressEvent;
+
+static IA64FwProgressEvent ia64_fw_progress_ring[IA64_FW_PROGRESS_EVENT_MAX];
+static uint64_t ia64_fw_progress_seq;
+
 static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
                                         uint64_t ps_ptr, uint16_t svc_id,
                                         uint32_t source, bool selected);
 static void ia64_fw_pei_ps_epoch_dump_history(const char *tag, uint64_t pc);
 static IA64PeiPsEpochSelected ia64_fw_pei_ps_epoch_selected_state(void);
+static void ia64_fw_progress_record(CPUIA64State *env, uint64_t pc,
+                                    uint64_t status, uint32_t code_type,
+                                    uint32_t code_value);
 
 static bool ia64_fw_pei_hob_flow_trace_enabled(void)
 {
@@ -5651,6 +5670,103 @@ static int ia64_fw_pei_279d0_safe_mode_log_limit(void)
         }
     }
     return limit;
+}
+
+static bool ia64_fw_progress_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_progress_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 64;
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static bool ia64_fw_progress_event_same_key(const IA64FwProgressEvent *a,
+                                            const IA64FwProgressEvent *b)
+{
+    return a->pc == b->pc &&
+           a->b0 == b->b0 &&
+           a->status == b->status &&
+           a->code_type == b->code_type &&
+           a->code_value == b->code_value &&
+           a->ps_ptr == b->ps_ptr;
+}
+
+static uint64_t ia64_fw_progress_guess_ps_ptr(CPUIA64State *env)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    return 0;
+#else
+    uint64_t ps_ptr = 0;
+    if (ia64_fw_pei_get_ps_ptr(env, env->r[32], &ps_ptr) ||
+        ia64_fw_pei_get_ps_ptr(env, env->r[33], &ps_ptr)) {
+        return ps_ptr;
+    }
+    return env->fw_pei_ps;
+#endif
+}
+
+static void ia64_fw_progress_record(CPUIA64State *env, uint64_t pc,
+                                    uint64_t status, uint32_t code_type,
+                                    uint32_t code_value)
+{
+    IA64FwProgressEvent ev = {
+        .seq = ++ia64_fw_progress_seq,
+        .ip = env->ip,
+        .pc = pc,
+        .b0 = env->b[0],
+        .status = status,
+        .code_type = code_type,
+        .code_value = code_value,
+        .ps_ptr = ia64_fw_progress_guess_ps_ptr(env),
+        .prod_seq = ia64_fw_pei_producer_seq,
+    };
+    IA64FwProgressEvent *slot =
+        &ia64_fw_progress_ring[(ev.seq - 1) % IA64_FW_PROGRESS_EVENT_MAX];
+    IA64FwProgressEvent prev = { 0 };
+    bool have_prev = false;
+    if (ev.seq > 1) {
+        prev = ia64_fw_progress_ring[(ev.seq - 2) % IA64_FW_PROGRESS_EVENT_MAX];
+        have_prev = prev.seq == (ev.seq - 1);
+    }
+    *slot = ev;
+
+    if (ia64_fw_progress_trace_enabled() &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int trace_count;
+        int limit = ia64_fw_progress_trace_limit();
+        bool changed = !have_prev || !ia64_fw_progress_event_same_key(&ev, &prev);
+        if (changed && trace_count < limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_progress seq=%" PRIu64
+                          " ip=%016" PRIx64 " pc=%016" PRIx64
+                          " b0=%016" PRIx64 " r8=%016" PRIx64
+                          " type=%08x value=%08x ps=%016" PRIx64
+                          " prod_seq=%" PRIu64 "\n",
+                          ev.seq, ev.ip, ev.pc, ev.b0, ev.status,
+                          ev.code_type, ev.code_value, ev.ps_ptr,
+                          ev.prod_seq);
+            trace_count++;
+        }
+    }
 }
 
 static bool ia64_fw_pei_report_status_is_soft_error(uint64_t status)
@@ -9713,6 +9829,7 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                  (((log_value & IA64_EFI_STATUS_CODE_SUBCLASS_MASK) >> 16) & 0x1f));
         }
     }
+    ia64_fw_progress_record(env, pc, env->r[8], log_code_type, log_value);
 
     if (dxe_hob_res_dump_enabled && !dxe_hob_res_dumped &&
         dxe_hob_res_attempts < 16 &&
