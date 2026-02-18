@@ -5,8 +5,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/run-ia64-nat-tests.sh [timeout]
 
-Builds and runs a bare-metal IA-64 directed selftest for A-unit NaT
-propagation (`add`, `and`, `shladd`, `adds`, `pavg2`) using QEMU kernel entry.
+Builds and runs a bare-metal IA-64 directed selftest for NaT behavior:
+A-unit propagation (`add`, `and`, `shladd`, `adds`, `pavg2`) and
+NaT-clearing writes (`getf.sig`, `getf.exp`) using QEMU kernel entry.
 
 Arguments:
   timeout   Optional timeout passed to `timeout` (default: 12s)

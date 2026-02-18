@@ -4844,6 +4844,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 gen_helper_getf_sig(t, tcg_env, tcg_constant_i32(f2));
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t);
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 handled = true;
             }
@@ -4854,6 +4856,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 gen_fr_load_hi(t, f2);
                 if (r1 != 0) {
                     tcg_gen_mov_i64(cpu_r[r1], t);
+                    gen_helper_gr_nat_set(tcg_env, tcg_constant_i32(r1),
+                                          tcg_constant_i64(0));
                 }
                 handled = true;
             }

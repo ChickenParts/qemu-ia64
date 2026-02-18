@@ -49,6 +49,28 @@ test_clean_non_nat:
 	mov r17 = r15
 	add r18 = r17, r0
 	tnat.z p6,p7 = r18
+(p6)	br.cond.spnt test_getf_sig_clears_nat
+	br.sptk.many fail
+
+test_getf_sig_clears_nat:
+	mov r19 = r14
+	tnat.z p6,p7 = r19
+(p7)	br.cond.spnt 1f
+	br.sptk.many fail
+1:
+	getf.sig r19 = f0
+	tnat.z p6,p7 = r19
+(p6)	br.cond.spnt test_getf_exp_clears_nat
+	br.sptk.many fail
+
+test_getf_exp_clears_nat:
+	mov r19 = r14
+	tnat.z p6,p7 = r19
+(p7)	br.cond.spnt 1f
+	br.sptk.many fail
+1:
+	getf.exp r19 = f0
+	tnat.z p6,p7 = r19
 (p6)	br.cond.spnt pass
 	br.sptk.many fail
 
