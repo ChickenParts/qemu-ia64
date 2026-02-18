@@ -156,6 +156,14 @@ typedef struct CPUArchState {
     uint64_t last_branch_insn;
     uint64_t last_branch_kind; /* kind | (ri << 8) */
 
+    /* Debug: breadcrumbs for TB_EXIT_REQUESTED assert root-cause work. */
+    uint64_t dbg_tbexit_last_unimpl_pc;
+    uint64_t dbg_tbexit_last_unimpl_insn;
+    uint64_t dbg_tbexit_last_unimpl_ri;
+    uint64_t dbg_tbexit_last_fault_vec;
+    uint64_t dbg_tbexit_last_fault_ip;
+    uint64_t dbg_tbexit_last_break0_pc;
+
     /* Optional kernel text range for fail-fast diagnostics. */
     uint64_t kernel_stext;
     uint64_t kernel_etext;

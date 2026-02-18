@@ -908,6 +908,32 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
 
     /* Instruction counter expired.  */
     if (!icount_enabled()) {
+        static int ia64_tbexit_trace = -1;
+        static int ia64_tbexit_trace_limit = -1;
+        static int ia64_tbexit_trace_count;
+        if (ia64_tbexit_trace == -1) {
+            const char *s = getenv("QEMU_IA64_TBEXIT_TRACE");
+            ia64_tbexit_trace = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+        }
+        if (ia64_tbexit_trace_limit == -1) {
+            ia64_tbexit_trace_limit = 8;
+            const char *s = getenv("QEMU_IA64_TBEXIT_TRACE_LIMIT");
+            if (s && *s) {
+                ia64_tbexit_trace_limit = atoi(s);
+            }
+            if (ia64_tbexit_trace_limit < 0) {
+                ia64_tbexit_trace_limit = 0;
+            }
+        }
+        if (ia64_tbexit_trace &&
+            ia64_tbexit_trace_count < ia64_tbexit_trace_limit) {
+            ia64_tbexit_trace_count++;
+            fprintf(stderr,
+                    "IA64: tbexit_trace pc=%016" VADDR_PRIx
+                    " tb=%p tb->pc=%016" VADDR_PRIx " tb_exit=%d\n",
+                    pc, tb, tb->pc, *tb_exit);
+            cpu_dump_state(cpu, stderr, CPU_DUMP_CCOP | CPU_DUMP_FPU);
+        }
         fprintf(stderr,
                 "TCG BUG: TB_EXIT_REQUESTED without exitreq/icount\n"
                 "  pc=%016" VADDR_PRIx " tb=%p tb->pc=%016" VADDR_PRIx

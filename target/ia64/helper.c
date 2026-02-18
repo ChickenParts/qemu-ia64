@@ -715,6 +715,8 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     env->cr_isr = isr;
     env->cr_iim = iim;
     cs->exception_index = IA64_EXCP_BASE + vec;
+    env->dbg_tbexit_last_fault_vec = vec;
+    env->dbg_tbexit_last_fault_ip = env->ip;
     if (log_count < 64 || vec != last_vec || env->ip != last_ip) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64 fault vec=0x%x ip=0x%" PRIx64 " psr=0x%" PRIx64
@@ -1107,6 +1109,9 @@ void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   pc, ri, insn, msg ? msg : "",
                   env->last_branch_from, env->last_branch_to,
                   last_kind_id, last_ri, env->last_branch_insn);
+    env->dbg_tbexit_last_unimpl_pc = pc;
+    env->dbg_tbexit_last_unimpl_ri = ri;
+    env->dbg_tbexit_last_unimpl_insn = insn;
 
     /*
      * Unsupported/illegal encodings are architectural illegal-op faults.
@@ -9373,6 +9378,8 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     static int scan_always = -1;
     static int scan_limit = -1;
     static int scan_count;
+
+    env->dbg_tbexit_last_break0_pc = pc;
 
     ia64_fw_try_install_sal_systab(env);
     ia64_fw_log_efi_runtime_services(env, "break0");

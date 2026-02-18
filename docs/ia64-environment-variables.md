@@ -343,6 +343,8 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_279D0_STATUS_FIX_LOG_LIMIT` | Limit `pc=0xffe279d0` rewrite logs |
 | `QEMU_IA64_PEI_279D0_SAFE_MODE` | Quarantine `pc=0xffe279d0` rewrite path (while still tracing/probing) to avoid host abort during investigation (default on) |
 | `QEMU_IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT` | Limit `279d0` safe-mode block/probe logs |
+| `QEMU_IA64_TBEXIT_TRACE` | Emit bounded IA-64 state dump when TCG hits `TB_EXIT_REQUESTED without exitreq/icount` (default off) |
+| `QEMU_IA64_TBEXIT_TRACE_LIMIT` | Limit `QEMU_IA64_TBEXIT_TRACE` dumps |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL` | Legacy report_status soft-fail path (kept for compatibility) |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL_ALWAYS` | Legacy override to always soft-fail report_status errors |
 | `QEMU_IA64_PEI_HOB_FLOW_TRACE` | Trace PEI `GetHobList`/`CreateHob` call-return pointer contract (default off) |

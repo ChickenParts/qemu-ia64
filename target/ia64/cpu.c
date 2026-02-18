@@ -496,6 +496,16 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
                  env->last_branch_from, env->last_branch_to,
                  env->last_branch_kind, env->last_branch_insn);
+    qemu_fprintf(f, "TBEXIT_BREADCRUMB unimpl_pc=%016" PRIx64
+                 " unimpl_ri=%" PRIu64 " unimpl_insn=%011" PRIx64
+                 " fault_vec=%" PRIu64 " fault_ip=%016" PRIx64
+                 " break0_pc=%016" PRIx64 "\n",
+                 env->dbg_tbexit_last_unimpl_pc,
+                 env->dbg_tbexit_last_unimpl_ri,
+                 env->dbg_tbexit_last_unimpl_insn,
+                 env->dbg_tbexit_last_fault_vec,
+                 env->dbg_tbexit_last_fault_ip,
+                 env->dbg_tbexit_last_break0_pc);
     qemu_fprintf(f, "LAST_B0_WRITE pc=%016" PRIx64 " val=%016" PRIx64
                  " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
                  env->last_b0_write_pc, env->last_b0_write_val,
