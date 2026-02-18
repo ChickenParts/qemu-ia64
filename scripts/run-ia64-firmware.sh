@@ -22,6 +22,10 @@ Environment overrides:
   IA64_FW_BREAK0_GATE_TRACE_LIMIT (default: inherited/64)
   IA64_FW_BREAK0_WR_GATE_TRACE (default: inherited/off; trace work-RAM break(0) gate loop cycles)
   IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT (default: inherited/64)
+  IA64_FW_BREAK0_WR_GATE_LOOP_GUARD (default: inherited/off; suppress repeated work-RAM break(0) loop churn via early helper return)
+  IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_WINDOW (default: inherited/64)
+  IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_THRESHOLD (default: inherited/8)
+  IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_LOG_LIMIT (default: inherited/64)
   IA64_FW_XENIPF_MPBUFFER_FIX (default: inherited/1; seed/refresh MP buffer stack slots near IpfEarlyMpInit)
   IA64_FW_XENIPF_MPBUFFER_STICKY (default: inherited/1; keep repairing MP buffer slot/signature drift throughout MP-init window)
   IA64_FW_XENIPF_MPBUFFER_WINDOW (default: inherited/0x200; extend MP-init fix trigger window around ffe59800..ffe59a3f)
@@ -142,6 +146,22 @@ fi
 
 if [[ -n "${IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT:-}" ]]; then
   export QEMU_IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT="${IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT}"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD="${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD}"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_WINDOW:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_WINDOW="${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_WINDOW}"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_THRESHOLD:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_THRESHOLD="${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_THRESHOLD}"
+fi
+
+if [[ -n "${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_LOG_LIMIT:-}" ]]; then
+  export QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_LOG_LIMIT="${IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_LOG_LIMIT}"
 fi
 
 if [[ -n "${IA64_FW_XENIPF_MPBUFFER_FIX:-}" ]]; then

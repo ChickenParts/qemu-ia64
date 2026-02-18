@@ -5213,6 +5213,13 @@ typedef struct IA64FwBreak0CycleState {
     IA64FwBreak0CycleFingerprint last;
 } IA64FwBreak0CycleState;
 
+typedef struct IA64FwBreak0LoopGuardState {
+    bool valid;
+    uint64_t fp_id;
+    uint64_t last_seq;
+    uint64_t suppress_count;
+} IA64FwBreak0LoopGuardState;
+
 typedef struct IA64XenipfMpbufferState {
     bool active;
     uint64_t epoch;
@@ -5248,6 +5255,7 @@ static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_report_rewrite_dedup;
 static IA64FwProgressDedupState ia64_fw_progress_dedup;
 static IA64FwBreak0CycleState ia64_fw_break0_wr_gate_cycle;
+static IA64FwBreak0LoopGuardState ia64_fw_break0_wr_gate_loop_guard;
 static IA64XenipfMpbufferState ia64_fw_xenipf_mpbuffer_state;
 static uint64_t ia64_fw_xenipf_mpbuffer_seq;
 static IA64PeiErrFixDedupState ia64_fw_pei_err_fix_dedup;
@@ -5820,6 +5828,70 @@ static int ia64_fw_break0_wr_gate_trace_limit(void)
     if (limit == -1) {
         limit = 64;
         const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static bool ia64_fw_break0_wr_gate_loop_guard_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static uint64_t ia64_fw_break0_wr_gate_loop_guard_window(void)
+{
+    static uint64_t window = UINT64_MAX;
+    if (window == UINT64_MAX) {
+        window = 64;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_WINDOW");
+        if (s && *s) {
+            unsigned long long v = strtoull(s, NULL, 0);
+            if (v > 0) {
+                window = v;
+            }
+        }
+        if (window == 0) {
+            window = 1;
+        }
+    }
+    return window;
+}
+
+static uint64_t ia64_fw_break0_wr_gate_loop_guard_threshold(void)
+{
+    static uint64_t threshold = UINT64_MAX;
+    if (threshold == UINT64_MAX) {
+        threshold = 8;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_THRESHOLD");
+        if (s && *s) {
+            unsigned long long v = strtoull(s, NULL, 0);
+            if (v > 0) {
+                threshold = v;
+            }
+        }
+        if (threshold == 0) {
+            threshold = 1;
+        }
+    }
+    return threshold;
+}
+
+static int ia64_fw_break0_wr_gate_loop_guard_log_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 64;
+        const char *s = getenv("QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_LOG_LIMIT");
         if (s && *s) {
             limit = atoi(s);
         }
@@ -10730,6 +10802,60 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
     if (progress_dedup_candidate && !progress_dedup_hit) {
         ia64_fw_progress_dedup_remember(&ia64_fw_progress_dedup, &progress_fp);
     }
+    bool loop_guard_hit = false;
+    uint64_t loop_guard_seq_delta = UINT64_MAX;
+    if (wr_gate_pc &&
+        ia64_fw_break0_wr_gate_loop_guard_enabled() &&
+        !is_assert &&
+        ia64_fw_status_code_valid(log_code_type, log_value)) {
+        IA64FwBreak0LoopGuardState *guard = &ia64_fw_break0_wr_gate_loop_guard;
+        bool same_fp = guard->valid && guard->fp_id == wr_cycle_fp_id;
+        if (same_fp && progress_fp.seq >= guard->last_seq) {
+            loop_guard_seq_delta = progress_fp.seq - guard->last_seq;
+        }
+        loop_guard_hit = same_fp &&
+                         loop_guard_seq_delta <=
+                             ia64_fw_break0_wr_gate_loop_guard_window() &&
+                         wr_cycle_repeat >=
+                             ia64_fw_break0_wr_gate_loop_guard_threshold();
+
+        if (!same_fp || !guard->valid || wr_cycle_advanced) {
+            guard->suppress_count = 0;
+        }
+        guard->valid = true;
+        guard->fp_id = wr_cycle_fp_id;
+        guard->last_seq = progress_fp.seq;
+
+        if (loop_guard_hit) {
+            guard->suppress_count++;
+            if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                static int loop_guard_log_count;
+                int loop_guard_log_limit =
+                    ia64_fw_break0_wr_gate_loop_guard_log_limit();
+                if (loop_guard_log_limit == 0 ||
+                    loop_guard_log_count < loop_guard_log_limit) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: fw_break0_wr_guard action=early_return"
+                                  " ip=%016" PRIx64 " pc=%016" PRIx64
+                                  " b0=%016" PRIx64 " type=%08x value=%08x"
+                                  " fp=%016" PRIx64
+                                  " cycle=%" PRIu64 " repeat=%" PRIu64
+                                  " seq=%" PRIu64 " seq_delta=%" PRIu64
+                                  " threshold=%" PRIu64
+                                  " window=%" PRIu64
+                                  " suppress_count=%" PRIu64 "\n",
+                                  env->ip, pc, env->b[0], log_code_type,
+                                  log_value, wr_cycle_fp_id, wr_cycle_id,
+                                  wr_cycle_repeat, progress_fp.seq,
+                                  loop_guard_seq_delta,
+                                  ia64_fw_break0_wr_gate_loop_guard_threshold(),
+                                  ia64_fw_break0_wr_gate_loop_guard_window(),
+                                  guard->suppress_count);
+                    loop_guard_log_count++;
+                }
+            }
+        }
+    }
 
     if (dxe_hob_res_dump_enabled && !dxe_hob_res_dumped &&
         dxe_hob_res_attempts < 16 &&
@@ -10769,6 +10895,10 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
                           ia64_fw_progress_dedup_window());
             reject_log_count++;
         }
+    }
+
+    if (loop_guard_hit) {
+        return;
     }
 
     if (wr_gate_pc && ia64_fw_break0_wr_gate_trace_enabled() &&
