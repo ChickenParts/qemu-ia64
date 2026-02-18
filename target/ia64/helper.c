@@ -5160,6 +5160,22 @@ typedef struct IA64FwProgressEvent {
 static IA64FwProgressEvent ia64_fw_progress_ring[IA64_FW_PROGRESS_EVENT_MAX];
 static uint64_t ia64_fw_progress_seq;
 
+typedef struct IA64PeiStatusRewriteFingerprint {
+    uint64_t ret_pc;
+    uint64_t ps_ptr;
+    uint64_t type;
+    uint64_t value;
+    uint64_t instance;
+    uint64_t seq;
+} IA64PeiStatusRewriteFingerprint;
+
+typedef struct IA64PeiStatusRewriteDedupState {
+    bool valid;
+    IA64PeiStatusRewriteFingerprint last;
+} IA64PeiStatusRewriteDedupState;
+
+static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
+
 static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
                                         uint64_t ps_ptr, uint16_t svc_id,
                                         uint32_t source, bool selected);
@@ -5168,6 +5184,8 @@ static IA64PeiPsEpochSelected ia64_fw_pei_ps_epoch_selected_state(void);
 static void ia64_fw_progress_record(CPUIA64State *env, uint64_t pc,
                                     uint64_t status, uint32_t code_type,
                                     uint32_t code_value);
+static uint64_t ia64_fw_pei_status_rewrite_fp_id(
+    const IA64PeiStatusRewriteFingerprint *fp);
 
 static bool ia64_fw_pei_hob_flow_trace_enabled(void)
 {
@@ -5444,6 +5462,90 @@ static int ia64_fw_pei_statuscode_semantic_fix_log_limit(void)
         }
     }
     return limit;
+}
+
+static bool ia64_fw_pei_status_rewrite_dedup_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_STATUS_REWRITE_DEDUP");
+        enabled = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static uint64_t ia64_fw_pei_status_rewrite_dedup_window(void)
+{
+    static uint64_t window = UINT64_MAX;
+    if (window == UINT64_MAX) {
+        window = 64;
+        const char *s = getenv("QEMU_IA64_PEI_STATUS_REWRITE_DEDUP_WINDOW");
+        if (s && *s) {
+            long long v = atoll(s);
+            if (v > 0) {
+                window = (uint64_t)v;
+            }
+        }
+        if (window == 0) {
+            window = 1;
+        }
+    }
+    return window;
+}
+
+static bool ia64_fw_pei_status_rewrite_fp_equal(
+    const IA64PeiStatusRewriteFingerprint *a,
+    const IA64PeiStatusRewriteFingerprint *b)
+{
+    return a->ret_pc == b->ret_pc &&
+           a->ps_ptr == b->ps_ptr &&
+           a->type == b->type &&
+           a->value == b->value &&
+           a->instance == b->instance;
+}
+
+static bool ia64_fw_pei_status_rewrite_dedup_hit(
+    const IA64PeiStatusRewriteDedupState *state,
+    const IA64PeiStatusRewriteFingerprint *fp,
+    uint64_t *delta_out)
+{
+    if (delta_out) {
+        *delta_out = UINT64_MAX;
+    }
+    if (!ia64_fw_pei_status_rewrite_dedup_enabled() || !state->valid) {
+        return false;
+    }
+    if (!ia64_fw_pei_status_rewrite_fp_equal(&state->last, fp) ||
+        fp->seq < state->last.seq) {
+        return false;
+    }
+    uint64_t delta = fp->seq - state->last.seq;
+    if (delta_out) {
+        *delta_out = delta;
+    }
+    return delta <= ia64_fw_pei_status_rewrite_dedup_window();
+}
+
+static void ia64_fw_pei_status_rewrite_dedup_remember(
+    IA64PeiStatusRewriteDedupState *state,
+    const IA64PeiStatusRewriteFingerprint *fp)
+{
+    if (!ia64_fw_pei_status_rewrite_dedup_enabled()) {
+        return;
+    }
+    state->last = *fp;
+    state->valid = true;
+}
+
+static uint64_t ia64_fw_pei_status_rewrite_fp_id(
+    const IA64PeiStatusRewriteFingerprint *fp)
+{
+    uint64_t h = fp->ret_pc ^ (fp->ps_ptr << 1) ^ (fp->type << 3) ^
+                 (fp->value << 5) ^ (fp->instance << 7);
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= (h >> 33);
+    return h;
 }
 
 static bool ia64_fw_pei_notify_trace_enabled(void)
@@ -14387,14 +14489,31 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
     bool epoch_match = epoch_seen && ps_ptr && epoch_ps == ps_ptr;
     bool epoch_gate_ok = epoch_match || ia64_fw_pei_22560_status_fix_always();
 
-    bool do_fix = fix_enabled &&
-                  chain.chain_match &&
-                  epoch_gate_ok &&
-                  (ia64_fw_pei_22560_status_fix_always() || unresolved);
+    uint64_t chain_seq = chain.locate_seen ? chain.locate.seq
+                       : chain.report_seen ? chain.report.seq
+                       : ia64_fw_pei_producer_seq;
+    IA64PeiStatusRewriteFingerprint rewrite_fp = {
+        .ret_pc = env->b[0],
+        .ps_ptr = ps_ptr,
+        .type = chain.report_seen ? chain.report.a1 : env->r[33],
+        .value = chain.report_seen ? chain.report.a2 : env->r[34],
+        .instance = chain.report_seen ? chain.report.a3 : env->r[35],
+        .seq = chain_seq,
+    };
+    uint64_t rewrite_fp_id = ia64_fw_pei_status_rewrite_fp_id(&rewrite_fp);
+    uint64_t dedup_delta = UINT64_MAX;
+    bool do_fix_ready = fix_enabled &&
+                        chain.chain_match &&
+                        epoch_gate_ok &&
+                        (ia64_fw_pei_22560_status_fix_always() || unresolved);
+    bool dedup_hit = do_fix_ready &&
+                     ia64_fw_pei_status_rewrite_dedup_hit(
+                         &ia64_fw_pei_22560_rewrite_dedup,
+                         &rewrite_fp, &dedup_delta);
+    bool do_fix = do_fix_ready && !dedup_hit;
     if (do_fix) {
-        uint64_t chain_seq = chain.locate_seen ? chain.locate.seq
-                           : chain.report_seen ? chain.report.seq
-                           : ia64_fw_pei_producer_seq;
+        ia64_fw_pei_status_rewrite_dedup_remember(&ia64_fw_pei_22560_rewrite_dedup,
+                                                  &rewrite_fp);
         ia64_fw_pei_22560_fix_ctx = (IA64Pei22560FixCtx) {
             .valid = true,
             .seq = chain_seq,
@@ -14433,6 +14552,8 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                           " epoch_src=%s epoch_seq=%" PRIu64
                           " epoch_cont=%d"
                           " chain=%d seq_now=%" PRIu64
+                          " dedup_hit=%d dedup_delta=%" PRIu64
+                          " dedup_fp=%016" PRIx64
                           " locate_seq=%" PRIu64 " report_seq=%" PRIu64 "\n",
                           status, do_fix ? 1 : 0, pc, env->b[0], ps_ptr,
                           unresolved ? 1 : 0, ppi_end, ppi_found ? 1 : 0,
@@ -14441,6 +14562,9 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                           epoch_sel.seq,
                           epoch_sel.from_continuity ? 1 : 0,
                           chain.chain_match ? 1 : 0, ia64_fw_pei_producer_seq,
+                          dedup_hit ? 1 : 0,
+                          dedup_hit ? dedup_delta : 0,
+                          rewrite_fp_id,
                           chain.locate_seen ? chain.locate.seq : 0,
                           chain.report_seen ? chain.report.seq : 0);
             if (fix_enabled && chain.chain_match && !epoch_gate_ok) {
@@ -14457,6 +14581,21 @@ static void ia64_fw_pei_maybe_fix_status_transition_ffe22560(CPUIA64State *env,
                               ia64_fw_pei_ps_source_name(epoch_sel.source),
                               epoch_sel.seq,
                               epoch_sel.from_continuity ? 1 : 0);
+            }
+            if (fix_enabled && do_fix_ready && dedup_hit) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_22560_status reject=dedup_repeat"
+                              " ret_pc=%016" PRIx64
+                              " ps=%016" PRIx64 " type=%016" PRIx64
+                              " value=%016" PRIx64 " inst=%016" PRIx64
+                              " fp=%016" PRIx64
+                              " dedup_delta=%" PRIu64
+                              " dedup_window=%" PRIu64 "\n",
+                              rewrite_fp.ret_pc, rewrite_fp.ps_ptr,
+                              rewrite_fp.type, rewrite_fp.value,
+                              rewrite_fp.instance, rewrite_fp_id,
+                              dedup_delta,
+                              ia64_fw_pei_status_rewrite_dedup_window());
             }
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_22560_status regs"
