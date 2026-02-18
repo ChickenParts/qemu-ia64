@@ -5174,8 +5174,23 @@ typedef struct IA64PeiStatusRewriteDedupState {
     IA64PeiStatusRewriteFingerprint last;
 } IA64PeiStatusRewriteDedupState;
 
+typedef struct IA64FwProgressDedupFingerprint {
+    uint64_t pc;
+    uint64_t b0;
+    uint32_t code_type;
+    uint32_t code_value;
+    uint64_t ps_ptr;
+    uint64_t seq;
+} IA64FwProgressDedupFingerprint;
+
+typedef struct IA64FwProgressDedupState {
+    bool valid;
+    IA64FwProgressDedupFingerprint last;
+} IA64FwProgressDedupState;
+
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_report_rewrite_dedup;
+static IA64FwProgressDedupState ia64_fw_progress_dedup;
 
 #define IA64_PEI_ERR_LOOP_EVENT_MAX 128
 typedef struct IA64PeiErrLoopEvent {
@@ -5577,6 +5592,89 @@ static uint64_t ia64_fw_pei_status_rewrite_seq_delta(uint64_t seq_now,
         return UINT64_MAX;
     }
     return seq_now - seq_prev;
+}
+
+static bool ia64_fw_progress_dedup_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_DEDUP");
+        enabled = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static uint64_t ia64_fw_progress_dedup_window(void)
+{
+    static uint64_t window = UINT64_MAX;
+    if (window == UINT64_MAX) {
+        window = 64;
+        const char *s = getenv("QEMU_IA64_PEI_PROGRESS_DEDUP_WINDOW");
+        if (s && *s) {
+            long long v = atoll(s);
+            if (v > 0) {
+                window = (uint64_t)v;
+            }
+        }
+        if (window == 0) {
+            window = 1;
+        }
+    }
+    return window;
+}
+
+static bool ia64_fw_progress_dedup_fp_equal(
+    const IA64FwProgressDedupFingerprint *a,
+    const IA64FwProgressDedupFingerprint *b)
+{
+    return a->pc == b->pc &&
+           a->b0 == b->b0 &&
+           a->code_type == b->code_type &&
+           a->code_value == b->code_value &&
+           a->ps_ptr == b->ps_ptr;
+}
+
+static bool ia64_fw_progress_dedup_hit(const IA64FwProgressDedupState *state,
+                                       const IA64FwProgressDedupFingerprint *fp,
+                                       uint64_t *delta_out)
+{
+    if (delta_out) {
+        *delta_out = UINT64_MAX;
+    }
+    if (!ia64_fw_progress_dedup_enabled() || !state->valid) {
+        return false;
+    }
+    if (!ia64_fw_progress_dedup_fp_equal(&state->last, fp) ||
+        fp->seq < state->last.seq) {
+        return false;
+    }
+    uint64_t delta = fp->seq - state->last.seq;
+    if (delta_out) {
+        *delta_out = delta;
+    }
+    return delta <= ia64_fw_progress_dedup_window();
+}
+
+static void ia64_fw_progress_dedup_remember(IA64FwProgressDedupState *state,
+                                            const IA64FwProgressDedupFingerprint *fp)
+{
+    if (!ia64_fw_progress_dedup_enabled()) {
+        return;
+    }
+    state->last = *fp;
+    state->valid = true;
+}
+
+static uint64_t ia64_fw_progress_dedup_fp_id(
+    const IA64FwProgressDedupFingerprint *fp)
+{
+    uint64_t h = fp->pc ^ (fp->b0 << 1) ^
+                 ((uint64_t)fp->code_type << 32) ^ fp->code_value ^
+                 (fp->ps_ptr << 3);
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= (h >> 33);
+    return h;
 }
 
 static bool ia64_fw_pei_err_loop_trace_enabled(void)
@@ -10286,6 +10384,27 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         }
     }
     ia64_fw_progress_record(env, pc, env->r[8], log_code_type, log_value);
+    IA64FwProgressDedupFingerprint progress_fp = {
+        .pc = pc,
+        .b0 = env->b[0],
+        .code_type = log_code_type,
+        .code_value = log_value,
+        .ps_ptr = ia64_fw_progress_guess_ps_ptr(env),
+        .seq = ia64_fw_pei_producer_seq,
+    };
+    uint64_t progress_fp_id = ia64_fw_progress_dedup_fp_id(&progress_fp);
+    uint64_t progress_dedup_delta = UINT64_MAX;
+    bool progress_dedup_candidate =
+        !is_assert &&
+        ia64_fw_pc_match_bundle(env->ip, 0x0000000100003000ULL) &&
+        ia64_fw_status_code_valid(log_code_type, log_value) &&
+        ((log_value & IA64_EFI_STATUS_CODE_CLASS_MASK) == IA64_EFI_CLASS_SOFTWARE);
+    bool progress_dedup_hit = progress_dedup_candidate &&
+        ia64_fw_progress_dedup_hit(&ia64_fw_progress_dedup, &progress_fp,
+                                   &progress_dedup_delta);
+    if (progress_dedup_candidate && !progress_dedup_hit) {
+        ia64_fw_progress_dedup_remember(&ia64_fw_progress_dedup, &progress_fp);
+    }
 
     if (dxe_hob_res_dump_enabled && !dxe_hob_res_dumped &&
         dxe_hob_res_attempts < 16 &&
@@ -10309,7 +10428,26 @@ void HELPER(fw_break0)(CPUIA64State *env, uint64_t pc)
         }
     }
 
+    if (progress_dedup_hit && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int reject_log_count;
+        if (log_limit == 0 || reject_log_count < log_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_break0 reject=progress_dedup_repeat"
+                          " ip=%016" PRIx64 " pc=%016" PRIx64
+                          " b0=%016" PRIx64 " type=%08x value=%08x"
+                          " ps=%016" PRIx64 " fp=%016" PRIx64
+                          " dedup_delta=%" PRIu64
+                          " dedup_window=%" PRIu64 "\n",
+                          env->ip, pc, env->b[0], log_code_type, log_value,
+                          progress_fp.ps_ptr, progress_fp_id,
+                          progress_dedup_delta,
+                          ia64_fw_progress_dedup_window());
+            reject_log_count++;
+        }
+    }
+
     if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+        !progress_dedup_hit &&
         (log_limit == 0 || log_count++ < log_limit)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_break0 ip=%016" PRIx64 " pc=%016" PRIx64
