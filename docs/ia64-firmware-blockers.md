@@ -146,9 +146,31 @@ investigation breadcrumbs.
       `rc=134`, `fix_279d0=1`, host assert reproduced
       (`TB_EXIT_REQUESTED without exitreq/icount`).
   - Current stance:
-    - keep safe mode default-on to prevent host abort in fix-enabled runs.
-    - retain `...SAFE_MODE=0` as repro switch for root-cause analysis of the
-      post-`279d0` TCG assert path.
+    - keep safe mode default-on while `...SAFE_MODE=0` remains an
+      investigation mode.
+    - retain `...SAFE_MODE=0` as repro switch for post-quarantine behavior.
+- `TB_EXIT_REQUESTED` host assert root-cause/fix (2026-02-18):
+  - Root cause:
+    - `target/ia64/translate.c` marked `DISAS_NORETURN` in a `break.m`
+      mixed path that can return via `fw_break0` when
+      `fw_preboot_active != 0`.
+    - this allowed TB fallthrough into the generic exit-request epilogue and
+      triggered:
+      `TB_EXIT_REQUESTED without exitreq/icount`.
+  - Fixes:
+    - `HELPER(unimpl)` is now declared/compiled as no-return
+      (`TCG_CALL_NO_RETURN`, `G_NORETURN`), and `gen_unimpl()` no longer emits
+      an extra `exit_tb` after calling it.
+    - removed `DISAS_NORETURN` from the mixed `break.m` `fw_break0`/`breaki`
+      path so only true no-return paths are marked no-return.
+  - Validation (`scratch/ia64_logs/p3r/commit3_safe_off.out`, 45s):
+    - `...279D0_STATUS_FIX=1 ...279D0_SAFE_MODE=0` now runs to timeout
+      (`rc=124`) with no host assert.
+    - bounded rewrite still fires (`pei_279d0_status ... fixed=1 ...`).
+  - Next blocker exposed:
+    - run now reaches guest-side `IA64 UNIMPL` at
+      `pc=80000000ffffb2b0` and then loops in break vector `0x2c00`
+      (repeated `fw_break0`/`fault vec=0x2c00`).
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

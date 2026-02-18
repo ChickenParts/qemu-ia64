@@ -1171,7 +1171,6 @@ static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)
                       tcg_constant_i32(ctx->ri),
                       tcg_constant_i64(insn),
                       tcg_constant_i64((uintptr_t)(msg ? msg : "")));
-    tcg_gen_exit_tb(NULL, 0);
     if (skip) {
         gen_set_label(skip);
     } else {
@@ -3714,9 +3713,11 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         tcg_gen_br(done);
                         gen_set_label(do_break);
                         gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
-                        if (qp == 0) {
-                            ctx->base.is_jmp = DISAS_NORETURN;
-                        }
+                        /*
+                         * Do not mark the TB as DISAS_NORETURN here: the
+                         * fast path above can call fw_break0(), which returns
+                         * normally when fw_preboot_active is set.
+                         */
                         gen_set_label(done);
                     } else if (nr == 0x0) {
                         /*

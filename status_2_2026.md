@@ -624,10 +624,47 @@ Logs checked:
     - `scripts/ia64-unimpl-report.sh --format tsv --top 50 ...`
       reported no `IA64 UNIMPL` lines in fresh smoke logs.
 
+## Follow-up (P3-R `TB_EXIT_REQUESTED` Assert Root-Cause + Translator Contract Fix)
+- Root-caused the host assert to a translator contract bug in
+  `target/ia64/translate.c`:
+  - `break.m` hypercall decode marked `DISAS_NORETURN` on a mixed runtime path
+    that can either:
+    - call `breaki` (no return), or
+    - call `fw_break0` (returns normally when `fw_preboot_active != 0`).
+  - with `DISAS_NORETURN` set, TB fallthrough reaches generic
+    `TB_EXIT_REQUESTED` epilogue (`gen_tb_end`) without `exit_request/icount`,
+    triggering `cpu_loop_exec_tb` assert.
+- Correctness fixes:
+  - `HELPER(unimpl)` is now explicitly no-return:
+    - `DEF_HELPER_FLAGS_5(..., TCG_CALL_NO_RETURN, noreturn, ...)`
+    - `G_NORETURN` helper signature + `g_assert_not_reached()` tail.
+  - `gen_unimpl(...)` no longer emits `tcg_gen_exit_tb(NULL, 0)` after
+    no-return helper call.
+  - `break.m` mixed `fw_break0`/`breaki` path no longer sets
+    `ctx->base.is_jmp = DISAS_NORETURN`.
+  - assert diagnostics in `cpu_loop_exec_tb` now include `exception_index`.
+- Validation (2026-02-18, `scratch/ia64_logs/p3r/commit3_safe_off.out`):
+  - repro knobs:
+    - `IA64_PEI_22560_STATUS_FIX=1`
+    - `IA64_PEI_279D0_TRACE=1`
+    - `IA64_PEI_279D0_STATUS_FIX=1`
+    - `IA64_PEI_279D0_SAFE_MODE=0`
+  - result: `rc=124` (timeout), no host assert.
+  - evidence from `scratch/ia64_logs/qemu.fw.log`:
+    - bounded rewrite still fires:
+      `pei_279d0_status ... fixed=1 ... safe_mode=0 safe_quarantine=0`
+    - no `TB_EXIT_REQUESTED without exitreq/icount` lines.
+    - execution continues past prior crash point and now exposes guest-side
+      illegal-op -> break-vector loop:
+      `IA64 UNIMPL ... pc=80000000ffffb2b0 ...` then repeated
+      `IA64 fault vec=0x2c00 ip=0x2c00`.
+- Regression/smoke:
+  - `scripts/run-ia64-op7-tests.sh 12s` passed.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
 - Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
-- Root-cause of the post-`279d0` host-side TCG assert remains open; safe-mode
-  quarantine is now default-on and `...279D0_SAFE_MODE=0` reproduces for
-  investigation.
+- Host-side `TB_EXIT_REQUESTED` assert is fixed; next blocker is guest-side
+  `IA64 UNIMPL` at `0x80000000ffffb2b0` and subsequent break-vector
+  (`0x2c00`) loop in `...279D0_SAFE_MODE=0` runs.

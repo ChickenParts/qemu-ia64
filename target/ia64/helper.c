@@ -1059,8 +1059,8 @@ uint64_t HELPER(ld_s)(CPUIA64State *env, uint64_t addr, uint32_t size,
     return ok ? val : 0;
 }
 
-void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
-                    uint64_t insn, uint64_t msg_ptr)
+G_NORETURN void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                               uint64_t insn, uint64_t msg_ptr)
 {
     const char *msg = (const char *)(uintptr_t)msg_ptr;
     uint64_t last_kind = env->last_branch_kind;
@@ -1118,6 +1118,7 @@ void HELPER(unimpl)(CPUIA64State *env, uint64_t pc, uint32_t ri,
      * Route through the general-exception vector instead of aborting QEMU.
      */
     ia64_fault(env_cpu(env), env, false, false, IA64_VEC_ILLEGAL_OP, 0, GETPC());
+    g_assert_not_reached();
 }
 
 enum {
