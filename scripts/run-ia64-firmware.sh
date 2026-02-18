@@ -37,6 +37,9 @@ Environment overrides:
   IA64_PEI_PRODUCER_TRACE (default: 1; capture PEI call history for first-bad path dump)
   IA64_PEI_PRODUCER_HISTORY (default: 96; retained call entries for first-bad dump)
   IA64_PEI_PRODUCER_STACK (default: 12; RSE frames dumped at first-bad)
+  IA64_PEI_PS_EPOCH_TRACE (default: 0; trace selected PEI PS/core epoch provenance)
+  IA64_PEI_PS_EPOCH_TRACE_LIMIT (default: 64)
+  IA64_PEI_PS_SELECT_STRICT (default: 1; prefer validated arg-derived PS over stale cached PS)
   IA64_PEI_STATUS_TRANSITION_TRACE (default: 1; log r8 error-status transitions)
   IA64_PEI_STATUS_TRANSITION_LIMIT (default: 64)
   IA64_PEI_STATUSCODE_SEMANTIC_FIX (default: 1; semantic StatusCode optional-path success)
@@ -195,6 +198,18 @@ fi
 
 if [[ -n "${IA64_PEI_PRODUCER_STACK:-}" ]]; then
   export QEMU_IA64_PEI_PRODUCER_STACK="${IA64_PEI_PRODUCER_STACK}"
+fi
+
+if [[ -n "${IA64_PEI_PS_EPOCH_TRACE:-}" ]]; then
+  export QEMU_IA64_PEI_PS_EPOCH_TRACE="${IA64_PEI_PS_EPOCH_TRACE}"
+fi
+
+if [[ -n "${IA64_PEI_PS_EPOCH_TRACE_LIMIT:-}" ]]; then
+  export QEMU_IA64_PEI_PS_EPOCH_TRACE_LIMIT="${IA64_PEI_PS_EPOCH_TRACE_LIMIT}"
+fi
+
+if [[ -n "${IA64_PEI_PS_SELECT_STRICT:-}" ]]; then
+  export QEMU_IA64_PEI_PS_SELECT_STRICT="${IA64_PEI_PS_SELECT_STRICT}"
 fi
 
 if [[ -n "${IA64_PEI_STATUS_TRANSITION_TRACE:-}" ]]; then

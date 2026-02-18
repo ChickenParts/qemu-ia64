@@ -329,6 +329,9 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_CLEAR_OLDCORE` | Clear old core memory |
 | `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX` | Treat unresolved StatusCode report path as optional (default on) |
 | `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT` | Limit StatusCode semantic-fix logs |
+| `QEMU_IA64_PEI_PS_EPOCH_TRACE` | Trace PEI PS/core epoch provenance used by status-path selectors (default off) |
+| `QEMU_IA64_PEI_PS_EPOCH_TRACE_LIMIT` | Limit PEI PS/core epoch trace entries |
+| `QEMU_IA64_PEI_PS_SELECT_STRICT` | Enable strict PEI PS selection (prefer validated arg-derived PS over stale cached PS; default on) |
 | `QEMU_IA64_PEI_NOTIFY_TRACE` | Trace `NotifyPpi` return status for the blocker callback path (default off) |
 | `QEMU_IA64_PEI_NOTIFY_TRACE_LIMIT` | Limit notify-return trace entries |
 | `QEMU_IA64_PEI_NOTIFY_TRACE_ONESHOT` | Log only first soft-error notify return when enabled (default on) |

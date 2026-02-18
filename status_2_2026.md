@@ -823,6 +823,44 @@ Logs checked:
     - no `pei_report_status_fix` events at non-PEI return PCs
       (for example `ret_pc=0x000000001fff01d0` is no longer rewritten).
 
+## Follow-up (P3-X PEI PS-Epoch Provenance + Strict PS Selector Coupling)
+- Added explicit PEI PS/core epoch provenance ring in `target/ia64/helper.c`:
+  - captures selected/observed PS context from:
+    - producer-call path
+    - current PS selector path
+  - first-bad dumps now include:
+    - `pei_ps_epoch_history`
+    - per-event core/header snapshot (`core`, `ppi_end`, `notify_end`, `dispatch_end`).
+- Added strict PEI PS selection policy (default on):
+  - `QEMU_IA64_PEI_PS_SELECT_STRICT=1`
+  - prefers validated arg-derived PS (`r32`/`r33`) over stale cached PS.
+  - tie-break uses recent StatusCode producer-chain PS hint and
+    non-zero dispatch metadata.
+- Coupled rewrites to selected PS epoch:
+  - `pc=0xffe22560` fix now requires PS-epoch match
+    (or explicit `...22560_STATUS_FIX_ALWAYS=1` override).
+  - semantic `statuscode_optional_path` rewrite/first-bad-skip now requires
+    PS-epoch eligibility (`ps_epoch_match=1` when strict mode is enabled).
+  - added explicit reject logs:
+    - `pei_22560_status reject=ps_epoch_mismatch ...`
+    - `pei_report_status_fix reject=ps_epoch_mismatch ...`
+- Extended `279d0` event linkage with PS-epoch continuity fields:
+  - `ps_epoch_seen`, `ps_epoch_match`, `ps_epoch_link`.
+  - `do_fix_ready` now includes PS-epoch link guard.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro:
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, no host assert.
+    - `scratch/ia64_logs/qemu.fw.log` shows:
+      - `pei_22560_status ... epoch_seen=1 epoch_match=1 ...`
+      - `pei_report_status_fix ... ps_epoch_req=1 ... ps_epoch_match=1 ...`
+      - `pei_report_status_fix reject=ps_epoch_mismatch ...` on stale-epoch tail recurrences.
+      - `pei_279d0_event ... ps_epoch_seen=1 ps_epoch_match=1 ps_epoch_link=1 ...`
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

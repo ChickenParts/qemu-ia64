@@ -267,6 +267,29 @@ investigation breadcrumbs.
       `ctx_reg_match=0 ctx_link=0` on the observed mismatched context path.
     - no semantic rewrite observed at non-PEI return PCs
       (for example `ret_pc=0x000000001fff01d0` no longer rewritten).
+- PEI PS-epoch provenance + strict selector coupling (2026-02-18):
+  - `target/ia64/helper.c`:
+    - added bounded `pei_ps_epoch` ring for PS/core provenance captured from
+      producer calls and current-PS selector decisions.
+    - first-bad dumps now include `pei_ps_epoch_history`.
+    - added strict selector knob (default on):
+      `QEMU_IA64_PEI_PS_SELECT_STRICT`.
+    - strict selector prefers validated arg-derived PS (`r32`/`r33`) over
+      stale cached PS and uses producer-chain/dispatched-state tie-breaks.
+  - rewrites now couple to selected PS epoch:
+    - `pc=0xffe22560` fix requires epoch match unless forced.
+    - semantic `statuscode_optional_path` rewrite/skip requires epoch match
+      in strict mode.
+    - `279d0` `do_fix_ready` now includes PS-epoch continuity
+      (`ps_epoch_seen/match/link`).
+    - mismatch logs are explicit:
+      - `pei_22560_status reject=ps_epoch_mismatch ...`
+      - `pei_report_status_fix reject=ps_epoch_mismatch ...`
+  - validation (`IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`):
+    - `rc=124`, no host assert.
+    - `pei_22560_status ... epoch_seen=1 epoch_match=1 ...` on matched path.
+    - stale-epoch tail recurrences are now rejected/logged instead of silently
+      rewritten.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
