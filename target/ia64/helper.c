@@ -13467,6 +13467,9 @@ typedef struct IA64Pei279d0Event {
     bool seq_link_ok;
     bool ps_match;
     bool ps_link_ok;
+    bool ps_epoch_seen;
+    bool ps_epoch_match;
+    bool ps_epoch_link_ok;
     bool ctx_reg_match;
     bool ctx_link_ok;
     bool summary_chain_ok;
@@ -13477,6 +13480,7 @@ typedef struct IA64Pei279d0Event {
     uint64_t ctx_ps_ptr;
     uint64_t ctx_r33;
     uint64_t ctx_r34;
+    uint64_t ps_epoch_ptr;
     uint64_t cur_r33;
     uint64_t cur_r34;
     bool safe_mode;
@@ -13870,6 +13874,10 @@ static void ia64_fw_pei_279d0_record_event(CPUIA64State *env,
                                            bool seq_link_ok,
                                            bool ps_match,
                                            bool ps_link_ok,
+                                           bool ps_epoch_seen,
+                                           uint64_t ps_epoch_ptr,
+                                           bool ps_epoch_match,
+                                           bool ps_epoch_link_ok,
                                            bool ctx_reg_match,
                                            bool ctx_link_ok,
                                            bool summary_chain_ok,
@@ -13897,6 +13905,9 @@ static void ia64_fw_pei_279d0_record_event(CPUIA64State *env,
         .seq_link_ok = seq_link_ok,
         .ps_match = ps_match,
         .ps_link_ok = ps_link_ok,
+        .ps_epoch_seen = ps_epoch_seen,
+        .ps_epoch_match = ps_epoch_match,
+        .ps_epoch_link_ok = ps_epoch_link_ok,
         .ctx_reg_match = ctx_reg_match,
         .ctx_link_ok = ctx_link_ok,
         .summary_chain_ok = summary_chain_ok,
@@ -13907,6 +13918,7 @@ static void ia64_fw_pei_279d0_record_event(CPUIA64State *env,
         .ctx_ps_ptr = ia64_fw_pei_22560_fix_ctx.ps_ptr,
         .ctx_r33 = ia64_fw_pei_22560_fix_ctx.r33,
         .ctx_r34 = ia64_fw_pei_22560_fix_ctx.r34,
+        .ps_epoch_ptr = ps_epoch_seen ? ps_epoch_ptr : 0,
         .cur_r33 = env->r[33],
         .cur_r34 = env->r[34],
         .safe_mode = safe_mode,
@@ -13950,6 +13962,7 @@ static void ia64_fw_pei_279d0_dump_event_history(const char *tag, uint64_t pc)
                       " unresolved=%d ppi_end=%" PRIi64 " ppi_found=%d"
                       " seq_now=%" PRIu64 " delta=%" PRIu64 " seq_link=%d"
                       " ps_match=%d ps_link=%d"
+                      " ps_epoch_seen=%d ps_epoch_match=%d ps_epoch_link=%d"
                       " ctx_reg=%d ctx_link=%d chain=%d unresolved_gate=%d"
                       " safe_mode=%d safe_quarantine=%d"
                       " ready=%d fixed=%d\n",
@@ -13957,6 +13970,9 @@ static void ia64_fw_pei_279d0_dump_event_history(const char *tag, uint64_t pc)
                       ev->unresolved ? 1 : 0, ev->ppi_end, ev->ppi_found ? 1 : 0,
                       ev->seq_now, ev->seq_delta, ev->seq_link_ok ? 1 : 0,
                       ev->ps_match ? 1 : 0, ev->ps_link_ok ? 1 : 0,
+                      ev->ps_epoch_seen ? 1 : 0,
+                      ev->ps_epoch_match ? 1 : 0,
+                      ev->ps_epoch_link_ok ? 1 : 0,
                       ev->ctx_reg_match ? 1 : 0, ev->ctx_link_ok ? 1 : 0,
                       ev->summary_chain_ok ? 1 : 0,
                       ev->unresolved_gate_ok ? 1 : 0,
@@ -13968,10 +13984,12 @@ static void ia64_fw_pei_279d0_dump_event_history(const char *tag, uint64_t pc)
                           " seq=%" PRIu64 " pc=%016" PRIx64
                           " b0=%016" PRIx64 " ps=%016" PRIx64
                           " ctx_r33=%016" PRIx64 " ctx_r34=%016" PRIx64
+                          " ps_epoch=%016" PRIx64
                           " cur_r33=%016" PRIx64 " cur_r34=%016" PRIx64 "\n",
                           tag, ev->ctx_seq, ev->ctx_pc,
                           ev->ctx_b0, ev->ctx_ps_ptr,
                           ev->ctx_r33, ev->ctx_r34,
+                          ev->ps_epoch_ptr,
                           ev->cur_r33, ev->cur_r34);
         }
     }
@@ -14213,6 +14231,10 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
                     ps_ptr && ia64_fw_pei_22560_fix_ctx.ps_ptr &&
                     ps_ptr == ia64_fw_pei_22560_fix_ctx.ps_ptr;
     bool ps_link_ok = ps_match || (force_fix && ps_valid);
+    uint64_t ps_epoch_ptr = 0;
+    bool ps_epoch_seen = ia64_fw_pei_ps_epoch_last_selected(&ps_epoch_ptr);
+    bool ps_epoch_match = ps_epoch_seen && ps_ptr && ps_epoch_ptr == ps_ptr;
+    bool ps_epoch_link_ok = ps_epoch_match || (force_fix && ps_epoch_seen);
     bool ctx_reg_match = ia64_fw_pei_22560_fix_ctx.valid &&
                          env->r[33] == ia64_fw_pei_22560_fix_ctx.r33 &&
                          env->r[34] == ia64_fw_pei_22560_fix_ctx.r34;
@@ -14224,6 +14246,7 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
     bool do_fix_ready = fix_enabled &&
                         seq_link_ok &&
                         ps_link_ok &&
+                        ps_epoch_link_ok &&
                         ctx_link_ok &&
                         chain_link_ok &&
                         unresolved_gate_ok;
@@ -14240,6 +14263,8 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
     ia64_fw_pei_279d0_record_event(env, pc, status, ps_ptr, &opt, seq_now,
                                    seq_delta, seq_link_ok,
                                    ps_match, ps_link_ok,
+                                   ps_epoch_seen, ps_epoch_ptr,
+                                   ps_epoch_match, ps_epoch_link_ok,
                                    ctx_reg_match, ctx_link_ok,
                                    summary_chain_ok, unresolved_gate_ok,
                                    safe_mode, safe_quarantine,
@@ -14275,6 +14300,8 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
                           " ppi_end=%" PRIi64 " ppi_found=%d"
                           " seq_now=%" PRIu64 " seq_link=%d delta=%" PRIu64
                           " ps_match=%d ps_link=%d"
+                          " ps_epoch_seen=%d ps_epoch_match=%d"
+                          " ps_epoch_link=%d ps_epoch=%016" PRIx64
                           " ctx_reg_match=%d ctx_link=%d chain_link=%d"
                           " unresolved_gate=%d"
                           " safe_mode=%d safe_quarantine=%d\n",
@@ -14283,6 +14310,9 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
                           opt.ppi_found ? 1 : 0,
                           seq_now, seq_link_ok ? 1 : 0, seq_delta,
                           ps_match ? 1 : 0, ps_link_ok ? 1 : 0,
+                          ps_epoch_seen ? 1 : 0,
+                          ps_epoch_match ? 1 : 0,
+                          ps_epoch_link_ok ? 1 : 0, ps_epoch_ptr,
                           ctx_reg_match ? 1 : 0, ctx_link_ok ? 1 : 0,
                           summary_chain_ok ? 1 : 0, unresolved_gate_ok ? 1 : 0,
                           safe_mode ? 1 : 0, safe_quarantine ? 1 : 0);
