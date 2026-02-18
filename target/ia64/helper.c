@@ -14472,7 +14472,6 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
         env->fw_pei_install_guid_valid = 0;
     }
 
-    if (do_pop) {
     if (!do_pop) {
         uint64_t bsp = ia64_rse_get_bsp(env);
         uint8_t sof = env->cfm & 0x7f;
@@ -14480,7 +14479,6 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
             ia64_rse_store_frame(env, bsp, sof);
         }
     }
-}
 }
 
 void HELPER(fw_enter_kernel)(CPUIA64State *env)

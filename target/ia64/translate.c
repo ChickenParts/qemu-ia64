@@ -1333,9 +1333,10 @@ static void gen_break_common(DisasContext *ctx, uint64_t insn, uint64_t imm,
                 ia64_fw_break0_rom_gate_match(ctx->base.pc_next)) {
                 /*
                  * ROM break(0) gate stubs behave as call-gates: resume at b0.
-                 * Without this, execution can fall through into data at
-                 * 0xffffb2f0 and raise a spurious reserved-template fault.
+                 * Model this as a return edge so stacked-register state tracks
+                 * br.ret-style unwind semantics before branching to b0.
                  */
+                gen_helper_ret_restore_b0(tcg_env);
                 TCGv_i64 tgt = tcg_temp_new_i64();
                 tcg_gen_andi_i64(tgt, cpu_b[0], ~0xFULL);
                 tcg_gen_mov_i64(cpu_pc, tgt);
