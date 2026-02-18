@@ -7241,6 +7241,70 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 break;
             }
 
+            if (!handled && f_major == 0x4 && extract64(insn, 34, 2) == 0) {
+                /*
+                 * F4: fcmp.{eq,lt,le,unord}.s0 p1,p2 = f2,f3
+                 *
+                 * Minimal comparison subset used by compiler-generated FP
+                 * control flow. Relation is encoded by (bit33, bit36).
+                 */
+                uint8_t p1 = extract64(insn, 6, 6);
+                uint8_t f2 = extract64(insn, 13, 7);
+                uint8_t f3 = extract64(insn, 20, 7);
+                uint8_t p2 = extract64(insn, 27, 6);
+                uint8_t rel = (extract64(insn, 33, 1) << 1) |
+                              extract64(insn, 36, 1);
+                TCGv_i64 cond = tcg_temp_new_i64();
+                gen_helper_fcmp_s0(cond, tcg_env,
+                                   tcg_constant_i32(f2),
+                                   tcg_constant_i32(f3),
+                                   tcg_constant_i32(rel));
+                gen_set_predicates(p1, p2, cond);
+                handled = true;
+            }
+
+            if (!handled &&
+                (f_major == 0x8 || f_major == 0xA) &&
+                extract64(insn, 36, 1) == 1 &&
+                extract64(insn, 33, 1) == 0 &&
+                extract64(insn, 34, 2) == 0) {
+                /*
+                 * F1 pseudos in arithmetic form:
+                 * - fadd.s: major=0x8, x=1, f4=1
+                 * - fsub.s: major=0xA, x=1, f4=1
+                 * - fmpy.s: major=0x8, x=1, f2=0
+                 *
+                 * Reuse existing fused helpers with constant-register operands.
+                 */
+                uint8_t f4 = extract64(insn, 27, 7);
+                uint8_t f3 = extract64(insn, 20, 7);
+                uint8_t f2 = extract64(insn, 13, 7);
+                uint8_t f1 = extract64(insn, 6, 7);
+
+                if (f_major == 0x8 && f4 == 1) {
+                    gen_helper_fma_s1(tcg_env,
+                                      tcg_constant_i32(f1),
+                                      tcg_constant_i32(f3),
+                                      tcg_constant_i32(f4),
+                                      tcg_constant_i32(f2));
+                    handled = true;
+                } else if (f_major == 0xA && f4 == 1) {
+                    gen_helper_fms_s1(tcg_env,
+                                      tcg_constant_i32(f1),
+                                      tcg_constant_i32(f3),
+                                      tcg_constant_i32(f4),
+                                      tcg_constant_i32(f2));
+                    handled = true;
+                } else if (f_major == 0x8 && f2 == 0) {
+                    gen_helper_fma_s1(tcg_env,
+                                      tcg_constant_i32(f1),
+                                      tcg_constant_i32(f3),
+                                      tcg_constant_i32(f4),
+                                      tcg_constant_i32(f2));
+                    handled = true;
+                }
+            }
+
             if (f_major == 0x0) {
                 /* F8: frcpa.s* f1,p2 = f2,f3 */
                 uint8_t x3 = extract64(insn, 33, 3);
@@ -7255,6 +7319,38 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                         tcg_constant_i32(p2),
                                         tcg_constant_i32(f2),
                                         tcg_constant_i32(f3));
+                    handled = true;
+                }
+            }
+
+            if (!handled && f_major == 0x0 &&
+                extract64(insn, 36, 1) == 0 &&
+                extract64(insn, 34, 2) == 0 &&
+                extract64(insn, 33, 1) == 0 &&
+                extract64(insn, 31, 2) == 1) {
+                /*
+                 * F9: fabs / fneg scalar forms.
+                 * Keep raw FP payload and only toggle/clear the sign bit in
+                 * the exp/sign word.
+                 */
+                uint8_t x6 = extract64(insn, 27, 6);
+                if (x6 == 0x10 || x6 == 0x11) {
+                    uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
+                    uint8_t src = (x6 == 0x10) ? (extract64(insn, 20, 7) & 0x7f)
+                                               : (extract64(insn, 13, 7) & 0x7f);
+                    if (f1 > 1) {
+                        TCGv_i64 lo = tcg_temp_new_i64();
+                        TCGv_i64 hi = tcg_temp_new_i64();
+                        gen_fr_load_lo(lo, src);
+                        gen_fr_load_hi(hi, src);
+                        if (x6 == 0x10) {
+                            tcg_gen_andi_i64(hi, hi, ~0x20000ULL);
+                        } else {
+                            tcg_gen_xori_i64(hi, hi, 0x20000ULL);
+                        }
+                        gen_fr_store_lo(f1, lo);
+                        gen_fr_store_hi(f1, hi);
+                    }
                     handled = true;
                 }
             }

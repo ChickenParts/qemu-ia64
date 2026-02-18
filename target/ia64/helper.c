@@ -2876,6 +2876,34 @@ void HELPER(fnma_s1)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     ia64_ld_to_fp(env, f1, fmal(-a, b, c));
 }
 
+uint64_t HELPER(fcmp_s0)(CPUIA64State *env, uint32_t f2, uint32_t f3,
+                         uint32_t rel)
+{
+    long double a = ia64_fp_to_ld(env, f2);
+    long double b = ia64_fp_to_ld(env, f3);
+    bool unord = isnan(a) || isnan(b);
+    bool cond = false;
+
+    switch (rel & 0x3) {
+    case 0: /* eq */
+        cond = !unord && (a == b);
+        break;
+    case 1: /* lt */
+        cond = !unord && (a < b);
+        break;
+    case 2: /* le */
+        cond = !unord && (a <= b);
+        break;
+    case 3: /* unord */
+        cond = unord;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    return cond ? 1 : 0;
+}
+
 static void ia64_fcvt_invalid(CPUIA64State *env, const char *op,
                               uint32_t fsrc, uint64_t expw, uint64_t mant)
 {

@@ -360,6 +360,41 @@ Logs checked:
     - `scripts/ia64-unimpl-report.sh --format tsv --top 30 ...`
       reported no `IA64 UNIMPL` lines in the fresh logs.
 
+## Follow-up (CPU-C4 F-slot Core Coverage)
+- Added core F-slot instruction coverage in `target/ia64/translate.c`:
+  - arithmetic pseudos:
+    - `fadd.s` (major `0x8`, `x=1`, `f4=1`)
+    - `fsub.s` (major `0xA`, `x=1`, `f4=1`)
+    - `fmpy.s` (major `0x8`, `x=1`, `f2=0`)
+  - scalar compare forms:
+    - `fcmp.{eq,lt,le,unord}.s0`
+  - scalar sign/magnitude forms:
+    - `fabs`
+    - `fneg`
+- Added `HELPER(fcmp_s0)` in `target/ia64/helper.c`
+  (`target/ia64/helper.h` declaration) and reused existing
+  `fma_s1` / `fms_s1` helpers for pseudo arithmetic paths.
+- Added directed selftest coverage:
+  - `scripts/ia64-fslot-selftest.S`
+  - `scripts/run-ia64-fslot-tests.sh`
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-fslot-tests.sh 15s` passed.
+    - `scripts/run-ia64-rse-tests.sh 12s` passed.
+    - `scripts/run-ia64-alat-tests.sh 12s` passed.
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+    - `scripts/run-ia64-nat-tests.sh 12s` passed.
+  - Runtime smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+      -> `rc=124`.
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+      -> `rc=137`.
+  - UNIMPL refresh:
+    - `scripts/ia64-unimpl-report.sh --format tsv --top 50 ...`
+      reported no `IA64 UNIMPL` lines in fresh logs.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

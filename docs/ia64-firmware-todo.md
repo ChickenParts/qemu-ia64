@@ -124,6 +124,14 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
 - Add directed RSE/ALAT bare-kernel selftests and runners
   (`scripts/ia64-rse-selftest.S`, `scripts/run-ia64-rse-tests.sh`,
    `scripts/ia64-alat-selftest.S`, `scripts/run-ia64-alat-tests.sh`).
+- Add core F-slot arithmetic/compare/sign coverage:
+  - `fadd.s`, `fsub.s`, `fmpy.s`
+  - `fcmp.{eq,lt,le,unord}.s0`
+  - `fabs`, `fneg`
+  (`target/ia64/translate.c`, `target/ia64/helper.c`,
+  `target/ia64/helper.h`).
+- Add directed F-slot bare-kernel selftest and runner
+  (`scripts/ia64-fslot-selftest.S`, `scripts/run-ia64-fslot-tests.sh`).
 
 ## Open issues (needs work)
 
@@ -150,8 +158,9 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   PCI width/address ordering is correct for all firmware calls.
 - Extended PCI config (type=1) is not implemented; add ECAM handling if
   firmware uses it.
-- F-unit decode is still a bringup subset; many architected F-slot encodings still
-  fall through to `gen_unimpl("F-slot")` (`target/ia64/translate.c`).
+- F-unit decode remains partial beyond core arithmetic/compare/sign paths;
+  many architected F-slot encodings still fall through to
+  `gen_unimpl("F-slot")` (`target/ia64/translate.c`).
 - ALAT/advanced load modeling is still partial; integer + FP ALAT record/check
   paths are now wired for `ld*.a`/`ldf*.a` + `chk.a`, but advanced-load
   exception/NaT corner cases are not fully modeled
