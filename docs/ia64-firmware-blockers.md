@@ -450,6 +450,17 @@ investigation breadcrumbs.
       is now present (rewrite no longer skipped on dedup hit).
     - first blocker remains `DxeLoad.c:536`, so blocker is likely downstream of
       register-return status propagation alone.
+- CPU NaT destination-clear sweep (2026-02-18, P3-AD slice 4):
+  - fixed IA-64 destination NaT clearing on successful writes for:
+    - `getf.sig`, `getf.exp`
+    - `ld*.c.{clr,nc}` destination GR writes.
+  - updated directed NaT selftest to verify NatVal clear behavior for:
+    - `getf.sig`, `getf.exp`, `ld4.c.nc`, `ld8.c.clr`.
+  - validation:
+    - `scripts/run-ia64-nat-tests.sh 12s` passed.
+    - full directed matrix (`op7`, `fslot`, `nat`, `rse`, `alat`) passed.
+    - firmware repro remains stable (`rc=124`) with unchanged first blocker:
+      `DxeLoad.c:536`.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

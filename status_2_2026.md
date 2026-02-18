@@ -1046,6 +1046,48 @@ Logs checked:
       - `progress_dedup_repeat=50`, `wr_guard_actions=2`.
     - no host assert in either path (`rc=124`).
 
+## Follow-up (P3-AD DXE-Load Provenance + Status-Rewrite Correctness + CPU NaT Sweep)
+- Refreshed blocker fingerprint and kept active first blocker pinned:
+  - baseline repro (`2026-02-18`) still lands on:
+    - `ASSERT ... Universal\\DxeIpl\\Pei\\DxeLoad.c Line 536`.
+  - MP-init AP-path regression remains suppressed in this profile.
+- Added bounded DXE-load provenance probe window:
+  - `target/ia64/translate.c` now probes:
+    - `pc=0xffe255a0..0xffe25620`
+    - `pc=0xffe256a0..0xffe2572c`.
+  - `target/ia64/helper.c` logs:
+    - `dxe_load_probe ... pending_report=... rpt_ret=...`
+    - captures `r8/r9`, arg pointers, PS, producer sequence and report-status
+      stack top.
+  - knobs:
+    - `QEMU_IA64_DXE_LOAD_TRACE`
+    - `QEMU_IA64_DXE_LOAD_TRACE_LIMIT`.
+- Corrected StatusCode rewrite dedup semantics:
+  - dedup is now logging/rate-control only.
+  - rewrite application is preserved on dedup-repeat paths for:
+    - `pei_22560_status`
+    - `pei_report_status_fix`.
+  - evidence now includes:
+    - `... reject=dedup_repeat ... status_rewritten=1 ...`.
+- CPU correctness sweep (NaT destination-clearing fixes):
+  - fixed NaT clear on `getf.sig` / `getf.exp` destination writes.
+  - fixed NaT clear on successful `ld*.c.{clr,nc}` destination writes.
+  - expanded `scripts/ia64-nat-selftest.S` to validate:
+    - `getf.sig`, `getf.exp`, `ld4.c.nc`, `ld8.c.clr` clear destination NaT.
+- Validation matrix (2026-02-18):
+  - build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+    - `scripts/run-ia64-fslot-tests.sh 12s` passed.
+    - `scripts/run-ia64-nat-tests.sh 12s` passed.
+    - `scripts/run-ia64-rse-tests.sh 12s` passed.
+    - `scripts/run-ia64-alat-tests.sh 12s` passed.
+  - firmware repro:
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 35s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, no host assert.
+    - first blocker remains `DxeLoad.c:536`.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
