@@ -5126,13 +5126,29 @@ typedef struct IA64PeiPsEpochEvent {
     bool valid;
 } IA64PeiPsEpochEvent;
 
+typedef struct IA64PeiPsEpochSelected {
+    bool seen;
+    bool from_continuity;
+    uint64_t ps_ptr;
+    uint64_t seq;
+    uint32_t source;
+    bool valid;
+    uint64_t core;
+    int64_t ppi_end;
+    int64_t notify_end;
+    int64_t dispatch_end;
+} IA64PeiPsEpochSelected;
+
 static IA64PeiPsEpochEvent ia64_fw_pei_ps_epoch_ring[IA64_PEI_PS_EPOCH_MAX];
 static uint64_t ia64_fw_pei_ps_epoch_seq;
+static IA64PeiPsEpochEvent ia64_fw_pei_ps_epoch_last_selected_ev;
+static bool ia64_fw_pei_ps_epoch_last_selected_valid;
 
 static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
                                         uint64_t ps_ptr, uint16_t svc_id,
                                         uint32_t source, bool selected);
 static void ia64_fw_pei_ps_epoch_dump_history(const char *tag, uint64_t pc);
+static IA64PeiPsEpochSelected ia64_fw_pei_ps_epoch_selected_state(void);
 
 static bool ia64_fw_pei_hob_flow_trace_enabled(void)
 {
@@ -13286,6 +13302,11 @@ static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
         .valid = valid,
     };
 
+    if (selected && valid && ps_ptr) {
+        ia64_fw_pei_ps_epoch_last_selected_ev = *ev;
+        ia64_fw_pei_ps_epoch_last_selected_valid = true;
+    }
+
     if (ia64_fw_pei_ps_epoch_trace_enabled() &&
         qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         static int trace_count;
@@ -13356,8 +13377,24 @@ static void ia64_fw_pei_ps_epoch_dump_history(const char *tag, uint64_t pc)
     }
 }
 
-static bool ia64_fw_pei_ps_epoch_last_selected(uint64_t *ps_out)
+static IA64PeiPsEpochSelected ia64_fw_pei_ps_epoch_selected_state(void)
 {
+    IA64PeiPsEpochSelected out = { 0 };
+
+    if (ia64_fw_pei_ps_epoch_last_selected_valid) {
+        out.seen = true;
+        out.from_continuity = true;
+        out.ps_ptr = ia64_fw_pei_ps_epoch_last_selected_ev.ps_ptr;
+        out.seq = ia64_fw_pei_ps_epoch_last_selected_ev.seq;
+        out.source = ia64_fw_pei_ps_epoch_last_selected_ev.source;
+        out.valid = ia64_fw_pei_ps_epoch_last_selected_ev.valid;
+        out.core = ia64_fw_pei_ps_epoch_last_selected_ev.core;
+        out.ppi_end = ia64_fw_pei_ps_epoch_last_selected_ev.ppi_end;
+        out.notify_end = ia64_fw_pei_ps_epoch_last_selected_ev.notify_end;
+        out.dispatch_end = ia64_fw_pei_ps_epoch_last_selected_ev.dispatch_end;
+        return out;
+    }
+
     uint64_t have = MIN(ia64_fw_pei_ps_epoch_seq, (uint64_t)IA64_PEI_PS_EPOCH_MAX);
     for (uint64_t i = 0; i < have; i++) {
         uint64_t s = ia64_fw_pei_ps_epoch_seq - i;
@@ -13366,12 +13403,31 @@ static bool ia64_fw_pei_ps_epoch_last_selected(uint64_t *ps_out)
         if (ev->seq != s || !ev->selected) {
             continue;
         }
-        if (ps_out) {
-            *ps_out = ev->ps_ptr;
-        }
-        return true;
+        out.seen = true;
+        out.from_continuity = false;
+        out.ps_ptr = ev->ps_ptr;
+        out.seq = ev->seq;
+        out.source = ev->source;
+        out.valid = ev->valid;
+        out.core = ev->core;
+        out.ppi_end = ev->ppi_end;
+        out.notify_end = ev->notify_end;
+        out.dispatch_end = ev->dispatch_end;
+        return out;
     }
-    return false;
+    return out;
+}
+
+static bool ia64_fw_pei_ps_epoch_last_selected(uint64_t *ps_out)
+{
+    IA64PeiPsEpochSelected sel = ia64_fw_pei_ps_epoch_selected_state();
+    if (!sel.seen) {
+        return false;
+    }
+    if (ps_out) {
+        *ps_out = sel.ps_ptr;
+    }
+    return true;
 }
 
 #define IA64_PEI_STATUS_PC_22560 0x00000000ffe22560ULL
