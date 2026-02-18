@@ -5187,6 +5187,8 @@ static void ia64_fw_progress_record(CPUIA64State *env, uint64_t pc,
                                     uint32_t code_value);
 static uint64_t ia64_fw_pei_status_rewrite_fp_id(
     const IA64PeiStatusRewriteFingerprint *fp);
+static uint64_t ia64_fw_pei_status_rewrite_seq_delta(uint64_t seq_now,
+                                                     uint64_t seq_prev);
 
 static bool ia64_fw_pei_hob_flow_trace_enabled(void)
 {
@@ -5547,6 +5549,15 @@ static uint64_t ia64_fw_pei_status_rewrite_fp_id(
     h *= 0xff51afd7ed558ccdULL;
     h ^= (h >> 33);
     return h;
+}
+
+static uint64_t ia64_fw_pei_status_rewrite_seq_delta(uint64_t seq_now,
+                                                     uint64_t seq_prev)
+{
+    if (!seq_prev || seq_now < seq_prev) {
+        return UINT64_MAX;
+    }
+    return seq_now - seq_prev;
 }
 
 static bool ia64_fw_pei_notify_trace_enabled(void)
@@ -5913,6 +5924,22 @@ static void ia64_fw_progress_maybe_log_loop(const IA64FwProgressEvent *ev)
     static int last_repeats;
     int limit = ia64_fw_progress_loop_trace_limit();
     uint64_t sig = ia64_fw_progress_event_signature(ev);
+    uint64_t report_fp = ia64_fw_pei_report_rewrite_dedup.valid ?
+        ia64_fw_pei_status_rewrite_fp_id(&ia64_fw_pei_report_rewrite_dedup.last) : 0;
+    uint64_t report_seq = ia64_fw_pei_report_rewrite_dedup.valid ?
+        ia64_fw_pei_report_rewrite_dedup.last.seq : 0;
+    uint64_t report_delta = ia64_fw_pei_report_rewrite_dedup.valid ?
+        ia64_fw_pei_status_rewrite_seq_delta(ia64_fw_pei_producer_seq,
+                                             ia64_fw_pei_report_rewrite_dedup.last.seq) :
+        UINT64_MAX;
+    uint64_t s22560_fp = ia64_fw_pei_22560_rewrite_dedup.valid ?
+        ia64_fw_pei_status_rewrite_fp_id(&ia64_fw_pei_22560_rewrite_dedup.last) : 0;
+    uint64_t s22560_seq = ia64_fw_pei_22560_rewrite_dedup.valid ?
+        ia64_fw_pei_22560_rewrite_dedup.last.seq : 0;
+    uint64_t s22560_delta = ia64_fw_pei_22560_rewrite_dedup.valid ?
+        ia64_fw_pei_status_rewrite_seq_delta(ia64_fw_pei_producer_seq,
+                                             ia64_fw_pei_22560_rewrite_dedup.last.seq) :
+        UINT64_MAX;
 
     if (loop_log_count >= limit) {
         return;
@@ -5927,10 +5954,18 @@ static void ia64_fw_progress_maybe_log_loop(const IA64FwProgressEvent *ev)
                   " ip=%016" PRIx64 " pc=%016" PRIx64
                   " b0=%016" PRIx64 " r8=%016" PRIx64
                   " type=%08x value=%08x ps=%016" PRIx64
-                  " prod_seq=%" PRIu64 "\n",
+                  " prod_seq=%" PRIu64
+                  " report_fp=%016" PRIx64 " report_seq=%" PRIu64
+                  " report_delta=%" PRIu64
+                  " s22560_fp=%016" PRIx64 " s22560_seq=%" PRIu64
+                  " s22560_delta=%" PRIu64 "\n",
                   repeats, window, ev->seq, sig,
                   ev->ip, ev->pc, ev->b0, ev->status,
-                  ev->code_type, ev->code_value, ev->ps_ptr, ev->prod_seq);
+                  ev->code_type, ev->code_value, ev->ps_ptr, ev->prod_seq,
+                  report_fp, report_seq,
+                  report_delta == UINT64_MAX ? 0 : report_delta,
+                  s22560_fp, s22560_seq,
+                  s22560_delta == UINT64_MAX ? 0 : s22560_delta);
     loop_log_count++;
     last_sig = sig;
     last_repeats = repeats;
