@@ -23,6 +23,8 @@ Environment overrides:
   IA64_FW_BREAK0_WR_GATE_TRACE (default: inherited/off; trace work-RAM break(0) gate loop cycles)
   IA64_FW_BREAK0_WR_GATE_TRACE_LIMIT (default: inherited/64)
   IA64_FW_XENIPF_MPBUFFER_FIX (default: inherited/1; seed/refresh MP buffer stack slots near IpfEarlyMpInit)
+  IA64_FW_XENIPF_MPBUFFER_STICKY (default: inherited/1; keep repairing MP buffer slot/signature drift throughout MP-init window)
+  IA64_FW_XENIPF_MPBUFFER_WINDOW (default: inherited/0x200; extend MP-init fix trigger window around ffe59800..ffe59a3f)
   IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT (default: helper default/16)
   IA64_EFI_HOB_PATCH (default: inherited/off; enable EFI HOB repair path)
   IA64_EFI_HOB_PATCH_TRACE (default: inherited/off; verbose HOB patch logs)
@@ -144,6 +146,14 @@ fi
 
 if [[ -n "${IA64_FW_XENIPF_MPBUFFER_FIX:-}" ]]; then
   export QEMU_IA64_FW_XENIPF_MPBUFFER_FIX="${IA64_FW_XENIPF_MPBUFFER_FIX}"
+fi
+
+if [[ -n "${IA64_FW_XENIPF_MPBUFFER_STICKY:-}" ]]; then
+  export QEMU_IA64_FW_XENIPF_MPBUFFER_STICKY="${IA64_FW_XENIPF_MPBUFFER_STICKY}"
+fi
+
+if [[ -n "${IA64_FW_XENIPF_MPBUFFER_WINDOW:-}" ]]; then
+  export QEMU_IA64_FW_XENIPF_MPBUFFER_WINDOW="${IA64_FW_XENIPF_MPBUFFER_WINDOW}"
 fi
 
 if [[ -n "${IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT:-}" ]]; then

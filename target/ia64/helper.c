@@ -19451,6 +19451,7 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
 #else
     static int enabled = -1;
     static int log_limit = -1;
+    static int sticky = -1;
     static int log_count;
     IA64XenipfMpbufferState *st = &ia64_fw_xenipf_mpbuffer_state;
     uint64_t seq = ++ia64_fw_xenipf_mpbuffer_seq;
@@ -19471,6 +19472,10 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
         if (log_limit < 0) {
             log_limit = 0;
         }
+    }
+    if (sticky == -1) {
+        const char *s = getenv("QEMU_IA64_FW_XENIPF_MPBUFFER_STICKY");
+        sticky = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
     }
 #define MPLOG(...)                                                         \
     do {                                                                   \
@@ -19535,17 +19540,21 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
     }
 
     hwaddr sp = ia64_phys_mode_addr(env->r[12]);
+    bool sp_in_low_ram = env->fw_mem_size &&
+                         sp >= 0x0000000000100000ULL &&
+                         sp < env->fw_mem_size;
     bool sp_in_pei_temp = sp >= 0x0000000004000000ULL &&
                           sp < 0x0000000004300000ULL;
     bool sp_in_fw_work = sp >= 0x0000000100000000ULL &&
                          sp < 0x0000000101000000ULL;
-    if (!sp_in_pei_temp && !sp_in_fw_work) {
+    if (!sp_in_pei_temp && !sp_in_fw_work && !sp_in_low_ram) {
         if (st->last_mode != 4) {
             MPLOG("IA64: xenipf mpbuffer transition=stack_out_of_range"
                   " epoch=%" PRIu64 " pc=%016" PRIx64
-                  " sp=%016" HWADDR_PRIx " in_temp=%d in_work=%d\n",
+                  " sp=%016" HWADDR_PRIx
+                  " in_temp=%d in_work=%d in_lowram=%d sticky=%d\n",
                   st->epoch, pc, sp, sp_in_pei_temp ? 1 : 0,
-                  sp_in_fw_work ? 1 : 0);
+                  sp_in_fw_work ? 1 : 0, sp_in_low_ram ? 1 : 0, sticky);
             st->last_mode = 4;
         }
         return;
@@ -19589,6 +19598,27 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
                               : (!slot336_match || !slot344_match) ? "slot_drift"
                               : !sig_match ? "sig_drift"
                               : "refresh";
+    bool allow_repair = sticky || st->repairs == 0;
+    if (!allow_repair) {
+        if (st->last_mode != 5 ||
+            st->slot336_last != cur ||
+            st->slot344_last != cur_alt ||
+            st->sig_last != sig_now) {
+            MPLOG("IA64: xenipf mpbuffer transition=drift_ignored"
+                  " epoch=%" PRIu64 " pc=%016" PRIx64
+                  " sp=%016" HWADDR_PRIx " reason=%s"
+                  " slot336=%016" PRIx64 " slot344=%016" PRIx64
+                  " sig=%016" PRIx64 " repairs=%" PRIu64
+                  " sticky=%d\n",
+                  st->epoch, pc, sp, repair_reason, cur, cur_alt,
+                  sig_now, st->repairs, sticky);
+            st->last_mode = 5;
+        }
+        st->slot336_last = cur;
+        st->slot344_last = cur_alt;
+        st->sig_last = sig_now;
+        return;
+    }
 
     stq_le_p(tmp, bsp_sig);
     cpu_physical_memory_write(mp_base + 0x188, tmp, sizeof(tmp));

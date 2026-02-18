@@ -1158,9 +1158,36 @@ static bool ia64_fw_break0_rom_gate_match(uint64_t pc)
 static bool ia64_fw_xenipf_mpbuffer_fix_site(uint64_t pc)
 {
     uint64_t phys = ia64_pc_to_phys61(pc);
+    uint64_t window = 0x200ULL;
+    static int parsed;
+    static uint64_t cached_window;
 
-    return phys >= IA64_FW_XENIPF_MPBUFFER_PC_FIRST &&
-           phys <= IA64_FW_XENIPF_MPBUFFER_PC_LAST;
+    if (!parsed) {
+        const char *s = getenv("QEMU_IA64_FW_XENIPF_MPBUFFER_WINDOW");
+        if (s && *s) {
+            unsigned long long v = strtoull(s, NULL, 0);
+            cached_window = v;
+        } else {
+            cached_window = window;
+        }
+        parsed = 1;
+    }
+    window = cached_window;
+
+    uint64_t first = IA64_FW_XENIPF_MPBUFFER_PC_FIRST;
+    uint64_t last = IA64_FW_XENIPF_MPBUFFER_PC_LAST;
+    if (window > first) {
+        first = 0;
+    } else {
+        first -= window;
+    }
+    if (UINT64_MAX - last < window) {
+        last = UINT64_MAX;
+    } else {
+        last += window;
+    }
+
+    return phys >= first && phys <= last;
 }
 
 static bool ia64_fw_break0_wr_gate_match(uint64_t pc)
