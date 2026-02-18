@@ -243,6 +243,30 @@ investigation breadcrumbs.
         `ret_restore_b0 ip=0x80000000ffffb2a0 ... pop=1`
       - prior blocker cleared:
         no `fault vec=0x2c00 ip=0x280` and no `IA64 UNIMPL` in the 90s window.
+- `279d0` rewrite/link hardening + optional-path predicate tightening
+  (2026-02-18):
+  - `target/ia64/helper.c`:
+    - `pc=0xffe279d0..0xffe27a10` rewrite now requires `22560` context
+      register match (`r33/r34`) and a local producer chain proof
+      (`locate_ppi` StatusCode GUID + nearby `report_status_code`)
+      in addition to existing seq/PS linkage.
+    - added explicit bounded `pei_279d0_event` provenance ring with
+      per-hit gate decisions and linked `22560` context snapshots.
+    - first-bad dumps now include recent `pei_279d0_event` history.
+  - shared `statuscode_optional_path` eligibility evaluator now gates both:
+    - `pei_report_status_fix` rewrite
+    - `fw_pei_first_bad_skip` suppression.
+  - tightened semantic rewrite predicate now requires:
+    - unresolved optional path
+    - valid PEI service table pointer
+    - return PC in PEI firmware region
+    - StatusCode type class in `1..3`.
+  - validation (`IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`):
+    - `rc=124`, no host assert.
+    - `pei_279d0_status` now records `fixed=0` with
+      `ctx_reg_match=0 ctx_link=0` on the observed mismatched context path.
+    - no semantic rewrite observed at non-PEI return PCs
+      (for example `ret_pc=0x000000001fff01d0` no longer rewritten).
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

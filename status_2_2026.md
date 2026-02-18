@@ -790,6 +790,39 @@ Logs checked:
     - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
       -> `rc=137`.
 
+## Follow-up (P3-W `279d0` Link Tightening + StatusCode Rewrite Predicate Hardening)
+- Tightened `pc=0xffe279d0..0xffe27a10` rewrite gating in
+  `target/ia64/helper.c`:
+  - now requires `22560` context register match (`r33/r34`) in addition to
+    existing sequence/PS linkage.
+  - now requires a local producer-chain proof
+    (`locate_ppi` StatusCode GUID + nearby `report_status_code`) unless forced.
+- Added explicit `279d0` event provenance ring:
+  - bounded in-memory ring captures per-hit gate decisions
+    (`seq_link`, `ps_link`, `ctx_reg_match`, `chain_link`,
+    `safe_quarantine`, `fixed`) plus linked `22560` context.
+  - first-bad dumps now include recent `pei_279d0_event` history.
+- Hardened `statuscode_optional_path` rewrite predicate:
+  - added shared eligibility evaluator used by both:
+    - `pei_report_status_fix` rewrite
+    - `fw_pei_first_bad_skip` suppression
+  - semantic rewrite now requires:
+    - unresolved optional path
+    - valid PEI service table pointer
+    - return PC in PEI firmware region
+    - simple StatusCode type class (`1..3`).
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed test:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Safe-off repro (`IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 45s scripts/run-ia64-firmware.sh`):
+    - `rc=124` (timeout), no host assert.
+    - `pei_279d0_status` now shows `fixed=0` with
+      `ctx_reg_match=0 ctx_link=0` on the observed mismatched path.
+    - no `pei_report_status_fix` events at non-PEI return PCs
+      (for example `ret_pc=0x000000001fff01d0` is no longer rewritten).
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

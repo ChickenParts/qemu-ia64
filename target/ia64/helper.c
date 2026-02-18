@@ -4964,6 +4964,8 @@ typedef struct IA64PeiProducerCall {
     uint64_t cfm;
     uint64_t pfs;
     uint64_t r8;
+    uint64_t r33;
+    uint64_t r34;
     uint64_t a0;
     uint64_t a1;
     uint64_t a2;
@@ -5884,6 +5886,8 @@ static void ia64_fw_pei_producer_record_call(CPUIA64State *env,
         .cfm = env->cfm,
         .pfs = env->ar[IA64_AR_PFS],
         .r8 = env->r[8],
+        .r33 = env->r[33],
+        .r34 = env->r[34],
         .a0 = a0,
         .a1 = a1,
         .a2 = a2,
@@ -5941,11 +5945,13 @@ static void ia64_fw_pei_producer_dump_history(CPUIA64State *env,
                       " pc=%016" PRIx64 " tgt=%016" PRIx64
                       " svc=%s r8=%016" PRIx64 " b0=%016" PRIx64
                       " cfm=%016" PRIx64 " pfs=%016" PRIx64
+                      " r33=%016" PRIx64 " r34=%016" PRIx64
                       " a0=%016" PRIx64 " a1=%016" PRIx64
                       " a2=%016" PRIx64 " a3=%016" PRIx64
                       " ps=%016" PRIx64 "\n",
                       tag, ent->seq, ent->pc, ent->tgt, svc,
                       ent->r8, ent->b0, ent->cfm, ent->pfs,
+                      ent->r33, ent->r34,
                       ent->a0, ent->a1, ent->a2, ent->a3, ent->ps_ptr);
 
         if (ent->svc_id == IA64_PEI_SVC_LOCATE_PPI && ent->a1) {
@@ -13105,12 +13111,14 @@ static bool ia64_fw_pei_statuscode_optional_path_unresolved(CPUIA64State *env,
 #define IA64_PEI_STATUS_PC_27A10 0x00000000ffe27a10ULL
 #define IA64_PEI_STATUS_279D0_SEQ_WINDOW 64
 #define IA64_PEI_STATUS_279D0_SUMMARY_WINDOW 24
+#define IA64_PEI_STATUS_279D0_EVENT_MAX 128
 #define IA64_PEI_STATUS_279D0_ERR0 0xffffffff0011fff0ULL
 #define IA64_PEI_STATUS_279D0_ERR1 0xffffffff0011bff0ULL
 #define IA64_PEI_STATUS_279D0_SAFE_PC_HI 0x80000000ffffb2b0ULL
 #define IA64_PEI_STATUS_279D0_SAFE_PC_LO 0x00000000ffffb2b0ULL
 #define IA64_PEI_STATUS_279D0_SAFE_SIG0 0x024005800c292802ULL
 #define IA64_PEI_STATUS_279D0_SAFE_SIG1 0x84010004c0006200ULL
+#define IA64_PEI_STATUS_TYPE_SIMPLE_MAX 3
 
 typedef struct IA64Pei22560Chain {
     bool locate_seen;
@@ -13132,6 +13140,16 @@ typedef struct IA64Pei22560FixCtx {
     uint64_t r33;
     uint64_t r34;
 } IA64Pei22560FixCtx;
+
+typedef struct IA64PeiStatuscodeOptionalEval {
+    int64_t ppi_end;
+    bool ppi_found;
+    bool unresolved;
+    bool ps_valid;
+    bool ret_in_fw;
+    bool type_ok;
+    bool eligible;
+} IA64PeiStatuscodeOptionalEval;
 
 typedef struct IA64Pei279d0Summary {
     uint64_t first_seq;
@@ -13160,7 +13178,41 @@ typedef struct IA64Pei279d0SafeProbe {
     uint64_t q1;
 } IA64Pei279d0SafeProbe;
 
+typedef struct IA64Pei279d0Event {
+    uint64_t seq;
+    uint64_t pc;
+    uint64_t status;
+    uint64_t b0;
+    uint64_t ps_ptr;
+    int64_t ppi_end;
+    bool ppi_found;
+    bool unresolved;
+    uint64_t seq_now;
+    uint64_t seq_delta;
+    bool seq_link_ok;
+    bool ps_match;
+    bool ps_link_ok;
+    bool ctx_reg_match;
+    bool ctx_link_ok;
+    bool summary_chain_ok;
+    bool unresolved_gate_ok;
+    uint64_t ctx_seq;
+    uint64_t ctx_pc;
+    uint64_t ctx_b0;
+    uint64_t ctx_ps_ptr;
+    uint64_t ctx_r33;
+    uint64_t ctx_r34;
+    uint64_t cur_r33;
+    uint64_t cur_r34;
+    bool safe_mode;
+    bool safe_quarantine;
+    bool do_fix_ready;
+    bool do_fix;
+} IA64Pei279d0Event;
+
 static IA64Pei22560FixCtx ia64_fw_pei_22560_fix_ctx;
+static IA64Pei279d0Event ia64_fw_pei_279d0_event_ring[IA64_PEI_STATUS_279D0_EVENT_MAX];
+static uint64_t ia64_fw_pei_279d0_event_seq;
 
 static uint64_t ia64_fw_pei_current_ps_ptr(CPUIA64State *env)
 {
@@ -13181,6 +13233,38 @@ static uint64_t ia64_fw_pei_current_ps_ptr(CPUIA64State *env)
         return ps_ptr;
     }
     return 0;
+#endif
+}
+
+static IA64PeiStatuscodeOptionalEval
+ia64_fw_pei_eval_statuscode_optional_path(CPUIA64State *env,
+                                          const IA64PeiReportStatusCall *ent)
+{
+    IA64PeiStatuscodeOptionalEval out = {
+        .ppi_end = -1,
+    };
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)ent;
+    return out;
+#else
+    if (!ent) {
+        return out;
+    }
+
+    out.unresolved = ia64_fw_pei_statuscode_optional_path_unresolved(env,
+                                                                      ent->ps_ptr,
+                                                                      &out.ppi_end,
+                                                                      &out.ppi_found);
+    CPUState *cs = env_cpu(env);
+    out.ps_valid = ent->ps_ptr && ia64_fw_pei_is_ps_table(cs, ent->ps_ptr);
+    out.ret_in_fw = ia64_fw_pei_addr_in_fw(ent->ret_pc);
+    out.type_ok = ent->type > 0 && ent->type <= IA64_PEI_STATUS_TYPE_SIMPLE_MAX;
+    out.eligible = out.unresolved &&
+                   out.ps_valid &&
+                   out.ret_in_fw &&
+                   out.type_ok;
+    return out;
 #endif
 }
 
@@ -13306,6 +13390,148 @@ static void ia64_fw_pei_279d0_collect_summary(CPUIA64State *env,
             ent->svc_id == IA64_PEI_SVC_CREATE_HOB) {
             out->create_hob_seen = true;
             out->create_hob = *ent;
+        }
+    }
+}
+
+static bool ia64_fw_pei_279d0_summary_chain_ok(const IA64Pei279d0Summary *summary,
+                                               uint64_t ps_ptr)
+{
+    if (!summary->locate_seen ||
+        !summary->locate_guid_match ||
+        !summary->report_seen) {
+        return false;
+    }
+
+    if (summary->locate.seq < summary->report.seq) {
+        return false;
+    }
+    if ((summary->locate.seq - summary->report.seq) > IA64_PEI_STATUS_CHAIN_WINDOW) {
+        return false;
+    }
+
+    if (ps_ptr && summary->locate.ps_ptr && summary->locate.ps_ptr != ps_ptr) {
+        return false;
+    }
+    if (ps_ptr && summary->report.ps_ptr && summary->report.ps_ptr != ps_ptr) {
+        return false;
+    }
+    return true;
+}
+
+static void ia64_fw_pei_279d0_record_event(CPUIA64State *env,
+                                           uint64_t pc,
+                                           uint64_t status,
+                                           uint64_t ps_ptr,
+                                           const IA64PeiStatuscodeOptionalEval *opt,
+                                           uint64_t seq_now,
+                                           uint64_t seq_delta,
+                                           bool seq_link_ok,
+                                           bool ps_match,
+                                           bool ps_link_ok,
+                                           bool ctx_reg_match,
+                                           bool ctx_link_ok,
+                                           bool summary_chain_ok,
+                                           bool unresolved_gate_ok,
+                                           bool safe_mode,
+                                           bool safe_quarantine,
+                                           bool do_fix_ready,
+                                           bool do_fix)
+{
+    uint64_t seq = ++ia64_fw_pei_279d0_event_seq;
+    IA64Pei279d0Event *ev =
+        &ia64_fw_pei_279d0_event_ring[(seq - 1) % IA64_PEI_STATUS_279D0_EVENT_MAX];
+
+    *ev = (IA64Pei279d0Event) {
+        .seq = seq,
+        .pc = pc,
+        .status = status,
+        .b0 = env->b[0],
+        .ps_ptr = ps_ptr,
+        .ppi_end = opt ? opt->ppi_end : -1,
+        .ppi_found = opt ? opt->ppi_found : false,
+        .unresolved = opt ? opt->unresolved : false,
+        .seq_now = seq_now,
+        .seq_delta = seq_delta,
+        .seq_link_ok = seq_link_ok,
+        .ps_match = ps_match,
+        .ps_link_ok = ps_link_ok,
+        .ctx_reg_match = ctx_reg_match,
+        .ctx_link_ok = ctx_link_ok,
+        .summary_chain_ok = summary_chain_ok,
+        .unresolved_gate_ok = unresolved_gate_ok,
+        .ctx_seq = ia64_fw_pei_22560_fix_ctx.seq,
+        .ctx_pc = ia64_fw_pei_22560_fix_ctx.pc,
+        .ctx_b0 = ia64_fw_pei_22560_fix_ctx.b0,
+        .ctx_ps_ptr = ia64_fw_pei_22560_fix_ctx.ps_ptr,
+        .ctx_r33 = ia64_fw_pei_22560_fix_ctx.r33,
+        .ctx_r34 = ia64_fw_pei_22560_fix_ctx.r34,
+        .cur_r33 = env->r[33],
+        .cur_r34 = env->r[34],
+        .safe_mode = safe_mode,
+        .safe_quarantine = safe_quarantine,
+        .do_fix_ready = do_fix_ready,
+        .do_fix = do_fix,
+    };
+}
+
+static void ia64_fw_pei_279d0_dump_event_history(const char *tag, uint64_t pc)
+{
+    if (ia64_fw_pei_279d0_event_seq == 0) {
+        return;
+    }
+
+    int want = ia64_fw_pei_producer_history_len();
+    uint64_t have = MIN(ia64_fw_pei_279d0_event_seq,
+                        (uint64_t)IA64_PEI_STATUS_279D0_EVENT_MAX);
+    if ((uint64_t)want > have) {
+        want = (int)have;
+    }
+    if (want <= 0) {
+        return;
+    }
+
+    uint64_t first = ia64_fw_pei_279d0_event_seq - (uint64_t)want + 1;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: %s pei_279d0_event_history pc=%016" PRIx64
+                  " seq=%" PRIu64 " showing=%d\n",
+                  tag, pc, ia64_fw_pei_279d0_event_seq, want);
+    for (uint64_t s = first; s <= ia64_fw_pei_279d0_event_seq; s++) {
+        IA64Pei279d0Event *ev =
+            &ia64_fw_pei_279d0_event_ring[(s - 1) % IA64_PEI_STATUS_279D0_EVENT_MAX];
+        if (ev->seq != s) {
+            continue;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: %s pei_279d0_event seq=%" PRIu64
+                      " pc=%016" PRIx64 " status=%016" PRIx64
+                      " b0=%016" PRIx64 " ps=%016" PRIx64
+                      " unresolved=%d ppi_end=%" PRIi64 " ppi_found=%d"
+                      " seq_now=%" PRIu64 " delta=%" PRIu64 " seq_link=%d"
+                      " ps_match=%d ps_link=%d"
+                      " ctx_reg=%d ctx_link=%d chain=%d unresolved_gate=%d"
+                      " safe_mode=%d safe_quarantine=%d"
+                      " ready=%d fixed=%d\n",
+                      tag, ev->seq, ev->pc, ev->status, ev->b0, ev->ps_ptr,
+                      ev->unresolved ? 1 : 0, ev->ppi_end, ev->ppi_found ? 1 : 0,
+                      ev->seq_now, ev->seq_delta, ev->seq_link_ok ? 1 : 0,
+                      ev->ps_match ? 1 : 0, ev->ps_link_ok ? 1 : 0,
+                      ev->ctx_reg_match ? 1 : 0, ev->ctx_link_ok ? 1 : 0,
+                      ev->summary_chain_ok ? 1 : 0,
+                      ev->unresolved_gate_ok ? 1 : 0,
+                      ev->safe_mode ? 1 : 0, ev->safe_quarantine ? 1 : 0,
+                      ev->do_fix_ready ? 1 : 0, ev->do_fix ? 1 : 0);
+        if (ev->ctx_seq) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: %s pei_279d0_event_ctx"
+                          " seq=%" PRIu64 " pc=%016" PRIx64
+                          " b0=%016" PRIx64 " ps=%016" PRIx64
+                          " ctx_r33=%016" PRIx64 " ctx_r34=%016" PRIx64
+                          " cur_r33=%016" PRIx64 " cur_r34=%016" PRIx64 "\n",
+                          tag, ev->ctx_seq, ev->ctx_pc,
+                          ev->ctx_b0, ev->ctx_ps_ptr,
+                          ev->ctx_r33, ev->ctx_r34,
+                          ev->cur_r33, ev->cur_r34);
         }
     }
 }
@@ -13503,14 +13729,17 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
     }
 
     uint64_t ps_ptr = ia64_fw_pei_current_ps_ptr(env);
-    int64_t ppi_end = -1;
-    bool ppi_found = false;
-    bool unresolved = ia64_fw_pei_statuscode_optional_path_unresolved(env, ps_ptr,
-                                                                       &ppi_end,
-                                                                       &ppi_found);
+    IA64PeiReportStatusCall report_eval = {
+        .ret_pc = pc,
+        .type = env->r[33],
+        .ps_ptr = ps_ptr,
+    };
+    IA64PeiStatuscodeOptionalEval opt =
+        ia64_fw_pei_eval_statuscode_optional_path(env, &report_eval);
 
     IA64Pei279d0Summary summary;
     ia64_fw_pei_279d0_collect_summary(env, ps_ptr, &summary);
+    bool summary_chain_ok = ia64_fw_pei_279d0_summary_chain_ok(&summary, ps_ptr);
 
     uint64_t seq_now = ia64_fw_pei_producer_seq;
     uint64_t seq_delta = UINT64_MAX;
@@ -13522,14 +13751,26 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
     }
 
     CPUState *cs = env_cpu(env);
+    bool force_fix = ia64_fw_pei_279d0_status_fix_always();
     bool ps_valid = ps_ptr && ia64_fw_pei_is_ps_table(cs, ps_ptr);
     bool ps_match = ia64_fw_pei_22560_fix_ctx.valid &&
                     ps_ptr && ia64_fw_pei_22560_fix_ctx.ps_ptr &&
                     ps_ptr == ia64_fw_pei_22560_fix_ctx.ps_ptr;
-    bool ps_link_ok = ps_match ||
-        (ia64_fw_pei_279d0_status_fix_always() && ps_valid);
+    bool ps_link_ok = ps_match || (force_fix && ps_valid);
+    bool ctx_reg_match = ia64_fw_pei_22560_fix_ctx.valid &&
+                         env->r[33] == ia64_fw_pei_22560_fix_ctx.r33 &&
+                         env->r[34] == ia64_fw_pei_22560_fix_ctx.r34;
+    bool ctx_link_ok = ctx_reg_match ||
+                       (force_fix && ia64_fw_pei_22560_fix_ctx.valid);
+    bool unresolved_gate_ok = force_fix || opt.unresolved;
+    bool chain_link_ok = summary_chain_ok || force_fix;
 
-    bool do_fix_ready = fix_enabled && seq_link_ok && ps_link_ok;
+    bool do_fix_ready = fix_enabled &&
+                        seq_link_ok &&
+                        ps_link_ok &&
+                        ctx_link_ok &&
+                        chain_link_ok &&
+                        unresolved_gate_ok;
     bool safe_mode = ia64_fw_pei_279d0_safe_mode_enabled();
     IA64Pei279d0SafeProbe safe_probe = { 0 };
     bool safe_quarantine = safe_mode && do_fix_ready;
@@ -13540,6 +13781,13 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
     if (do_fix) {
         env->r[8] = 0;
     }
+    ia64_fw_pei_279d0_record_event(env, pc, status, ps_ptr, &opt, seq_now,
+                                   seq_delta, seq_link_ok,
+                                   ps_match, ps_link_ok,
+                                   ctx_reg_match, ctx_link_ok,
+                                   summary_chain_ok, unresolved_gate_ok,
+                                   safe_mode, safe_quarantine,
+                                   do_fix_ready, do_fix);
 
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         static int trace_count;
@@ -13571,11 +13819,16 @@ static void ia64_fw_pei_maybe_handle_status_transition_ffe279d0(CPUIA64State *en
                           " ppi_end=%" PRIi64 " ppi_found=%d"
                           " seq_now=%" PRIu64 " seq_link=%d delta=%" PRIu64
                           " ps_match=%d ps_link=%d"
+                          " ctx_reg_match=%d ctx_link=%d chain_link=%d"
+                          " unresolved_gate=%d"
                           " safe_mode=%d safe_quarantine=%d\n",
                           status, do_fix ? 1 : 0, pc, env->b[0], ps_ptr,
-                          unresolved ? 1 : 0, ppi_end, ppi_found ? 1 : 0,
+                          opt.unresolved ? 1 : 0, opt.ppi_end,
+                          opt.ppi_found ? 1 : 0,
                           seq_now, seq_link_ok ? 1 : 0, seq_delta,
                           ps_match ? 1 : 0, ps_link_ok ? 1 : 0,
+                          ctx_reg_match ? 1 : 0, ctx_link_ok ? 1 : 0,
+                          summary_chain_ok ? 1 : 0, unresolved_gate_ok ? 1 : 0,
                           safe_mode ? 1 : 0, safe_quarantine ? 1 : 0);
             qemu_log_mask(LOG_GUEST_ERROR,
                           "IA64: pei_279d0_status regs"
@@ -13876,17 +14129,15 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
     }
 
     bool semantic_fix = ia64_fw_pei_statuscode_semantic_fix_enabled();
-    int64_t ppi_end = -1;
-    bool ppi_found = false;
-    bool unresolved = ia64_fw_pei_statuscode_optional_path_unresolved(env, ent->ps_ptr,
-                                                                       &ppi_end,
-                                                                       &ppi_found);
+    IA64PeiStatuscodeOptionalEval opt =
+        ia64_fw_pei_eval_statuscode_optional_path(env, ent);
 
-    if (semantic_fix && !unresolved) {
+    if (semantic_fix && !opt.eligible) {
         return;
     }
     if (!semantic_fix) {
-        bool softfail = ia64_fw_pei_report_status_softfail_always() || ppi_end <= 0;
+        bool softfail = ia64_fw_pei_report_status_softfail_always() ||
+                        opt.ppi_end <= 0;
         if (!softfail) {
             return;
         }
@@ -13904,12 +14155,17 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
                           " seq=%" PRIu64 " type=%016" PRIx64
                           " value=%016" PRIx64 " inst=%016" PRIx64
                           " ps=%016" PRIx64 " ppi_end=%" PRIi64
-                          " ppi_found=%d\n",
+                          " ppi_found=%d unresolved=%d"
+                          " ps_valid=%d ret_in_fw=%d type_ok=%d\n",
                           semantic_fix ? "statuscode_optional_path"
                                        : "legacy_softfail",
                           status, ent->ret_pc, env->b[0], ent->seq,
                           ent->type, ent->value, ent->instance,
-                          ent->ps_ptr, ppi_end, ppi_found ? 1 : 0);
+                          ent->ps_ptr, opt.ppi_end, opt.ppi_found ? 1 : 0,
+                          opt.unresolved ? 1 : 0,
+                          opt.ps_valid ? 1 : 0,
+                          opt.ret_in_fw ? 1 : 0,
+                          opt.type_ok ? 1 : 0);
             log_count++;
         }
     }
@@ -18945,12 +19201,9 @@ static bool ia64_fw_pei_first_bad_should_skip_optional_statuscode(CPUIA64State *
 
     IA64PeiReportStatusCall *ent =
         &ia64_fw_pei_report_status_stack[ia64_fw_pei_report_status_sp - 1];
-    int64_t ppi_end = -1;
-    bool ppi_found = false;
-    bool unresolved = ia64_fw_pei_statuscode_optional_path_unresolved(env, ent->ps_ptr,
-                                                                       &ppi_end,
-                                                                       &ppi_found);
-    if (!unresolved) {
+    IA64PeiStatuscodeOptionalEval opt =
+        ia64_fw_pei_eval_statuscode_optional_path(env, ent);
+    if (!opt.eligible) {
         return false;
     }
 
@@ -18960,9 +19213,12 @@ static bool ia64_fw_pei_first_bad_should_skip_optional_statuscode(CPUIA64State *
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IA64: fw_pei_first_bad_skip reason=statuscode_optional_path"
                       " site=%s pc=%016" PRIx64 " r8=%016" PRIx64
-                      " ps=%016" PRIx64 " ppi_end=%" PRIi64 " ppi_found=%d\n",
+                      " ps=%016" PRIx64 " ppi_end=%" PRIi64 " ppi_found=%d"
+                      " unresolved=%d ps_valid=%d ret_in_fw=%d type_ok=%d\n",
                       ia64_fw_pei_first_bad_site_name(site), pc, status,
-                      ent->ps_ptr, ppi_end, ppi_found ? 1 : 0);
+                      ent->ps_ptr, opt.ppi_end, opt.ppi_found ? 1 : 0,
+                      opt.unresolved ? 1 : 0, opt.ps_valid ? 1 : 0,
+                      opt.ret_in_fw ? 1 : 0, opt.type_ok ? 1 : 0);
         log_count++;
     }
     return true;
@@ -19019,6 +19275,7 @@ void HELPER(fw_pei_first_bad_status_probe)(CPUIA64State *env, uint64_t pc,
     ia64_fw_pei_first_bad_dump_rse_chain(env, "fw_pei_first_bad");
     ia64_fw_pei_first_bad_dump_dispatch_state(env, "fw_pei_first_bad", pc);
     ia64_fw_pei_producer_dump_history(env, "fw_pei_first_bad", pc);
+    ia64_fw_pei_279d0_dump_event_history("fw_pei_first_bad", pc);
 
     int dump_len = ia64_fw_pei_first_bad_dump_len();
     if (dump_len > 0 && env->r[32]) {
