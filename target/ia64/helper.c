@@ -5213,6 +5213,21 @@ typedef struct IA64FwBreak0CycleState {
     IA64FwBreak0CycleFingerprint last;
 } IA64FwBreak0CycleState;
 
+typedef struct IA64XenipfMpbufferState {
+    bool active;
+    uint64_t epoch;
+    uint64_t enter_seq;
+    uint64_t last_seq;
+    uint64_t checks;
+    uint64_t repairs;
+    uint64_t steady_hits;
+    uint64_t slot336_last;
+    uint64_t slot344_last;
+    uint64_t sig_last;
+    uint64_t last_pc;
+    uint8_t last_mode;
+} IA64XenipfMpbufferState;
+
 typedef struct IA64PeiErrFixDedupFingerprint {
     uint64_t pc;
     uint64_t b0;
@@ -5233,6 +5248,8 @@ static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_report_rewrite_dedup;
 static IA64FwProgressDedupState ia64_fw_progress_dedup;
 static IA64FwBreak0CycleState ia64_fw_break0_wr_gate_cycle;
+static IA64XenipfMpbufferState ia64_fw_xenipf_mpbuffer_state;
+static uint64_t ia64_fw_xenipf_mpbuffer_seq;
 static IA64PeiErrFixDedupState ia64_fw_pei_err_fix_dedup;
 
 #define IA64_PEI_ERR_LOOP_EVENT_MAX 128
@@ -19435,6 +19452,8 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
     static int enabled = -1;
     static int log_limit = -1;
     static int log_count;
+    IA64XenipfMpbufferState *st = &ia64_fw_xenipf_mpbuffer_state;
+    uint64_t seq = ++ia64_fw_xenipf_mpbuffer_seq;
 
     if (enabled == -1) {
         const char *s = getenv("QEMU_IA64_FW_XENIPF_MPBUFFER_FIX");
@@ -19453,6 +19472,14 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
             log_limit = 0;
         }
     }
+#define MPLOG(...)                                                         \
+    do {                                                                   \
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&                         \
+            (log_limit == 0 || log_count < log_limit)) {                   \
+            qemu_log_mask(LOG_GUEST_ERROR, __VA_ARGS__);                   \
+            log_count++;                                                    \
+        }                                                                  \
+    } while (0)
 
     /*
      * xenipf/EDK firmware MP buffer bringup.
@@ -19465,23 +19492,44 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
      * Provide a minimal MP buffer in the ia64 firmware work RAM and point the
      * scratch stack slots at it so CPU0 takes the BSP path.
      */
-    bool do_log = qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-                  (log_limit == 0 || log_count < log_limit);
-    if (do_log) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: xenipf mpbuffer attempt pc=%016" PRIx64
-                      " r12=%016" PRIx64 " psr=%016" PRIx64 "\n",
-                      pc, env->r[12], env->psr);
-        log_count++;
+    if (st->active && pc < st->last_pc) {
+        MPLOG("IA64: xenipf mpbuffer exit"
+              " epoch=%" PRIu64 " reason=pc_rewind"
+              " checks=%" PRIu64 " repairs=%" PRIu64
+              " steady=%" PRIu64 " first_seq=%" PRIu64
+              " last_seq=%" PRIu64 " last_pc=%016" PRIx64 "\n",
+              st->epoch, st->checks, st->repairs, st->steady_hits,
+              st->enter_seq, st->last_seq, st->last_pc);
+        st->active = false;
     }
+    if (!st->active) {
+        st->active = true;
+        st->epoch++;
+        st->enter_seq = seq;
+        st->last_seq = seq;
+        st->checks = 0;
+        st->repairs = 0;
+        st->steady_hits = 0;
+        st->slot336_last = 0;
+        st->slot344_last = 0;
+        st->sig_last = 0;
+        st->last_mode = 0;
+        MPLOG("IA64: xenipf mpbuffer enter"
+              " epoch=%" PRIu64 " pc=%016" PRIx64
+              " r12=%016" PRIx64 " psr=%016" PRIx64 "\n",
+              st->epoch, pc, env->r[12], env->psr);
+    }
+    st->last_seq = seq;
+    st->last_pc = pc;
+    st->checks++;
+
     if (env->psr & IA64_PSR_DT) {
-        if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-            (log_limit == 0 || log_count < log_limit)) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: xenipf mpbuffer skip=psr_dt"
-                          " pc=%016" PRIx64 " psr=%016" PRIx64 "\n",
-                          pc, env->psr);
-            log_count++;
+        if (st->last_mode != 3) {
+            MPLOG("IA64: xenipf mpbuffer transition=psr_dt"
+                  " epoch=%" PRIu64 " pc=%016" PRIx64
+                  " psr=%016" PRIx64 "\n",
+                  st->epoch, pc, env->psr);
+            st->last_mode = 3;
         }
         return;
     }
@@ -19492,15 +19540,13 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
     bool sp_in_fw_work = sp >= 0x0000000100000000ULL &&
                          sp < 0x0000000101000000ULL;
     if (!sp_in_pei_temp && !sp_in_fw_work) {
-        if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-            (log_limit == 0 || log_count < log_limit)) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: xenipf mpbuffer skip=stack_out_of_temp"
-                          " pc=%016" PRIx64 " sp=%016" HWADDR_PRIx
-                          " in_temp=%d in_work=%d\n",
-                          pc, sp, sp_in_pei_temp ? 1 : 0,
-                          sp_in_fw_work ? 1 : 0);
-            log_count++;
+        if (st->last_mode != 4) {
+            MPLOG("IA64: xenipf mpbuffer transition=stack_out_of_range"
+                  " epoch=%" PRIu64 " pc=%016" PRIx64
+                  " sp=%016" HWADDR_PRIx " in_temp=%d in_work=%d\n",
+                  st->epoch, pc, sp, sp_in_pei_temp ? 1 : 0,
+                  sp_in_fw_work ? 1 : 0);
+            st->last_mode = 4;
         }
         return;
     }
@@ -19520,16 +19566,23 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
     bool sig_match = sig_now == bsp_sig;
     bool seeded_ok = slot336_match && slot344_match && sig_match;
     if (seeded_ok) {
-        if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-            (log_limit == 0 || log_count < log_limit)) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: xenipf mpbuffer skip=already_seeded"
-                          " pc=%016" PRIx64 " sp=%016" HWADDR_PRIx
-                          " slot336=%016" PRIx64 " slot344=%016" PRIx64
-                          " sig=%016" PRIx64 "\n",
-                          pc, sp, cur, cur_alt, sig_now);
-            log_count++;
+        st->steady_hits++;
+        if (st->last_mode != 1 ||
+            st->slot336_last != cur ||
+            st->slot344_last != cur_alt ||
+            st->sig_last != sig_now) {
+            MPLOG("IA64: xenipf mpbuffer transition=steady"
+                  " epoch=%" PRIu64 " pc=%016" PRIx64
+                  " sp=%016" HWADDR_PRIx " slot336=%016" PRIx64
+                  " slot344=%016" PRIx64 " sig=%016" PRIx64
+                  " checks=%" PRIu64 " repairs=%" PRIu64 "\n",
+                  st->epoch, pc, sp, cur, cur_alt, sig_now,
+                  st->checks, st->repairs);
+            st->last_mode = 1;
         }
+        st->slot336_last = cur;
+        st->slot344_last = cur_alt;
+        st->sig_last = sig_now;
         return;
     }
     const char *repair_reason = (!cur && !cur_alt) ? "missing_slots"
@@ -19543,20 +19596,20 @@ void HELPER(fw_xenipf_mpbuffer_fix)(CPUIA64State *env, uint64_t pc)
     stq_le_p(tmp, (uint64_t)mp_base);
     cpu_physical_memory_write(sp + 336, tmp, sizeof(tmp));
     cpu_physical_memory_write(sp + 344, tmp, sizeof(tmp));
+    st->repairs++;
+    st->slot336_last = mp_base;
+    st->slot344_last = mp_base;
+    st->sig_last = bsp_sig;
+    st->last_mode = 2;
 
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-        (log_limit == 0 || log_count < log_limit)) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IA64: xenipf mpbuffer applied"
-                      " pc=%016" PRIx64 " sp=%016" HWADDR_PRIx
-                      " reason=%s"
-                      " mp_base=%016" HWADDR_PRIx
-                      " slot336_old=%016" PRIx64
-                      " slot344_old=%016" PRIx64
-                      " sig_old=%016" PRIx64 "\n",
-                      pc, sp, repair_reason, mp_base, cur, cur_alt, sig_now);
-        log_count++;
-    }
+    MPLOG("IA64: xenipf mpbuffer transition=repair"
+          " epoch=%" PRIu64 " pc=%016" PRIx64 " sp=%016" HWADDR_PRIx
+          " reason=%s mp_base=%016" HWADDR_PRIx
+          " slot336_old=%016" PRIx64 " slot344_old=%016" PRIx64
+          " sig_old=%016" PRIx64 " repairs=%" PRIu64 "\n",
+          st->epoch, pc, sp, repair_reason, mp_base,
+          cur, cur_alt, sig_now, st->repairs);
+#undef MPLOG
 #endif
 }
 
