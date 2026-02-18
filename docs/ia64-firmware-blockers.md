@@ -395,6 +395,29 @@ investigation breadcrumbs.
     - active first blocker is now the `DxeLoad.c:536` assert path.
     - keep WR-gate loop guard default-off pending evidence of forward
       progression impact.
+- Current baseline fingerprint refresh (2026-02-18, P3-AD slice 1):
+  - command:
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 30s scripts/run-ia64-firmware.sh`
+  - run result:
+    - `rc=124`, no host assert/abort.
+    - serial (`scratch/ia64_logs/serial.fw.20260218-124950.log`) shows:
+      - two BSP passes through `IpfEarlyMpInit` (`check MpBuffer and find I'm BSP`).
+      - no AP rendezvous recurrence.
+      - first guest assert remains:
+        - `ASSERT ... Universal\\DxeIpl\\Pei\\DxeLoad.c Line 536`.
+  - qemu log (`scratch/ia64_logs/qemu.fw.log`) signal summary:
+    - MP-buffer sticky repair remains active and convergent in epoch 2:
+      - `xenipf mpbuffer transition=repair ... reason=slot_drift`
+      - `xenipf mpbuffer transition=steady ...`.
+    - status rewrite dedup remains active and bounded on optional StatusCode
+      path:
+      - `pei_report_status_fix reason=statuscode_optional_path ...`
+      - `pei_report_status_fix reject=dedup_repeat ...`.
+    - progress-loop churn still appears around work-RAM break(0) gate path:
+      - `fw_break0 reject=progress_dedup_repeat ...`.
+  - blocker classification (current):
+    - active first blocker remains `DxeLoad.c:536`.
+    - prior MP-init AP-path blocker remains suppressed in this repro profile.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
