@@ -3517,10 +3517,9 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 /*
                  * chk.a.clr f1, target25
                  *
-                 * The kernel uses advanced floating-point loads (ldf*.a) with
-                 * chk.a.clr recovery branches. We do not model the ALAT yet;
-                 * treat advanced loads as always successful, so the check does
-                 * not branch.
+                 * Model this through the same minimal ALAT path as integer
+                 * chk.a.clr so advanced FP loads can take recovery branches on
+                 * aliasing stores.
                  */
                 uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
                 uint64_t imm =
@@ -5175,6 +5174,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                 x6 == 0x0e || x6 == 0x22 || x6 == 0x26);
                 bool is_ldfd = (x6 == 0x03 || x6 == 0x07 || x6 == 0x0b ||
                                 x6 == 0x0f || x6 == 0x23 || x6 == 0x27);
+                bool is_advanced = (x6 >= 0x08 && x6 <= 0x0f);
 
                 if (is_ldfe || is_ldf8 || is_ldfs || is_ldfd) {
                     uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
@@ -5301,6 +5301,13 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     if (f1 > 1) {
                         gen_fr_store_lo(f1, mant);
                         gen_fr_store_hi(f1, expw);
+                        if (is_advanced) {
+                            uint32_t alat_size = is_ldfe ? 16 : (is_ldfs ? 4 : 8);
+                            gen_helper_alat_record_fr(tcg_env,
+                                                      tcg_constant_i32(f1),
+                                                      mem_addr,
+                                                      tcg_constant_i32(alat_size));
+                        }
                     }
 
                     if (major == 0x6 && m == 1) {

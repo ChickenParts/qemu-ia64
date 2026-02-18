@@ -317,6 +317,49 @@ Logs checked:
   - no `IA64 UNIMPL` lines in fresh firmware/kernel logs.
   - no actionable fresh F-slot hit table for this tranche.
 
+## Follow-up (CPU-C3 RSE/ALAT Correctness Hardening)
+- `target/ia64/helper.c`
+  - Added RSE strict trace controls:
+    - `QEMU_IA64_RSE_STRICT_TRACE`
+    - `QEMU_IA64_RSE_STRICT_TRACE_LIMIT`
+  - Hardened RSE `loadrs` / `flushrs` behavior:
+    - clamps `ar.rsc.loadrs` accounting in lazy mode
+    - `loadrs` now consumes/clears `loadrs` and keeps
+      `ar.bsp`/`ar.bspstore` coherent
+    - `flushrs` now clears `loadrs` and synchronizes
+      `ar.bspstore` with `ar.bsp` using lazy/eager-aware spill counts
+  - Added strict-trace hooks on `alloc`, `loadrs`, `flushrs`,
+    `set_bspstore`, and `ret_restore`.
+  - Added ALAT trace controls:
+    - `QEMU_IA64_ALAT_TRACE`
+    - `QEMU_IA64_ALAT_TRACE_LIMIT`
+  - Added ALAT trace points on record/check/invalidate/invala paths.
+- `target/ia64/translate.c`
+  - Updated stale `chk.a.clr f1` comment to match implemented ALAT behavior.
+  - Wired FR ALAT recording for advanced FP loads (`ldf*.a`) so
+    `chk.a.{clr,nc} f*` can detect aliasing stores.
+- New directed selftests:
+  - `scripts/ia64-rse-selftest.S`
+  - `scripts/run-ia64-rse-tests.sh`
+  - `scripts/ia64-alat-selftest.S`
+  - `scripts/run-ia64-alat-tests.sh`
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-rse-tests.sh 10s` passed.
+    - `scripts/run-ia64-alat-tests.sh 12s` passed.
+    - `scripts/run-ia64-op7-tests.sh 12s` passed (regression).
+    - `scripts/run-ia64-nat-tests.sh 12s` passed (regression).
+  - Runtime smoke:
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-firmware.sh`
+      -> `rc=124` (timeout path, no host abort).
+    - `IA64_GUEST_ERRORS=1 timeout 60s scripts/run-ia64-kernel.sh`
+      -> `rc=137` (killed after timeout path, no host abort).
+  - UNIMPL refresh:
+    - `scripts/ia64-unimpl-report.sh --format tsv --top 30 ...`
+      reported no `IA64 UNIMPL` lines in the fresh logs.
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.

@@ -93,6 +93,8 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_TB_LOG_MAX_PC` | Filter TB log end (inclusive) |
 | `QEMU_IA64_MOVRB_LOG` | Log MOV from branch register instructions |
 | `QEMU_IA64_BRL_LOG` | Log long branch instructions |
+| `QEMU_IA64_RSE_STRICT_TRACE` | Enable strict RSE transition tracing (`alloc`/`loadrs`/`flushrs`/`set_bspstore`/`ret_restore`) |
+| `QEMU_IA64_RSE_STRICT_TRACE_LIMIT` | Limit RSE strict trace entries |
 
 ### Branch/Call Tracing
 
@@ -145,6 +147,8 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_DBG_MUNIT` | Debug M-unit instructions |
 | `QEMU_IA64_DBG_MUNIT_PC` | Filter M-unit debug by PC |
 | `QEMU_IA64_DBG_AR_LC` | Debug AR.LC changes |
+| `QEMU_IA64_ALAT_TRACE` | Trace ALAT record/check/invalidate events |
+| `QEMU_IA64_ALAT_TRACE_LIMIT` | Limit ALAT trace entries |
 
 ### Probe Debugging
 

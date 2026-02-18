@@ -255,6 +255,59 @@ static inline uint64_t ia64_rsc_get_mode(uint64_t rsc)
     return rsc & IA64_RSC_MODE_MASK;
 }
 
+static bool ia64_rse_strict_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_RSE_STRICT_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_rse_strict_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 128;
+        const char *s = getenv("QEMU_IA64_RSE_STRICT_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static void ia64_rse_strict_trace(CPUIA64State *env, const char *tag,
+                                  uint64_t arg0, uint64_t arg1)
+{
+    static int count;
+    if (!ia64_rse_strict_trace_enabled() || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    if (count >= ia64_rse_strict_trace_limit()) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: rse_strict tag=%s ip=%016" PRIx64
+                  " rsc=%016" PRIx64 " loadrs=%" PRIu64
+                  " bsp=%016" PRIx64 " bspstore=%016" PRIx64
+                  " cfm=%016" PRIx64 " pfs=%016" PRIx64
+                  " r12=%016" PRIx64 " arg0=%016" PRIx64
+                  " arg1=%016" PRIx64 "\n",
+                  tag ? tag : "?",
+                  env->ip, env->ar[IA64_AR_RSC],
+                  ia64_rsc_get_loadrs(env->ar[IA64_AR_RSC]),
+                  env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
+                  env->cfm, env->ar[IA64_AR_PFS], env->r[12],
+                  arg0, arg1);
+    count++;
+}
+
 static inline bool ia64_rse_is_lazy(const CPUIA64State *env)
 {
     return ia64_rsc_get_mode(env->ar[IA64_AR_RSC]) == 0;
@@ -283,6 +336,11 @@ static inline uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
         delta -= 0x3e;
     }
     return addr + ((uint64_t)(num_regs + delta / 0x3f) << 3);
+}
+
+static inline uint8_t ia64_rse_bytes_to_regs(uint64_t bytes)
+{
+    return MIN((uint64_t)96, bytes >> 3);
 }
 
 static inline bool ia64_gr_nat_get(const CPUIA64State *env, uint32_t gr)
@@ -319,6 +377,9 @@ static inline void ia64_rse_update_loadrs(CPUIA64State *env, uint64_t bsp)
     }
     uint64_t bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
     uint64_t bytes = (bsp > bspstore) ? (bsp - bspstore) : 0;
+    if (bytes > IA64_RSC_LOADRS_MASK) {
+        bytes = IA64_RSC_LOADRS_MASK;
+    }
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], bytes);
 }
 
@@ -368,10 +429,11 @@ static void ia64_rse_store_frame(CPUIA64State *env, uint64_t bsp, uint8_t sof)
     env->ar[IA64_AR_RNAT] = rnat;
 }
 
-static void ia64_rse_load_frame(CPUIA64State *env, uint64_t bsp, uint8_t sof)
+static void ia64_rse_load_frame(CPUIA64State *env, uint64_t bsp, uint8_t count,
+                                bool clear_tail_nat)
 {
-    uint8_t count = MIN(sof, (uint8_t)96);
-    if (count == 0) {
+    count = MIN(count, (uint8_t)96);
+    if (!count) {
         return;
     }
 
@@ -408,8 +470,10 @@ static void ia64_rse_load_frame(CPUIA64State *env, uint64_t bsp, uint8_t sof)
         }
     }
 
-    for (uint32_t i = count; i < 96; i++) {
-        env->nat[32 + i] = 0;
+    if (clear_tail_nat) {
+        for (uint32_t i = count; i < 96; i++) {
+            env->nat[32 + i] = 0;
+        }
     }
 }
 
@@ -426,6 +490,10 @@ static inline uint32_t ia64_fr_phys(const CPUIA64State *env, uint32_t f)
     }
     return IA64_FR_ROT_BASE + off;
 }
+
+static void ia64_alat_trace(CPUIA64State *env, const char *op, const char *cls,
+                            uint32_t reg, uint64_t addr, uint32_t size,
+                            uint32_t miss, uint32_t clr);
 
 static void ia64_rse_push_window(CPUIA64State *env, uint64_t ret_addr);
 static bool ia64_rse_pop_window(CPUIA64State *env);
@@ -972,6 +1040,7 @@ uint64_t HELPER(ld_s)(CPUIA64State *env, uint64_t addr, uint32_t size,
                     if (env->alat_gr_valid) {
                         env->alat_gr_valid--;
                     }
+                    ia64_alat_trace(env, "invalidate", "gr", r, addr, size, 1, 0);
                 }
             } else {
                 if (!e->valid) {
@@ -980,6 +1049,7 @@ uint64_t HELPER(ld_s)(CPUIA64State *env, uint64_t addr, uint32_t size,
                 e->addr = addr;
                 e->size = size;
                 e->valid = 1;
+                ia64_alat_trace(env, "record", "gr", r, addr, size, 0, 0);
             }
         }
     }
@@ -10810,6 +10880,53 @@ static inline bool ia64_ranges_overlap(uint64_t a1, uint32_t s1,
     return !(e1 <= a2 || e2 <= a1);
 }
 
+static bool ia64_alat_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_ALAT_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_alat_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 256;
+        const char *s = getenv("QEMU_IA64_ALAT_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+    }
+    return limit;
+}
+
+static void ia64_alat_trace(CPUIA64State *env, const char *op, const char *cls,
+                            uint32_t reg, uint64_t addr, uint32_t size,
+                            uint32_t miss, uint32_t clr)
+{
+    static int count;
+    if (!ia64_alat_trace_enabled() || !qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        return;
+    }
+    if (count >= ia64_alat_trace_limit()) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: alat op=%s cls=%s ip=%016" PRIx64
+                  " reg=%u addr=%016" PRIx64 " size=%u miss=%u clr=%u"
+                  " gr_valid=%u fr_valid=%u\n",
+                  op ? op : "?", cls ? cls : "?",
+                  env->ip, reg & 0x7f, addr, size, miss, clr,
+                  env->alat_gr_valid, env->alat_fr_valid);
+    count++;
+}
+
 static void ia64_alat_clear_entries(struct IA64ALATEntry *entries,
                                    uint32_t *count, size_t n)
 {
@@ -10824,10 +10941,14 @@ static void ia64_alat_clear_entries(struct IA64ALATEntry *entries,
 
 void HELPER(alat_invalidate_all)(CPUIA64State *env)
 {
+    uint32_t gr_before = env->alat_gr_valid;
+    uint32_t fr_before = env->alat_fr_valid;
     ia64_alat_clear_entries(env->alat_gr, &env->alat_gr_valid,
                             ARRAY_SIZE(env->alat_gr));
     ia64_alat_clear_entries(env->alat_fr, &env->alat_fr_valid,
                             ARRAY_SIZE(env->alat_fr));
+    ia64_alat_trace(env, "invalidate_all", "all", 0, 0, 0,
+                    gr_before + fr_before, 1);
 }
 
 void HELPER(alat_record_gr)(CPUIA64State *env, uint32_t reg,
@@ -10844,6 +10965,7 @@ void HELPER(alat_record_gr)(CPUIA64State *env, uint32_t reg,
     e->addr = addr;
     e->size = size;
     e->valid = 1;
+    ia64_alat_trace(env, "record", "gr", reg, addr, size, 0, 0);
 }
 
 void HELPER(alat_record_fr)(CPUIA64State *env, uint32_t reg,
@@ -10860,6 +10982,7 @@ void HELPER(alat_record_fr)(CPUIA64State *env, uint32_t reg,
     e->addr = addr;
     e->size = size;
     e->valid = 1;
+    ia64_alat_trace(env, "record", "fr", reg, addr, size, 0, 0);
 }
 
 uint64_t HELPER(alat_check_gr)(CPUIA64State *env, uint32_t reg, uint32_t clr)
@@ -10879,6 +11002,7 @@ uint64_t HELPER(alat_check_gr)(CPUIA64State *env, uint32_t reg, uint32_t clr)
     if (clr && miss) {
         e->valid = 0;
     }
+    ia64_alat_trace(env, "check", "gr", reg, e->addr, e->size, miss, clr);
     return miss;
 }
 
@@ -10899,6 +11023,7 @@ uint64_t HELPER(alat_check_fr)(CPUIA64State *env, uint32_t reg, uint32_t clr)
     if (clr && miss) {
         e->valid = 0;
     }
+    ia64_alat_trace(env, "check", "fr", reg, e->addr, e->size, miss, clr);
     return miss;
 }
 
@@ -10917,6 +11042,7 @@ void HELPER(alat_invalidate)(CPUIA64State *env, uint64_t addr, uint32_t size)
             if (ia64_ranges_overlap(addr, size, e->addr, e->size)) {
                 e->valid = 0;
                 env->alat_gr_valid--;
+                ia64_alat_trace(env, "invalidate", "gr", r, addr, size, 1, 0);
             }
         }
     }
@@ -10930,6 +11056,7 @@ void HELPER(alat_invalidate)(CPUIA64State *env, uint64_t addr, uint32_t size)
             if (ia64_ranges_overlap(addr, size, e->addr, e->size)) {
                 e->valid = 0;
                 env->alat_fr_valid--;
+                ia64_alat_trace(env, "invalidate", "fr", f, addr, size, 1, 0);
             }
         }
     }
@@ -10966,9 +11093,11 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
     int64_t growth = (int64_t)new_sof - (int64_t)old_sof;
     if (growth != 0) {
         uint64_t bsp = ia64_rse_get_bsp(env);
+        uint64_t old_bsp = bsp;
         bsp = ia64_rse_skip_regs(bsp, growth);
         env->ar[IA64_AR_BSP] = bsp;
         ia64_rse_update_loadrs(env, bsp);
+        ia64_rse_strict_trace(env, "alloc_bsp", old_bsp, bsp);
     }
 
     /*
@@ -12756,6 +12885,8 @@ void HELPER(ret_restore)(CPUIA64State *env)
     }
     bool watch_hit = (watch_b0 != 0) &&
                      (((env->b[0] ^ watch_b0) & ~0xFULL) == 0);
+    ia64_rse_strict_trace(env, "ret_restore_pre",
+                          ia64_rse_get_bsp(env), env->b[0]);
     if (log_count < 64) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "ret_restore ip=0x%" PRIx64 " b0=0x%" PRIx64
@@ -12948,6 +13079,8 @@ void HELPER(ret_restore)(CPUIA64State *env)
                       env->ip, env->b[0], env->cfm, env->ar[64],
                       env->rse_depth, env->r[1], env->r[37], env->r[38]);
     }
+    ia64_rse_strict_trace(env, "ret_restore_post",
+                          ia64_rse_get_bsp(env), env->ar[IA64_AR_RSC]);
 }
 
 void HELPER(ret_restore_b0)(CPUIA64State *env)
@@ -24275,39 +24408,64 @@ void HELPER(ptr_i)(CPUIA64State *env, uint64_t va, uint64_t range)
 void HELPER(flushrs)(CPUIA64State *env)
 {
     /*
-     * For now, model an eager RSE with an empty dirty partition: flushrs
-     * synchronizes ar.bspstore with ar.bsp and clears ar.rsc.loadrs.
-     *
-     * Linux uses enforced-lazy + flushrs when switching stacks/modes and
-     * expects the loadrs field to report the dirty-partition size.
+     * flushrs synchronizes ar.bspstore with ar.bsp and clears ar.rsc.loadrs.
+     * In lazy mode, use loadrs as the dirty-byte count; in eager mode spill
+     * the current frame size (SOF) like the existing eager paths.
      */
+    uint64_t rsc = env->ar[IA64_AR_RSC];
+    uint64_t loadrs = ia64_rsc_get_loadrs(rsc) & ~0x7ULL;
     uint64_t bsp = ia64_rse_get_bsp(env);
     uint8_t sof = env->cfm & 0x7f;
-    if (!ia64_rse_is_lazy(env)) {
-        ia64_rse_store_frame(env, bsp, sof);
+    uint8_t spill_regs = ia64_rse_is_lazy(env) ? ia64_rse_bytes_to_regs(loadrs)
+                                               : MIN(sof, (uint8_t)96);
+
+    ia64_rse_strict_trace(env, "flushrs_pre", loadrs, spill_regs);
+    if (spill_regs) {
+        ia64_rse_store_frame(env, bsp, spill_regs);
     }
+    bsp &= ~0x7ULL;
     env->ar[IA64_AR_BSP] = bsp;
     env->ar[IA64_AR_BSPSTORE] = bsp;
-    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);
+    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, 0);
+    ia64_rse_strict_trace(env, "flushrs_post", bsp, 0);
 }
 
 void HELPER(loadrs)(CPUIA64State *env)
 {
     /*
-     * Minimal loadrs implementation sufficient for reaching userspace.
-     *
-     * We do not model the full RSE backing-store/dirty-partition machinery
-     * yet. Treat loadrs as synchronizing bspstore with bsp and clearing the
-     * loadrs field, which is enough for Linux's rse_clear_invalid path when
-     * starting the first user process.
+     * Consume ar.rsc.loadrs bytes from backing store, reload the corresponding
+     * stacked registers, and clear loadrs. The simplified model keeps BSP and
+     * BSPSTORE synchronized after the consume step.
      */
     uint64_t rsc = env->ar[IA64_AR_RSC];
-    (void)ia64_rsc_get_loadrs(rsc);
+    uint64_t loadrs = ia64_rsc_get_loadrs(rsc) & ~0x7ULL;
     uint64_t bsp = ia64_rse_get_bsp(env);
-    uint8_t sof = env->cfm & 0x7f;
-    ia64_rse_load_frame(env, bsp, sof);
+    uint64_t bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
+    uint64_t load_end = bspstore;
+    uint8_t load_regs = ia64_rse_bytes_to_regs(loadrs);
+
+    ia64_rse_strict_trace(env, "loadrs_pre", loadrs, bspstore);
+
+    if (loadrs) {
+        load_end = bspstore + loadrs;
+        if (load_end < bspstore) {
+            load_end = bspstore;
+        }
+        if (load_regs) {
+            ia64_rse_load_frame(env, load_end, load_regs, false);
+        }
+        if (load_end < bsp) {
+            load_end = bsp;
+        }
+        env->ar[IA64_AR_BSPSTORE] = load_end;
+    }
+    if (bsp < env->ar[IA64_AR_BSPSTORE]) {
+        bsp = env->ar[IA64_AR_BSPSTORE];
+    }
     env->ar[IA64_AR_BSP] = bsp;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, 0);
+    ia64_rse_strict_trace(env, "loadrs_post",
+                          load_regs, env->ar[IA64_AR_BSPSTORE]);
 }
 
 void HELPER(cover)(CPUIA64State *env)
@@ -24355,6 +24513,7 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
      * ar.rsc.loadrs.
      */
     bspstore &= ~0x7ULL;
+    uint64_t old_bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
     static int log_bspstore = -1;
     if (log_bspstore == -1) {
         log_bspstore = getenv("QEMU_IA64_LOG_BSPSTORE") ? 1 : 0;
@@ -24379,11 +24538,14 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
         ia64_rse_switch_bspstore(env, bspstore);
     }
 #endif
+    ia64_rse_strict_trace(env, "set_bspstore_pre", old_bspstore, bspstore);
     env->ar[IA64_AR_BSPSTORE] = bspstore;
     env->ar[IA64_AR_BSP] = bspstore;
     env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], 0);
     env->ar[IA64_AR_RNAT] = 0;
     memset(&env->nat[32], 0, 96);
+    ia64_rse_strict_trace(env, "set_bspstore_post",
+                          env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RSC]);
 }
 
 uint64_t HELPER(get_itc)(CPUIA64State *env)

@@ -110,6 +110,20 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
 - Add directed A-unit NaT propagation selftest harness (`add`, `and`,
   `shladd`, `adds`, `pavg2`) and runner
   (`scripts/ia64-nat-selftest.S`, `scripts/run-ia64-nat-tests.sh`).
+- Harden RSE `loadrs` / `flushrs` handling to consume/clear `ar.rsc.loadrs`,
+  keep `ar.bsp`/`ar.bspstore` coherent, and clamp `loadrs` accounting in
+  lazy mode (`target/ia64/helper.c`).
+- Add env-gated RSE strict tracing (`QEMU_IA64_RSE_STRICT_TRACE`,
+  `QEMU_IA64_RSE_STRICT_TRACE_LIMIT`) on `alloc`, `loadrs`, `flushrs`,
+  `set_bspstore`, and `ret_restore` paths (`target/ia64/helper.c`).
+- Record FP advanced loads (`ldf*.a`) into ALAT and clean up stale `chk.a`
+  comments to match implemented behavior (`target/ia64/translate.c`).
+- Add env-gated ALAT trace logging (`QEMU_IA64_ALAT_TRACE`,
+  `QEMU_IA64_ALAT_TRACE_LIMIT`) for ALAT record/check/invalidate paths
+  (`target/ia64/helper.c`).
+- Add directed RSE/ALAT bare-kernel selftests and runners
+  (`scripts/ia64-rse-selftest.S`, `scripts/run-ia64-rse-tests.sh`,
+   `scripts/ia64-alat-selftest.S`, `scripts/run-ia64-alat-tests.sh`).
 
 ## Open issues (needs work)
 
@@ -138,11 +152,13 @@ For quarter-level execution sequencing, see `IA64_ROADMAP.md`.
   firmware uses it.
 - F-unit decode is still a bringup subset; many architected F-slot encodings still
   fall through to `gen_unimpl("F-slot")` (`target/ia64/translate.c`).
-- ALAT/advanced load modeling is minimal; advanced load exceptions and NaT
-  handling are not fully implemented (ld.a/chk.a paths in `target/ia64/translate.c`
-  and `target/ia64/helper.c`).
-- RSE dirty/clean partition tracking is still incomplete; we avoid eager spills
-  in lazy mode, but loadrs/flushrs semantics are not yet fully modeled.
+- ALAT/advanced load modeling is still partial; integer + FP ALAT record/check
+  paths are now wired for `ld*.a`/`ldf*.a` + `chk.a`, but advanced-load
+  exception/NaT corner cases are not fully modeled
+  (`target/ia64/translate.c`, `target/ia64/helper.c`).
+- RSE dirty/clean partition tracking is still partial; `loadrs`/`flushrs`
+  now consume/clear `loadrs` and maintain BSP/BSPSTORE invariants, but full
+  architectural dirty/clean partition behavior is not yet complete.
 - EFI system table scanning is heuristic and may miss firmware layouts; verify
   search ranges for your Flash.fd and consider using firmware-provided pointers
   instead of wide scans (`target/ia64/helper.c:2046`).
