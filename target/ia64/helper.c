@@ -5175,6 +5175,7 @@ typedef struct IA64PeiStatusRewriteDedupState {
 } IA64PeiStatusRewriteDedupState;
 
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
+static IA64PeiStatusRewriteDedupState ia64_fw_pei_report_rewrite_dedup;
 
 static void ia64_fw_pei_ps_epoch_record(CPUIA64State *env, uint64_t pc,
                                         uint64_t ps_ptr, uint16_t svc_id,
@@ -15135,6 +15136,45 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
         }
     }
 
+    IA64PeiStatusRewriteFingerprint rewrite_fp = {
+        .ret_pc = ent->ret_pc,
+        .ps_ptr = ent->ps_ptr,
+        .type = ent->type,
+        .value = ent->value,
+        .instance = ent->instance,
+        .seq = ent->seq,
+    };
+    uint64_t rewrite_fp_id = ia64_fw_pei_status_rewrite_fp_id(&rewrite_fp);
+    uint64_t dedup_delta = UINT64_MAX;
+    bool dedup_hit = ia64_fw_pei_status_rewrite_dedup_hit(
+        &ia64_fw_pei_report_rewrite_dedup, &rewrite_fp, &dedup_delta);
+    if (dedup_hit) {
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            static int reject_log_count;
+            int log_limit = ia64_fw_pei_statuscode_semantic_fix_log_limit();
+            if (reject_log_count < log_limit) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_report_status_fix"
+                              " reject=dedup_repeat"
+                              " ret_pc=%016" PRIx64 " b0=%016" PRIx64
+                              " seq=%" PRIu64 " ps=%016" PRIx64
+                              " type=%016" PRIx64 " value=%016" PRIx64
+                              " inst=%016" PRIx64
+                              " fp=%016" PRIx64
+                              " dedup_delta=%" PRIu64
+                              " dedup_window=%" PRIu64 "\n",
+                              ent->ret_pc, env->b[0], ent->seq, ent->ps_ptr,
+                              ent->type, ent->value, ent->instance,
+                              rewrite_fp_id, dedup_delta,
+                              ia64_fw_pei_status_rewrite_dedup_window());
+                reject_log_count++;
+            }
+        }
+        return;
+    }
+    ia64_fw_pei_status_rewrite_dedup_remember(&ia64_fw_pei_report_rewrite_dedup,
+                                              &rewrite_fp);
+
     env->r[8] = 0;
     if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
         static int log_count;
@@ -15152,7 +15192,8 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
                           " ps_epoch_req=%d ps_epoch_seen=%d"
                           " ps_epoch_match=%d ps_epoch=%016" PRIx64
                           " ps_epoch_src=%s ps_epoch_seq=%" PRIu64
-                          " ps_epoch_cont=%d\n",
+                          " ps_epoch_cont=%d"
+                          " dedup_fp=%016" PRIx64 "\n",
                           semantic_fix ? "statuscode_optional_path"
                                        : "legacy_softfail",
                           status, ent->ret_pc, env->b[0], ent->seq,
@@ -15168,7 +15209,8 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
                           opt.ps_epoch_ptr,
                           ia64_fw_pei_ps_source_name(opt.ps_epoch_source),
                           opt.ps_epoch_seq,
-                          opt.ps_epoch_from_continuity ? 1 : 0);
+                          opt.ps_epoch_from_continuity ? 1 : 0,
+                          rewrite_fp_id);
             log_count++;
         }
     }
