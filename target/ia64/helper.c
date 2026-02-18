@@ -5188,9 +5188,26 @@ typedef struct IA64FwProgressDedupState {
     IA64FwProgressDedupFingerprint last;
 } IA64FwProgressDedupState;
 
+typedef struct IA64PeiErrFixDedupFingerprint {
+    uint64_t pc;
+    uint64_t b0;
+    uint64_t r8;
+    uint64_t r32;
+    uint64_t r33;
+    uint64_t r34;
+    uint64_t ps_ptr;
+    uint64_t seq;
+} IA64PeiErrFixDedupFingerprint;
+
+typedef struct IA64PeiErrFixDedupState {
+    IA64PeiErrFixDedupFingerprint history[32];
+    uint64_t next_idx;
+} IA64PeiErrFixDedupState;
+
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_22560_rewrite_dedup;
 static IA64PeiStatusRewriteDedupState ia64_fw_pei_report_rewrite_dedup;
 static IA64FwProgressDedupState ia64_fw_progress_dedup;
+static IA64PeiErrFixDedupState ia64_fw_pei_err_fix_dedup;
 
 #define IA64_PEI_ERR_LOOP_EVENT_MAX 128
 typedef struct IA64PeiErrLoopEvent {
@@ -5670,6 +5687,107 @@ static uint64_t ia64_fw_progress_dedup_fp_id(
 {
     uint64_t h = fp->pc ^ (fp->b0 << 1) ^
                  ((uint64_t)fp->code_type << 32) ^ fp->code_value ^
+                 (fp->ps_ptr << 3);
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= (h >> 33);
+    return h;
+}
+
+static bool ia64_fw_pei_err_fix_dedup_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_ERR_FIX_DEDUP");
+        enabled = (!s || !*s || strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static uint64_t ia64_fw_pei_err_fix_dedup_window(void)
+{
+    static uint64_t window = UINT64_MAX;
+    if (window == UINT64_MAX) {
+        window = 64;
+        const char *s = getenv("QEMU_IA64_PEI_ERR_FIX_DEDUP_WINDOW");
+        if (s && *s) {
+            long long v = atoll(s);
+            if (v > 0) {
+                window = (uint64_t)v;
+            }
+        }
+        if (window == 0) {
+            window = 1;
+        }
+    }
+    return window;
+}
+
+static bool ia64_fw_pei_err_fix_dedup_fp_equal(
+    const IA64PeiErrFixDedupFingerprint *a,
+    const IA64PeiErrFixDedupFingerprint *b)
+{
+    return a->pc == b->pc &&
+           a->b0 == b->b0 &&
+           a->r8 == b->r8 &&
+           a->ps_ptr == b->ps_ptr;
+}
+
+static bool ia64_fw_pei_err_fix_dedup_hit(const IA64PeiErrFixDedupState *state,
+                                          const IA64PeiErrFixDedupFingerprint *fp,
+                                          uint64_t *delta_out)
+{
+    if (delta_out) {
+        *delta_out = UINT64_MAX;
+    }
+    if (!ia64_fw_pei_err_fix_dedup_enabled()) {
+        return false;
+    }
+    uint64_t seen_seq = 0;
+    for (size_t i = 0; i < ARRAY_SIZE(state->history); i++) {
+        const IA64PeiErrFixDedupFingerprint *ent = &state->history[i];
+        if (!ent->seq || ent->seq > fp->seq) {
+            continue;
+        }
+        if (ia64_fw_pei_err_fix_dedup_fp_equal(ent, fp) &&
+            ent->seq > seen_seq) {
+            seen_seq = ent->seq;
+        }
+    }
+    if (!seen_seq) {
+        return false;
+    }
+    uint64_t delta = fp->seq - seen_seq;
+    if (delta_out) {
+        *delta_out = delta;
+    }
+    return delta <= ia64_fw_pei_err_fix_dedup_window();
+}
+
+static void ia64_fw_pei_err_fix_dedup_remember(
+    IA64PeiErrFixDedupState *state,
+    const IA64PeiErrFixDedupFingerprint *fp)
+{
+    if (!ia64_fw_pei_err_fix_dedup_enabled()) {
+        return;
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(state->history); i++) {
+        IA64PeiErrFixDedupFingerprint *ent = &state->history[i];
+        if (ent->seq && ia64_fw_pei_err_fix_dedup_fp_equal(ent, fp)) {
+            *ent = *fp;
+            return;
+        }
+    }
+    IA64PeiErrFixDedupFingerprint *slot =
+        &state->history[state->next_idx % ARRAY_SIZE(state->history)];
+    *slot = *fp;
+    state->next_idx++;
+}
+
+static uint64_t ia64_fw_pei_err_fix_dedup_fp_id(
+    const IA64PeiErrFixDedupFingerprint *fp)
+{
+    uint64_t h = fp->pc ^ (fp->b0 << 1) ^ (fp->r8 << 7) ^
                  (fp->ps_ptr << 3);
     h ^= (h >> 33);
     h *= 0xff51afd7ed558ccdULL;
@@ -20815,6 +20933,45 @@ void HELPER(fw_pei_err_watch)(CPUIA64State *env, uint64_t pc)
         ia64_fw_pei_err_loop_record(env, pc, r8);
     }
     HELPER(fw_pei_first_bad_status_probe)(env, pc, 0);
+    IA64PeiErrFixDedupFingerprint err_fp = {
+        .pc = pc,
+        .b0 = env->b[0],
+        .r8 = r8,
+        .r32 = env->r[32],
+        .r33 = env->r[33],
+        .r34 = env->r[34],
+        .ps_ptr = ia64_fw_progress_guess_ps_ptr(env),
+        .seq = ia64_fw_pei_err_loop_seq,
+    };
+    uint64_t err_fp_id = ia64_fw_pei_err_fix_dedup_fp_id(&err_fp);
+    uint64_t err_dedup_delta = UINT64_MAX;
+    bool err_dedup_candidate = r8 == (IA64_EFI_STATUS_ERROR_BIT | 14);
+    bool err_dedup_hit = err_dedup_candidate &&
+                         ia64_fw_pei_err_fix_dedup_hit(&ia64_fw_pei_err_fix_dedup,
+                                                       &err_fp,
+                                                       &err_dedup_delta);
+    if (err_dedup_candidate && !err_dedup_hit) {
+        ia64_fw_pei_err_fix_dedup_remember(&ia64_fw_pei_err_fix_dedup, &err_fp);
+    }
+    if (err_dedup_hit) {
+        static int dedup_reject_log_count;
+        if (limit == 0 || dedup_reject_log_count < limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_pei_err reject=err_dedup_repeat"
+                          " pc=%016" PRIx64 " b0=%016" PRIx64
+                          " r8=%016" PRIx64 " r32=%016" PRIx64
+                          " r33=%016" PRIx64 " r34=%016" PRIx64
+                          " ps=%016" PRIx64 " fp=%016" PRIx64
+                          " dedup_delta=%" PRIu64
+                          " dedup_window=%" PRIu64 "\n",
+                          pc, env->b[0], r8, env->r[32], env->r[33], env->r[34],
+                          err_fp.ps_ptr, err_fp_id,
+                          err_dedup_delta,
+                          ia64_fw_pei_err_fix_dedup_window());
+            dedup_reject_log_count++;
+        }
+        return;
+    }
     static uint64_t last_pc;
     static uint64_t last_r8;
     static bool dumped_ppi;
