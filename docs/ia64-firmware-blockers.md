@@ -461,6 +461,23 @@ investigation breadcrumbs.
     - full directed matrix (`op7`, `fslot`, `nat`, `rse`, `alat`) passed.
     - firmware repro remains stable (`rc=124`) with unchanged first blocker:
       `DxeLoad.c:536`.
+- P3-AE baseline refresh (2026-02-18, slice 1):
+  - command:
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 35s scripts/run-ia64-firmware.sh`
+  - result:
+    - `rc=124`, no host assert/abort.
+    - serial (`scratch/ia64_logs/serial.fw.20260218-132806.log`):
+      - `IpfEarlyMpInit` BSP path observed twice.
+      - first assert remains:
+        - `ASSERT ... Universal\\DxeIpl\\Pei\\DxeLoad.c Line 536`.
+    - qemu log confirms prior P3-AD behavior is stable:
+      - `pei_report_status_fix reject=dedup_repeat ... status_rewritten=1 ...`
+      - `xenipf mpbuffer transition=repair|steady ...`
+      - recurring work-RAM loop signature:
+        - `fw_break0 reject=progress_dedup_repeat ...`.
+  - blocker status:
+    - active first blocker remains `DxeLoad.c:536`.
+    - no regression to older MP-init AP rendezvous blocker in this profile.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
