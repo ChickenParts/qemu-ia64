@@ -71,6 +71,8 @@ Environment overrides:
   IA64_DXE_ASSERT_TRACE_LIMIT (default: 128)
   IA64_DXE_ASSERT_SCAN_TRACE (default: 0; scan calls for DxeLoad assert-like payload shape and file-path attribution)
   IA64_DXE_ASSERT_SCAN_TRACE_LIMIT (default: 128)
+  IA64_DXE_ASSERT_CONTEXT_TRACE (default: 0; dump bounded producer/report/lifecycle context on DxeLoad assert-scan hits)
+  IA64_DXE_ASSERT_CONTEXT_DEPTH (default: 24; producer-history depth for assert context dumps)
   IA64_PEI_STATUSCODE_SEMANTIC_FIX (default: 1; semantic StatusCode optional-path success)
   IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT (default: 64)
   IA64_PEI_NOTIFY_TRACE (default: 0; trace notify-ppi return status for traced blocker path)
@@ -363,6 +365,14 @@ fi
 
 if [[ -n "${IA64_DXE_ASSERT_SCAN_TRACE_LIMIT:-}" ]]; then
   export QEMU_IA64_DXE_ASSERT_SCAN_TRACE_LIMIT="${IA64_DXE_ASSERT_SCAN_TRACE_LIMIT}"
+fi
+
+if [[ -n "${IA64_DXE_ASSERT_CONTEXT_TRACE:-}" ]]; then
+  export QEMU_IA64_DXE_ASSERT_CONTEXT_TRACE="${IA64_DXE_ASSERT_CONTEXT_TRACE}"
+fi
+
+if [[ -n "${IA64_DXE_ASSERT_CONTEXT_DEPTH:-}" ]]; then
+  export QEMU_IA64_DXE_ASSERT_CONTEXT_DEPTH="${IA64_DXE_ASSERT_CONTEXT_DEPTH}"
 fi
 
 if [[ -n "${IA64_PEI_STATUSCODE_SEMANTIC_FIX:-}" ]]; then

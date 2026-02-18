@@ -6704,6 +6704,35 @@ static int ia64_fw_dxe_assert_scan_trace_limit(void)
     return limit;
 }
 
+static bool ia64_fw_dxe_assert_context_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DXE_ASSERT_CONTEXT_TRACE");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_dxe_assert_context_depth(void)
+{
+    static int depth = -1;
+    if (depth == -1) {
+        depth = 24;
+        const char *s = getenv("QEMU_IA64_DXE_ASSERT_CONTEXT_DEPTH");
+        if (s && *s) {
+            depth = atoi(s);
+        }
+        if (depth < 4) {
+            depth = 4;
+        }
+        if (depth > 128) {
+            depth = 128;
+        }
+    }
+    return depth;
+}
+
 static int ia64_fw_dxe_load_trace_limit(void)
 {
     static int limit = -1;
@@ -6882,6 +6911,10 @@ static bool ia64_fw_dxe_assert_scan_match(CPUIA64State *env,
     return true;
 #endif
 }
+
+static void ia64_fw_dxe_assert_dump_context(CPUIA64State *env,
+                                            const IA64DxeAssertScanMatch *scan,
+                                            uint64_t pc, uint64_t tgt);
 
 static uint64_t ia64_fw_progress_event_signature(const IA64FwProgressEvent *ev)
 {
@@ -7325,8 +7358,9 @@ static void ia64_fw_pei_producer_record_call(CPUIA64State *env,
     bool want_hob_flow = ia64_fw_pei_hob_flow_trace_enabled() ||
                          ia64_fw_pei_hob_ptr_fix_enabled() ||
                          ia64_fw_pei_create_hob_ptr_guard_enabled();
+    bool want_assert_context = ia64_fw_dxe_assert_context_trace_enabled();
     if (!want_trace && !want_report_fix && !want_22560_flow &&
-        !want_279d0_flow &&
+        !want_279d0_flow && !want_assert_context &&
         !want_notify_flow && !want_hob_flow) {
         return;
     }
@@ -7358,7 +7392,8 @@ static void ia64_fw_pei_producer_record_call(CPUIA64State *env,
                                   ps_ptr, a1, a2, a3);
     }
 
-    if (!want_trace && !want_22560_flow && !want_279d0_flow) {
+    if (!want_trace && !want_22560_flow && !want_279d0_flow &&
+        !want_assert_context) {
         return;
     }
 
@@ -13624,6 +13659,9 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                                   scan.status,
                                   ia64_fw_efi_status_name(scan.status));
                 }
+                if (ia64_fw_dxe_assert_context_trace_enabled()) {
+                    ia64_fw_dxe_assert_dump_context(env, &scan, pc, tgt);
+                }
                 dxe_assert_scan_count++;
             }
         }
@@ -16504,6 +16542,128 @@ static void ia64_fw_pei_lifecycle_note_install_ret(bool via_b0,
     ia64_fw_pei_lifecycle_log_common(via_b0, "install_after_locate_not_found",
                                      st, seq, status, call_pc, ret_pc,
                                      ppi, true);
+}
+
+static void ia64_fw_dxe_assert_dump_context(CPUIA64State *env,
+                                            const IA64DxeAssertScanMatch *scan,
+                                            uint64_t pc, uint64_t tgt)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)scan;
+    (void)pc;
+    (void)tgt;
+    return;
+#else
+    static uint64_t last_seq;
+    static uint64_t last_line;
+    uint64_t seq = ia64_fw_pei_producer_seq;
+    uint64_t line = scan->line_valid ? scan->line : 0;
+    if (seq != 0 && last_seq == seq && last_line == line) {
+        return;
+    }
+    last_seq = seq;
+    last_line = line;
+
+    int depth = ia64_fw_dxe_assert_context_depth();
+    uint64_t have = MIN(seq, (uint64_t)IA64_PEI_PRODUCER_MAX);
+    if ((uint64_t)depth > have) {
+        depth = (int)have;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: dxe_assert_ctx pc=%016" PRIx64
+                  " tgt=%016" PRIx64 " prod_seq=%" PRIu64
+                  " depth=%d file=\"%s\" line=%" PRIu64 "\n",
+                  pc, tgt, seq, depth, scan->file,
+                  scan->line_valid ? scan->line : 0);
+
+    if (ia64_fw_pei_report_status_sp > 0) {
+        IA64PeiReportStatusCall *top =
+            &ia64_fw_pei_report_status_stack[ia64_fw_pei_report_status_sp - 1];
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: dxe_assert_ctx report_top"
+                      " ret_pc=%016" PRIx64 " type=%016" PRIx64
+                      " value=%016" PRIx64 " instance=%016" PRIx64
+                      " ps=%016" PRIx64 " seq=%" PRIu64 "\n",
+                      top->ret_pc, top->type, top->value,
+                      top->instance, top->ps_ptr, top->seq);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: dxe_assert_ctx report_top none\n");
+    }
+
+    IA64PeiLocateInstallChainState *chain = &ia64_fw_pei_locate_install_chain;
+    if (chain->valid) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: dxe_assert_ctx lifecycle"
+                      " notfound_seq=%" PRIu64
+                      " locate_call=%016" PRIx64
+                      " locate_ret=%016" PRIx64
+                      " install_seen=%d install_seq=%" PRIu64
+                      " install_call=%016" PRIx64
+                      " install_ret=%016" PRIx64
+                      " install_status=%016" PRIx64
+                      " install_flags=%016" PRIx64
+                      " install_ppi=%016" PRIx64
+                      " ps=%016" PRIx64
+                      " guid=%08x-%04x-%04x-%02x%02x-"
+                      "%02x%02x%02x%02x%02x%02x\n",
+                      chain->seq_notfound,
+                      chain->locate_call_pc, chain->locate_ret_pc,
+                      chain->install_seen ? 1 : 0, chain->seq_install,
+                      chain->install_call_pc, chain->install_ret_pc,
+                      chain->install_status, chain->install_flags,
+                      chain->install_ppi, chain->ps_ptr,
+                      chain->guid.data1, chain->guid.data2, chain->guid.data3,
+                      chain->guid.data4[0], chain->guid.data4[1],
+                      chain->guid.data4[2], chain->guid.data4[3],
+                      chain->guid.data4[4], chain->guid.data4[5],
+                      chain->guid.data4[6], chain->guid.data4[7]);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: dxe_assert_ctx lifecycle none\n");
+    }
+
+    if (depth == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: dxe_assert_ctx producer none\n");
+        return;
+    }
+
+    uint64_t first = seq - (uint64_t)depth + 1;
+    for (uint64_t s = first; s <= seq; s++) {
+        IA64PeiProducerCall *ent =
+            &ia64_fw_pei_producer_ring[(s - 1) % IA64_PEI_PRODUCER_MAX];
+        if (ent->seq != s) {
+            continue;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: dxe_assert_ctx path seq=%" PRIu64
+                      " svc=%s pc=%016" PRIx64 " tgt=%016" PRIx64
+                      " r8=%016" PRIx64
+                      " a0=%016" PRIx64 " a1=%016" PRIx64
+                      " a2=%016" PRIx64 " a3=%016" PRIx64
+                      " ps=%016" PRIx64 "\n",
+                      ent->seq, ia64_fw_pei_service_name(ent->svc_id),
+                      ent->pc, ent->tgt, ent->r8,
+                      ent->a0, ent->a1, ent->a2, ent->a3, ent->ps_ptr);
+        if (ent->svc_id == IA64_PEI_SVC_LOCATE_PPI && ent->a1) {
+            IA64EfiGuid guid;
+            if (ia64_fw_read_guid(env, ent->a1, &guid)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: dxe_assert_ctx path seq=%" PRIu64
+                              " locate_guid=%08x-%04x-%04x-%02x%02x-"
+                              "%02x%02x%02x%02x%02x%02x\n",
+                              ent->seq,
+                              guid.data1, guid.data2, guid.data3,
+                              guid.data4[0], guid.data4[1], guid.data4[2],
+                              guid.data4[3], guid.data4[4], guid.data4[5],
+                              guid.data4[6], guid.data4[7]);
+            }
+        }
+    }
+#endif
 }
 
 static void ia64_fw_pei_maybe_handle_get_boot_mode_ret(CPUIA64State *env,

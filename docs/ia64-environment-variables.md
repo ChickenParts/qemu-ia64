@@ -364,6 +364,8 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_DXE_ASSERT_TRACE_LIMIT` | Limit DxeIpl assert-call trace entries |
 | `QEMU_IA64_DXE_ASSERT_SCAN_TRACE` | Scan call payloads for DxeLoad assert-like signatures (file string + line + status shape) to find real assert emit callsites |
 | `QEMU_IA64_DXE_ASSERT_SCAN_TRACE_LIMIT` | Limit DxeLoad assert-scan trace entries |
+| `QEMU_IA64_DXE_ASSERT_CONTEXT_TRACE` | Dump bounded producer/report/lifecycle context when DxeLoad assert-scan triggers |
+| `QEMU_IA64_DXE_ASSERT_CONTEXT_DEPTH` | Producer-history depth for `QEMU_IA64_DXE_ASSERT_CONTEXT_TRACE` dumps (default `24`) |
 | `QEMU_IA64_TBEXIT_TRACE` | Emit bounded IA-64 state dump when TCG hits `TB_EXIT_REQUESTED without exitreq/icount` (default off) |
 | `QEMU_IA64_TBEXIT_TRACE_LIMIT` | Limit `QEMU_IA64_TBEXIT_TRACE` dumps |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL` | Legacy report_status soft-fail path (kept for compatibility) |
