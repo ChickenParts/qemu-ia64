@@ -491,6 +491,65 @@ investigation breadcrumbs.
     - probe and mem-derivation logs are emitted.
     - early DXE probe windows in this run show `r33/r34` unresolved
       (`*_val_ok=0`) and no immediate soft-error payload values.
+- P3-AE DXE probe de-noise + attribution refresh (2026-02-18, slice 3):
+  - `dxe_load_probe` dedup now fingerprints state (not per-PC) and uses
+    configurable repeat suppression window:
+    - `QEMU_IA64_DXE_LOAD_TRACE_REPEAT_WINDOW` (default `32`).
+  - probe output now includes:
+    - producer correlation (`last_prod_*`)
+    - per-sample classification (`classify=...`).
+  - validation (`IA64_DXE_LOAD_TRACE=1 IA64_DXE_LOAD_TRACE_LIMIT=200 IA64_DXE_LOAD_TRACE_REPEAT_WINDOW=64 ... timeout 35s`):
+    - trace compressed from repeated per-bundle spam to state transitions.
+    - late-state samples now captured (`pc=0xffe256e0`, `prod_seq=1284/3838`)
+      with `classify=status_ptr_unreadable`.
+  - disassembly update:
+    - the probed `pc=0xffe25510..0xffe2577c` window is a local helper loop
+      (byte/slot initialization), not the direct failing assert path.
+- P3-AE GetBootMode trace + bounded recovery fallback (2026-02-18, slice 4):
+  - added PEI service classification for:
+    - `get_boot_mode` (`PS+0x38`)
+    - `set_boot_mode` (`PS+0x40`).
+  - added call/return trace + optional bounded rewrite:
+    - `QEMU_IA64_PEI_BOOT_MODE_TRACE`
+    - `QEMU_IA64_PEI_BOOT_MODE_RECOVERY_FIX` (default off)
+    - `QEMU_IA64_PEI_BOOT_MODE_FIX_LOG_LIMIT`.
+  - validation (`IA64_PEI_BOOT_MODE_TRACE=1 ... timeout 35s`):
+    - observed `GetBootMode` returns are `mode=0` (full configuration),
+      `status=0`.
+    - recovery-mode guard conditions are not met in current repro;
+      fallback rewrite remains inactive (`fixed=0`).
+- P3-AE assert-call probe hook (2026-02-18, slice 5):
+  - added focused assert-call tracing at call target `0xffe7e620`:
+    - `QEMU_IA64_DXE_ASSERT_TRACE`
+    - `QEMU_IA64_DXE_ASSERT_TRACE_LIMIT`.
+  - current baseline windows did not hit this target, so active
+    `DxeLoad.c:536` assert emission path is likely routed through a different
+    helper/callsite than this canonical target.
+- P3-AE PEI locate/install lifecycle correlation (2026-02-18, slice 6):
+  - added bounded GUID lifecycle correlation logs in locate/install return
+    handlers:
+    - `QEMU_IA64_PEI_LIFECYCLE_TRACE`
+    - `QEMU_IA64_PEI_LIFECYCLE_TRACE_LIMIT`
+    - `QEMU_IA64_PEI_LIFECYCLE_TRACE_WINDOW`
+  - script passthrough added:
+    - `IA64_PEI_LIFECYCLE_TRACE*`
+    - `IA64_PEI_LOCATE_TRACE*`
+    - `IA64_PEI_INSTALL_TRACE*`
+  - correlation suppresses known StatusCode GUID noise and now reports
+    sequence-coupled chains for non-StatusCode GUIDs.
+  - validation (`IA64_PEI_LIFECYCLE_TRACE=1 ... timeout 35s`):
+    - observed chain for GUID `643b8786-b417-48d2-8f5e-7819931caed8`:
+      - `locate_not_found` at `pc=0xffe76cd0` (`status=EFI_NOT_FOUND`)
+      - `install_after_locate_not_found` at `pc=0xffe79490`
+        (`status=EFI_SUCCESS`, `flags=0x80000010`, `ppi=0`)
+      - `locate_success_after_install` at `pc=0xffffffff1ffe8770`
+        (`status=EFI_SUCCESS`).
+  - current interpretation:
+    - the failing DXE assert window now has concrete proof of this
+      locate/install ordering transition; first failure is not a permanent
+      missing-PPI condition.
+    - next corrective step should target the exact assert emission callsite
+      and status producer in this `0xffe76c*..0xffe79*` chain.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the

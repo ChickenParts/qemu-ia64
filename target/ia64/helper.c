@@ -4290,11 +4290,23 @@ static const IA64EfiGuid ia64_efi_guid_status_code_ppi = {
     .data4 = { 0xb8, 0x27, 0xf4, 0x0c, 0xb7, 0xd4, 0x54, 0x36 },
 };
 
+static const IA64EfiGuid ia64_efi_guid_recovery_module_ppi = {
+    .data1 = 0xfb6d9542,
+    .data2 = 0x612d,
+    .data3 = 0x4f45,
+    .data4 = { 0x87, 0x2f, 0x5c, 0xff, 0x52, 0xe9, 0x3d, 0xcf },
+};
+
 static const IA64EfiGuid ia64_efi_guid_notify_trace_target = {
     .data1 = 0x1388066e,
     .data2 = 0x3a57,
     .data3 = 0x4efa,
     .data4 = { 0x98, 0xf3, 0xc1, 0x2f, 0x3a, 0x95, 0x8a, 0x29 },
+};
+
+enum {
+    IA64_EFI_BOOT_WITH_FULL_CONFIGURATION = 0x00,
+    IA64_EFI_BOOT_IN_RECOVERY_MODE = 0x20,
 };
 
 static const IA64EfiGuid ia64_efi_guid_memory_discovered_ppi = {
@@ -4896,6 +4908,93 @@ static bool ia64_fw_pei_locate_fix_enabled(void)
     return enabled;
 }
 
+static bool ia64_fw_pei_lifecycle_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_LIFECYCLE_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_pei_lifecycle_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 128;
+        const char *s = getenv("QEMU_IA64_PEI_LIFECYCLE_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+        if (limit > 4096) {
+            limit = 4096;
+        }
+    }
+    return limit;
+}
+
+static uint64_t ia64_fw_pei_lifecycle_trace_window(void)
+{
+    static uint64_t window = UINT64_MAX;
+    if (window == UINT64_MAX) {
+        window = 256;
+        const char *s = getenv("QEMU_IA64_PEI_LIFECYCLE_TRACE_WINDOW");
+        if (s && *s) {
+            window = strtoull(s, NULL, 0);
+        }
+        if (window < 1) {
+            window = 1;
+        }
+        if (window > 65536) {
+            window = 65536;
+        }
+    }
+    return window;
+}
+
+static bool ia64_fw_pei_boot_mode_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_BOOT_MODE_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static bool ia64_fw_pei_boot_mode_fix_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_BOOT_MODE_RECOVERY_FIX");
+        enabled = (s && *s && strcmp(s, "0") != 0) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_pei_boot_mode_fix_log_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 64;
+        const char *s = getenv("QEMU_IA64_PEI_BOOT_MODE_FIX_LOG_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+        if (limit > 4096) {
+            limit = 4096;
+        }
+    }
+    return limit;
+}
+
 static bool ia64_fw_pei_producer_trace_enabled(void)
 {
     static int enabled = -1;
@@ -4980,6 +5079,8 @@ enum {
     IA64_PEI_SVC_REINSTALL_PPI,
     IA64_PEI_SVC_LOCATE_PPI,
     IA64_PEI_SVC_NOTIFY_PPI,
+    IA64_PEI_SVC_GET_BOOT_MODE,
+    IA64_PEI_SVC_SET_BOOT_MODE,
     IA64_PEI_SVC_GET_HOB_LIST,
     IA64_PEI_SVC_CREATE_HOB,
     IA64_PEI_SVC_FFS_FIND_VOLUME,
@@ -4998,6 +5099,8 @@ static const struct {
     { IA64_PEI_SVC_REINSTALL_PPI,     0x20, "reinstall_ppi" },
     { IA64_PEI_SVC_LOCATE_PPI,        0x28, "locate_ppi" },
     { IA64_PEI_SVC_NOTIFY_PPI,        0x30, "notify_ppi" },
+    { IA64_PEI_SVC_GET_BOOT_MODE,     0x38, "get_boot_mode" },
+    { IA64_PEI_SVC_SET_BOOT_MODE,     0x40, "set_boot_mode" },
     { IA64_PEI_SVC_GET_HOB_LIST,      0x48, "get_hob_list" },
     { IA64_PEI_SVC_CREATE_HOB,        0x50, "create_hob" },
     { IA64_PEI_SVC_FFS_FIND_VOLUME,   0x58, "ffs_find_next_volume" },
@@ -6543,6 +6646,35 @@ static bool ia64_fw_dxe_load_trace_enabled(void)
     return enabled;
 }
 
+static bool ia64_fw_dxe_assert_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_DXE_ASSERT_TRACE");
+        enabled = (s && *s) ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int ia64_fw_dxe_assert_trace_limit(void)
+{
+    static int limit = -1;
+    if (limit == -1) {
+        limit = 128;
+        const char *s = getenv("QEMU_IA64_DXE_ASSERT_TRACE_LIMIT");
+        if (s && *s) {
+            limit = atoi(s);
+        }
+        if (limit < 0) {
+            limit = 0;
+        }
+        if (limit > 4096) {
+            limit = 4096;
+        }
+    }
+    return limit;
+}
+
 static int ia64_fw_dxe_load_trace_limit(void)
 {
     static int limit = -1;
@@ -6557,6 +6689,25 @@ static int ia64_fw_dxe_load_trace_limit(void)
         }
     }
     return limit;
+}
+
+static uint64_t ia64_fw_dxe_load_repeat_window(void)
+{
+    static uint64_t window = UINT64_MAX;
+    if (window == UINT64_MAX) {
+        window = 32;
+        const char *s = getenv("QEMU_IA64_DXE_LOAD_TRACE_REPEAT_WINDOW");
+        if (s && *s) {
+            window = strtoull(s, NULL, 0);
+        }
+        if (window < 4) {
+            window = 4;
+        }
+        if (window > 1024) {
+            window = 1024;
+        }
+    }
+    return window;
 }
 
 static bool ia64_fw_dxe_load_value_trace_enabled(void)
@@ -13219,10 +13370,42 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                       env->ar[IA64_AR_BSP], env->ar[IA64_AR_PFS]);
     }
 
+    if (ia64_fw_dxe_assert_trace_enabled() &&
+        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        uint64_t tgt_phys = ia64_phys_mode_addr(tgt);
+        bool assert_tgt =
+            ((tgt ^ 0xffe7e620ULL) & ~0xFULL) == 0 ||
+            ((tgt_phys ^ 0xffe7e620ULL) & ~0xFULL) == 0;
+        if (assert_tgt) {
+            static int dxe_assert_trace_count;
+            int trace_limit = ia64_fw_dxe_assert_trace_limit();
+            if (trace_limit == 0 || dxe_assert_trace_count < trace_limit) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: dxe_assert_call pc=%016" PRIx64
+                              " tgt=%016" PRIx64 " status=%016" PRIx64
+                              " file_ptr=%016" PRIx64 " line=%" PRIu64
+                              " desc_ptr=%016" PRIx64
+                              " pei=%016" PRIx64 " ctx=%016" PRIx64 "\n",
+                              pc, tgt, call_a0, call_a1, call_a2,
+                              call_a3, call_a4, call_a5);
+                if (ia64_fw_efi_status_maybe(call_a0)) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: dxe_assert_call status=%016" PRIx64
+                                  " %s\n",
+                                  call_a0, ia64_fw_efi_status_name(call_a0));
+                }
+                dxe_assert_trace_count++;
+            }
+        }
+    }
+
     bool pei_locate_trace = ia64_fw_pei_locate_trace_enabled();
     bool pei_locate_fix = ia64_fw_pei_locate_fix_enabled();
+    bool pei_boot_mode_trace = ia64_fw_pei_boot_mode_trace_enabled();
+    bool pei_boot_mode_fix = ia64_fw_pei_boot_mode_fix_enabled();
     bool pei_status_semantic_fix = ia64_fw_pei_statuscode_semantic_fix_enabled();
-    if (pei_locate_trace || pei_locate_fix || pei_status_semantic_fix) {
+    if (pei_locate_trace || pei_locate_fix || pei_status_semantic_fix ||
+        pei_boot_mode_trace || pei_boot_mode_fix) {
         static int pei_trace_count;
         int limit = ia64_fw_pei_locate_trace_limit();
         if (!pei_locate_trace || limit == 0 || pei_trace_count < limit) {
@@ -13297,10 +13480,55 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
         }
     }
 
-    if (ia64_fw_pei_install_trace_enabled()) {
+    if (pei_boot_mode_trace || pei_boot_mode_fix) {
+        CPUState *cs = env_cpu(env);
+        uint64_t ps_ptr = 0;
+        if (ia64_fw_pei_get_ps_ptr(env, call_a0, &ps_ptr)) {
+            uint64_t plabel = 0;
+            uint64_t entry = 0;
+            if (ia64_fw_read_u64(cs, ps_ptr + 0x38, &plabel) &&
+                plabel != 0 &&
+                ia64_fw_read_u64(cs, plabel, &entry) &&
+                entry != 0) {
+                uint64_t entry_phys = ia64_phys_mode_addr(entry);
+                bool entry_match = ((entry ^ tgt) & ~0xFULL) == 0 ||
+                                   ((entry_phys ^ tgt) & ~0xFULL) == 0;
+                if (entry_match) {
+                    env->fw_pei_ps = ps_ptr;
+                    env->fw_pei_get_boot_mode_call_pc = pc;
+                    env->fw_pei_get_boot_mode_ret_pc = pc + 16;
+                    env->fw_pei_get_boot_mode_ptr = call_a1;
+                    if (pei_boot_mode_trace &&
+                        qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                        static int trace_count;
+                        int trace_limit = ia64_fw_pei_boot_mode_fix_log_limit();
+                        if (trace_count < trace_limit) {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "IA64: pei_get_boot_mode_call"
+                                          " pc=%016" PRIx64
+                                          " tgt=%016" PRIx64
+                                          " ps=%016" PRIx64
+                                          " plabel=%016" PRIx64
+                                          " entry=%016" PRIx64
+                                          " mode_ptr=%016" PRIx64 "\n",
+                                          pc, tgt, ps_ptr, plabel, entry,
+                                          call_a1);
+                            trace_count++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bool pei_install_trace = ia64_fw_pei_install_trace_enabled();
+    bool pei_lifecycle_trace = ia64_fw_pei_lifecycle_trace_enabled();
+    if (pei_install_trace || pei_lifecycle_trace) {
         static int pei_install_count;
         int limit = ia64_fw_pei_install_trace_limit();
-        if (limit == 0 || pei_install_count < limit) {
+        bool allow_trace_log = !pei_install_trace ||
+                               (limit == 0 || pei_install_count < limit);
+        if (allow_trace_log || pei_lifecycle_trace) {
             CPUState *cs = env_cpu(env);
             uint64_t ps_ptr = 0;
             if (ia64_fw_pei_get_ps_ptr(env, call_a0, &ps_ptr)) {
@@ -13347,7 +13575,7 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                         ia64_fw_pei_dump_ps(env, ps_ptr, pc);
                     }
 
-                    if (guid_ok) {
+                    if (pei_install_trace && allow_trace_log && guid_ok) {
                         qemu_log_mask(LOG_GUEST_ERROR,
                                       "IA64: pei_install_call pc=%016" PRIx64
                                       " tgt=%016" PRIx64 " ps=%016" PRIx64
@@ -13362,7 +13590,7 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                                       guid.data4[2], guid.data4[3],
                                       guid.data4[4], guid.data4[5],
                                       guid.data4[6], guid.data4[7]);
-                    } else {
+                    } else if (pei_install_trace && allow_trace_log) {
                         qemu_log_mask(LOG_GUEST_ERROR,
                                       "IA64: pei_install_call pc=%016" PRIx64
                                       " tgt=%016" PRIx64 " ps=%016" PRIx64
@@ -13374,7 +13602,9 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                                       desc_ptr, flags, ppi_ptr, guid_ptr,
                                       desc_ok ? 1 : 0);
                     }
-                    pei_install_count++;
+                    if (pei_install_trace && allow_trace_log) {
+                        pei_install_count++;
+                    }
                 }
             }
         }
@@ -15863,6 +16093,264 @@ static bool ia64_fw_maybe_fix_pei_locate_ret(CPUIA64State *env)
 #endif
 }
 
+typedef struct IA64PeiLocateInstallChainState {
+    bool valid;
+    IA64EfiGuid guid;
+    uint64_t seq_notfound;
+    uint64_t locate_call_pc;
+    uint64_t locate_ret_pc;
+    uint64_t locate_status;
+    uint64_t ps_ptr;
+    bool install_seen;
+    uint64_t seq_install;
+    uint64_t install_call_pc;
+    uint64_t install_ret_pc;
+    uint64_t install_status;
+    uint64_t install_flags;
+    uint64_t install_ppi;
+} IA64PeiLocateInstallChainState;
+
+static IA64PeiLocateInstallChainState ia64_fw_pei_locate_install_chain;
+
+static void ia64_fw_pei_lifecycle_log_common(bool via_b0, const char *phase,
+                                             const IA64PeiLocateInstallChainState *st,
+                                             uint64_t seq, uint64_t status,
+                                             uint64_t call_pc, uint64_t ret_pc,
+                                             uint64_t ppi, bool ppi_ok)
+{
+    static int log_count;
+    int log_limit = ia64_fw_pei_lifecycle_trace_limit();
+    uint64_t window = ia64_fw_pei_lifecycle_trace_window();
+    uint64_t delta = st->valid && seq >= st->seq_notfound
+                     ? seq - st->seq_notfound : UINT64_MAX;
+    uint64_t install_delta = (st->valid && st->install_seen &&
+                              st->seq_install >= st->seq_notfound)
+                             ? st->seq_install - st->seq_notfound
+                             : UINT64_MAX;
+
+    if (!qemu_loglevel_mask(LOG_GUEST_ERROR) ||
+        (log_limit > 0 && log_count >= log_limit)) {
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_lifecycle phase=%s via_b0=%d"
+                  " seq=%" PRIu64 " status=%016" PRIx64
+                  " call_pc=%016" PRIx64 " ret_pc=%016" PRIx64
+                  " ps=%016" PRIx64
+                  " first_notfound_seq=%" PRIu64 " delta=%" PRIu64
+                  " install_seen=%d install_seq=%" PRIu64
+                  " install_delta=%" PRIu64
+                  " install_status=%016" PRIx64
+                  " install_call_pc=%016" PRIx64
+                  " install_ret_pc=%016" PRIx64
+                  " install_flags=%016" PRIx64
+                  " install_ppi=%016" PRIx64
+                  " ppi=%016" PRIx64 " ppi_ok=%d"
+                  " window=%" PRIu64
+                  " guid=%08x-%04x-%04x-%02x%02x-"
+                  "%02x%02x%02x%02x%02x%02x\n",
+                  phase, via_b0 ? 1 : 0,
+                  seq, status, call_pc, ret_pc,
+                  st->ps_ptr,
+                  st->seq_notfound, delta,
+                  st->install_seen ? 1 : 0, st->seq_install,
+                  install_delta,
+                  st->install_status, st->install_call_pc,
+                  st->install_ret_pc, st->install_flags, st->install_ppi,
+                  ppi_ok ? ppi : 0, ppi_ok ? 1 : 0,
+                  window,
+                  st->guid.data1, st->guid.data2, st->guid.data3,
+                  st->guid.data4[0], st->guid.data4[1],
+                  st->guid.data4[2], st->guid.data4[3],
+                  st->guid.data4[4], st->guid.data4[5],
+                  st->guid.data4[6], st->guid.data4[7]);
+    log_count++;
+}
+
+static void ia64_fw_pei_lifecycle_note_locate_ret(CPUIA64State *env, bool via_b0,
+                                                   const IA64EfiGuid *guid,
+                                                   uint64_t status,
+                                                   uint64_t call_pc,
+                                                   uint64_t ret_pc,
+                                                   uint64_t ppi,
+                                                   bool ppi_ok)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)via_b0;
+    (void)guid;
+    (void)status;
+    (void)call_pc;
+    (void)ret_pc;
+    (void)ppi;
+    (void)ppi_ok;
+    return;
+#else
+    const uint64_t EFI_NOT_FOUND = IA64_EFI_STATUS_ERROR_BIT | 14;
+    IA64PeiLocateInstallChainState *st = &ia64_fw_pei_locate_install_chain;
+    uint64_t seq = ia64_fw_pei_producer_seq;
+    uint64_t window = ia64_fw_pei_lifecycle_trace_window();
+
+    if (!ia64_fw_pei_lifecycle_trace_enabled()) {
+        return;
+    }
+    if (ia64_fw_guid_equal(guid, &ia64_efi_guid_status_code_ppi)) {
+        return;
+    }
+
+    if (st->valid &&
+        (seq < st->seq_notfound || seq - st->seq_notfound > window)) {
+        st->valid = false;
+    }
+
+    if (status == EFI_NOT_FOUND) {
+        st->valid = true;
+        st->guid = *guid;
+        st->seq_notfound = seq;
+        st->locate_call_pc = call_pc;
+        st->locate_ret_pc = ret_pc;
+        st->locate_status = status;
+        st->ps_ptr = env->fw_pei_ps;
+        st->install_seen = false;
+        st->seq_install = 0;
+        st->install_call_pc = 0;
+        st->install_ret_pc = 0;
+        st->install_status = 0;
+        st->install_flags = 0;
+        st->install_ppi = 0;
+        ia64_fw_pei_lifecycle_log_common(via_b0, "locate_not_found", st,
+                                         seq, status, call_pc, ret_pc,
+                                         ppi, ppi_ok);
+        return;
+    }
+
+    if (status == 0 && st->valid && ia64_fw_guid_equal(&st->guid, guid)) {
+        ia64_fw_pei_lifecycle_log_common(via_b0,
+                                         st->install_seen ?
+                                         "locate_success_after_install" :
+                                         "locate_success_no_install",
+                                         st, seq, status, call_pc, ret_pc,
+                                         ppi, ppi_ok);
+        st->valid = false;
+    }
+#endif
+}
+
+static void ia64_fw_pei_lifecycle_note_install_ret(bool via_b0,
+                                                    const IA64EfiGuid *guid,
+                                                    uint64_t status,
+                                                    uint64_t call_pc,
+                                                    uint64_t ret_pc,
+                                                    uint64_t flags,
+                                                    uint64_t ppi)
+{
+    IA64PeiLocateInstallChainState *st = &ia64_fw_pei_locate_install_chain;
+    uint64_t seq = ia64_fw_pei_producer_seq;
+    uint64_t window = ia64_fw_pei_lifecycle_trace_window();
+
+    if (!ia64_fw_pei_lifecycle_trace_enabled()) {
+        return;
+    }
+    if (ia64_fw_guid_equal(guid, &ia64_efi_guid_status_code_ppi)) {
+        return;
+    }
+
+    if (!st->valid || !ia64_fw_guid_equal(&st->guid, guid)) {
+        return;
+    }
+    if (seq < st->seq_notfound || seq - st->seq_notfound > window) {
+        st->valid = false;
+        return;
+    }
+
+    st->install_seen = true;
+    st->seq_install = seq;
+    st->install_call_pc = call_pc;
+    st->install_ret_pc = ret_pc;
+    st->install_status = status;
+    st->install_flags = flags;
+    st->install_ppi = ppi;
+    ia64_fw_pei_lifecycle_log_common(via_b0, "install_after_locate_not_found",
+                                     st, seq, status, call_pc, ret_pc,
+                                     ppi, true);
+}
+
+static void ia64_fw_pei_maybe_handle_get_boot_mode_ret(CPUIA64State *env,
+                                                       bool via_b0)
+{
+#ifdef CONFIG_USER_ONLY
+    (void)env;
+    (void)via_b0;
+    return;
+#else
+    bool trace_enabled = ia64_fw_pei_boot_mode_trace_enabled();
+    bool fix_enabled = ia64_fw_pei_boot_mode_fix_enabled();
+    if (!trace_enabled && !fix_enabled) {
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    uint64_t status = env->r[8];
+    bool status_ok = (status == 0);
+    uint32_t mode = 0;
+    bool mode_ok = env->fw_pei_get_boot_mode_ptr &&
+                   ia64_fw_read_u32(cs, env->fw_pei_get_boot_mode_ptr, &mode);
+    bool mode_is_recovery = mode_ok &&
+                            mode == IA64_EFI_BOOT_IN_RECOVERY_MODE;
+    uint32_t call_lo = (uint32_t)env->fw_pei_get_boot_mode_call_pc;
+    bool dxe_callsite = call_lo >= 0xffe25000u && call_lo < 0xffe26000u;
+
+    uint64_t recovery_desc = 0;
+    uint64_t recovery_ppi = 0;
+    bool recovery_ppi_found = false;
+    if (status_ok && mode_is_recovery && env->fw_pei_ps) {
+        recovery_ppi_found = ia64_fw_pei_find_ppi_by_guid(
+            env, env->fw_pei_ps, &ia64_efi_guid_recovery_module_ppi,
+            &recovery_desc, &recovery_ppi);
+    }
+
+    bool fix_applied = false;
+    if (fix_enabled && status_ok && mode_is_recovery && dxe_callsite &&
+        !recovery_ppi_found && env->fw_pei_get_boot_mode_ptr) {
+        uint8_t out[4];
+        stl_le_p(out, IA64_EFI_BOOT_WITH_FULL_CONFIGURATION);
+        fix_applied = ia64_fw_write_bytes_any(cs, env->fw_pei_get_boot_mode_ptr,
+                                              out, sizeof(out));
+    }
+
+    if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
+        (trace_enabled || fix_applied)) {
+        static int log_count;
+        int log_limit = ia64_fw_pei_boot_mode_fix_log_limit();
+        if (log_count < log_limit) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: pei_get_boot_mode_ret%s"
+                          " call_pc=%016" PRIx64 " ret_pc=%016" PRIx64
+                          " b0=%016" PRIx64 " status=%016" PRIx64
+                          " ps=%016" PRIx64 " mode_ptr=%016" PRIx64
+                          " mode_ok=%d mode=%08x recovery=%d"
+                          " dxe_callsite=%d recovery_ppi_found=%d"
+                          " recovery_desc=%016" PRIx64
+                          " recovery_ppi=%016" PRIx64
+                          " fixed=%d\n",
+                          via_b0 ? "_b0" : "",
+                          env->fw_pei_get_boot_mode_call_pc,
+                          env->fw_pei_get_boot_mode_ret_pc,
+                          env->b[0], status, env->fw_pei_ps,
+                          env->fw_pei_get_boot_mode_ptr,
+                          mode_ok ? 1 : 0, mode_ok ? mode : 0,
+                          mode_is_recovery ? 1 : 0,
+                          dxe_callsite ? 1 : 0,
+                          recovery_ppi_found ? 1 : 0,
+                          recovery_desc, recovery_ppi,
+                          fix_applied ? 1 : 0);
+            log_count++;
+        }
+    }
+#endif
+}
+
 static void ia64_fw_pei_maybe_handle_notify_ret(CPUIA64State *env)
 {
 #ifdef CONFIG_USER_ONLY
@@ -16380,22 +16868,35 @@ void HELPER(ret_restore)(CPUIA64State *env)
     ia64_fw_pei_maybe_fix_report_status_ret(env);
     ia64_fw_pei_maybe_handle_hob_flow_ret(env);
 
+    if (env->fw_pei_get_boot_mode_ret_pc &&
+        ((env->b[0] ^ env->fw_pei_get_boot_mode_ret_pc) & ~0xFULL) == 0) {
+        ia64_fw_pei_maybe_handle_get_boot_mode_ret(env, false);
+        env->fw_pei_get_boot_mode_ret_pc = 0;
+        env->fw_pei_get_boot_mode_call_pc = 0;
+        env->fw_pei_get_boot_mode_ptr = 0;
+    }
+
     if (env->fw_pei_locate_ret_pc &&
         ((env->b[0] ^ env->fw_pei_locate_ret_pc) & ~0xFULL) == 0) {
         (void)ia64_fw_maybe_fix_pei_locate_ret(env);
-        if (ia64_fw_pei_locate_trace_enabled()) {
-            CPUState *cs = env_cpu(env);
-            uint64_t out_desc = 0;
-            bool out_ok = env->fw_pei_locate_desc_ptr &&
-                          ia64_fw_read_u64(cs, env->fw_pei_locate_desc_ptr,
-                                           &out_desc);
-            uint64_t out_ppi = 0;
-            bool out_ppi_ok = env->fw_pei_locate_ppi_ptr &&
-                              ia64_fw_read_u64(cs, env->fw_pei_locate_ppi_ptr,
-                                               &out_ppi);
-            if (env->fw_pei_locate_guid_valid) {
-                IA64EfiGuid guid;
-                ia64_fw_guid_from_bytes(env->fw_pei_locate_guid, &guid);
+        CPUState *cs = env_cpu(env);
+        uint64_t out_desc = 0;
+        bool out_ok = env->fw_pei_locate_desc_ptr &&
+                      ia64_fw_read_u64(cs, env->fw_pei_locate_desc_ptr,
+                                       &out_desc);
+        uint64_t out_ppi = 0;
+        bool out_ppi_ok = env->fw_pei_locate_ppi_ptr &&
+                          ia64_fw_read_u64(cs, env->fw_pei_locate_ppi_ptr,
+                                           &out_ppi);
+        if (env->fw_pei_locate_guid_valid) {
+            IA64EfiGuid guid;
+            ia64_fw_guid_from_bytes(env->fw_pei_locate_guid, &guid);
+            uint64_t ret_pc = env->fw_pei_locate_ret_pc;
+            uint64_t call_pc = (ret_pc >= 16) ? (ret_pc - 16) : 0;
+            ia64_fw_pei_lifecycle_note_locate_ret(env, false, &guid, env->r[8],
+                                                  call_pc, ret_pc,
+                                                  out_ppi, out_ppi_ok);
+            if (ia64_fw_pei_locate_trace_enabled()) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: pei_locate_ret ip=%016" PRIx64
                               " b0=%016" PRIx64 " status=%016" PRIx64
@@ -16414,7 +16915,8 @@ void HELPER(ret_restore)(CPUIA64State *env)
                               guid.data4[2], guid.data4[3],
                               guid.data4[4], guid.data4[5],
                               guid.data4[6], guid.data4[7]);
-            } else {
+            }
+        } else if (ia64_fw_pei_locate_trace_enabled()) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: pei_locate_ret ip=%016" PRIx64
                               " b0=%016" PRIx64 " status=%016" PRIx64
@@ -16427,7 +16929,6 @@ void HELPER(ret_restore)(CPUIA64State *env)
                               out_ok ? out_desc : 0,
                               env->fw_pei_locate_ppi_ptr,
                               out_ppi_ok ? out_ppi : 0);
-            }
         }
         env->fw_pei_locate_ret_pc = 0;
         env->fw_pei_locate_instance = 0;
@@ -16435,50 +16936,60 @@ void HELPER(ret_restore)(CPUIA64State *env)
         env->fw_pei_locate_guid_valid = 0;
         env->fw_pei_locate_ppi_ptr = 0;
     }
-    if (ia64_fw_pei_install_trace_enabled() &&
-        env->fw_pei_install_ret_pc &&
+    if (env->fw_pei_install_ret_pc &&
         ((env->b[0] ^ env->fw_pei_install_ret_pc) & ~0xFULL) == 0) {
-        CPUState *cs = env_cpu(env);
-        uint64_t flags = 0;
-        uint64_t guid_ptr = 0;
-        uint64_t ppi_ptr = 0;
-        bool desc_ok = false;
-        if (env->fw_pei_install_desc_ptr) {
-            uint8_t desc[24];
-            if (ia64_fw_read_bytes_any(cs, env->fw_pei_install_desc_ptr,
-                                       desc, sizeof(desc))) {
-                flags = ldq_le_p(&desc[0]);
-                guid_ptr = ldq_le_p(&desc[8]);
-                ppi_ptr = ldq_le_p(&desc[16]);
-                desc_ok = true;
+        bool install_trace = ia64_fw_pei_install_trace_enabled();
+        bool lifecycle_trace = ia64_fw_pei_lifecycle_trace_enabled();
+        if (install_trace || lifecycle_trace) {
+            CPUState *cs = env_cpu(env);
+            uint64_t flags = 0;
+            uint64_t guid_ptr = 0;
+            uint64_t ppi_ptr = 0;
+            bool desc_ok = false;
+            if (env->fw_pei_install_desc_ptr) {
+                uint8_t desc[24];
+                if (ia64_fw_read_bytes_any(cs, env->fw_pei_install_desc_ptr,
+                                           desc, sizeof(desc))) {
+                    flags = ldq_le_p(&desc[0]);
+                    guid_ptr = ldq_le_p(&desc[8]);
+                    ppi_ptr = ldq_le_p(&desc[16]);
+                    desc_ok = true;
+                }
             }
-        }
-        if (env->fw_pei_install_guid_valid) {
-            IA64EfiGuid guid;
-            ia64_fw_guid_from_bytes(env->fw_pei_install_guid, &guid);
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: pei_install_ret ip=%016" PRIx64
-                          " b0=%016" PRIx64 " status=%016" PRIx64
-                          " desc=%016" PRIx64 " flags=%016" PRIx64
-                          " ppi=%016" PRIx64
-                          " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
-                          env->ip, env->b[0], env->r[8],
-                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
-                          guid.data1, guid.data2, guid.data3,
-                          guid.data4[0], guid.data4[1],
-                          guid.data4[2], guid.data4[3],
-                          guid.data4[4], guid.data4[5],
-                          guid.data4[6], guid.data4[7]);
-        } else {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: pei_install_ret ip=%016" PRIx64
-                          " b0=%016" PRIx64 " status=%016" PRIx64
-                          " desc=%016" PRIx64 " flags=%016" PRIx64
-                          " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
-                          " desc_ok=%d\n",
-                          env->ip, env->b[0], env->r[8],
-                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
-                          guid_ptr, desc_ok ? 1 : 0);
+            if (env->fw_pei_install_guid_valid) {
+                IA64EfiGuid guid;
+                ia64_fw_guid_from_bytes(env->fw_pei_install_guid, &guid);
+                uint64_t ret_pc = env->fw_pei_install_ret_pc;
+                uint64_t call_pc = (ret_pc >= 16) ? (ret_pc - 16) : 0;
+                ia64_fw_pei_lifecycle_note_install_ret(false, &guid, env->r[8],
+                                                       call_pc, ret_pc,
+                                                       flags, ppi_ptr);
+                if (install_trace) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: pei_install_ret ip=%016" PRIx64
+                                  " b0=%016" PRIx64 " status=%016" PRIx64
+                                  " desc=%016" PRIx64 " flags=%016" PRIx64
+                                  " ppi=%016" PRIx64
+                                  " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                  env->ip, env->b[0], env->r[8],
+                                  env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                                  guid.data1, guid.data2, guid.data3,
+                                  guid.data4[0], guid.data4[1],
+                                  guid.data4[2], guid.data4[3],
+                                  guid.data4[4], guid.data4[5],
+                                  guid.data4[6], guid.data4[7]);
+                }
+            } else if (install_trace) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_ret ip=%016" PRIx64
+                              " b0=%016" PRIx64 " status=%016" PRIx64
+                              " desc=%016" PRIx64 " flags=%016" PRIx64
+                              " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
+                              " desc_ok=%d\n",
+                              env->ip, env->b[0], env->r[8],
+                              env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                              guid_ptr, desc_ok ? 1 : 0);
+            }
         }
         env->fw_pei_install_ret_pc = 0;
         env->fw_pei_install_guid_valid = 0;
@@ -16613,22 +17124,35 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
     ia64_fw_pei_maybe_fix_report_status_ret(env);
     ia64_fw_pei_maybe_handle_hob_flow_ret(env);
 
+    if (env->fw_pei_get_boot_mode_ret_pc &&
+        ((env->b[0] ^ env->fw_pei_get_boot_mode_ret_pc) & ~0xFULL) == 0) {
+        ia64_fw_pei_maybe_handle_get_boot_mode_ret(env, true);
+        env->fw_pei_get_boot_mode_ret_pc = 0;
+        env->fw_pei_get_boot_mode_call_pc = 0;
+        env->fw_pei_get_boot_mode_ptr = 0;
+    }
+
     if (env->fw_pei_locate_ret_pc &&
         ((env->b[0] ^ env->fw_pei_locate_ret_pc) & ~0xFULL) == 0) {
         (void)ia64_fw_maybe_fix_pei_locate_ret(env);
-        if (ia64_fw_pei_locate_trace_enabled()) {
-            CPUState *cs = env_cpu(env);
-            uint64_t out_desc = 0;
-            bool out_ok = env->fw_pei_locate_desc_ptr &&
-                          ia64_fw_read_u64(cs, env->fw_pei_locate_desc_ptr,
-                                           &out_desc);
-            uint64_t out_ppi = 0;
-            bool out_ppi_ok = env->fw_pei_locate_ppi_ptr &&
-                              ia64_fw_read_u64(cs, env->fw_pei_locate_ppi_ptr,
-                                               &out_ppi);
-            if (env->fw_pei_locate_guid_valid) {
-                IA64EfiGuid guid;
-                ia64_fw_guid_from_bytes(env->fw_pei_locate_guid, &guid);
+        CPUState *cs = env_cpu(env);
+        uint64_t out_desc = 0;
+        bool out_ok = env->fw_pei_locate_desc_ptr &&
+                      ia64_fw_read_u64(cs, env->fw_pei_locate_desc_ptr,
+                                       &out_desc);
+        uint64_t out_ppi = 0;
+        bool out_ppi_ok = env->fw_pei_locate_ppi_ptr &&
+                          ia64_fw_read_u64(cs, env->fw_pei_locate_ppi_ptr,
+                                           &out_ppi);
+        if (env->fw_pei_locate_guid_valid) {
+            IA64EfiGuid guid;
+            ia64_fw_guid_from_bytes(env->fw_pei_locate_guid, &guid);
+            uint64_t ret_pc = env->fw_pei_locate_ret_pc;
+            uint64_t call_pc = (ret_pc >= 16) ? (ret_pc - 16) : 0;
+            ia64_fw_pei_lifecycle_note_locate_ret(env, true, &guid, env->r[8],
+                                                  call_pc, ret_pc,
+                                                  out_ppi, out_ppi_ok);
+            if (ia64_fw_pei_locate_trace_enabled()) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: pei_locate_ret_b0 ip=%016" PRIx64
                               " b0=%016" PRIx64 " status=%016" PRIx64
@@ -16647,7 +17171,8 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
                               guid.data4[2], guid.data4[3],
                               guid.data4[4], guid.data4[5],
                               guid.data4[6], guid.data4[7]);
-            } else {
+            }
+        } else if (ia64_fw_pei_locate_trace_enabled()) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: pei_locate_ret_b0 ip=%016" PRIx64
                               " b0=%016" PRIx64 " status=%016" PRIx64
@@ -16660,7 +17185,6 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
                               out_ok ? out_desc : 0,
                               env->fw_pei_locate_ppi_ptr,
                               out_ppi_ok ? out_ppi : 0);
-            }
         }
         env->fw_pei_locate_ret_pc = 0;
         env->fw_pei_locate_instance = 0;
@@ -16668,50 +17192,60 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
         env->fw_pei_locate_guid_valid = 0;
         env->fw_pei_locate_ppi_ptr = 0;
     }
-    if (ia64_fw_pei_install_trace_enabled() &&
-        env->fw_pei_install_ret_pc &&
+    if (env->fw_pei_install_ret_pc &&
         ((env->b[0] ^ env->fw_pei_install_ret_pc) & ~0xFULL) == 0) {
-        CPUState *cs = env_cpu(env);
-        uint64_t flags = 0;
-        uint64_t guid_ptr = 0;
-        uint64_t ppi_ptr = 0;
-        bool desc_ok = false;
-        if (env->fw_pei_install_desc_ptr) {
-            uint8_t desc[24];
-            if (ia64_fw_read_bytes_any(cs, env->fw_pei_install_desc_ptr,
-                                       desc, sizeof(desc))) {
-                flags = ldq_le_p(&desc[0]);
-                guid_ptr = ldq_le_p(&desc[8]);
-                ppi_ptr = ldq_le_p(&desc[16]);
-                desc_ok = true;
+        bool install_trace = ia64_fw_pei_install_trace_enabled();
+        bool lifecycle_trace = ia64_fw_pei_lifecycle_trace_enabled();
+        if (install_trace || lifecycle_trace) {
+            CPUState *cs = env_cpu(env);
+            uint64_t flags = 0;
+            uint64_t guid_ptr = 0;
+            uint64_t ppi_ptr = 0;
+            bool desc_ok = false;
+            if (env->fw_pei_install_desc_ptr) {
+                uint8_t desc[24];
+                if (ia64_fw_read_bytes_any(cs, env->fw_pei_install_desc_ptr,
+                                           desc, sizeof(desc))) {
+                    flags = ldq_le_p(&desc[0]);
+                    guid_ptr = ldq_le_p(&desc[8]);
+                    ppi_ptr = ldq_le_p(&desc[16]);
+                    desc_ok = true;
+                }
             }
-        }
-        if (env->fw_pei_install_guid_valid) {
-            IA64EfiGuid guid;
-            ia64_fw_guid_from_bytes(env->fw_pei_install_guid, &guid);
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: pei_install_ret_b0 ip=%016" PRIx64
-                          " b0=%016" PRIx64 " status=%016" PRIx64
-                          " desc=%016" PRIx64 " flags=%016" PRIx64
-                          " ppi=%016" PRIx64
-                          " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
-                          env->ip, env->b[0], env->r[8],
-                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
-                          guid.data1, guid.data2, guid.data3,
-                          guid.data4[0], guid.data4[1],
-                          guid.data4[2], guid.data4[3],
-                          guid.data4[4], guid.data4[5],
-                          guid.data4[6], guid.data4[7]);
-        } else {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: pei_install_ret_b0 ip=%016" PRIx64
-                          " b0=%016" PRIx64 " status=%016" PRIx64
-                          " desc=%016" PRIx64 " flags=%016" PRIx64
-                          " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
-                          " desc_ok=%d\n",
-                          env->ip, env->b[0], env->r[8],
-                          env->fw_pei_install_desc_ptr, flags, ppi_ptr,
-                          guid_ptr, desc_ok ? 1 : 0);
+            if (env->fw_pei_install_guid_valid) {
+                IA64EfiGuid guid;
+                ia64_fw_guid_from_bytes(env->fw_pei_install_guid, &guid);
+                uint64_t ret_pc = env->fw_pei_install_ret_pc;
+                uint64_t call_pc = (ret_pc >= 16) ? (ret_pc - 16) : 0;
+                ia64_fw_pei_lifecycle_note_install_ret(true, &guid, env->r[8],
+                                                       call_pc, ret_pc,
+                                                       flags, ppi_ptr);
+                if (install_trace) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "IA64: pei_install_ret_b0 ip=%016" PRIx64
+                                  " b0=%016" PRIx64 " status=%016" PRIx64
+                                  " desc=%016" PRIx64 " flags=%016" PRIx64
+                                  " ppi=%016" PRIx64
+                                  " guid=%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                  env->ip, env->b[0], env->r[8],
+                                  env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                                  guid.data1, guid.data2, guid.data3,
+                                  guid.data4[0], guid.data4[1],
+                                  guid.data4[2], guid.data4[3],
+                                  guid.data4[4], guid.data4[5],
+                                  guid.data4[6], guid.data4[7]);
+                }
+            } else if (install_trace) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: pei_install_ret_b0 ip=%016" PRIx64
+                              " b0=%016" PRIx64 " status=%016" PRIx64
+                              " desc=%016" PRIx64 " flags=%016" PRIx64
+                              " ppi=%016" PRIx64 " guid_ptr=%016" PRIx64
+                              " desc_ok=%d\n",
+                              env->ip, env->b[0], env->r[8],
+                              env->fw_pei_install_desc_ptr, flags, ppi_ptr,
+                              guid_ptr, desc_ok ? 1 : 0);
+            }
         }
         env->fw_pei_install_ret_pc = 0;
         env->fw_pei_install_guid_valid = 0;
@@ -21503,20 +22037,24 @@ void HELPER(fw_dxe_load_status_probe)(CPUIA64State *env,
         pending_report =
             ia64_fw_pei_report_status_stack[ia64_fw_pei_report_status_sp - 1];
     }
+    bool have_last_prod = ia64_fw_pei_producer_seq > 0;
+    IA64PeiProducerCall last_prod = { 0 };
+    if (have_last_prod) {
+        last_prod = ia64_fw_pei_producer_ring[
+            (ia64_fw_pei_producer_seq - 1) % IA64_PEI_PRODUCER_MAX];
+    }
 
-    uint64_t fp = pc ^ ((uint64_t)ri << 56) ^
-                  (env->b[0] << 1) ^ (env->r[8] << 7) ^ (env->r[9] << 11) ^
+    uint64_t fp = (env->b[0] << 1) ^ (env->r[8] << 7) ^ (env->r[9] << 11) ^
                   (env->r[32] << 13) ^ (env->r[33] << 17) ^
-                  (env->r[34] << 19) ^ (env->r[35] << 23) ^
-                  (ps_ptr << 29) ^ ia64_fw_pei_producer_seq;
+                  (env->r[34] << 19) ^ (env->r[35] << 23) ^ (ps_ptr << 29);
     if (have_pending_report) {
         fp ^= pending_report.ret_pc ^ pending_report.type ^
-              pending_report.value ^ pending_report.seq;
+              pending_report.value;
     }
 
     uint64_t seq_delta = ia64_fw_pei_status_rewrite_seq_delta(
         ia64_fw_pei_producer_seq, last_seq);
-    if (last_fp == fp && seq_delta <= 8) {
+    if (last_fp == fp && seq_delta <= ia64_fw_dxe_load_repeat_window()) {
         repeat_count++;
         return;
     }
@@ -21526,6 +22064,25 @@ void HELPER(fw_dxe_load_status_probe)(CPUIA64State *env,
     repeat_count = 0;
     last_fp = fp;
     last_seq = ia64_fw_pei_producer_seq;
+
+    const char *classify = "ok";
+    if (ia64_fw_efi_status_maybe(env->r[8]) && (env->r[8] & IA64_EFI_STATUS_ERROR_BIT)) {
+        if (ia64_fw_pei_report_status_is_soft_error(env->r[8])) {
+            classify = "r8_soft_error";
+        } else {
+            classify = "r8_hard_error";
+        }
+    } else if (arg1_ptr_ok && arg1_ptr == 0) {
+        classify = "status_ptr_null";
+    } else if (arg1_ptr_ok && arg1_ptr != 0 && !arg1_ptr_val_ok) {
+        classify = "status_ptr_unreadable";
+    } else if (arg1_ptr_val_ok &&
+               ia64_fw_pei_report_status_is_soft_error(arg1_ptr_val)) {
+        classify = "status_ptr_soft_error";
+    } else if (have_pending_report &&
+               ia64_fw_pei_report_status_is_soft_error(pending_report.value)) {
+        classify = "pending_soft_error";
+    }
 
     qemu_log_mask(LOG_GUEST_ERROR,
                   "IA64: dxe_load_probe pc=%016" PRIx64
@@ -21539,17 +22096,37 @@ void HELPER(fw_dxe_load_status_probe)(CPUIA64State *env,
                   " pending_report=%d rpt_ret=%016" PRIx64
                   " rpt_type=%016" PRIx64 " rpt_value=%016" PRIx64
                   " rpt_seq=%" PRIu64
+                  " last_prod=%d last_prod_seq=%" PRIu64
+                  " last_prod_svc=%s"
+                  " last_prod_call=%016" PRIx64
+                  " last_prod_tgt=%016" PRIx64
+                  " last_prod_a1=%016" PRIx64
+                  " last_prod_a2=%016" PRIx64
+                  " last_prod_a3=%016" PRIx64
                   " arg0_ptr=%016" PRIx64 " arg1_ptr=%016" PRIx64
-                  " repeated=%d repeat_count=%" PRIu64 "\n",
+                  " classify=%s"
+                  " repeated=%d repeat_count=%" PRIu64
+                  " repeat_window=%" PRIu64 "\n",
                   pc, ri, env->b[0], env->r[8], env->r[9],
                   env->r[12], env->r[32], env->r[33], env->r[34], env->r[35],
                   env->r[36], env->r[37], ps_ptr, ia64_fw_pei_producer_seq,
                   have_pending_report ? 1 : 0,
                   pending_report.ret_pc, pending_report.type,
                   pending_report.value, pending_report.seq,
+                  have_last_prod ? 1 : 0,
+                  have_last_prod ? last_prod.seq : 0,
+                  have_last_prod ? ia64_fw_pei_service_name(last_prod.svc_id) :
+                                   "none",
+                  have_last_prod ? last_prod.pc : 0,
+                  have_last_prod ? last_prod.tgt : 0,
+                  have_last_prod ? last_prod.a1 : 0,
+                  have_last_prod ? last_prod.a2 : 0,
+                  have_last_prod ? last_prod.a3 : 0,
                   arg0_ptr_ok ? arg0_ptr : 0,
                   arg1_ptr_ok ? arg1_ptr : 0,
-                  repeated ? 1 : 0, repeated_count);
+                  classify,
+                  repeated ? 1 : 0, repeated_count,
+                  ia64_fw_dxe_load_repeat_window());
     if (val_trace) {
         bool r33_soft_err = r33_val_ok &&
                             ia64_fw_pei_report_status_is_soft_error(r33_val);

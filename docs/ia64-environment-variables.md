@@ -300,6 +300,9 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_LOCATE_FIX` | Fix StatusCode LocatePpi return when StatusCode PPI is present |
 | `QEMU_IA64_PEI_INSTALL_TRACE` | Trace PPI installations |
 | `QEMU_IA64_PEI_INSTALL_TRACE_LIMIT` | Limit install trace entries |
+| `QEMU_IA64_PEI_LIFECYCLE_TRACE` | Correlate GUID lifecycle transitions (`LocatePpi` not-found -> `InstallPpi` -> `LocatePpi` success) with bounded sequence windows |
+| `QEMU_IA64_PEI_LIFECYCLE_TRACE_LIMIT` | Limit PEI lifecycle correlation trace entries |
+| `QEMU_IA64_PEI_LIFECYCLE_TRACE_WINDOW` | Producer-sequence window used for lifecycle correlation matching (default `256`) |
 | `QEMU_IA64_PEI_PRE_INSTALL_PROBE` | Probe before PPI install |
 | `QEMU_IA64_PEI_INSTALL_PPLIST_TRACE` | Trace PPI list changes |
 | `QEMU_IA64_PEI_INSTALL_PPLIST_ADDR` | Watch PPI list address |
@@ -329,6 +332,9 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_CLEAR_OLDCORE` | Clear old core memory |
 | `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX` | Treat unresolved StatusCode report path as optional (default on) |
 | `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX_LOG_LIMIT` | Limit StatusCode semantic-fix logs |
+| `QEMU_IA64_PEI_BOOT_MODE_TRACE` | Trace PEI `GetBootMode` call/return context for DXE-recovery path triage (default off) |
+| `QEMU_IA64_PEI_BOOT_MODE_RECOVERY_FIX` | Rewrite recovery boot mode to full configuration when `GetBootMode` returns recovery in DxeIpl and RecoveryModule PPI is absent (default off) |
+| `QEMU_IA64_PEI_BOOT_MODE_FIX_LOG_LIMIT` | Limit `GetBootMode` trace/fix logs |
 | `QEMU_IA64_PEI_PS_EPOCH_TRACE` | Trace PEI PS/core epoch provenance used by status-path selectors (default off) |
 | `QEMU_IA64_PEI_PS_EPOCH_TRACE_LIMIT` | Limit PEI PS/core epoch trace entries |
 | `QEMU_IA64_PEI_PS_SELECT_STRICT` | Enable strict PEI PS selection (prefer validated arg-derived PS over stale cached PS; default on) |
@@ -352,7 +358,10 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_PEI_279D0_SAFE_MODE_LOG_LIMIT` | Limit `279d0` safe-mode block/probe logs |
 | `QEMU_IA64_DXE_LOAD_TRACE` | Trace status propagation in DXE-load probe window (`pc=0xffe255a0..0xffe2572c`, default off) |
 | `QEMU_IA64_DXE_LOAD_TRACE_LIMIT` | Limit DXE-load probe trace entries |
+| `QEMU_IA64_DXE_LOAD_TRACE_REPEAT_WINDOW` | Suppress repeated DXE-load probe fingerprints within this producer-seq window (default 32) |
 | `QEMU_IA64_DXE_LOAD_VALUE_TRACE` | Include DXE-load probe dereference values (`r33/r34/*r33`) and soft-error classification (default on) |
+| `QEMU_IA64_DXE_ASSERT_TRACE` | Trace calls into the DxeIpl assert helper target (`0xffe7e620`) with status/file/line payload |
+| `QEMU_IA64_DXE_ASSERT_TRACE_LIMIT` | Limit DxeIpl assert-call trace entries |
 | `QEMU_IA64_TBEXIT_TRACE` | Emit bounded IA-64 state dump when TCG hits `TB_EXIT_REQUESTED without exitreq/icount` (default off) |
 | `QEMU_IA64_TBEXIT_TRACE_LIMIT` | Limit `QEMU_IA64_TBEXIT_TRACE` dumps |
 | `QEMU_IA64_PEI_REPORT_STATUS_SOFTFAIL` | Legacy report_status soft-fail path (kept for compatibility) |

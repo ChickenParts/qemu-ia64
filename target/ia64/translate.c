@@ -2289,7 +2289,7 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
                                         tcg_constant_i64(ctx->base.pc_next));
         }
     }
-    if (ctx->mem_idx != MMU_USER_IDX) {
+    if (ctx->mem_idx != MMU_USER_IDX && ctx->ri == 0) {
         uint64_t pc_lo = ctx->base.pc_next & ((1ULL << 61) - 1);
         if ((pc_lo >= 0xffe255a0ULL && pc_lo <= 0xffe25620ULL) ||
             (pc_lo >= 0xffe256a0ULL && pc_lo <= 0xffe2572cULL)) {

@@ -240,6 +240,9 @@ typedef struct CPUArchState {
     uint64_t fw_pei_locate_ppi_ptr;
     uint8_t fw_pei_locate_guid[16];
     uint8_t fw_pei_locate_guid_valid;
+    uint64_t fw_pei_get_boot_mode_ret_pc;
+    uint64_t fw_pei_get_boot_mode_call_pc;
+    uint64_t fw_pei_get_boot_mode_ptr;
     uint64_t fw_pei_install_ret_pc;
     uint64_t fw_pei_install_desc_ptr;
     uint8_t fw_pei_install_guid[16];
