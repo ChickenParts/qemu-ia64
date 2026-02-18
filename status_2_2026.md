@@ -1001,10 +1001,57 @@ Logs checked:
       -> `rc=124`, with `xenipf mpbuffer applied ... reason=slot_drift` and
       bounded follow-on `skip=already_seeded` evidence.
 
+## Follow-up (P3-AC MP-Init Sticky Repair + Optional Work-RAM Loop Guard)
+- Added explicit MP-buffer epoch/transition telemetry in `target/ia64/helper.c`:
+  - emits bounded state transitions:
+    - `xenipf mpbuffer enter ...`
+    - `xenipf mpbuffer transition=repair|steady|...`
+    - `xenipf mpbuffer exit ...`
+  - tracks per-epoch checks/repairs/steady counts.
+- Hardened MP-buffer repair policy for second MP-init pass:
+  - stack eligibility now includes low RAM stack addresses (not only original
+    PEI temp/work ranges), matching observed second-pass stack relocation.
+  - added sticky drift-repair control (default on):
+    - `QEMU_IA64_FW_XENIPF_MPBUFFER_STICKY=1`
+    - `QEMU_IA64_FW_XENIPF_MPBUFFER_WINDOW` (default `0x200`) to extend
+      translator trigger around the MP-init window.
+  - outcome: second `IpfEarlyMpInit` recurrence no longer falls into AP
+    rendezvous in current repro windows.
+- Added optional work-RAM break(0) loop guard in `target/ia64/helper.c`:
+  - detects repeated `0x100003000` cycle fingerprints and can early-return
+    from helper when enabled.
+  - knobs (default off):
+    - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD`
+    - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_WINDOW`
+    - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_THRESHOLD`
+    - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_LOG_LIMIT`.
+  - current stance: keep default-off; guard is validated and available for
+    controlled A/B but is not yet required for progression.
+- Updated `scripts/run-ia64-firmware.sh` passthrough/usage for all new knobs.
+- Validation (2026-02-18):
+  - Build:
+    - `ninja -C build -j4 qemu-system-ia64` passed.
+  - Directed tests:
+    - `scripts/run-ia64-op7-tests.sh 12s` passed.
+  - Firmware repro (default guard-off):
+    - `IA64_GUEST_ERRORS=1 IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_TRACE=1 IA64_PEI_279D0_STATUS_FIX=1 IA64_PEI_279D0_SAFE_MODE=0 timeout 30s scripts/run-ia64-firmware.sh`
+      -> `rc=124`, no host assert.
+    - serial now shows `BSP=2`, `AP rendezvous=0` in this window.
+    - progression advances to:
+      - `ASSERT ... Universal\\DxeIpl\\Pei\\DxeLoad.c Line 536`.
+  - A/B loop-guard probe (`20s` windows):
+    - guard off:
+      - `progress_dedup_repeat=50`, `wr_guard_actions=0`.
+    - guard on:
+      - `progress_dedup_repeat=50`, `wr_guard_actions=2`.
+    - no host assert in either path (`rc=124`).
+
 ## Remaining Open Work
 - F-unit coverage remains partial; many encodings still fall through to
   `gen_unimpl("F-slot")`.
 - Firmware PEI/DXE blockers remain tracked in `docs/ia64-firmware-blockers.md`.
+- Current first firmware blocker in safe-off repro windows is:
+  - `ASSERT ... Universal\\DxeIpl\\Pei\\DxeLoad.c Line 536`.
 - Host-side `TB_EXIT_REQUESTED` assert, `0xffffb2f0` reserved-template blocker,
   and the `fault vec=0x2c00 ip=0x280` return-path blocker are fixed in the
   current safe-off path. Next terminal blocker is no longer reached inside the

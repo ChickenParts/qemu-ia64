@@ -359,6 +359,42 @@ investigation breadcrumbs.
     - MP-buffer corrective path is now actively applied on observed slot drift
       (`... reason=slot_drift ...`) but the second `IpfEarlyMpInit` AP
       rendezvous path still reproduces in current windows.
+- MP-init sticky repair + optional WR-gate loop guard (2026-02-18):
+  - `target/ia64/helper.c`:
+    - MP-buffer fix now exposes per-epoch transition telemetry:
+      - `xenipf mpbuffer enter ...`
+      - `xenipf mpbuffer transition=repair|steady|...`
+      - `xenipf mpbuffer exit ...`
+    - MP-buffer stack eligibility now includes low RAM stack addresses
+      (observed second-pass stack `sp=0x43fb760`) and supports sticky repair
+      semantics:
+      - `QEMU_IA64_FW_XENIPF_MPBUFFER_STICKY` (default on)
+      - `QEMU_IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT`.
+    - added optional WR-gate loop guard:
+      - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD`
+      - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_WINDOW`
+      - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_THRESHOLD`
+      - `QEMU_IA64_FW_BREAK0_WR_GATE_LOOP_GUARD_LOG_LIMIT`
+      - guard emits `fw_break0_wr_guard action=early_return ...` when enabled.
+  - `target/ia64/translate.c`:
+    - MP-buffer trigger window now configurable via
+      `QEMU_IA64_FW_XENIPF_MPBUFFER_WINDOW` (default `0x200` extension around
+      `0xffe59800..0xffe59a3f`).
+  - validation:
+    - default safe-off repro remains stable (`rc=124`, no host assert).
+    - MP-init recurrence now stays on BSP path in current windows:
+      - serial evidence: `check MpBuffer and find I'm BSP` twice,
+        no `...I'm AP, will go to Rendezvous`.
+    - firmware progression advances to guest-side assert:
+      - `ASSERT ... Universal\\DxeIpl\\Pei\\DxeLoad.c Line 536`.
+    - WR-gate loop guard A/B (20s windows):
+      - guard off: `progress_dedup_repeat=50`, no guard actions.
+      - guard on: guard actions observed, but no additional progression yet.
+  - current stance:
+    - MP-init AP-path recurrence is no longer the active first blocker.
+    - active first blocker is now the `DxeLoad.c:536` assert path.
+    - keep WR-gate loop guard default-off pending evidence of forward
+      progression impact.
 - StatusCode semantic handling is now wired (default on):
   - `QEMU_IA64_PEI_STATUSCODE_SEMANTIC_FIX=1` treats unresolved StatusCode
     report path as optional and rewrites return status at the
