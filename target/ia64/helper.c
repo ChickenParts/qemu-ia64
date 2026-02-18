@@ -13478,6 +13478,9 @@ typedef struct IA64PeiStatuscodeOptionalEval {
     bool ps_epoch_required;
     bool ps_epoch_seen;
     bool ps_epoch_match;
+    bool ps_epoch_from_continuity;
+    uint64_t ps_epoch_seq;
+    uint32_t ps_epoch_source;
     uint64_t ps_epoch_ptr;
     bool eligible;
 } IA64PeiStatuscodeOptionalEval;
@@ -13756,7 +13759,12 @@ ia64_fw_pei_eval_statuscode_optional_path(CPUIA64State *env,
     out.ret_in_fw = ia64_fw_pei_addr_in_fw(ent->ret_pc);
     out.type_ok = ent->type > 0 && ent->type <= IA64_PEI_STATUS_TYPE_SIMPLE_MAX;
     out.ps_epoch_required = ia64_fw_pei_ps_select_strict_enabled();
-    out.ps_epoch_seen = ia64_fw_pei_ps_epoch_last_selected(&out.ps_epoch_ptr);
+    IA64PeiPsEpochSelected sel = ia64_fw_pei_ps_epoch_selected_state();
+    out.ps_epoch_seen = sel.seen;
+    out.ps_epoch_from_continuity = sel.from_continuity;
+    out.ps_epoch_seq = sel.seq;
+    out.ps_epoch_source = sel.source;
+    out.ps_epoch_ptr = sel.ps_ptr;
     out.ps_epoch_match = !out.ps_epoch_required ||
                          (out.ps_epoch_seen && ent->ps_ptr &&
                           ent->ps_ptr == out.ps_epoch_ptr);
@@ -14676,19 +14684,27 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
 
     if (semantic_fix && !opt.eligible) {
         if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-            !opt.ps_epoch_match &&
-            opt.ps_epoch_required) {
+            opt.ps_epoch_required &&
+            !opt.ps_epoch_match) {
             static int reject_log_count;
             int log_limit = ia64_fw_pei_statuscode_semantic_fix_log_limit();
             if (reject_log_count < log_limit) {
+                const char *reason = !opt.ps_epoch_seen ?
+                    "ps_epoch_missing" : "ps_epoch_mismatch";
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "IA64: pei_report_status_fix"
-                              " reject=ps_epoch_mismatch"
+                              " reject=%s"
                               " ret_pc=%016" PRIx64 " b0=%016" PRIx64
                               " seq=%" PRIu64 " ps=%016" PRIx64
-                              " ps_epoch_seen=%d ps_epoch=%016" PRIx64 "\n",
+                              " ps_epoch_seen=%d ps_epoch=%016" PRIx64
+                              " ps_epoch_src=%s ps_epoch_seq=%" PRIu64
+                              " ps_epoch_cont=%d\n",
+                              reason,
                               ent->ret_pc, env->b[0], ent->seq, ent->ps_ptr,
-                              opt.ps_epoch_seen ? 1 : 0, opt.ps_epoch_ptr);
+                              opt.ps_epoch_seen ? 1 : 0, opt.ps_epoch_ptr,
+                              ia64_fw_pei_ps_source_name(opt.ps_epoch_source),
+                              opt.ps_epoch_seq,
+                              opt.ps_epoch_from_continuity ? 1 : 0);
                 reject_log_count++;
             }
         }
@@ -14717,7 +14733,9 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
                           " ppi_found=%d unresolved=%d"
                           " ps_valid=%d ret_in_fw=%d type_ok=%d"
                           " ps_epoch_req=%d ps_epoch_seen=%d"
-                          " ps_epoch_match=%d ps_epoch=%016" PRIx64 "\n",
+                          " ps_epoch_match=%d ps_epoch=%016" PRIx64
+                          " ps_epoch_src=%s ps_epoch_seq=%" PRIu64
+                          " ps_epoch_cont=%d\n",
                           semantic_fix ? "statuscode_optional_path"
                                        : "legacy_softfail",
                           status, ent->ret_pc, env->b[0], ent->seq,
@@ -14730,7 +14748,10 @@ static void ia64_fw_pei_maybe_fix_report_status_ret(CPUIA64State *env)
                           opt.ps_epoch_required ? 1 : 0,
                           opt.ps_epoch_seen ? 1 : 0,
                           opt.ps_epoch_match ? 1 : 0,
-                          opt.ps_epoch_ptr);
+                          opt.ps_epoch_ptr,
+                          ia64_fw_pei_ps_source_name(opt.ps_epoch_source),
+                          opt.ps_epoch_seq,
+                          opt.ps_epoch_from_continuity ? 1 : 0);
             log_count++;
         }
     }
@@ -19781,7 +19802,9 @@ static bool ia64_fw_pei_first_bad_should_skip_optional_statuscode(CPUIA64State *
                       " ps=%016" PRIx64 " ppi_end=%" PRIi64 " ppi_found=%d"
                       " unresolved=%d ps_valid=%d ret_in_fw=%d type_ok=%d"
                       " ps_epoch_req=%d ps_epoch_seen=%d"
-                      " ps_epoch_match=%d ps_epoch=%016" PRIx64 "\n",
+                      " ps_epoch_match=%d ps_epoch=%016" PRIx64
+                      " ps_epoch_src=%s ps_epoch_seq=%" PRIu64
+                      " ps_epoch_cont=%d\n",
                       ia64_fw_pei_first_bad_site_name(site), pc, status,
                       ent->ps_ptr, opt.ppi_end, opt.ppi_found ? 1 : 0,
                       opt.unresolved ? 1 : 0, opt.ps_valid ? 1 : 0,
@@ -19789,7 +19812,10 @@ static bool ia64_fw_pei_first_bad_should_skip_optional_statuscode(CPUIA64State *
                       opt.ps_epoch_required ? 1 : 0,
                       opt.ps_epoch_seen ? 1 : 0,
                       opt.ps_epoch_match ? 1 : 0,
-                      opt.ps_epoch_ptr);
+                      opt.ps_epoch_ptr,
+                      ia64_fw_pei_ps_source_name(opt.ps_epoch_source),
+                      opt.ps_epoch_seq,
+                      opt.ps_epoch_from_continuity ? 1 : 0);
         log_count++;
     }
     return true;
