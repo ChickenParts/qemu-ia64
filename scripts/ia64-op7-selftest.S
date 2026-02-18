@@ -34,7 +34,23 @@ test_pmpyshr2_u:
 	pmpyshr2.u r16 = r14, r15, 16
 	movl r17 = 0x00ff7ffe00010000
 	cmp.eq p6,p0 = r16, r17
-(p6)	br.cond.spnt test_pmin1_u
+	(p6)	br.cond.spnt test_pshladd2
+	br.sptk.many fail
+
+test_pshladd2:
+	/* A10/A11: pshladd2 r1 = r2, count2, r3 */
+	pshladd2 r16 = r14, 1, r15
+	movl r17 = 0xff007ffd8003246a
+	cmp.eq p6,p0 = r16, r17
+	(p6)	br.cond.spnt test_pshradd2
+	br.sptk.many fail
+
+test_pshradd2:
+	/* A10/A11: pshradd2 r1 = r2, count2, r3 */
+	pshradd2 r16 = r14, 1, r15
+	movl r17 = 0x00803ffdc003091c
+	cmp.eq p6,p0 = r16, r17
+	(p6)	br.cond.spnt test_pmin1_u
 	br.sptk.many fail
 
 test_pmin1_u:
