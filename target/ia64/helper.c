@@ -20251,6 +20251,18 @@ static bool ia64_fw_pei_first_bad_should_skip_optional_statuscode(CPUIA64State *
     if (!opt.eligible) {
         return false;
     }
+    IA64PeiStatusRewriteFingerprint rewrite_fp = {
+        .ret_pc = ent->ret_pc,
+        .ps_ptr = ent->ps_ptr,
+        .type = ent->type,
+        .value = ent->value,
+        .instance = ent->instance,
+        .seq = ent->seq,
+    };
+    uint64_t rewrite_fp_id = ia64_fw_pei_status_rewrite_fp_id(&rewrite_fp);
+    uint64_t dedup_delta = UINT64_MAX;
+    bool dedup_hit = ia64_fw_pei_status_rewrite_dedup_hit(
+        &ia64_fw_pei_report_rewrite_dedup, &rewrite_fp, &dedup_delta);
 
     static int log_count;
     int log_limit = ia64_fw_pei_statuscode_semantic_fix_log_limit();
@@ -20263,7 +20275,9 @@ static bool ia64_fw_pei_first_bad_should_skip_optional_statuscode(CPUIA64State *
                       " ps_epoch_req=%d ps_epoch_seen=%d"
                       " ps_epoch_match=%d ps_epoch=%016" PRIx64
                       " ps_epoch_src=%s ps_epoch_seq=%" PRIu64
-                      " ps_epoch_cont=%d\n",
+                      " ps_epoch_cont=%d"
+                      " rewrite_dedup=%d rewrite_dedup_delta=%" PRIu64
+                      " rewrite_fp=%016" PRIx64 "\n",
                       ia64_fw_pei_first_bad_site_name(site), pc, status,
                       ent->ps_ptr, opt.ppi_end, opt.ppi_found ? 1 : 0,
                       opt.unresolved ? 1 : 0, opt.ps_valid ? 1 : 0,
@@ -20274,7 +20288,10 @@ static bool ia64_fw_pei_first_bad_should_skip_optional_statuscode(CPUIA64State *
                       opt.ps_epoch_ptr,
                       ia64_fw_pei_ps_source_name(opt.ps_epoch_source),
                       opt.ps_epoch_seq,
-                      opt.ps_epoch_from_continuity ? 1 : 0);
+                      opt.ps_epoch_from_continuity ? 1 : 0,
+                      dedup_hit ? 1 : 0,
+                      dedup_hit ? dedup_delta : 0,
+                      rewrite_fp_id);
         log_count++;
     }
     return true;
