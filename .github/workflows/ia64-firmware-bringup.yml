@@ -177,6 +177,43 @@ jobs:
 
           column -t -s $'\t' "$out/summary.tsv" || cat "$out/summary.tsv"
 
+      - name: Sample live state in representative development ROMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-firmware/live-state
+          mkdir -p "$out"
+          chmod +x scripts/ia64-qmp-sample.py
+
+          for firmware in 'stuff/bios130.BIN' 'stuff/rx4610_117B.BIN'; do
+            stem="$(basename "$firmware" | tr ' /' '__')"
+            logdir="$out/$stem"
+            qmp="$logdir/qmp.sock"
+            mkdir -p "$logdir"
+            rm -f "$qmp"
+
+            QEMU_IA64_RSE_STRICT_TRACE=1 \
+            QEMU_IA64_RSE_STRICT_TRACE_LIMIT=1024 \
+            IA64_BIOS="$firmware" \
+            IA64_LOGDIR="$logdir" \
+            IA64_GUEST_ERRORS=1 \
+              scripts/run-ia64-firmware.sh -- \
+                -qmp "unix:$qmp,server=on,wait=off" &
+            qemu_pid=$!
+
+            set +e
+            python3 scripts/ia64-qmp-sample.py "$qmp" \
+              --samples 8 --interval 1.5 > "$logdir/samples.txt" 2>&1
+            sample_rc=$?
+            kill -TERM "$qemu_pid" 2>/dev/null
+            wait "$qemu_pid"
+            qemu_rc=$?
+            set -e
+
+            printf 'sample_rc=%s qemu_rc=%s\n' "$sample_rc" "$qemu_rc" \
+              | tee "$logdir/result.txt"
+          done
+
       - name: Upload firmware logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -186,4 +223,5 @@ jobs:
             scratch/ci-firmware/summary.tsv
             scratch/ci-firmware/matrix.tsv
             scratch/ci-firmware/logs/
+            scratch/ci-firmware/live-state/
           if-no-files-found: error
