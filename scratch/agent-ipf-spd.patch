@@ -1,6 +1,14 @@
 --- a/hw/ia64/ipf.c
 +++ b/hw/ia64/ipf.c
-@@ -178,6 +178,8 @@
+@@ -63,6 +63,7 @@
+ #include "qemu/host-utils.h"
+ #include "qemu/log.h"
+ #include "qemu/timer.h"
++#include "qemu/units.h"
+ #include "exec/cpu-common.h"
+ #include "chardev/char.h"
+ #include <ctype.h>
+@@ -178,6 +179,8 @@
      uint32_t pci_cfgaddr;
      uint32_t trace_pci_cfgaddr;
      IPFPciFwConfig pci_fw_cfg[IPF_PCI_FW_DEV_COUNT][IPF_PCI_FW_MAX_FUNC];
@@ -9,7 +17,7 @@
  };
  
  #define IPF_VARSTORE_SIGNATURE 0x53535624U /* "$VSS" */
-@@ -4565,6 +4567,14 @@
+@@ -4565,6 +4568,14 @@
      ipf_pci_fw_cfg_set(cfg, off, size, value, 0, w1c);
  }
  
@@ -24,7 +32,7 @@
  static void ipf_pci_fw_cfg_init_one(IPFPciFwConfig *cfg,
                                      uint16_t vendor_id,
                                      uint16_t device_id,
-@@ -4691,6 +4701,153 @@
+@@ -4691,6 +4702,153 @@
      ipf_pci_fw_cfg_set_ro(cfg, 0x9C, 3, 0x000000);
  }
  
@@ -178,7 +186,7 @@
  static void ipf_pci_fw_cfg_init_ihpc(IPFPciFwConfig *cfg)
  {
      /* IHPC command: SERR, parity enable, memory space. */
-@@ -4784,6 +4941,14 @@
+@@ -4784,6 +4942,14 @@
      ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][0]);
      ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][1]);
  
@@ -193,7 +201,7 @@
      for (int dev = 16; dev <= 23; dev++) {
          ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][0], PCI_VENDOR_ID_INTEL,
                                  IPF_PCI_FW_DEVICE_ID_WXB,
-@@ -4821,13 +4986,17 @@
+@@ -4821,13 +4987,17 @@
      for (unsigned i = 0; i < size; i++) {
          uint16_t off = reg + i;
          uint8_t byte = 0xff;
@@ -214,7 +222,7 @@
              (func >= 4 && reg == 0x48)) {
              uint64_t pc = 0;
              CPUState *cs = current_cpu;
-@@ -4873,8 +5042,9 @@
+@@ -4873,8 +5043,9 @@
          cur = (cur & ~mask) | (byte & mask);
          cfg->cfg[off] = cur;
      }
