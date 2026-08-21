@@ -1,11 +1,6 @@
-name: IA-64 RSE source export
+name: Apply IA-64 RSE core patch
 
 on:
-  push:
-    branches:
-      - agent/ia64-xen-dev-firmware-boot
-    paths:
-      - .github/workflows/agent-rse-source-export.yml
   pull_request:
     branches:
       - master
@@ -14,30 +9,39 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: ia64-rse-core-apply
+  cancel-in-progress: false
 
 jobs:
-  export:
+  apply:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out live integration branch
+      - name: Check out integration branch
         uses: actions/checkout@v4
         with:
           ref: agent/ia64-xen-dev-firmware-boot
+          fetch-depth: 0
 
-      - name: Package full branch source
+      - name: Apply and validate core patch
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD | tee qemu-ia64-source.sha
-          git archive --format=tar.gz --output=qemu-ia64-source.tar.gz HEAD
+          patch=scripts/patches/ia64-rse-core.patch
+          git apply --check "$patch"
+          git apply "$patch"
+          python3 -m py_compile scripts/ia64-rse-trace-check.py
+          git diff --check
+          git rm -- "$patch"
 
-      - name: Upload source package
-        uses: actions/upload-artifact@v4
-        with:
-          name: qemu-ia64-source-${{ github.sha }}
-          path: |
-            qemu-ia64-source.tar.gz
-            qemu-ia64-source.sha
-          retention-days: 1
-          if-no-files-found: error
+      - name: Commit integration-branch update
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- target/ia64/helper.c scripts/ia64-rse-trace-check.py
+          git commit -m 'target/ia64: correct RSE frame and LOADRS accounting'
+          git push origin HEAD:agent/ia64-xen-dev-firmware-boot
