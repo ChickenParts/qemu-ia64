@@ -1,0 +1,40 @@
+name: IA-64 Xen firmware acquisition
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Mercurial
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mercurial
+
+      - name: Fetch Xen IA-64 virtual firmware
+        run: |
+          chmod +x scripts/fetch-ia64-xen-firmware.sh
+          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
+            scripts/fetch-ia64-xen-firmware.sh scratch/ia64-xen-firmware
+          find scratch/ia64-xen-firmware/source -type f -iname 'DxeLoad.c' \
+            -print -exec sh -c 'nl -ba "$1" | sed -n "500,570p"' _ {} \;
+
+      - name: Upload provenance and source mapping
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-firmware-provenance
+          path: |
+            scratch/ia64-xen-firmware/PROVENANCE.txt
+            scratch/ia64-xen-firmware/source/
+          if-no-files-found: warn
