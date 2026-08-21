@@ -1,0 +1,228 @@
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -178,6 +178,8 @@
+     uint32_t pci_cfgaddr;
+     uint32_t trace_pci_cfgaddr;
+     IPFPciFwConfig pci_fw_cfg[IPF_PCI_FW_DEV_COUNT][IPF_PCI_FW_MAX_FUNC];
++    uint8_t pci_fw_spd[PCI_CONFIG_SPACE_SIZE];
++    uint8_t pci_fw_spd_groups;
+ };
+ 
+ #define IPF_VARSTORE_SIGNATURE 0x53535624U /* "$VSS" */
+@@ -4565,6 +4567,14 @@
+     ipf_pci_fw_cfg_set(cfg, off, size, value, 0, w1c);
+ }
+ 
++static void ipf_pci_fw_cfg_init_raw(IPFPciFwConfig *cfg, bool writable)
++{
++    cfg->present = true;
++    memset(cfg->cfg, 0, sizeof(cfg->cfg));
++    memset(cfg->wmask, writable ? 0xff : 0, sizeof(cfg->wmask));
++    memset(cfg->w1c, 0, sizeof(cfg->w1c));
++}
++
+ static void ipf_pci_fw_cfg_init_one(IPFPciFwConfig *cfg,
+                                     uint16_t vendor_id,
+                                     uint16_t device_id,
+@@ -4691,6 +4701,153 @@
+     ipf_pci_fw_cfg_set_ro(cfg, 0x9C, 3, 0x000000);
+ }
+ 
++typedef struct IPFSpdProfile {
++    uint16_t dimm_mib;
++    uint8_t row_bits;
++    uint8_t column_bits;
++    uint8_t ranks;
++    uint8_t banks;
++} IPFSpdProfile;
++
++static const IPFSpdProfile ipf_spd_profiles[] = {
++    { 1024, 13, 11, 2, 4 },
++    {  512, 13, 11, 1, 4 },
++    {  256, 13, 10, 1, 4 },
++    {  128, 12, 10, 1, 4 },
++    {   64, 12,  9, 1, 4 },
++    {   32, 11, 10, 1, 2 },
++    {   16, 11,  9, 1, 2 },
++};
++
++static void ipf_pci_fw_cfg_fill_spd(uint8_t *spd,
++                                    const IPFSpdProfile *profile)
++{
++    uint64_t rank_mib = profile->dimm_mib / profile->ranks;
++    unsigned rank_log2 = 63 - clz64(rank_mib);
++
++    memset(spd, 0, PCI_CONFIG_SPACE_SIZE);
++    spd[0] = 128;                   /* Bytes written in the EEPROM. */
++    spd[1] = 8;                     /* 256-byte EEPROM. */
++    spd[2] = 4;                     /* SDR SDRAM. */
++    spd[3] = profile->row_bits;
++    spd[4] = profile->column_bits;
++    spd[5] = profile->ranks;
++    spd[6] = 72;                    /* 64 data bits plus ECC. */
++    spd[8] = 1;                     /* 3.3 V LVTTL interface. */
++    spd[9] = 0xa0;                  /* 10.0 ns: PC100. */
++    spd[10] = 0x60;                 /* 6.0 ns clock access time. */
++    spd[11] = 2;                    /* ECC. */
++    spd[12] = 0x82;                 /* Self refresh, normal refresh rate. */
++    spd[13] = 8;                    /* x8 primary SDRAM devices. */
++    spd[14] = 8;                    /* x8 ECC SDRAM device. */
++    spd[15] = 1;
++    spd[16] = 0x8f;                 /* Burst lengths 1, 2, 4, 8 and page. */
++    spd[17] = profile->banks;
++    spd[18] = 0x06;                 /* CAS latencies 2 and 3. */
++    spd[19] = 1;
++    spd[20] = 1;
++    spd[21] = 0x20;
++    spd[23] = 0xa0;
++    spd[24] = 0x60;
++    spd[27] = 20;
++    spd[28] = 15;
++    spd[29] = 20;
++    spd[30] = 45;
++    spd[31] = 1U << (rank_log2 - 2);
++    spd[32] = 20;
++    spd[33] = 8;
++    spd[34] = 20;
++    spd[35] = 8;
++
++    for (int i = 0; i < 63; i++) {
++        spd[63] += spd[i];
++    }
++}
++
++static void ipf_pci_fw_cfg_init_spd(IPFMachineState *m)
++{
++    ram_addr_t ram_size = MACHINE(m)->ram_size;
++
++    m->pci_fw_spd_groups = 0;
++    memset(m->pci_fw_spd, 0xff, sizeof(m->pci_fw_spd));
++
++    for (size_t i = 0; i < ARRAY_SIZE(ipf_spd_profiles); i++) {
++        const IPFSpdProfile *profile = &ipf_spd_profiles[i];
++        uint64_t row_size = 4ULL * profile->dimm_mib * MiB;
++        uint64_t groups;
++
++        if (ram_size < row_size || ram_size % row_size) {
++            continue;
++        }
++        groups = ram_size / row_size;
++        if (groups > 16) {
++            continue;
++        }
++
++        ipf_pci_fw_cfg_fill_spd(m->pci_fw_spd, profile);
++        m->pci_fw_spd_groups = (uint8_t)groups;
++        DPRINTF("460GX SPD: %" PRIu64 " rows of four %u MiB PC100 ECC DIMMs\n",
++                groups, profile->dimm_mib);
++        return;
++    }
++
++    warn_report("460GX SPD cannot represent " RAM_ADDR_FMT
++                " bytes as complete four-DIMM rows", ram_size);
++}
++
++static int ipf_pci_fw_cfg_spd_slot(IPFMachineState *m, uint8_t dev)
++{
++    uint8_t selector =
++        m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0].cfg[0x68] & 0x7f;
++    int card;
++    int bank;
++    int group = -1;
++
++    if (dev == IPF_PCI_FW_DEV_MAC) {
++        card = 0;
++    } else if (dev == IPF_PCI_FW_DEV_MDC) {
++        card = 1;
++    } else {
++        return -1;
++    }
++
++    if ((selector & 0xfc) == 0x54) {
++        bank = 0;
++    } else if ((selector & 0xfc) == 0x50) {
++        bank = 1;
++    } else {
++        return -1;
++    }
++
++    for (int func = 4; func <= 7; func++) {
++        if (m->pci_fw_cfg[dev][func].cfg[0x48] & 1) {
++            if (group >= 0) {
++                return -1;
++            }
++            group = func - 4;
++        }
++    }
++    if (group < 0) {
++        return -1;
++    }
++
++    int row = ((card * 2 + bank) * 4) + group;
++    if (row >= m->pci_fw_spd_groups) {
++        return -1;
++    }
++    return row * 4 + (selector & 3);
++}
++
++static uint8_t ipf_pci_fw_cfg_spd_read(IPFMachineState *m, uint8_t dev,
++                                       uint16_t reg)
++{
++    if (reg >= sizeof(m->pci_fw_spd) ||
++        ipf_pci_fw_cfg_spd_slot(m, dev) < 0) {
++        return 0xff;
++    }
++    return m->pci_fw_spd[reg];
++}
++
+ static void ipf_pci_fw_cfg_init_ihpc(IPFPciFwConfig *cfg)
+ {
+     /* IHPC command: SERR, parity enable, memory space. */
+@@ -4784,6 +4941,14 @@
+     ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][0]);
+     ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][1]);
+ 
++    for (int dev = IPF_PCI_FW_DEV_MAC; dev <= IPF_PCI_FW_DEV_MDC; dev++) {
++        ipf_pci_fw_cfg_init_raw(&m->pci_fw_cfg[dev][2], false);
++        for (int func = 4; func <= 7; func++) {
++            ipf_pci_fw_cfg_init_raw(&m->pci_fw_cfg[dev][func], true);
++        }
++    }
++    ipf_pci_fw_cfg_init_spd(m);
++
+     for (int dev = 16; dev <= 23; dev++) {
+         ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][0], PCI_VENDOR_ID_INTEL,
+                                 IPF_PCI_FW_DEVICE_ID_WXB,
+@@ -4821,13 +4986,17 @@
+     for (unsigned i = 0; i < size; i++) {
+         uint16_t off = reg + i;
+         uint8_t byte = 0xff;
+-        if (off < PCI_CONFIG_SPACE_SIZE) {
++        if ((dev == IPF_PCI_FW_DEV_MAC || dev == IPF_PCI_FW_DEV_MDC) &&
++            func == 2) {
++            byte = ipf_pci_fw_cfg_spd_read(m, dev, off);
++        } else if (off < PCI_CONFIG_SPACE_SIZE) {
+             byte = cfg->cfg[off];
+         }
+         val |= (uint32_t)byte << (i * 8);
+     }
+-    if (trace_special && dev == IPF_PCI_FW_DEV_MDC) {
+-        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) ||
++    if (trace_special &&
++        (dev == IPF_PCI_FW_DEV_MAC || dev == IPF_PCI_FW_DEV_MDC)) {
++        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) || func == 2 ||
+             (func >= 4 && reg == 0x48)) {
+             uint64_t pc = 0;
+             CPUState *cs = current_cpu;
+@@ -4873,8 +5042,9 @@
+         cur = (cur & ~mask) | (byte & mask);
+         cfg->cfg[off] = cur;
+     }
+-    if (trace_special && dev == IPF_PCI_FW_DEV_MDC) {
+-        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) ||
++    if (trace_special &&
++        (dev == IPF_PCI_FW_DEV_MAC || dev == IPF_PCI_FW_DEV_MDC)) {
++        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) || func == 2 ||
+             (func >= 4 && reg == 0x48)) {
+             uint64_t pc = 0;
+             CPUState *cs = current_cpu;
