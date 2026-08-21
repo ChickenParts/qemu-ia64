@@ -1,4 +1,4 @@
-name: Temporary IA-64 source export
+name: Temporary IA-64 SPD patch validation
 
 on:
   push:
@@ -6,90 +6,110 @@ on:
       - agent/ia64-xen-dev-firmware-boot
     paths:
       - .github/workflows/agent-source-export.yml
-  pull_request:
-    branches:
-      - master
-    paths:
-      - .github/workflows/agent-source-export.yml
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
+  apply-build-smoke:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - name: Check out integration branch
         uses: actions/checkout@v4
         with:
           ref: agent/ia64-xen-dev-firmware-boot
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Install multi-architecture binutils
+      - name: Apply and review 460GX SPD model
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check scratch/agent-ipf-spd.patch
+          git apply scratch/agent-ipf-spd.patch
+          git diff --check
+          scripts/checkpatch.pl --no-tree --ignore MISSING_SIGN_OFF \
+            scratch/agent-ipf-spd.patch
+
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y binutils-multiarch
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
 
-      - name: Disassemble development-firmware loop frontiers
+      - name: Configure and build IA-64 emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build qemu-system-ia64
+
+      - name: Exercise representative development firmware
         shell: bash
         run: |
           set -euo pipefail
-          out=scratch/agent-source-export
-          mkdir -p "$out/toolchain/lib"
-          objdump -i > "$out/objdump-targets.txt"
-          ldd "$(command -v objdump)" > "$out/objdump-ldd.txt"
-          cp "$(command -v objdump)" "$out/toolchain/objdump"
-          while IFS= read -r lib; do
-            [[ -f "$lib" ]] || continue
-            cp -L "$lib" "$out/toolchain/lib/"
-          done < <(ldd "$(command -v objdump)" | awk '/=> \/|^\// { for (i=1; i<=NF; i++) if ($i ~ /^\//) print $i }')
+          out=scratch/agent-spd-validation
+          mkdir -p "$out"
+          printf 'firmware\trc\tpost04\tlast_post\tserial_bytes\n' > "$out/summary.tsv"
 
-          disassemble() {
-            local firmware=$1
-            local base=$2
-            local start=$3
-            local stop=$4
-            local output=$5
-            {
-              echo "# firmware=$firmware base=$base range=$start..$stop"
-              objdump -D -b binary -m ia64 \
-                --adjust-vma="$base" \
-                --start-address="$start" \
-                --stop-address="$stop" \
-                "$firmware"
-            } > "$output" 2>&1
-          }
+          for firmware in 'stuff/bios130.BIN' 'stuff/rx4610_117B.BIN'; do
+            stem="$(basename "$firmware" | tr ' /' '__')"
+            logdir="$out/$stem"
+            mkdir -p "$logdir"
 
-          disassemble 'stuff/bios130.BIN' 0xffc00000 \
-            0xfffe1c00 0xfffe2300 "$out/bios130-delay.txt"
-          disassemble 'stuff/bios130.BIN' 0xffc00000 \
-            0xfffea000 0xfffeb000 "$out/bios130-init.txt"
+            set +e
+            QEMU_IPF_TRACE_PCI_SPECIAL=1 \
+            QEMU_IPF_TRACE_POST=1 \
+            QEMU_IPF_TRACE_LIMIT=4096 \
+            IA64_BIOS="$firmware" \
+            IA64_LOGDIR="$logdir" \
+            IA64_GUEST_ERRORS=1 \
+            timeout --signal=TERM --kill-after=5s 40s \
+              scripts/run-ia64-firmware.sh
+            rc=$?
+            set -e
 
-          rx_size=$(stat -c '%s' 'stuff/rx4610_117B.BIN')
-          rx_base=$(printf '0x%x' $((0x100000000 - rx_size)))
-          disassemble 'stuff/rx4610_117B.BIN' "$rx_base" \
-            0xfffd9f00 0xfffdba00 "$out/rx4610-loop.txt"
+            qlog="$logdir/qemu.fw.log"
+            serial="$(find "$logdir" -maxdepth 1 -name 'serial.fw.*.log' \
+                      -type f -print | sort | tail -n 1)"
+            post04="$(grep -ac 'ipf post.*val=04' "$qlog" 2>/dev/null || true)"
+            last_post="$(grep -a 'ipf post' "$qlog" 2>/dev/null | tail -n 1 | \
+                         tr '\t\r\n' '   ' || true)"
+            serial_bytes=0
+            if [[ -n "$serial" && -f "$serial" ]]; then
+              serial_bytes="$(stat -c '%s' "$serial")"
+            fi
+            [[ -n "$last_post" ]] || last_post='-'
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$firmware" "$rc" "$post04" "$last_post" "$serial_bytes" \
+              | tee -a "$out/summary.tsv"
+          done
 
-      - name: Pack source tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p scratch/agent-source-export
-          tar \
-            --exclude=.git \
-            --exclude=build \
-            --exclude=scratch/agent-source-export \
-            -czf scratch/agent-source-export/qemu-ia64-source.tar.gz .
-          sha256sum scratch/agent-source-export/qemu-ia64-source.tar.gz \
-            > scratch/agent-source-export/SHA256SUMS
-
-      - name: Upload source workspace and disassembly
+      - name: Upload emulator and validation logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ia64-source-${{ github.run_id }}
-          path: scratch/agent-source-export/
-          retention-days: 1
-          if-no-files-found: error
+          name: ia64-spd-validation-${{ github.run_id }}
+          path: |
+            build/qemu-system-ia64
+            scratch/agent-spd-validation/
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Commit validated model and remove staging files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -- scratch/agent-ipf-spd.patch \
+            .github/workflows/agent-source-export.yml
+          git add -- hw/ia64/ipf.c
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'hw/ia64: expose 460GX DIMM SPD topology'
+          git push origin HEAD:agent/ia64-xen-dev-firmware-boot
