@@ -20,33 +20,24 @@ jobs:
   export:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out branch
+      - name: Check out live integration branch
         uses: actions/checkout@v4
+        with:
+          ref: agent/ia64-xen-dev-firmware-boot
 
-      - name: Package live IA-64 sources
+      - name: Package full branch source
         shell: bash
         run: |
           set -euo pipefail
-          git ls-files \
-            target/ia64/helper.c \
-            target/ia64/helper.h \
-            target/ia64/cpu.h \
-            target/ia64/translate.c \
-            target/ia64/meson.build \
-            hw/ia64 \
-            scripts/run-ia64-firmware.sh \
-            scripts/ia64-qmp-sample.py \
-            .github/workflows/ia64-firmware-bringup.yml \
-            > ia64-rse-source-files.txt
-          test -s ia64-rse-source-files.txt
-          tar -czf ia64-rse-source.tar.gz -T ia64-rse-source-files.txt
+          git rev-parse HEAD | tee qemu-ia64-source.sha
+          git archive --format=tar.gz --output=qemu-ia64-source.tar.gz HEAD
 
       - name: Upload source package
         uses: actions/upload-artifact@v4
         with:
-          name: ia64-rse-source-${{ github.sha }}
+          name: qemu-ia64-source-${{ github.sha }}
           path: |
-            ia64-rse-source.tar.gz
-            ia64-rse-source-files.txt
+            qemu-ia64-source.tar.gz
+            qemu-ia64-source.sha
           retention-days: 1
           if-no-files-found: error
