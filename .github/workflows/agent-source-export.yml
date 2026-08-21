@@ -35,7 +35,7 @@ jobs:
           git apply --check scratch/agent-ipf-spd.patch
           git apply scratch/agent-ipf-spd.patch
           git diff --check
-          scripts/checkpatch.pl --no-tree --ignore MISSING_SIGN_OFF \
+          scripts/checkpatch.pl --no-tree --no-signoff \
             scratch/agent-ipf-spd.patch
 
       - name: Install build dependencies
