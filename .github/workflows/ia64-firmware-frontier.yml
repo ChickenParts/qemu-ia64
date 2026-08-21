@@ -1,0 +1,156 @@
+name: IA-64 firmware frontier
+
+on:
+  push:
+    branches:
+      - feature/xen-dev-firmware-full-boot
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the IA-64 tree
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Self-test the firmware matrix harness
+        run: python3 scripts/test-ia64-firmware-matrix.py
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ninja-build \
+            pkg-config \
+            python3 \
+            python3-venv \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            zlib1g-dev
+
+      - name: Configure IA-64 system emulation
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
+            --disable-vnc \
+            --disable-curses
+
+      - name: Build qemu-system-ia64
+        run: ninja -C build qemu-system-ia64
+
+      - name: Inventory bundled and archived firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/archive-inventory scratch/extracted-firmware
+          {
+            echo "== repository images =="
+            find stuff -maxdepth 1 -type f -printf '%s %p\n' | sort -n
+            echo
+            for archive in stuff/*.tar stuff/*.tar.gz; do
+              [[ -f "$archive" ]] || continue
+              echo "== $archive =="
+              tar -tf "$archive" || true
+              echo
+            done
+          } | tee scratch/archive-inventory/firmware-inventory.txt
+
+          mkdir -p scratch/extracted-firmware/sdv
+          tar -xf stuff/SDV_Debug_Bios.tar \
+            -C scratch/extracted-firmware/sdv || true
+          mkdir -p scratch/extracted-firmware/xen
+          tar -xf stuff/xen-3.4.1.tar.gz \
+            -C scratch/extracted-firmware/xen || true
+
+          find scratch/extracted-firmware -type f \
+            -printf '%s %p\n' | sort -n \
+            | tee scratch/archive-inventory/extracted-inventory.txt
+
+      - name: Run strict firmware frontier matrix
+        id: firmware-matrix
+        continue-on-error: true
+        shell: bash
+        env:
+          IA64_PEI_22560_STATUS_FIX: "1"
+          IA64_PEI_279D0_TRACE: "1"
+          IA64_PEI_279D0_STATUS_FIX: "1"
+          IA64_PEI_279D0_SAFE_MODE: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/ci-firmware-matrix
+
+          extra=()
+          index=0
+          while IFS= read -r image; do
+            [[ -n "$image" ]] || continue
+            index=$((index + 1))
+            extra+=(--firmware "archive-${index}=${image}")
+          done < <(
+            find scratch/extracted-firmware -type f \
+              \( -iname 'Flash.fd' -o -iname '*gfw*.bin' \
+                 -o -iname '*bios*.bin' \) \
+              -size +512k -print
+          )
+
+          python3 scripts/run-ia64-firmware-matrix.py \
+            --qemu ./build/qemu-system-ia64 \
+            --allow-missing \
+            --timeout 60 \
+            --output scratch/ci-firmware-matrix \
+            "${extra[@]}" \
+            | tee scratch/ci-firmware-matrix/console.log
+
+      - name: Upload firmware frontier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-firmware-frontier
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            scratch/archive-inventory
+            scratch/ci-firmware-matrix
+
+      - name: Enforce full-boot gate
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = Path("scratch/ci-firmware-matrix/summary.json")
+          if not summary.is_file():
+              raise SystemExit("firmware matrix did not produce summary.json")
+
+          results = json.loads(summary.read_text(encoding="utf-8"))
+          failed = [
+              result for result in results
+              if result.get("status") != "PASS"
+          ]
+          if failed:
+              for result in failed:
+                  print(
+                      f"{result['name']}: status={result['status']} "
+                      f"phase={result['phase']} "
+                      f"blocker={result.get('blocker')}"
+                  )
+              raise SystemExit(
+                  f"{len(failed)} firmware image(s) have not reached "
+                  "their full-boot oracle"
+              )
+          PY
