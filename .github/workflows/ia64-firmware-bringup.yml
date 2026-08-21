@@ -1,0 +1,186 @@
+name: IA-64 firmware bring-up
+
+on:
+  push:
+    branches:
+      - agent/ia64-xen-dev-firmware-boot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  xen-source-inventory:
+    name: Xen 3.4.1 firmware source inventory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract Xen source and map DxeLoad assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-inventory
+          tree="$out/tree"
+          mkdir -p "$tree"
+          tar -xzf stuff/xen-3.4.1.tar.gz -C "$tree"
+
+          {
+            echo '# Xen 3.4.1 firmware inventory'
+            echo
+            echo '## DxeLoad source candidates'
+            find "$tree" -type f -iname 'DxeLoad.c' -print | sort
+            echo
+            echo '## Source context around line 536'
+            while IFS= read -r source; do
+              [[ -n "$source" ]] || continue
+              echo
+              echo "### $source"
+              nl -ba "$source" | sed -n '500,570p'
+            done < <(find "$tree" -type f -iname 'DxeLoad.c' -print | sort)
+            echo
+            echo '## Firmware-like files in source archive'
+            find "$tree" -type f \
+              \( -iname '*.fd' -o -iname '*.rom' -o -iname '*.bin' -o \
+                 -iname '*.efi' -o -iname '*gfw*' \) \
+              -printf '%s\t%p\n' | sort -n
+            echo
+            echo '## IA-64 firmware build references'
+            grep -RInE '(^|[^[:alnum:]_])(gfw|Flash\.fd|DxeLoad|EFI.*IA64|XEN.*IA64)' \
+              "$tree" --include='Makefile*' --include='*.mk' --include='*.sh' \
+              --include='*.c' --include='*.h' 2>/dev/null | head -n 1000 || true
+          } | tee "$out/report.md"
+
+      - name: Upload source inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xen-3.4.1-firmware-inventory
+          path: scratch/ci-xen-inventory/report.md
+          if-no-files-found: error
+
+  build-and-smoke:
+    name: Build and smoke firmware matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+
+      - name: Build IA-64 system emulator
+        run: ninja -C build qemu-system-ia64
+
+      - name: Prepare firmware matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-firmware
+          mkdir -p "$out/logs" "$out/xen"
+          tar -xzf stuff/xen-3.4.1.tar.gz -C "$out/xen"
+
+          : > "$out/matrix.tsv"
+          for firmware in \
+            'stuff/EFI 0.99 Debug SDV.bin' \
+            'stuff/Unknown Ver EFI.bin' \
+            'stuff/bios117c.BIN' \
+            'stuff/bios130.BIN' \
+            'stuff/mybios.bin' \
+            'stuff/rx4610_109B.BIN' \
+            'stuff/rx4610_117B.BIN'; do
+            if [[ -s "$firmware" ]]; then
+              printf 'dev\t%s\n' "$firmware" >> "$out/matrix.tsv"
+            fi
+          done
+
+          while IFS= read -r firmware; do
+            [[ -n "$firmware" ]] || continue
+            printf 'xen\t%s\n' "$firmware" >> "$out/matrix.tsv"
+          done < <(find "$out/xen" -type f \
+                    \( -iname 'Flash.fd' -o -iname '*gfw*.bin' -o \
+                       -iname '*gfw*.rom' -o -iname '*gfw*.fd' \) \
+                    -size +0c -print | sort -u)
+
+          cat "$out/matrix.tsv"
+
+      - name: Run firmware smoke matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-firmware
+          printf 'class\tfirmware\trc\tfirst_assert\tfirst_unimpl\tlast_serial\n' \
+            > "$out/summary.tsv"
+
+          while IFS=$'\t' read -r class firmware; do
+            [[ -n "$firmware" ]] || continue
+            stem="$(basename "$firmware" | tr ' /' '__' | tr -cd '[:alnum:]_.-')"
+            logdir="$out/logs/${class}-${stem}"
+            mkdir -p "$logdir"
+
+            set +e
+            IA64_BIOS="$firmware" \
+            IA64_LOGDIR="$logdir" \
+            IA64_GUEST_ERRORS=1 \
+            IA64_PEI_22560_STATUS_FIX=1 \
+            IA64_PEI_279D0_TRACE=1 \
+            IA64_PEI_279D0_STATUS_FIX=1 \
+            IA64_PEI_279D0_SAFE_MODE=0 \
+            IA64_DXE_ASSERT_SCAN_TRACE=1 \
+            IA64_DXE_ASSERT_CONTEXT_TRACE=1 \
+            timeout --signal=TERM --kill-after=5s 25s \
+              scripts/run-ia64-firmware.sh
+            rc=$?
+            set -e
+
+            serial="$(find "$logdir" -maxdepth 1 -name 'serial.fw.*.log' \
+                      -type f -print | sort | tail -n 1)"
+            qlog="$logdir/qemu.fw.log"
+            first_assert='-'
+            first_unimpl='-'
+            last_serial='-'
+            if [[ -n "$serial" && -f "$serial" ]]; then
+              first_assert="$(grep -am1 'ASSERT' "$serial" | tr '\t\r\n' '   ' || true)"
+              last_serial="$(tail -n 1 "$serial" | tr '\t\r\n' '   ' || true)"
+            fi
+            if [[ -f "$qlog" ]]; then
+              first_unimpl="$(grep -am1 'IA64 UNIMPL' "$qlog" | tr '\t\r\n' '   ' || true)"
+            fi
+            [[ -n "$first_assert" ]] || first_assert='-'
+            [[ -n "$first_unimpl" ]] || first_unimpl='-'
+            [[ -n "$last_serial" ]] || last_serial='-'
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$class" "$firmware" "$rc" "$first_assert" \
+              "$first_unimpl" "$last_serial" | tee -a "$out/summary.tsv"
+          done < "$out/matrix.tsv"
+
+          column -t -s $'\t' "$out/summary.tsv" || cat "$out/summary.tsv"
+
+      - name: Upload firmware logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-firmware-smoke-logs
+          path: |
+            scratch/ci-firmware/summary.tsv
+            scratch/ci-firmware/matrix.tsv
+            scratch/ci-firmware/logs/
+          if-no-files-found: error
