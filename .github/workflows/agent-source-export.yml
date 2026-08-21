@@ -1,0 +1,49 @@
+name: Temporary IA-64 source export
+
+on:
+  push:
+    branches:
+      - agent/ia64-xen-dev-firmware-boot
+    paths:
+      - .github/workflows/agent-source-export.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/agent-source-export.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/ia64-xen-dev-firmware-boot
+          fetch-depth: 1
+
+      - name: Pack source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/agent-source-export
+          tar \
+            --exclude=.git \
+            --exclude=build \
+            --exclude=scratch/agent-source-export \
+            -czf scratch/agent-source-export/qemu-ia64-source.tar.gz .
+          sha256sum scratch/agent-source-export/qemu-ia64-source.tar.gz \
+            > scratch/agent-source-export/SHA256SUMS
+
+      - name: Upload source workspace
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-source-${{ github.run_id }}
+          path: scratch/agent-source-export/
+          retention-days: 1
+          if-no-files-found: error
