@@ -23,21 +23,30 @@ jobs:
       - name: Check out branch
         uses: actions/checkout@v4
 
-      - name: Package live RSE sources
+      - name: Package live IA-64 sources
+        shell: bash
         run: |
-          tar -czf ia64-rse-source.tar.gz \
+          set -euo pipefail
+          git ls-files \
             target/ia64/helper.c \
             target/ia64/helper.h \
             target/ia64/cpu.h \
             target/ia64/translate.c \
             target/ia64/meson.build \
-            roms/ia64/check-rse.c \
-            .github/workflows/ia64-firmware.yml
+            hw/ia64 \
+            scripts/run-ia64-firmware.sh \
+            scripts/ia64-qmp-sample.py \
+            .github/workflows/ia64-firmware-bringup.yml \
+            > ia64-rse-source-files.txt
+          test -s ia64-rse-source-files.txt
+          tar -czf ia64-rse-source.tar.gz -T ia64-rse-source-files.txt
 
       - name: Upload source package
         uses: actions/upload-artifact@v4
         with:
           name: ia64-rse-source-${{ github.sha }}
-          path: ia64-rse-source.tar.gz
+          path: |
+            ia64-rse-source.tar.gz
+            ia64-rse-source-files.txt
           retention-days: 1
           if-no-files-found: error
