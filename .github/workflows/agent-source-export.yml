@@ -6,6 +6,12 @@ on:
       - agent/ia64-xen-dev-firmware-boot
     paths:
       - .github/workflows/agent-source-export.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/agent-source-export.yml
+      - scratch/agent-ipf-spd.patch
   workflow_dispatch:
 
 permissions:
@@ -102,6 +108,7 @@ jobs:
           retention-days: 3
 
       - name: Commit validated model and remove staging files
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
