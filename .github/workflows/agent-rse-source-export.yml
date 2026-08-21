@@ -1,0 +1,38 @@
+name: IA-64 RSE source export
+
+on:
+  push:
+    branches:
+      - agent/ia64-xen-dev-firmware-boot
+    paths:
+      - .github/workflows/agent-rse-source-export.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Package live RSE sources
+        run: |
+          tar -czf ia64-rse-source.tar.gz \
+            target/ia64/helper.c \
+            target/ia64/helper.h \
+            target/ia64/cpu.h \
+            target/ia64/translate.c \
+            target/ia64/meson.build \
+            roms/ia64/check-rse.c \
+            .github/workflows/ia64-firmware.yml
+
+      - name: Upload source package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-rse-source-${{ github.sha }}
+          path: ia64-rse-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
