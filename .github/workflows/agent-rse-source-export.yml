@@ -6,6 +6,11 @@ on:
       - agent/ia64-xen-dev-firmware-boot
     paths:
       - .github/workflows/agent-rse-source-export.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/agent-rse-source-export.yml
   workflow_dispatch:
 
 permissions:
