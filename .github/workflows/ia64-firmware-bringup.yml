@@ -93,6 +93,42 @@ jobs:
       - name: Build IA-64 system emulator
         run: ninja -C build qemu-system-ia64
 
+      - name: Package IA-64 emulator for firmware replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-emulator
+          mkdir -p "$out/lib"
+          cp build/qemu-system-ia64 "$out/"
+
+          ldd build/qemu-system-ia64 | awk '
+            $2 == "=>" && $3 ~ /^\// { print $3 }
+            $1 ~ /^\// { print $1 }
+          ' | sort -u > "$out/linked-libraries.txt"
+          while IFS= read -r library; do
+            case "$(basename "$library")" in
+              libc.so.*|libm.so.*|ld-linux*.so.*) continue ;;
+            esac
+            cp -L "$library" "$out/lib/"
+          done < "$out/linked-libraries.txt"
+
+          cat > "$out/run-qemu-system-ia64" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          here="$(cd "$(dirname "$0")" && pwd)"
+          exec env LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$here/qemu-system-ia64" "$@"
+          EOF
+          chmod +x "$out/run-qemu-system-ia64"
+
+      - name: Upload replayable IA-64 emulator
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-emulator-${{ github.sha }}
+          path: scratch/ci-emulator/
+          retention-days: 3
+          if-no-files-found: error
+
       - name: Prepare firmware matrix
         shell: bash
         run: |
@@ -212,6 +248,12 @@ jobs:
 
             printf 'sample_rc=%s qemu_rc=%s\n' "$sample_rc" "$qemu_rc" \
               | tee "$logdir/result.txt"
+
+            python3 scripts/ia64-rse-trace-check.py \
+              "$logdir/qemu.fw.log" \
+              --require-tag alloc_bsp \
+              --require-tag call_bsp \
+              --require-tag ret_bsp
           done
 
       - name: Upload firmware logs
