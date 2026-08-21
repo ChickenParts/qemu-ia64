@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/ia64-xen-dev-firmware-boot
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
