@@ -1,0 +1,198 @@
+name: IA-64 Xen PEI HOB relocation validation
+
+on:
+  push:
+    branches:
+      - fix/ia64-xen-pei-hob-relocation
+    paths:
+      - .github/workflows/ia64-xen-pei-hob-relocation.yml
+      - scratch/ia64-xen-pei-hob-relocation.patch
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-xen-pei-hob-relocation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-build-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-xen-pei-hob-relocation
+          fetch-depth: 0
+
+      - name: Apply retained PEI/HOB correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch --dry-run -p1 < scratch/ia64-xen-pei-hob-relocation.patch
+          patch -p1 < scratch/ia64-xen-pei-hob-relocation.patch
+          git diff --check
+          grep -Fq 'uint64_t new_base = (new_phys != base_phys) ? new_phys : base_raw;' \
+            target/ia64/helper.c
+          grep -Fq 'mem_bottom_raw, hob_base' target/ia64/helper.c
+
+      - name: Install build and firmware-fetch dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev mercurial
+
+      - name: Configure and build IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build qemu-system-ia64
+
+      - name: Fetch the historical Xen/IPF virtual firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/fetch-ia64-xen-firmware.sh
+          scripts/fetch-ia64-xen-firmware.sh scratch/ci-xen-firmware
+          sha256sum scratch/ci-xen-firmware/Flash.fd
+          test "$(sha256sum scratch/ci-xen-firmware/Flash.fd | awk '{print $1}')" = \
+            e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+
+      - name: Exercise Xen PEI through the DXE frontier
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-hob-validation
+          mkdir -p "$out"
+
+          set +e
+          IA64_BIOS="$PWD/scratch/ci-xen-firmware/Flash.fd" \
+          IA64_LOGDIR="$PWD/$out" \
+          IA64_GUEST_ERRORS=1 \
+          IA64_EFI_HOB_PATCH=1 \
+          IA64_EFI_HOB_PATCH_TRACE=1 \
+          IA64_PEI_22560_STATUS_FIX=1 \
+          IA64_PEI_279D0_TRACE=1 \
+          IA64_PEI_279D0_STATUS_FIX=1 \
+          IA64_PEI_279D0_SAFE_MODE=0 \
+          IA64_DXE_ASSERT_SCAN_TRACE=1 \
+          IA64_DXE_ASSERT_CONTEXT_TRACE=1 \
+          timeout --signal=TERM --kill-after=5s 120s \
+            scripts/run-ia64-firmware.sh -- -L "$PWD/pc-bios" \
+            >"$out/runner.log" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$out/runner.rc"
+
+          serial="$(find "$out" -maxdepth 1 -type f \
+                    -name 'serial.fw.*.log' -print | sort | tail -n 1)"
+          qlog="$out/qemu.fw.log"
+          test -n "$serial"
+          test -s "$serial"
+          test -s "$qlog"
+
+          {
+            printf 'run_id=%s\n' '${{ github.run_id }}'
+            printf 'commit=%s\n' '${{ github.sha }}'
+            printf 'runner_rc=%s\n' "$rc"
+            printf 'firmware_sha256=%s\n' \
+              "$(sha256sum scratch/ci-xen-firmware/Flash.fd | awk '{print $1}')"
+            printf 'serial_bytes=%s\n' "$(stat -c '%s' "$serial")"
+            printf 'qlog_bytes=%s\n' "$(stat -c '%s' "$qlog")"
+            printf 'hob_insertions=%s\n' \
+              "$(grep -ac 'hob_patch: inserted .* sysmem resource HOB' "$qlog" || true)"
+            printf 'dxe_core_entries=%s\n' \
+              "$(grep -ac 'DXE Core Entry' "$serial" || true)"
+            printf 'assertions=%s\n' "$(grep -ac 'ASSERT' "$serial" || true)"
+          } | tee "$out/summary.txt"
+
+          grep -aFq 'hob_patch: inserted 1 sysmem resource HOB' "$qlog"
+          grep -aFq 'DXE Core Entry' "$serial"
+          ! grep -aFq 'DxeLoad.c Line 536' "$serial"
+          ! grep -aFq 'Gcd.c Line 1736' "$serial"
+          ! grep -aFq 'ASSERT' "$serial"
+          ! grep -aEq 'Segmentation fault|Aborted|assertion .* failed' "$out/runner.log"
+          test "$rc" -eq 124 -o "$rc" -eq 0
+
+          grep -aE \
+            'fw_pei_hob_init_fix|fw_pei_phit_temp_fix|hob_patch: inserted|efi_hob_res|DXE|GCD|ASSERT' \
+            "$qlog" > "$out/key-qemu-markers.log" || true
+          tail -n 400 "$serial" > "$out/serial-tail.log"
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-pei-hob-relocation-${{ github.run_id }}
+          path: |
+            scratch/ci-xen-firmware/PROVENANCE.txt
+            scratch/ci-xen-hob-validation/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Commit validated implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-hob-validation
+          mkdir -p docs/reviews
+          cat > docs/reviews/2026-08-21_xen_pei_hob_relocation.md <<EOF
+          # Xen/IPF PEI HOB relocation correction
+
+          Date: 2026-08-21
+          Integration target: \`metachicken\`
+          Validation workflow run: ${{ github.run_id }}
+
+          ## Correction
+
+          Low-RAM relocation now publishes an untagged physical base rather than
+          retaining the source firmware address's stale region/sign-extension tag.
+          The redirected PHIT also records its actual HOB-list base in
+          \`EfiMemoryBottom\`, with the same base used by the free-bottom fallback.
+
+          This keeps HOB growth coherent after translated accesses are enabled and
+          prevents permanent-memory migration from inflating the copied-list length
+          and stranding the real end-of-list marker.
+
+          ## Acceptance gate
+
+          The exact historical Xen/IPF firmware image with SHA-256
+          \`e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513\`
+          was run for 120 seconds with the existing bounded HOB resource repair
+          enabled.  The gate required:
+
+          - insertion of one tested system-memory resource HOB;
+          - entry into DXE Core;
+          - no recurrence of \`DxeLoad.c:536\`;
+          - no recurrence of \`Gcd.c:1736\`;
+          - no firmware assertion in the validation window; and
+          - no host abort or segmentation fault.
+
+          ## Machine summary
+
+          \`\`\`
+          $(cat "$out/summary.txt")
+          \`\`\`
+
+          The next tranche starts at the first stable post-DXE execution frontier;
+          it must not reintroduce broad alternate-HOB cloning or title/firmware
+          address aliases outside the validated Xen low-memory PEI arena.
+          EOF
+
+          git rm -- \
+            scratch/ia64-xen-pei-hob-relocation.patch \
+            .github/workflows/ia64-xen-pei-hob-relocation.yml
+          git add target/ia64/helper.c \
+            docs/reviews/2026-08-21_xen_pei_hob_relocation.md
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'ia64: repair Xen PEI HOB relocation [skip ci]'
+          git push origin HEAD:fix/ia64-xen-pei-hob-relocation
