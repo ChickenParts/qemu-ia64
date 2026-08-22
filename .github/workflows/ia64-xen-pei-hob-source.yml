@@ -1,0 +1,254 @@
+name: IA-64 Xen PEI HOB source validation
+
+on:
+  push:
+    branches:
+      - fix/ia64-xen-pei-hob-relocation
+    paths:
+      - .github/workflows/ia64-xen-pei-hob-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-xen-pei-hob-source-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-xen-pei-hob-relocation
+          fetch-depth: 0
+
+      - name: Apply, build, and exercise Xen firmware
+        id: validate
+        shell: bash
+        run: |
+          set +e
+          out=scratch/ci-xen-hob-source
+          rm -rf "$out"
+          mkdir -p "$out"
+          status=0
+          stage=apply
+          reason=ok
+
+          record_failure() {
+            status=1
+            reason="$1"
+            printf 'stage=%s\nreason=%s\n' "$stage" "$reason" > "$out/failure.txt"
+          }
+
+          patch --dry-run -p1 < scratch/ia64-xen-pei-hob-relocation.patch \
+            >"$out/patch-check.log" 2>&1 || record_failure patch-dry-run
+          if [ "$status" -eq 0 ]; then
+            patch -p1 < scratch/ia64-xen-pei-hob-relocation.patch \
+              >"$out/patch.log" 2>&1 || record_failure patch-apply
+          fi
+          if [ "$status" -eq 0 ]; then
+            git diff --check >"$out/diff-check.log" 2>&1 || record_failure diff-check
+            grep -Fq 'uint64_t new_base = (new_phys != base_phys) ? new_phys : base_raw;' \
+              target/ia64/helper.c || record_failure relocation-source-missing
+            grep -Fq 'mem_bottom_raw, hob_base' target/ia64/helper.c \
+              || record_failure phit-source-missing
+          fi
+
+          stage=dependencies
+          if [ "$status" -eq 0 ]; then
+            sudo apt-get update >"$out/apt-update.log" 2>&1 \
+              || record_failure apt-update
+          fi
+          if [ "$status" -eq 0 ]; then
+            sudo apt-get install -y \
+              build-essential ninja-build pkg-config python3 python3-venv \
+              libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev mercurial \
+              >"$out/apt-install.log" 2>&1 || record_failure apt-install
+          fi
+
+          stage=build
+          if [ "$status" -eq 0 ]; then
+            ./configure \
+              --target-list=ia64-softmmu \
+              --disable-werror \
+              --disable-docs \
+              --disable-gtk \
+              --disable-sdl \
+              >"$out/configure.log" 2>&1 || record_failure configure
+          fi
+          if [ "$status" -eq 0 ]; then
+            ninja -C build qemu-system-ia64 >"$out/build.log" 2>&1 \
+              || record_failure build
+          fi
+
+          stage=firmware
+          if [ "$status" -eq 0 ]; then
+            chmod +x scripts/fetch-ia64-xen-firmware.sh
+            scripts/fetch-ia64-xen-firmware.sh scratch/ci-xen-firmware \
+              >"$out/firmware-fetch.log" 2>&1 || record_failure firmware-fetch
+          fi
+          if [ "$status" -eq 0 ]; then
+            firmware_sha="$(sha256sum scratch/ci-xen-firmware/Flash.fd | awk '{print $1}')"
+            if [ "$firmware_sha" != \
+              e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513 ]; then
+              record_failure firmware-sha256
+            fi
+          else
+            firmware_sha=unavailable
+          fi
+
+          stage=boot
+          rc=not-run
+          serial=
+          qlog="$out/qemu.fw.log"
+          if [ "$status" -eq 0 ]; then
+            IA64_BIOS="$PWD/scratch/ci-xen-firmware/Flash.fd" \
+            IA64_LOGDIR="$PWD/$out" \
+            IA64_GUEST_ERRORS=1 \
+            IA64_EFI_HOB_PATCH=1 \
+            IA64_EFI_HOB_PATCH_TRACE=1 \
+            IA64_PEI_22560_STATUS_FIX=1 \
+            IA64_PEI_279D0_TRACE=1 \
+            IA64_PEI_279D0_STATUS_FIX=1 \
+            IA64_PEI_279D0_SAFE_MODE=0 \
+            IA64_DXE_ASSERT_SCAN_TRACE=1 \
+            IA64_DXE_ASSERT_CONTEXT_TRACE=1 \
+            timeout --signal=TERM --kill-after=5s 120s \
+              scripts/run-ia64-firmware.sh -- -L "$PWD/pc-bios" \
+              >"$out/runner.log" 2>&1
+            rc=$?
+            serial="$(find "$out" -maxdepth 1 -type f \
+                      -name 'serial.fw.*.log' -print | sort | tail -n 1)"
+            [ "$rc" -eq 124 ] || [ "$rc" -eq 0 ] || record_failure runner-exit
+            [ -n "$serial" ] && [ -s "$serial" ] || record_failure serial-missing
+            [ -s "$qlog" ] || record_failure qemu-log-missing
+          fi
+
+          stage=acceptance
+          if [ "$status" -eq 0 ]; then
+            grep -aFq 'hob_patch: inserted 1 sysmem resource HOB' "$qlog" \
+              || record_failure sysmem-hob-not-inserted
+            grep -aFq 'DXE Core Entry' "$serial" \
+              || record_failure dxe-core-not-entered
+            grep -aFq 'DxeLoad.c Line 536' "$serial" \
+              && record_failure dxeload-assert-returned
+            grep -aFq 'Gcd.c Line 1736' "$serial" \
+              && record_failure gcd-assert-returned
+            grep -aFq 'ASSERT' "$serial" \
+              && record_failure firmware-assert
+            grep -aEq 'Segmentation fault|Aborted|assertion .* failed' "$out/runner.log" \
+              && record_failure host-crash
+          fi
+
+          assertions=unavailable
+          dxe_entries=unavailable
+          hob_insertions=unavailable
+          serial_bytes=0
+          qlog_bytes=0
+          if [ -n "$serial" ] && [ -f "$serial" ]; then
+            assertions="$(grep -ac 'ASSERT' "$serial" || true)"
+            dxe_entries="$(grep -ac 'DXE Core Entry' "$serial" || true)"
+            serial_bytes="$(stat -c '%s' "$serial")"
+            tail -n 500 "$serial" > "$out/serial-tail.log"
+          fi
+          if [ -f "$qlog" ]; then
+            hob_insertions="$(grep -ac 'hob_patch: inserted .* sysmem resource HOB' "$qlog" || true)"
+            qlog_bytes="$(stat -c '%s' "$qlog")"
+            grep -aE \
+              'fw_pei_hob_init_fix|fw_pei_phit_temp_fix|hob_patch: inserted|efi_hob_res|DXE|GCD|ASSERT|UNIMPL' \
+              "$qlog" > "$out/key-qemu-markers.log" || true
+          fi
+
+          {
+            printf 'workflow_run=%s\n' '${{ github.run_id }}'
+            printf 'source_commit=%s\n' '${{ github.sha }}'
+            printf 'status=%s\n' "$status"
+            printf 'final_stage=%s\n' "$stage"
+            printf 'reason=%s\n' "$reason"
+            printf 'runner_rc=%s\n' "$rc"
+            printf 'firmware_sha256=%s\n' "$firmware_sha"
+            printf 'serial_bytes=%s\n' "$serial_bytes"
+            printf 'qlog_bytes=%s\n' "$qlog_bytes"
+            printf 'hob_insertions=%s\n' "$hob_insertions"
+            printf 'dxe_core_entries=%s\n' "$dxe_entries"
+            printf 'assertions=%s\n' "$assertions"
+          } | tee "$out/result.txt"
+
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-pei-hob-source-${{ github.run_id }}
+          path: |
+            scratch/ci-xen-firmware/PROVENANCE.txt
+            scratch/ci-xen-hob-source/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Publish implementation or exact failure frontier
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-hob-source
+          result="$out/result.txt"
+          test -f "$result"
+          status="$(sed -n 's/^status=//p' "$result" | tail -n 1)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          if [ "$status" = 0 ]; then
+            mkdir -p docs/reviews
+            cat > docs/reviews/2026-08-22_xen_pei_hob_relocation.md <<EOF
+          # Xen/IPF PEI HOB relocation correction
+
+          Date: 2026-08-22
+          Integration target: \`metachicken\`
+          Validation workflow run: ${{ github.run_id }}
+
+          Low-RAM relocation now drops stale source region/sign-extension tags.
+          The redirected PHIT records its actual HOB-list base in
+          \`EfiMemoryBottom\`, and the free-bottom fallback uses that same base.
+          This keeps PEI HOB growth and permanent-memory migration coherent after
+          translated accesses begin.
+
+          The exact historical Xen/IPF firmware image was exercised for 120 seconds
+          with the bounded existing system-memory resource repair.  It entered DXE
+          Core without the former DxeLoad or GCD assertions and without a host crash.
+
+          \`\`\`
+          $(cat "$result")
+          \`\`\`
+          EOF
+            git rm -- \
+              scratch/ia64-xen-pei-hob-relocation.patch \
+              .github/workflows/ia64-xen-pei-hob-relocation.yml \
+              .github/workflows/ia64-xen-pei-hob-source.yml
+            git add target/ia64/helper.c \
+              docs/reviews/2026-08-22_xen_pei_hob_relocation.md
+            git diff --cached --check
+            git commit -m 'ia64: repair Xen PEI HOB relocation [skip ci]'
+          else
+            mkdir -p scratch/ia64-xen-pei-hob-failure
+            cp "$result" scratch/ia64-xen-pei-hob-failure/result.txt
+            for file in "$out/failure.txt" "$out/serial-tail.log" \
+                        "$out/key-qemu-markers.log" "$out/configure.log" \
+                        "$out/build.log" "$out/firmware-fetch.log" \
+                        "$out/runner.log"; do
+              if [ -f "$file" ]; then
+                cp "$file" scratch/ia64-xen-pei-hob-failure/
+              fi
+            done
+            git add scratch/ia64-xen-pei-hob-failure
+            git diff --cached --check
+            git commit -m 'ci: record Xen PEI HOB validation frontier [skip ci]'
+          fi
+
+          git push origin HEAD:fix/ia64-xen-pei-hob-relocation
