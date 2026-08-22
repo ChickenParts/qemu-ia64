@@ -1,4 +1,4 @@
-# Validation trigger revision 3 (low-level ref update)
+# Validation trigger revision 4 (source integration validation)
 --- helper.c.b3e51e22.orig	2026-08-21 23:00:40.074589462 +0000
 +++ qemu-ia64-head/target/ia64/helper.c	2026-08-21 23:14:13.031911651 +0000
 @@ -10652,7 +10652,16 @@
