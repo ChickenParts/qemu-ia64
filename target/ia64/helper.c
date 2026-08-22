@@ -10652,7 +10652,16 @@ static bool ia64_fw_pei_patch_mem_args(CPUIA64State *env, uint64_t pc,
         fix = true;
     }
 
-    uint64_t new_base = ia64_fw_encode_addr(base_raw, new_phys);
+    /*
+     * When an out-of-range firmware address is relocated into normal low
+     * RAM, do not retain the source address's region/sign-extension tag.
+     * The xenipf PEI core stores this value in PHIT pointers and later uses
+     * them after enabling translated accesses.  A low physical address with
+     * a stale 0xffffffff tag aliases correctly only in physical mode; after
+     * the mode switch, HOB growth is written through an unrelated virtual
+     * address and the published list remains truncated.
+     */
+    uint64_t new_base = (new_phys != base_phys) ? new_phys : base_raw;
     if (fix || new_base != base_raw || size != env->r[size_reg]) {
         env->r[base_reg] = new_base;
         env->r[size_reg] = size;
@@ -21522,10 +21531,17 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                     uint64_t end_hob_phys = ia64_phys_mode_addr(end_hob_raw);
                     uint64_t free_bottom_phys = (end_hob_phys + 0x1fULL) & ~0x1fULL;
                     if (free_bottom_phys > temp_top) {
-                        free_bottom_phys = temp_base;
+                        free_bottom_phys = hob_base;
                     }
+                    /*
+                     * The redirected PHIT starts at hob_base.  Legacy IPF PEI
+                     * uses EfiMemoryBottom as the physical base to relocate
+                     * the list when permanent memory is installed, so leaving
+                     * temp_base here inflates the copied-list length by
+                     * hob_base - temp_base and strands the real END marker.
+                     */
                     stq_le_p(&phit[16], ia64_fw_encode_addr(mem_top_raw, temp_top));
-                    stq_le_p(&phit[24], ia64_fw_encode_addr(mem_bottom_raw, temp_base));
+                    stq_le_p(&phit[24], ia64_fw_encode_addr(mem_bottom_raw, hob_base));
                     stq_le_p(&phit[32], ia64_fw_encode_addr(mem_top_raw, temp_top));
                     stq_le_p(&phit[40], ia64_fw_encode_addr(mem_bottom_raw, free_bottom_phys));
                     cpu_physical_memory_write(hob_base, phit, sizeof(phit));
@@ -21535,7 +21551,7 @@ void HELPER(fw_pei_hob_init_fix)(CPUIA64State *env, uint64_t pc)
                                       " PHIT mem_bottom=%016" PRIx64
                                       " mem_top=%016" PRIx64
                                       " free_bottom=%016" PRIx64 "\n",
-                                      pc, temp_base, temp_top, free_bottom_phys);
+                                      pc, hob_base, temp_top, free_bottom_phys);
                     }
                 } else if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
                     qemu_log_mask(LOG_GUEST_ERROR,
@@ -21602,11 +21618,12 @@ void HELPER(fw_pei_phit_temp_fix)(CPUIA64State *env, uint64_t pc)
     uint64_t end_hob_phys = ia64_phys_mode_addr(end_hob_raw);
     uint64_t free_bottom_phys = (end_hob_phys + 0x1fULL) & ~0x1fULL;
     if (free_bottom_phys > temp_top) {
-        free_bottom_phys = temp_base;
+        free_bottom_phys = hob_base;
     }
 
+    /* Keep PHIT MemoryBottom equal to the redirected list's actual base. */
     stq_le_p(&phit[16], ia64_fw_encode_addr(mem_top_raw, temp_top));
-    stq_le_p(&phit[24], ia64_fw_encode_addr(mem_bottom_raw, temp_base));
+    stq_le_p(&phit[24], ia64_fw_encode_addr(mem_bottom_raw, hob_base));
     stq_le_p(&phit[32], ia64_fw_encode_addr(mem_top_raw, temp_top));
     stq_le_p(&phit[40], ia64_fw_encode_addr(mem_bottom_raw, free_bottom_phys));
     cpu_physical_memory_write(hob_base, phit, sizeof(phit));
@@ -21618,7 +21635,7 @@ void HELPER(fw_pei_phit_temp_fix)(CPUIA64State *env, uint64_t pc)
                       " mem_bottom=%016" PRIx64
                       " mem_top=%016" PRIx64
                       " free_bottom=%016" PRIx64 "\n",
-                      pc, hob_base, temp_base, temp_top, free_bottom_phys);
+                      pc, hob_base, hob_base, temp_top, free_bottom_phys);
     }
 #endif
 }
