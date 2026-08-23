@@ -210,7 +210,7 @@
 +    return true;
 +}
 +
- static void ia64_fw_try_patch_efi_hobs(CPUHA64State *env)
+ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
  {
      static int enabled = -1;
 @@ -17859,6 +18066,9 @@
@@ -247,7 +247,8 @@
 --- /dev/null
 +++ b/scripts/test-ia64-pei-sysmem-hob-source.py
 @@ -0,0 +1,58 @@
-+#!/usr/bin/env python3+"""Fail-closed source contract for the narrow Xen PEI sysmem-HOB repair."""
++#!/usr/bin/env python3
++"""Fail-closed source contract for the narrow Xen PEI sysmem-HOB repair."""
 +
 +from pathlib import Path
 +import re
