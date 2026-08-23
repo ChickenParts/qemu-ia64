@@ -31,6 +31,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Repair the staged patch's type-name transcription before applying;
+          # the workflow and patch are removed by the validated source commit.
+          sed -i 's/CPUHA64State/CPUIA64State/g' \
+            scratch/ia64-xen-dxe-system-memory-hob.patch
+          ! grep -Fq 'CPUHA64State' \
+            scratch/ia64-xen-dxe-system-memory-hob.patch
           patch --dry-run -p1 < scratch/ia64-xen-dxe-system-memory-hob.patch
           patch -p1 < scratch/ia64-xen-dxe-system-memory-hob.patch
           git diff --check
