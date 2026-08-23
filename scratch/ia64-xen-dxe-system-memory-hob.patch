@@ -1,6 +1,6 @@
 --- a/target/ia64/helper.c
 +++ b/target/ia64/helper.c
-@@ -17779,6 +17779,213 @@
+@@ -17779,6 +17779,212 @@
  }
  
  #ifndef CONFIG_USER_ONLY
@@ -213,8 +213,8 @@
  static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
  {
      static int enabled = -1;
-@@ -17859,6 +18066,9 @@
-            memtype_enabled = 1;
+@@ -17859,6 +18065,9 @@
+             memtype_enabled = 1;
          }
      }
 +    if (env->fw_pei_mem_installed) {
@@ -310,7 +310,7 @@
 @@ -0,0 +1,42 @@
 +# Xen/IPF DXE tested-system-memory HOB repair
 +
-+Date: 2026-08-23  
++Date: 2026-08-23
 +Integration target: `metachicken`
 +
 +## Failure contract
