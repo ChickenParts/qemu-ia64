@@ -1,0 +1,351 @@
+--- a/target/ia64/helper.c
++++ b/target/ia64/helper.c
+@@ -17779,6 +17779,213 @@
+ }
+ 
+ #ifndef CONFIG_USER_ONLY
++static bool ia64_fw_pei_sysmem_hob_fix_enabled(void)
++{
++    static int enabled = -1;
++
++    if (enabled == -1) {
++        const char *s = getenv("QEMU_IA64_PEI_SYSMEM_HOB_FIX");
++
++        /*
++         * Xen's legacy PEI core can omit the one tested-system-memory HOB
++         * required by DXE GCD initialization.  Keep this narrow repair on by
++         * default, but retain an explicit opt-out for firmware A/B testing.
++         */
++        enabled = (!s || !*s || ia64_env_truthy(s)) ? 1 : 0;
++    }
++    return enabled != 0;
++}
++
++static bool ia64_fw_pei_ensure_tested_sysmem_hob(CPUIA64State *env,
++                                                  CPUState *cs,
++                                                  uint64_t stack_phys)
++{
++    enum {
++        EFI_HOB_TYPE_HANDOFF = 0x0001,
++        EFI_HOB_TYPE_RESOURCE_DESCRIPTOR = 0x0003,
++        EFI_HOB_TYPE_END_OF_HOB_LIST = 0xffff,
++    };
++    enum {
++        EFI_RESOURCE_ATTRIBUTE_PRESENT = 0x00000001u,
++        EFI_RESOURCE_ATTRIBUTE_INITIALIZED = 0x00000002u,
++        EFI_RESOURCE_ATTRIBUTE_TESTED = 0x00000004u,
++        EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE = 0x00002000u,
++    };
++    const uint32_t tested_mask = EFI_RESOURCE_ATTRIBUTE_PRESENT |
++                                 EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
++                                 EFI_RESOURCE_ATTRIBUTE_TESTED;
++    const uint32_t attributes = tested_mask |
++                                EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE;
++    const uint64_t descriptor_len = 0x30;
++    const uint64_t end_header_len = 8;
++    uint64_t hob_base = 0;
++    uint64_t hob_end = 0;
++    uint8_t phit[0x38];
++    uint8_t old_end[8];
++
++    if (!ia64_fw_pei_sysmem_hob_fix_enabled() ||
++        !env->fw_pei_mem_installed || !stack_phys ||
++        !ia64_fw_find_pei_hob_list(cs, stack_phys, &hob_base, &hob_end)) {
++        return false;
++    }
++
++    if (hob_end <= hob_base || hob_end - hob_base < sizeof(phit) + 8 ||
++        hob_end - hob_base > (1ULL << 20) || hob_base < (1ULL << 20)) {
++        return false;
++    }
++    if (cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), false) != 0) {
++        return false;
++    }
++    if (lduw_le_p(&phit[0]) != EFI_HOB_TYPE_HANDOFF ||
++        lduw_le_p(&phit[2]) < sizeof(phit)) {
++        return false;
++    }
++
++    uint64_t mem_top_raw = ldq_le_p(&phit[16]);
++    uint64_t mem_bottom_raw = ldq_le_p(&phit[24]);
++    uint64_t free_top_raw = ldq_le_p(&phit[32]);
++    uint64_t free_bottom_raw = ldq_le_p(&phit[40]);
++    uint64_t end_hob_raw = ldq_le_p(&phit[48]);
++    uint64_t mem_top = ia64_phys_mode_addr(mem_top_raw);
++    uint64_t mem_bottom = ia64_phys_mode_addr(mem_bottom_raw);
++    uint64_t free_top = ia64_phys_mode_addr(free_top_raw);
++    uint64_t free_bottom = ia64_phys_mode_addr(free_bottom_raw);
++    uint64_t end_hob = ia64_phys_mode_addr(end_hob_raw);
++    uint64_t ram_size = env->fw_mem_size;
++
++    if (!ram_size && current_machine) {
++        ram_size = current_machine->ram_size;
++    }
++    /*
++     * The relocation contract installs Xen permanent PEI memory above the
++     * reserved first MiB.  Do not mutate the earlier temporary-memory PHIT;
++     * it can be copied into the final list and would leave overlapping
++     * resource descriptors after the PHIT expands to the full RAM range.
++     */
++    if (mem_bottom != (1ULL << 20) || mem_top <= mem_bottom ||
++        (ram_size && mem_top != ram_size) ||
++        hob_base < mem_bottom || hob_end > mem_top ||
++        free_bottom < hob_end || free_top > mem_top ||
++        free_bottom >= free_top || end_hob != hob_end - end_header_len) {
++        return false;
++    }
++    if (cpu_memory_rw_debug(cs, end_hob, old_end, sizeof(old_end), false) != 0 ||
++        lduw_le_p(&old_end[0]) != EFI_HOB_TYPE_END_OF_HOB_LIST ||
++        lduw_le_p(&old_end[2]) != sizeof(old_end)) {
++        return false;
++    }
++
++    for (uint64_t cur = hob_base; cur < end_hob;) {
++        uint8_t header[8];
++        if (cpu_memory_rw_debug(cs, cur, header, sizeof(header), false) != 0) {
++            return false;
++        }
++        uint16_t type = lduw_le_p(&header[0]);
++        uint16_t len = lduw_le_p(&header[2]);
++        if (len < sizeof(header) || cur + len < cur || cur + len > end_hob) {
++            return false;
++        }
++        if (type == EFI_HOB_TYPE_RESOURCE_DESCRIPTOR && len >= descriptor_len) {
++            uint8_t descriptor[0x30];
++
++            if (cpu_memory_rw_debug(cs, cur, descriptor,
++                                     sizeof(descriptor), false) != 0) {
++                return false;
++            }
++            uint32_t resource_type = ldl_le_p(&descriptor[24]);
++            uint32_t resource_attr = ldl_le_p(&descriptor[28]);
++            uint64_t start = ia64_phys_mode_addr(ldq_le_p(&descriptor[32]));
++            uint64_t length = ldq_le_p(&descriptor[40]);
++            uint64_t top = start + length;
++
++            if (resource_type == 0 &&
++                (resource_attr & tested_mask) == tested_mask &&
++                length && top >= start &&
++                free_bottom >= start && free_top <= top) {
++                env->fw_phit_mem_bottom = mem_bottom_raw;
++                env->fw_phit_mem_top = mem_top_raw;
++                env->fw_phit_free_bottom = free_bottom_raw;
++                env->fw_phit_free_top = free_top_raw;
++                return true;
++            }
++        }
++        cur += len;
++    }
++
++    uint64_t new_end_hob = end_hob + descriptor_len;
++    uint64_t new_list_end = new_end_hob + end_header_len;
++    uint64_t new_free_bottom = QEMU_ALIGN_UP(new_list_end, 0x20);
++    if (new_end_hob < end_hob || new_list_end < new_end_hob ||
++        new_free_bottom < new_list_end) {
++        return false;
++    }
++    if (new_free_bottom < free_bottom) {
++        new_free_bottom = free_bottom;
++    }
++    if (new_free_bottom >= free_top) {
++        return false;
++    }
++
++    uint8_t descriptor[0x30] = { 0 };
++    uint8_t end_header[8] = { 0 };
++    uint8_t new_phit[sizeof(phit)];
++    memcpy(new_phit, phit, sizeof(new_phit));
++
++    stw_le_p(&descriptor[0], EFI_HOB_TYPE_RESOURCE_DESCRIPTOR);
++    stw_le_p(&descriptor[2], sizeof(descriptor));
++    stl_le_p(&descriptor[24], 0 /* EFI_RESOURCE_SYSTEM_MEMORY */);
++    stl_le_p(&descriptor[28], attributes);
++    stq_le_p(&descriptor[32],
++             ia64_fw_encode_addr(mem_bottom_raw, mem_bottom));
++    stq_le_p(&descriptor[40], mem_top - mem_bottom);
++
++    stw_le_p(&end_header[0], EFI_HOB_TYPE_END_OF_HOB_LIST);
++    stw_le_p(&end_header[2], sizeof(end_header));
++
++    uint64_t end_template = end_hob_raw ? end_hob_raw : mem_bottom_raw;
++    uint64_t free_template = free_bottom_raw ? free_bottom_raw : mem_bottom_raw;
++    uint64_t new_free_bottom_raw =
++        ia64_fw_encode_addr(free_template, new_free_bottom);
++    stq_le_p(&new_phit[40], new_free_bottom_raw);
++    stq_le_p(&new_phit[48],
++             ia64_fw_encode_addr(end_template, new_end_hob));
++
++    if (cpu_memory_rw_debug(cs, end_hob, descriptor,
++                           sizeof(descriptor), true) != 0 ||
++        cpu_memory_rw_debug(cs, new_end_hob, end_header,
++                            sizeof(end_header), true) != 0 ||
++        cpu_memory_rw_debug(cs, hob_base, new_phit,
++                            sizeof(new_phit), true) != 0) {
++        cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), true);
++        cpu_memory_rw_debug(cs, end_hob, old_end, sizeof(old_end), true);
++        return false;
++    }
++
++    uint64_t validated_end = 0;
++    int validated_count = 0;
++    if (!ia64_fw_validate_efi_hob_list(cs, hob_base,
++                                        &validated_end, &validated_count) ||
++        validated_end != new_list_end) {
++        cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), true);
++        cpu_memory_rw_debug(cs, end_hob, old_end, sizeof(old_end), true);
++        return false;
++    }
++
++    env->fw_phit_mem_bottom = mem_bottom_raw;
++    env->fw_phit_mem_top = mem_top_raw;
++    env->fw_phit_free_bottom = new_free_bottom_raw;
++    env->fw_phit_free_top = free_top_raw;
++
++    qemu_log_mask(LOG_GUEST_ERROR,
++                  "IA64: pei_sysmem_hob_fix inserted base=%016" PRIx64
++                  " len=%016" PRIx64 " end=%016" PRIx64
++                  " free_bottom=%016" PRIx64 " hobs=%d\n",
++                  mem_bottom, mem_top - mem_bottom, new_end_hob,
++                  new_free_bottom, validated_count);
++    return true;
++}
++
+ static void ia64_fw_try_patch_efi_hobs(CPUHA64State *env)
+ {
+     static int enabled = -1;
+@@ -17859,6 +18066,9 @@
+            memtype_enabled = 1;
+         }
+     }
++    if (env->fw_pei_mem_installed) {
++        ia64_fw_pei_ensure_tested_sysmem_hob(env, cs, stack_phys);
++    }
+     if (!enabled && !memtype_enabled) {
+         if (dump_enabled && !dumped_hobs) {
+             if ((dump_throttle++ & 0xff) == 0) {
+--- a/scripts/run-ia64-firmware.sh
++++ b/scripts/run-ia64-firmware.sh
+@@ -32,6 +32,7 @@
+   IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT (default: helper default/16)
+   IA64_EFI_HOB_PATCH (default: inherited/off; enable EFI HOB repair path)
+   IA64_EFI_HOB_PATCH_TRACE (default: inherited/off; verbose HOB patch logs)
++  IA64_PEI_SYSMEM_HOB_FIX (default: inherited/1; narrowly add a missing tested system-memory HOB for DXE)
+   IA64_CALL_NULL_FIX (default: inherited/off; bisect-only guard for known null br.call target path)
+   IA64_CALL_NULL_FIX_LOG_LIMIT (default: helper default)
+   IA64_FW_PEI_COPY_TRACE (default: 0; enable fw_pei_copy probes)
+@@ -208,6 +209,10 @@
+   export QEMU_IA64_EFI_HOB_PATCH_TRACE="${IA64_EFI_HOB_PATCH_TRACE}"
+ fi
+ 
++if [[ -n "${IA64_PEI_SYSMEM_HOB_FIX:-}" ]]; then
++  export QEMU_IA64_PEI_SYSMEM_HOB_FIX="${IA64_PEI_SYSMEM_HOB_FIX}"
++fi
++
+ if [[ -n "${IA64_CALL_NULL_FIX:-}" ]]; then
+   export QEMU_IA64_CALL_NULL_FIX="${IA64_CALL_NULL_FIX}"
+ fi
+--- /dev/null
++++ b/scripts/test-ia64-pei-sysmem-hob-source.py
+@@ -0,0 +1,58 @@
++#!/usr/bin/env python3+"""Fail-closed source contract for the narrow Xen PEI sysmem-HOB repair."""
++
++from pathlib import Path
++import re
++
++root = Path(__file__).resolve().parents[1]
++helper = (root / "target/ia64/helper.c").read_text(encoding="utf-8")
++runner = (root / "scripts/run-ia64-firmware.sh").read_text(encoding="utf-8")
++
++required = (
++    "ia64_fw_pei_sysmem_hob_fix_enabled",
++    "QEMU_IA64_PEI_SYSMEM_HOB_FIX",
++    "ia64_fw_pei_ensure_tested_sysmem_hob",
++    "!env->fw_pei_mem_installed",
++    "ia64_fw_find_pei_hob_list",
++    "hob_end - hob_base > (1ULL << 20)",
++    "end_hob != hob_end - end_header_len",
++    "mem_bottom != (1ULL << 20)",
++    "mem_top != ram_size",
++    "free_bottom < hob_end",
++    "free_top > mem_top",
++    "EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE",
++    "QEMU_ALIGN_UP(new_list_end, 0x20)",
++    "validated_end != new_list_end",
++    "IA64: pei_sysmem_hob_fix inserted",
++)
++for token in required:
++    if token not in helper:
++        raise SystemExit(f"missing narrow sysmem-HOB contract marker: {token}")
++
++if "IA64_PEI_SYSMEM_HOB_FIX" not in runner:
++    raise SystemExit("firmware runner does not expose the narrow repair opt-out")
++
++helper_start = helper.index("static bool ia64_fw_pei_ensure_tested_sysmem_hob")
++helper_end = helper.index("static void ia64_fw_try_patch_efi_hobs", helper_start)
++narrow = helper[helper_start:helper_end]
++if "IA64_IPF_FW_SLACK_SIZE" in narrow or "slack_size" in narrow:
++    raise SystemExit("narrow repair must not absorb the broad slack-RAM heuristic")
++if "ia64_fw_find_hob_list_in_range" in narrow:
++    raise SystemExit("narrow repair must not scan arbitrary memory for HOB lists")
++if "EFI_HOB_TYPE_FV" in narrow or "MEMTYPE" in narrow:
++    raise SystemExit("narrow repair must insert only the tested sysmem descriptor")
++
++call = "ia64_fw_pei_ensure_tested_sysmem_hob(env, cs, stack_phys);"
++broad_return = "if (!enabled && !memtype_enabled)"
++if helper.index(call) > helper.index(broad_return):
++    raise SystemExit("narrow repair is hidden behind the broad HOB-patch gate")
++
++# The descriptor is exactly one 0x30-byte resource HOB followed by one END HOB.
++if not re.search(r"descriptor_len\s*=\s*0x30", narrow):
++    raise SystemExit("resource descriptor width is not fixed at 0x30")
++if narrow.count("EFI_HOB_TYPE_RESOURCE_DESCRIPTOR") < 2:
++    raise SystemExit("resource descriptor scan/write contract is incomplete")
++if "mem_top - mem_bottom" not in narrow:
++    raise SystemExit("descriptor does not cover the PHIT memory range")
++
++print("IA-64 narrow PEI tested-system-memory HOB source contract passed")
+--- /dev/null
++++ b/docs/reviews/2026-08-23_xen_dxe_system_memory_hob.md
+@@ -0,0 +1,42 @@
++# Xen/IPF DXE tested-system-memory HOB repair
++
++Date: 2026-08-23  
++Integration target: `metachicken`
++
++## Failure contract
++
++After the PEI relocation correction, Xen reaches the DXE core but its migrated
++HOB list can omit the tested `EFI_RESOURCE_SYSTEM_MEMORY` descriptor covering
++PHIT `EfiFreeMemoryBottom..EfiFreeMemoryTop`. DXE GCD initialization searches
++for exactly that descriptor and asserts when it is absent.
++
++The historical `QEMU_IA64_EFI_HOB_PATCH` path proves that synthesizing the
++missing descriptor clears the GCD boundary, but that path also performs broad
++HOB discovery, firmware-volume injection, memory-type insertion, GP-window
++reservation, address retagging, and other unrelated repairs.
++
++## Narrow repair
++
++The default-on `QEMU_IA64_PEI_SYSMEM_HOB_FIX` path performs one operation only:
++
++1. wait until PEI permanent memory has been installed;
++2. obtain the validated HOB list from the PEI core near the live stack;
++3. validate PHIT ranges, the physical RAM envelope, the exact END-HOB pointer,
++   and available free-list capacity;
++4. accept an existing tested system-memory descriptor when it covers the PHIT
++   free range; otherwise
++5. replace the END HOB with one 0x30-byte tested, initialized, present,
++   write-back-cacheable system-memory descriptor, append a new END HOB, and
++   update PHIT `EfiEndOfHobList` and `EfiFreeMemoryBottom`.
++
++It does not scan arbitrary memory, include the IPF slack window, inject firmware
++volumes, rewrite memory-type information, or enable the broad HOB patch. Set
++`IA64_PEI_SYSMEM_HOB_FIX=0` in the firmware runner for a clean A/B comparison.
++
++## Acceptance gate
++
++The Xen runtime gate requires the canonical retained `Flash.fd` and broad HOB
++patching disabled. A passing run must emit `pei_sysmem_hob_fix inserted`, clear
++the former `DxeLoad.c:536` and `Gcd.c:1736` assertions, and reach DXE memory
++service initialization without a host abort. The next observed assertion or
++control-flow boundary becomes a separate feature tranche.

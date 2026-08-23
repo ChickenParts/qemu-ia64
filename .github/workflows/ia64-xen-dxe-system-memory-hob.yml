@@ -1,0 +1,157 @@
+name: IA-64 Xen DXE system-memory HOB tranche
+
+on:
+  push:
+    branches:
+      - fix/ia64-xen-dxe-system-memory-hob
+    paths:
+      - .github/workflows/ia64-xen-dxe-system-memory-hob.yml
+      - scratch/ia64-xen-dxe-system-memory-hob.patch
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-xen-dxe-system-memory-hob-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-build-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-xen-dxe-system-memory-hob
+          fetch-depth: 0
+
+      - name: Apply narrow PEI system-memory HOB repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch --dry-run -p1 < scratch/ia64-xen-dxe-system-memory-hob.patch
+          patch -p1 < scratch/ia64-xen-dxe-system-memory-hob.patch
+          git diff --check
+          python3 scripts/test-ia64-pei-sysmem-hob-source.py
+          python3 -m py_compile scripts/test-ia64-pei-sysmem-hob-source.py
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure and build IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build qemu-system-ia64
+          test -x build/qemu-system-ia64
+
+      - name: Smoke representative development firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-dxe-sysmem/dev
+          mkdir -p "$out"
+          printf 'firmware\trc\tasserts\tunimpl\thost_abort\n' > "$out/summary.tsv"
+
+          for firmware in stuff/bios130.BIN stuff/rx4610_117B.BIN; do
+            stem="$(basename "$firmware" | tr ' /' '__')"
+            logdir="$out/$stem"
+            mkdir -p "$logdir"
+
+            set +e
+            IA64_BIOS="$firmware" \
+            IA64_LOGDIR="$logdir" \
+            IA64_GUEST_ERRORS=1 \
+            IA64_EFI_HOB_PATCH=0 \
+            IA64_PEI_SYSMEM_HOB_FIX=1 \
+              timeout --signal=TERM --kill-after=5s 15s \
+                scripts/run-ia64-firmware.sh -- -vga none -nic none
+            rc=$?
+            set -e
+
+            serial="$(find "$logdir" -maxdepth 1 -name 'serial.fw.*.log' -type f -print | sort | tail -n 1)"
+            qlog="$logdir/qemu.fw.log"
+            asserts=0
+            unimpl=0
+            host_abort=0
+            if [[ -n "$serial" && -f "$serial" ]]; then
+              asserts="$(grep -ac 'ASSERT' "$serial" || true)"
+            fi
+            if [[ -f "$qlog" ]]; then
+              unimpl="$(grep -ac 'IA64 UNIMPL' "$qlog" || true)"
+              host_abort="$(grep -aEc 'Segmentation fault|Aborted|core dumped|qemu-system-ia64:.*assert' "$qlog" || true)"
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$firmware" "$rc" "$asserts" "$unimpl" "$host_abort" \
+              | tee -a "$out/summary.tsv"
+            test "$host_abort" -eq 0
+          done
+
+      - name: Package replayable IA-64 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-dxe-sysmem/emulator
+          mkdir -p "$out/lib"
+          cp build/qemu-system-ia64 "$out/"
+          cp scripts/run-ia64-firmware.sh "$out/"
+          printf '%s\n' '${{ github.sha }}' > "$out/source-trigger-sha.txt"
+          sha256sum build/qemu-system-ia64 > "$out/qemu-system-ia64.sha256"
+
+          ldd build/qemu-system-ia64 | awk '
+            $2 == "=>" && $3 ~ /^\// { print $3 }
+            $1 ~ /^\// { print $1 }
+          ' | sort -u > "$out/linked-libraries.txt"
+          while IFS= read -r library; do
+            case "$(basename "$library")" in
+              libc.so.*|libm.so.*|ld-linux*.so.*) continue ;;
+            esac
+            cp -L "$library" "$out/lib/"
+          done < "$out/linked-libraries.txt"
+
+          cat > "$out/run-qemu-system-ia64" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          here="$(cd "$(dirname "$0")" && pwd)"
+          exec env LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$here/qemu-system-ia64" "$@"
+          EOF
+          chmod +x "$out/run-qemu-system-ia64"
+
+      - name: Upload emulator and development-firmware evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-dxe-sysmem-${{ github.sha }}
+          path: |
+            scratch/ci-xen-dxe-sysmem/emulator/
+            scratch/ci-xen-dxe-sysmem/dev/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Publish validated source to feature branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -- \
+            scratch/ia64-xen-dxe-system-memory-hob.patch \
+            .github/workflows/ia64-xen-dxe-system-memory-hob.yml
+          git add -- \
+            target/ia64/helper.c \
+            scripts/run-ia64-firmware.sh \
+            scripts/test-ia64-pei-sysmem-hob-source.py \
+            docs/reviews/2026-08-23_xen_dxe_system_memory_hob.md
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'ia64: add narrow Xen DXE system-memory HOB repair [skip ci]'
+          git push origin HEAD:fix/ia64-xen-dxe-system-memory-hob
