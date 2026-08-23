@@ -32,6 +32,7 @@ Environment overrides:
   IA64_FW_XENIPF_MPBUFFER_FIX_LOG_LIMIT (default: helper default/16)
   IA64_EFI_HOB_PATCH (default: inherited/off; enable EFI HOB repair path)
   IA64_EFI_HOB_PATCH_TRACE (default: inherited/off; verbose HOB patch logs)
+  IA64_PEI_SYSMEM_HOB_FIX (default: inherited/1; narrowly add a missing tested system-memory HOB for DXE)
   IA64_CALL_NULL_FIX (default: inherited/off; bisect-only guard for known null br.call target path)
   IA64_CALL_NULL_FIX_LOG_LIMIT (default: helper default)
   IA64_FW_PEI_COPY_TRACE (default: 0; enable fw_pei_copy probes)
@@ -206,6 +207,10 @@ fi
 
 if [[ -n "${IA64_EFI_HOB_PATCH_TRACE:-}" ]]; then
   export QEMU_IA64_EFI_HOB_PATCH_TRACE="${IA64_EFI_HOB_PATCH_TRACE}"
+fi
+
+if [[ -n "${IA64_PEI_SYSMEM_HOB_FIX:-}" ]]; then
+  export QEMU_IA64_PEI_SYSMEM_HOB_FIX="${IA64_PEI_SYSMEM_HOB_FIX}"
 fi
 
 if [[ -n "${IA64_CALL_NULL_FIX:-}" ]]; then
