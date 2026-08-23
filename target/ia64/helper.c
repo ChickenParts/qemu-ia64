@@ -17779,6 +17779,212 @@ void HELPER(fw_enter_kernel)(CPUIA64State *env)
 }
 
 #ifndef CONFIG_USER_ONLY
+static bool ia64_fw_pei_sysmem_hob_fix_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled == -1) {
+        const char *s = getenv("QEMU_IA64_PEI_SYSMEM_HOB_FIX");
+
+        /*
+         * Xen's legacy PEI core can omit the one tested-system-memory HOB
+         * required by DXE GCD initialization.  Keep this narrow repair on by
+         * default, but retain an explicit opt-out for firmware A/B testing.
+         */
+        enabled = (!s || !*s || ia64_env_truthy(s)) ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static bool ia64_fw_pei_ensure_tested_sysmem_hob(CPUIA64State *env,
+                                                  CPUState *cs,
+                                                  uint64_t stack_phys)
+{
+    enum {
+        EFI_HOB_TYPE_HANDOFF = 0x0001,
+        EFI_HOB_TYPE_RESOURCE_DESCRIPTOR = 0x0003,
+        EFI_HOB_TYPE_END_OF_HOB_LIST = 0xffff,
+    };
+    enum {
+        EFI_RESOURCE_ATTRIBUTE_PRESENT = 0x00000001u,
+        EFI_RESOURCE_ATTRIBUTE_INITIALIZED = 0x00000002u,
+        EFI_RESOURCE_ATTRIBUTE_TESTED = 0x00000004u,
+        EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE = 0x00002000u,
+    };
+    const uint32_t tested_mask = EFI_RESOURCE_ATTRIBUTE_PRESENT |
+                                 EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+                                 EFI_RESOURCE_ATTRIBUTE_TESTED;
+    const uint32_t attributes = tested_mask |
+                                EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE;
+    const uint64_t descriptor_len = 0x30;
+    const uint64_t end_header_len = 8;
+    uint64_t hob_base = 0;
+    uint64_t hob_end = 0;
+    uint8_t phit[0x38];
+    uint8_t old_end[8];
+
+    if (!ia64_fw_pei_sysmem_hob_fix_enabled() ||
+        !env->fw_pei_mem_installed || !stack_phys ||
+        !ia64_fw_find_pei_hob_list(cs, stack_phys, &hob_base, &hob_end)) {
+        return false;
+    }
+
+    if (hob_end <= hob_base || hob_end - hob_base < sizeof(phit) + 8 ||
+        hob_end - hob_base > (1ULL << 20) || hob_base < (1ULL << 20)) {
+        return false;
+    }
+    if (cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), false) != 0) {
+        return false;
+    }
+    if (lduw_le_p(&phit[0]) != EFI_HOB_TYPE_HANDOFF ||
+        lduw_le_p(&phit[2]) < sizeof(phit)) {
+        return false;
+    }
+
+    uint64_t mem_top_raw = ldq_le_p(&phit[16]);
+    uint64_t mem_bottom_raw = ldq_le_p(&phit[24]);
+    uint64_t free_top_raw = ldq_le_p(&phit[32]);
+    uint64_t free_bottom_raw = ldq_le_p(&phit[40]);
+    uint64_t end_hob_raw = ldq_le_p(&phit[48]);
+    uint64_t mem_top = ia64_phys_mode_addr(mem_top_raw);
+    uint64_t mem_bottom = ia64_phys_mode_addr(mem_bottom_raw);
+    uint64_t free_top = ia64_phys_mode_addr(free_top_raw);
+    uint64_t free_bottom = ia64_phys_mode_addr(free_bottom_raw);
+    uint64_t end_hob = ia64_phys_mode_addr(end_hob_raw);
+    uint64_t ram_size = env->fw_mem_size;
+
+    if (!ram_size && current_machine) {
+        ram_size = current_machine->ram_size;
+    }
+    /*
+     * The relocation contract installs Xen permanent PEI memory above the
+     * reserved first MiB.  Do not mutate the earlier temporary-memory PHIT;
+     * it can be copied into the final list and would leave overlapping
+     * resource descriptors after the PHIT expands to the full RAM range.
+     */
+    if (mem_bottom != (1ULL << 20) || mem_top <= mem_bottom ||
+        (ram_size && mem_top != ram_size) ||
+        hob_base < mem_bottom || hob_end > mem_top ||
+        free_bottom < hob_end || free_top > mem_top ||
+        free_bottom >= free_top || end_hob != hob_end - end_header_len) {
+        return false;
+    }
+    if (cpu_memory_rw_debug(cs, end_hob, old_end, sizeof(old_end), false) != 0 ||
+        lduw_le_p(&old_end[0]) != EFI_HOB_TYPE_END_OF_HOB_LIST ||
+        lduw_le_p(&old_end[2]) != sizeof(old_end)) {
+        return false;
+    }
+
+    for (uint64_t cur = hob_base; cur < end_hob;) {
+        uint8_t header[8];
+        if (cpu_memory_rw_debug(cs, cur, header, sizeof(header), false) != 0) {
+            return false;
+        }
+        uint16_t type = lduw_le_p(&header[0]);
+        uint16_t len = lduw_le_p(&header[2]);
+        if (len < sizeof(header) || cur + len < cur || cur + len > end_hob) {
+            return false;
+        }
+        if (type == EFI_HOB_TYPE_RESOURCE_DESCRIPTOR && len >= descriptor_len) {
+            uint8_t descriptor[0x30];
+
+            if (cpu_memory_rw_debug(cs, cur, descriptor,
+                                     sizeof(descriptor), false) != 0) {
+                return false;
+            }
+            uint32_t resource_type = ldl_le_p(&descriptor[24]);
+            uint32_t resource_attr = ldl_le_p(&descriptor[28]);
+            uint64_t start = ia64_phys_mode_addr(ldq_le_p(&descriptor[32]));
+            uint64_t length = ldq_le_p(&descriptor[40]);
+            uint64_t top = start + length;
+
+            if (resource_type == 0 &&
+                (resource_attr & tested_mask) == tested_mask &&
+                length && top >= start &&
+                free_bottom >= start && free_top <= top) {
+                env->fw_phit_mem_bottom = mem_bottom_raw;
+                env->fw_phit_mem_top = mem_top_raw;
+                env->fw_phit_free_bottom = free_bottom_raw;
+                env->fw_phit_free_top = free_top_raw;
+                return true;
+            }
+        }
+        cur += len;
+    }
+
+    uint64_t new_end_hob = end_hob + descriptor_len;
+    uint64_t new_list_end = new_end_hob + end_header_len;
+    uint64_t new_free_bottom = QEMU_ALIGN_UP(new_list_end, 0x20);
+    if (new_end_hob < end_hob || new_list_end < new_end_hob ||
+        new_free_bottom < new_list_end) {
+        return false;
+    }
+    if (new_free_bottom < free_bottom) {
+        new_free_bottom = free_bottom;
+    }
+    if (new_free_bottom >= free_top) {
+        return false;
+    }
+
+    uint8_t descriptor[0x30] = { 0 };
+    uint8_t end_header[8] = { 0 };
+    uint8_t new_phit[sizeof(phit)];
+    memcpy(new_phit, phit, sizeof(new_phit));
+
+    stw_le_p(&descriptor[0], EFI_HOB_TYPE_RESOURCE_DESCRIPTOR);
+    stw_le_p(&descriptor[2], sizeof(descriptor));
+    stl_le_p(&descriptor[24], 0 /* EFI_RESOURCE_SYSTEM_MEMORY */);
+    stl_le_p(&descriptor[28], attributes);
+    stq_le_p(&descriptor[32],
+             ia64_fw_encode_addr(mem_bottom_raw, mem_bottom));
+    stq_le_p(&descriptor[40], mem_top - mem_bottom);
+
+    stw_le_p(&end_header[0], EFI_HOB_TYPE_END_OF_HOB_LIST);
+    stw_le_p(&end_header[2], sizeof(end_header));
+
+    uint64_t end_template = end_hob_raw ? end_hob_raw : mem_bottom_raw;
+    uint64_t free_template = free_bottom_raw ? free_bottom_raw : mem_bottom_raw;
+    uint64_t new_free_bottom_raw =
+        ia64_fw_encode_addr(free_template, new_free_bottom);
+    stq_le_p(&new_phit[40], new_free_bottom_raw);
+    stq_le_p(&new_phit[48],
+             ia64_fw_encode_addr(end_template, new_end_hob));
+
+    if (cpu_memory_rw_debug(cs, end_hob, descriptor,
+                           sizeof(descriptor), true) != 0 ||
+        cpu_memory_rw_debug(cs, new_end_hob, end_header,
+                            sizeof(end_header), true) != 0 ||
+        cpu_memory_rw_debug(cs, hob_base, new_phit,
+                            sizeof(new_phit), true) != 0) {
+        cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), true);
+        cpu_memory_rw_debug(cs, end_hob, old_end, sizeof(old_end), true);
+        return false;
+    }
+
+    uint64_t validated_end = 0;
+    int validated_count = 0;
+    if (!ia64_fw_validate_efi_hob_list(cs, hob_base,
+                                        &validated_end, &validated_count) ||
+        validated_end != new_list_end) {
+        cpu_memory_rw_debug(cs, hob_base, phit, sizeof(phit), true);
+        cpu_memory_rw_debug(cs, end_hob, old_end, sizeof(old_end), true);
+        return false;
+    }
+
+    env->fw_phit_mem_bottom = mem_bottom_raw;
+    env->fw_phit_mem_top = mem_top_raw;
+    env->fw_phit_free_bottom = new_free_bottom_raw;
+    env->fw_phit_free_top = free_top_raw;
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IA64: pei_sysmem_hob_fix inserted base=%016" PRIx64
+                  " len=%016" PRIx64 " end=%016" PRIx64
+                  " free_bottom=%016" PRIx64 " hobs=%d\n",
+                  mem_bottom, mem_top - mem_bottom, new_end_hob,
+                  new_free_bottom, validated_count);
+    return true;
+}
+
 static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
 {
     static int enabled = -1;
@@ -17858,6 +18064,9 @@ static void ia64_fw_try_patch_efi_hobs(CPUIA64State *env)
         } else {
             memtype_enabled = 1;
         }
+    }
+    if (env->fw_pei_mem_installed) {
+        ia64_fw_pei_ensure_tested_sysmem_hob(env, cs, stack_phys);
     }
     if (!enabled && !memtype_enabled) {
         if (dump_enabled && !dumped_hobs) {
