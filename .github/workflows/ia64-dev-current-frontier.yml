@@ -1,0 +1,251 @@
+name: IA-64 current development-firmware frontier
+
+on:
+  push:
+    branches:
+      - diag/ia64-dev-current-frontier
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-dev-current-frontier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  collect:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: diag/ia64-dev-current-frontier
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Verify source and build IA-64
+        run: |
+          set -euo pipefail
+          python3 scripts/test-ia64-pei-sysmem-hob-source.py
+          python3 -m py_compile scripts/ia64-qmp-sample.py scripts/ia64-rse-trace-check.py
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror --disable-docs --disable-gtk --disable-sdl
+          ninja -C build qemu-system-ia64
+          test -x build/qemu-system-ia64
+          build/qemu-system-ia64 --version > scratch-ia64-version.txt
+          git diff --check
+
+      - name: Run bounded firmware matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/current-dev-frontier
+          mkdir -p "$out/matrix"
+          printf 'firmware\trc\tserial_bytes\tqlog_bytes\tasserts\tunimpl\tnull_branch\thost_abort\trse_rc\trse_summary\n' > "$out/summary.tsv"
+
+          firmwares=(
+            'stuff/EFI 0.99 Debug SDV.bin'
+            'stuff/Unknown Ver EFI.bin'
+            'stuff/bios117c.BIN'
+            'stuff/bios130.BIN'
+            'stuff/mybios.bin'
+            'stuff/rx4610_109B.BIN'
+            'stuff/rx4610_117B.BIN'
+          )
+
+          for firmware in "${firmwares[@]}"; do
+            [[ -s "$firmware" ]] || continue
+            stem="$(basename "$firmware" | tr ' /' '__' | tr -cd '[:alnum:]_.-')"
+            logdir="$out/matrix/$stem"
+            mkdir -p "$logdir"
+
+            set +e
+            QEMU_IA64_RSE_STRICT_TRACE=1 \
+            QEMU_IA64_RSE_STRICT_TRACE_LIMIT=4096 \
+            QEMU_IA64_ABORT_NULL_BRANCH=1 \
+            IA64_BIOS="$firmware" IA64_LOGDIR="$logdir" \
+            IA64_GUEST_ERRORS=1 IA64_EFI_HOB_PATCH=0 \
+            IA64_PEI_SYSMEM_HOB_FIX=1 \
+              timeout --signal=TERM --kill-after=5s 18s \
+                scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                >"$logdir/runner.stdout" 2>"$logdir/runner.stderr"
+            rc=$?
+            set -e
+
+            serial="$(find "$logdir" -maxdepth 1 -name 'serial.fw.*.log' -type f -print | sort | tail -n 1)"
+            qlog="$logdir/qemu.fw.log"
+            serial_bytes=0; qlog_bytes=0; asserts=0; unimpl=0; null_branch=0
+            if [[ -n "$serial" && -f "$serial" ]]; then
+              serial_bytes="$(stat -c '%s' "$serial")"
+              asserts="$(grep -aic 'ASSERT' "$serial" || true)"
+            fi
+            if [[ -f "$qlog" ]]; then
+              qlog_bytes="$(stat -c '%s' "$qlog")"
+              unimpl="$(grep -ac 'IA64 UNIMPL' "$qlog" || true)"
+              null_branch="$(grep -ac 'IA64: null branch' "$qlog" || true)"
+            fi
+            host_abort="$(cat "$logdir/runner.stdout" "$logdir/runner.stderr" 2>/dev/null | grep -aEc 'Segmentation fault|Aborted|core dumped|qemu-system-ia64:.*assert|IA64: null branch target' || true)"
+
+            set +e
+            python3 scripts/ia64-rse-trace-check.py "$qlog" >"$logdir/rse-check.txt" 2>&1
+            rse_rc=$?
+            set -e
+            rse_summary="$(tail -n 1 "$logdir/rse-check.txt" | tr '\t\r\n' '   ' | cut -c1-400)"
+            [[ -n "$rse_summary" ]] || rse_summary='-'
+
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$firmware" "$rc" "$serial_bytes" "$qlog_bytes" "$asserts" \
+              "$unimpl" "$null_branch" "$host_abort" "$rse_rc" "$rse_summary" \
+              | tee -a "$out/summary.tsv"
+          done
+
+          test "$(wc -l < "$out/summary.tsv")" -gt 1
+
+      - name: Sample representative live state
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/current-dev-frontier
+          mkdir -p "$out/live"
+
+          for firmware in 'stuff/bios130.BIN' 'stuff/rx4610_117B.BIN'; do
+            [[ -s "$firmware" ]] || continue
+            stem="$(basename "$firmware" | tr ' /' '__')"
+            logdir="$out/live/$stem"
+            qmp="$logdir/qmp.sock"
+            mkdir -p "$logdir"
+            rm -f "$qmp"
+
+            QEMU_IA64_RSE_STRICT_TRACE=1 \
+            QEMU_IA64_RSE_STRICT_TRACE_LIMIT=16384 \
+            QEMU_IA64_ABORT_NULL_BRANCH=1 \
+            IA64_BIOS="$firmware" IA64_LOGDIR="$logdir" \
+            IA64_GUEST_ERRORS=1 IA64_EFI_HOB_PATCH=0 \
+            IA64_PEI_SYSMEM_HOB_FIX=1 \
+              scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                -qmp "unix:$qmp,server=on,wait=off" \
+                >"$logdir/runner.stdout" 2>"$logdir/runner.stderr" &
+            qemu_pid=$!
+
+            set +e
+            python3 scripts/ia64-qmp-sample.py "$qmp" \
+              --samples 16 --interval 1.0 --connect-timeout 15 \
+              >"$logdir/samples.txt" 2>&1
+            sample_rc=$?
+            kill -TERM "$qemu_pid" 2>/dev/null
+            wait "$qemu_pid"
+            qemu_rc=$?
+            python3 scripts/ia64-rse-trace-check.py "$logdir/qemu.fw.log" \
+              --require-tag alloc_bsp --require-tag call_bsp --require-tag ret_bsp \
+              >"$logdir/rse-check.txt" 2>&1
+            rse_rc=$?
+            set -e
+
+            printf 'firmware=%s\nsample_rc=%s\nqemu_rc=%s\nrse_rc=%s\n' \
+              "$firmware" "$sample_rc" "$qemu_rc" "$rse_rc" >"$logdir/result.txt"
+          done
+
+      - name: Publish bounded diagnostic evidence
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          out=scratch/current-dev-frontier
+          evidence=docs/reviews/evidence
+          report=docs/reviews/2026-08-23_ia64_dev_current_frontier.md
+          mkdir -p "$evidence"
+          cp "$out/summary.tsv" "$evidence/2026-08-23_ia64_dev_current_frontier.tsv"
+
+          for stem in bios130.BIN rx4610_117B.BIN; do
+            live="$out/live/$stem"
+            [[ -d "$live" ]] || continue
+            cp "$live/samples.txt" "$evidence/2026-08-23_${stem}_current.samples.txt"
+            cp "$live/rse-check.txt" "$evidence/2026-08-23_${stem}_current.rse.txt"
+          done
+
+          {
+            echo '# IA-64 current-head development-firmware frontier'
+            echo
+            echo 'Date: 2026-08-23'
+            echo "Source commit: \`$SOURCE_SHA\`"
+            echo "GitHub Actions run: \`$RUN_ID\`"
+            echo
+            echo 'The live `metachicken` source was rebuilt for this run. The broad EFI HOB patch was disabled, the narrow tested-system-memory HOB repair remained enabled, null branches were configured to abort with architectural context, and RSE invariants were checked independently.'
+            echo
+            echo '## Firmware matrix'
+            echo
+            echo '```text'
+            cat "$out/summary.tsv"
+            echo '```'
+            echo
+            for stem in bios130.BIN rx4610_117B.BIN; do
+              live="$out/live/$stem"
+              [[ -d "$live" ]] || continue
+              echo "## \`$stem\` live state"
+              echo
+              echo '```text'
+              cat "$live/result.txt"
+              cat "$live/rse-check.txt"
+              echo '```'
+              echo
+              echo 'Sampled instruction frontiers:'
+              echo
+              echo '```text'
+              awk '
+                /^===== IA64 SAMPLE/ { sample=$0; want=0 }
+                /^INSTRUCTIONS$/ { want=1; next }
+                want && NF { print sample; print; want=0 }
+              ' "$live/samples.txt"
+              echo '```'
+              echo
+              if grep -aq 'IA64: null branch' "$live/qemu.fw.log"; then
+                echo 'First null-branch records:'
+                echo
+                echo '```text'
+                grep -am8 'IA64: null branch' "$live/qemu.fw.log" || true
+                echo '```'
+                echo
+              fi
+              if grep -aq 'IA64 UNIMPL' "$live/qemu.fw.log"; then
+                echo 'First unimplemented-instruction records:'
+                echo
+                echo '```text'
+                grep -am8 'IA64 UNIMPL' "$live/qemu.fw.log" || true
+                echo '```'
+                echo
+              fi
+            done
+            echo 'Full transient logs are retained in the workflow artifact; only bounded summaries and QMP samples are committed.'
+          } > "$report"
+
+          git add -- "$report" "$evidence"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'diag: record current IA-64 development firmware frontier [skip ci]'
+          git push origin HEAD:diag/ia64-dev-current-frontier
+
+      - name: Upload complete transient evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-dev-current-frontier-${{ github.sha }}
+          path: |
+            scratch/current-dev-frontier/
+            scratch-ia64-version.txt
+            docs/reviews/2026-08-23_ia64_dev_current_frontier.md
+            docs/reviews/evidence/
+          retention-days: 14
+          if-no-files-found: warn
