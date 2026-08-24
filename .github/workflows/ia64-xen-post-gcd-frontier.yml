@@ -1,0 +1,228 @@
+name: IA-64 Xen post-GCD frontier
+
+on:
+  push:
+    branches:
+      - diag/ia64-xen-post-gcd-frontier
+    paths:
+      - .github/workflows/ia64-xen-post-gcd-frontier.yml
+      - scripts/ia64-xen-artifact-inventory.py
+      - scripts/test-ia64-xen-artifact-inventory.py
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: ia64-xen-post-gcd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inventory-and-replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out diagnostic feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: diag/ia64-xen-post-gcd-frontier
+          fetch-depth: 0
+
+      - name: Test artifact inventory tooling
+        run: |
+          python3 scripts/test-ia64-xen-artifact-inventory.py
+          python3 -m py_compile \
+            scripts/ia64-xen-artifact-inventory.py \
+            scripts/test-ia64-xen-artifact-inventory.py
+
+      - name: Search retained Actions artifacts for canonical Xen GFW
+        id: inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-post-gcd/inventory
+          mkdir -p "$out"
+          python3 scripts/ia64-xen-artifact-inventory.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --output-dir "$out" \
+            --canonical-sha256 \
+              e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513 \
+            | tee "$out/console.json"
+
+          if [[ -s "$out/canonical-path.txt" ]]; then
+            canonical="$(cat "$out/canonical-path.txt")"
+            test -s "$canonical"
+            test "$(sha256sum "$canonical" | awk '{print $1}')" = \
+              e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+            echo 'found=true' >> "$GITHUB_OUTPUT"
+            echo "canonical=$canonical" >> "$GITHUB_OUTPUT"
+          else
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install IA-64 build dependencies
+        if: steps.inventory.outputs.found == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure and build current IA-64 emulator
+        if: steps.inventory.outputs.found == 'true'
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build qemu-system-ia64
+          test -x build/qemu-system-ia64
+
+      - name: Replay canonical Xen GFW through the post-GCD frontier
+        if: steps.inventory.outputs.found == 'true'
+        id: replay
+        shell: bash
+        env:
+          CANONICAL: ${{ steps.inventory.outputs.canonical }}
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-post-gcd/runtime
+          logs="$out/logs"
+          mkdir -p "$logs"
+
+          set +e
+          QEMU_IA64_ABORT_NULL_BRANCH=1 \
+          QEMU_IA64_ABORT_BRANCH_TO=0 \
+          IA64_BIOS="$CANONICAL" \
+          IA64_LOGDIR="$logs" \
+          IA64_GUEST_ERRORS=1 \
+          IA64_EFI_HOB_PATCH=0 \
+          IA64_PEI_SYSMEM_HOB_FIX=1 \
+          IA64_PEI_22560_STATUS_FIX=1 \
+          IA64_PEI_279D0_TRACE=1 \
+          IA64_PEI_279D0_STATUS_FIX=1 \
+          IA64_PEI_279D0_SAFE_MODE=0 \
+          IA64_DXE_ASSERT_SCAN_TRACE=1 \
+          IA64_DXE_ASSERT_CONTEXT_TRACE=1 \
+            timeout --signal=TERM --kill-after=5s 180s \
+              scripts/run-ia64-firmware.sh -- -vga none -nic none
+          runner_rc=$?
+          set -e
+          echo "runner_rc=$runner_rc" >> "$GITHUB_OUTPUT"
+
+          serial="$(find "$logs" -maxdepth 1 -name 'serial.fw.*.log' \
+                    -type f -print | sort | tail -n 1)"
+          qlog="$logs/qemu.fw.log"
+          first_assert=''
+          first_null=''
+          first_unimpl=''
+          sysmem_insert=''
+          dxe_memory=''
+          if [[ -n "$serial" && -f "$serial" ]]; then
+            first_assert="$(grep -am1 'ASSERT' "$serial" || true)"
+            dxe_memory="$(grep -am1 -E \
+              'CoreInitializeMemoryServices|CoreInternalAddMemorySpace' \
+              "$serial" || true)"
+            tail -n 300 "$serial" > "$out/serial-tail.log"
+          fi
+          if [[ -f "$qlog" ]]; then
+            first_null="$(grep -am1 'IA64: null branch' "$qlog" || true)"
+            first_unimpl="$(grep -am1 'IA64 UNIMPL' "$qlog" || true)"
+            sysmem_insert="$(grep -am1 'pei_sysmem_hob_fix inserted' \
+              "$qlog" || true)"
+            if [[ -z "$dxe_memory" ]]; then
+              dxe_memory="$(grep -am1 -E \
+                'CoreInitializeMemoryServices|CoreInternalAddMemorySpace' \
+                "$qlog" || true)"
+            fi
+            tail -n 500 "$qlog" > "$out/qemu-tail.log"
+          fi
+
+          {
+            echo '# Canonical Xen GFW post-GCD replay'
+            echo
+            echo "- Source commit: \`${GITHUB_SHA}\`"
+            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo "- Runner return code: \`${runner_rc}\`"
+            echo "- Canonical firmware SHA-256: \`$(sha256sum "$CANONICAL" | awk '{print $1}')\`"
+            echo "- Narrow system-memory HOB repair observed: \`$([[ -n "$sysmem_insert" ]] && echo yes || echo no)\`"
+            echo "- DXE memory-service progress observed: \`$([[ -n "$dxe_memory" ]] && echo yes || echo no)\`"
+            echo "- Null control transfer observed: \`$([[ -n "$first_null" ]] && echo yes || echo no)\`"
+            echo "- IA-64 unimplemented instruction observed: \`$([[ -n "$first_unimpl" ]] && echo yes || echo no)\`"
+            echo "- Firmware assertion observed: \`$([[ -n "$first_assert" ]] && echo yes || echo no)\`"
+            echo
+            echo '## First bounded signals'
+            echo
+            printf -- '- System-memory HOB: `%s`\n' "${sysmem_insert:-none}"
+            printf -- '- DXE memory services: `%s`\n' "${dxe_memory:-none}"
+            printf -- '- Null transfer: `%s`\n' "${first_null:-none}"
+            printf -- '- Unimplemented instruction: `%s`\n' "${first_unimpl:-none}"
+            printf -- '- Firmware assertion: `%s`\n' "${first_assert:-none}"
+          } > "$out/frontier.md"
+          cat "$out/frontier.md"
+
+      - name: Record absence of a replayable canonical artifact
+        if: steps.inventory.outputs.found != 'true'
+        run: |
+          out=scratch/ci-xen-post-gcd/runtime
+          mkdir -p "$out"
+          cat > "$out/frontier.md" <<EOF
+          # Canonical Xen GFW post-GCD replay
+
+          No unexpired retained Actions artifact contained the canonical
+          Xen/IPF \`Flash.fd\` SHA-256
+          \`e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513\`.
+          No emulator behavior was changed and no substitute firmware image was
+          accepted.
+          EOF
+
+      - name: Remove third-party firmware bytes from retained output
+        if: always()
+        run: |
+          rm -rf scratch/ci-xen-post-gcd/inventory/canonical
+          rm -f scratch/ci-xen-post-gcd/inventory/canonical-path.txt
+          ! find scratch/ci-xen-post-gcd -type f -iname 'Flash.fd' -print -quit \
+            | grep -q .
+
+      - name: Upload inventory and bounded frontier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-post-gcd-${{ github.sha }}
+          path: scratch/ci-xen-post-gcd/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish diagnostic result to feature branch
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report=docs/reviews/2026-08-23_xen_post_gcd_frontier.md
+          mkdir -p "$(dirname "$report")"
+          {
+            echo '# Xen/IPF post-GCD frontier recovery'
+            echo
+            echo "Date: 2026-08-23"
+            echo "Source commit: \`${GITHUB_SHA}\`"
+            echo "Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo
+            cat scratch/ci-xen-post-gcd/inventory/report.md
+            echo
+            cat scratch/ci-xen-post-gcd/runtime/frontier.md
+          } > "$report"
+          git add "$report"
+          git diff --cached --check
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email \
+              '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'docs/ia64: record Xen post-GCD artifact frontier [skip ci]'
+            git push origin HEAD:diag/ia64-xen-post-gcd-frontier
+          fi
