@@ -1,0 +1,123 @@
+name: IA-64 Xen post-GCD emulator export
+
+on:
+  push:
+    branches:
+      - diag/ia64-xen-null-call-frontier
+    paths:
+      - .github/workflows/ia64-xen-null-call-frontier.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-xen-null-call-frontier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-export:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact diagnostic branch
+        uses: actions/checkout@v4
+        with:
+          ref: diag/ia64-xen-null-call-frontier
+          fetch-depth: 0
+
+      - name: Install IA-64 QEMU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Validate narrow Xen HOB source contract
+        run: |
+          python3 scripts/test-ia64-pei-sysmem-hob-source.py
+          python3 -m py_compile scripts/test-ia64-pei-sysmem-hob-source.py
+          git diff --check
+
+      - name: Configure and build IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build qemu-system-ia64
+          test -x build/qemu-system-ia64
+
+      - name: Package replayable emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ia64-xen-current-emulator
+          mkdir -p "$out/lib"
+          cp build/qemu-system-ia64 "$out/"
+          cp scripts/run-ia64-firmware.sh "$out/"
+          git rev-parse HEAD > "$out/source-trigger-sha.txt"
+          git rev-parse HEAD^{tree} > "$out/source-tree-sha.txt"
+          sha256sum build/qemu-system-ia64 > "$out/qemu-system-ia64.sha256"
+
+          ldd build/qemu-system-ia64 | awk '
+            $2 == "=>" && $3 ~ /^\// { print $3 }
+            $1 ~ /^\// { print $1 }
+          ' | sort -u > "$out/linked-libraries.txt"
+          while IFS= read -r library; do
+            [[ -f "$library" ]] || continue
+            case "$(basename "$library")" in
+              libc.so.*|libm.so.*|ld-linux*.so.*) continue ;;
+            esac
+            cp -L "$library" "$out/lib/"
+          done < "$out/linked-libraries.txt"
+
+          cat > "$out/run-qemu-system-ia64" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          here="$(cd "$(dirname "$0")" && pwd)"
+          exec env LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$here/qemu-system-ia64" "$@"
+          EOF
+          chmod +x "$out/run-qemu-system-ia64"
+
+      - name: Upload replayable emulator
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-current-emulator-${{ github.run_id }}
+          path: scratch/ia64-xen-current-emulator/
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Publish run locator and binary identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/reviews
+          binary_sha=$(cut -d' ' -f1 scratch/ia64-xen-current-emulator/qemu-system-ia64.sha256)
+          tree_sha=$(cat scratch/ia64-xen-current-emulator/source-tree-sha.txt)
+          cat > docs/reviews/2026-08-23_xen_null_call_frontier_build.md <<EOF
+          # Xen/IPF post-GCD emulator export
+
+          Date: 2026-08-23
+          Source trigger: \`${{ github.sha }}\`
+          Source tree: \`${tree_sha}\`
+          Workflow run: \`${{ github.run_id }}\`
+          Artifact: \`ia64-xen-current-emulator-${{ github.run_id }}\`
+          qemu-system-ia64 SHA-256: \`${binary_sha}\`
+
+          The artifact is a replayable IA-64 system emulator built from the
+          exact diagnostic branch rooted at the current \`metachicken\` head.
+          It intentionally contains no Xen firmware image. Runtime replay uses
+          the separately retained canonical \`Flash.fd\` with SHA-256
+          \`e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513\`.
+          EOF
+          git add docs/reviews/2026-08-23_xen_null_call_frontier_build.md
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'diag/ia64: publish Xen post-GCD emulator locator [skip ci]'
+          git push origin HEAD:diag/ia64-xen-null-call-frontier
