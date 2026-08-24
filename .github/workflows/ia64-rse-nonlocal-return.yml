@@ -1,5 +1,4 @@
-# Validation trigger 2: workflow file now exists on the feature branch.
-name: IA-64 exact-target non-local return tranche
+name: IA-64 exact-target non-local return diagnostic
 
 on:
   push:
@@ -18,9 +17,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate-build-publish:
+  validate-build-package:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
+
     steps:
       - name: Check out feature branch
         uses: actions/checkout@v4
@@ -28,135 +29,207 @@ jobs:
           ref: fix/ia64-rse-nonlocal-return
           fetch-depth: 0
 
-      - name: Apply exact-target RSE unwind repair
-        shell: bash
-        run: |
-          set -euo pipefail
-          patch --dry-run -p1 < scratch/ia64-rse-nonlocal-return.patch
-          patch -p1 < scratch/ia64-rse-nonlocal-return.patch
-          git diff --check
-          python3 scripts/test-ia64-rse-nonlocal-source.py
-          python3 scripts/test-ia64-pei-sysmem-hob-source.py
-          python3 -m py_compile \
-            scripts/test-ia64-rse-nonlocal-source.py \
-            scripts/test-ia64-pei-sysmem-hob-source.py
-
-      - name: Install build dependencies
+      - name: Install IA-64 build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential ninja-build pkg-config python3 python3-venv \
             libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
 
-      - name: Configure and build IA-64 system emulator
-        run: |
-          ./configure \
-            --target-list=ia64-softmmu \
-            --disable-werror \
-            --disable-docs \
-            --disable-gtk \
-            --disable-sdl
-          ninja -C build qemu-system-ia64
-          test -x build/qemu-system-ia64
-
-      - name: Smoke representative development firmware
+      - name: Apply repair, build, smoke, and retain bounded evidence
+        id: diagnostic
         shell: bash
         run: |
-          set -euo pipefail
-          out=scratch/ci-rse-nonlocal/dev
-          mkdir -p "$out"
-          printf 'firmware\trc\tasserts\tunimpl\thost_abort\n' > "$out/summary.tsv"
+          set -u
+          out=scratch/ci-rse-nonlocal
+          artifact="$out/emulator"
+          dev="$out/dev"
+          mkdir -p "$artifact/lib" "$dev"
 
-          for firmware in stuff/bios130.BIN stuff/rx4610_117B.BIN; do
-            stem="$(basename "$firmware" | tr ' /' '__')"
-            logdir="$out/$stem"
-            mkdir -p "$logdir"
+          patch_rc=0
+          source_test_rc=99
+          configure_rc=99
+          build_rc=99
+          smoke_rc=99
 
-            set +e
-            IA64_BIOS="$firmware" \
-            IA64_LOGDIR="$logdir" \
-            IA64_GUEST_ERRORS=1 \
-            IA64_EFI_HOB_PATCH=0 \
-            IA64_PEI_SYSMEM_HOB_FIX=1 \
-              timeout --signal=TERM --kill-after=5s 15s \
-                scripts/run-ia64-firmware.sh -- -vga none -nic none
-            rc=$?
-            set -e
+          patch --dry-run -p1 < scratch/ia64-rse-nonlocal-return.patch \
+            >"$out/patch-dry-run.log" 2>&1
+          patch_rc=$?
+          if [[ "$patch_rc" -eq 0 ]]; then
+            patch -p1 < scratch/ia64-rse-nonlocal-return.patch \
+              >"$out/patch-apply.log" 2>&1
+            patch_rc=$?
+          fi
 
-            serial="$(find "$logdir" -maxdepth 1 -name 'serial.fw.*.log' -type f -print | sort | tail -n 1)"
-            qlog="$logdir/qemu.fw.log"
-            asserts=0
-            unimpl=0
-            host_abort=0
-            if [[ -n "$serial" && -f "$serial" ]]; then
-              asserts="$(grep -ac 'ASSERT' "$serial" || true)"
+          if [[ "$patch_rc" -eq 0 ]]; then
+            python3 scripts/test-ia64-rse-nonlocal-source.py \
+              >"$out/source-test.log" 2>&1
+            source_test_rc=$?
+            if [[ "$source_test_rc" -eq 0 ]]; then
+              python3 scripts/test-ia64-pei-sysmem-hob-source.py \
+                >>"$out/source-test.log" 2>&1
+              source_test_rc=$?
             fi
-            if [[ -f "$qlog" ]]; then
-              unimpl="$(grep -ac 'IA64 UNIMPL' "$qlog" || true)"
-              host_abort="$(grep -aEc 'Segmentation fault|Aborted|core dumped|qemu-system-ia64:.*assert' "$qlog" || true)"
+            git diff --check >>"$out/source-test.log" 2>&1
+            diff_rc=$?
+            if [[ "$source_test_rc" -eq 0 && "$diff_rc" -ne 0 ]]; then
+              source_test_rc="$diff_rc"
             fi
-            printf '%s\t%s\t%s\t%s\t%s\n' \
-              "$firmware" "$rc" "$asserts" "$unimpl" "$host_abort" \
-              | tee -a "$out/summary.tsv"
-            test "$host_abort" -eq 0
-          done
+          fi
 
-      - name: Package replayable IA-64 emulator
-        shell: bash
-        run: |
-          set -euo pipefail
-          out=scratch/ci-rse-nonlocal/emulator
-          mkdir -p "$out/lib"
-          cp build/qemu-system-ia64 "$out/"
-          cp scripts/run-ia64-firmware.sh "$out/"
-          printf '%s\n' '${{ github.sha }}' > "$out/source-trigger-sha.txt"
-          git diff -- target/ia64/helper.c \
-            > "$out/ia64-rse-nonlocal-return.diff"
-          sha256sum build/qemu-system-ia64 > "$out/qemu-system-ia64.sha256"
+          if [[ "$patch_rc" -eq 0 && "$source_test_rc" -eq 0 ]]; then
+            ./configure \
+              --target-list=ia64-softmmu \
+              --disable-werror \
+              --disable-docs \
+              --disable-gtk \
+              --disable-sdl \
+              >"$out/configure.log" 2>&1
+            configure_rc=$?
+          fi
 
-          ldd build/qemu-system-ia64 | awk '
-            $2 == "=>" && $3 ~ /^\// { print $3 }
-            $1 ~ /^\// { print $1 }
-          ' | sort -u > "$out/linked-libraries.txt"
-          while IFS= read -r library; do
-            case "$(basename "$library")" in
-              libc.so.*|libm.so.*|ld-linux*.so.*) continue ;;
-            esac
-            cp -L "$library" "$out/lib/"
-          done < "$out/linked-libraries.txt"
+          if [[ "$configure_rc" -eq 0 ]]; then
+            ninja -C build qemu-system-ia64 >"$out/build.log" 2>&1
+            build_rc=$?
+          fi
 
-          cat > "$out/run-qemu-system-ia64" <<'EOF'
+          if [[ "$build_rc" -eq 0 && -x build/qemu-system-ia64 ]]; then
+            printf 'firmware\trc\tasserts\tunimpl\thost_abort\n' \
+              > "$dev/summary.tsv"
+            smoke_rc=0
+            for firmware in stuff/bios130.BIN stuff/rx4610_117B.BIN; do
+              stem="$(basename "$firmware" | tr ' /' '__')"
+              logdir="$dev/$stem"
+              mkdir -p "$logdir"
+              IA64_BIOS="$firmware" \
+              IA64_LOGDIR="$logdir" \
+              IA64_GUEST_ERRORS=1 \
+              IA64_EFI_HOB_PATCH=0 \
+              IA64_PEI_SYSMEM_HOB_FIX=1 \
+                timeout --signal=TERM --kill-after=5s 15s \
+                  scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                  >"$logdir/runner.stdout" 2>"$logdir/runner.stderr"
+              rc=$?
+              serial="$(find "$logdir" -maxdepth 1 \
+                -name 'serial.fw.*.log' -type f -print | sort | tail -n 1)"
+              qlog="$logdir/qemu.fw.log"
+              asserts=0
+              unimpl=0
+              host_abort=0
+              if [[ -n "$serial" && -f "$serial" ]]; then
+                asserts="$(grep -ac 'ASSERT' "$serial" || true)"
+              fi
+              if [[ -f "$qlog" ]]; then
+                unimpl="$(grep -ac 'IA64 UNIMPL' "$qlog" || true)"
+              fi
+              host_abort="$(cat "$logdir/runner.stdout" \
+                "$logdir/runner.stderr" 2>/dev/null | grep -aEc \
+                'Segmentation fault|Aborted|core dumped|qemu-system-ia64:.*assert' \
+                || true)"
+              printf '%s\t%s\t%s\t%s\t%s\n' \
+                "$firmware" "$rc" "$asserts" "$unimpl" "$host_abort" \
+                | tee -a "$dev/summary.tsv"
+              if [[ "$host_abort" -ne 0 ]]; then
+                smoke_rc=1
+              fi
+            done
+
+            cp build/qemu-system-ia64 "$artifact/"
+            cp scripts/run-ia64-firmware.sh "$artifact/"
+            printf '%s\n' '${{ github.sha }}' > "$artifact/source-trigger-sha.txt"
+            git diff -- target/ia64/helper.c \
+              > "$artifact/ia64-rse-nonlocal-return.diff"
+            sha256sum build/qemu-system-ia64 \
+              > "$artifact/qemu-system-ia64.sha256"
+
+            ldd build/qemu-system-ia64 | awk '
+              $2 == "=>" && $3 ~ /^\// { print $3 }
+              $1 ~ /^\// { print $1 }
+            ' | sort -u > "$artifact/linked-libraries.txt"
+            while IFS= read -r library; do
+              case "$(basename "$library")" in
+                libc.so.*|libm.so.*|ld-linux*.so.*) continue ;;
+              esac
+              cp -L "$library" "$artifact/lib/"
+            done < "$artifact/linked-libraries.txt"
+
+            cat > "$artifact/run-qemu-system-ia64" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
           here="$(cd "$(dirname "$0")" && pwd)"
           exec env LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             "$here/qemu-system-ia64" "$@"
           EOF
-          chmod +x "$out/run-qemu-system-ia64"
+            chmod +x "$artifact/run-qemu-system-ia64"
+          fi
 
-      - name: Upload emulator and smoke evidence
+          qemu_sha='none'
+          if [[ -f "$artifact/qemu-system-ia64" ]]; then
+            qemu_sha="$(sha256sum "$artifact/qemu-system-ia64" | awk '{print $1}')"
+          fi
+
+          cat > "$out/report.md" <<EOF
+          # IA-64 exact-target non-local return diagnostic
+
+          Date: 2026-08-24  
+          Source trigger: \`${GITHUB_SHA}\`  
+          Workflow run: \`${GITHUB_RUN_ID}\`  
+          Artifact: \`ia64-rse-nonlocal-diagnostic-${GITHUB_RUN_ID}\`
+
+          | Gate | Return code |
+          |---|---:|
+          | Patch application | \`${patch_rc}\` |
+          | Source contracts | \`${source_test_rc}\` |
+          | Configure | \`${configure_rc}\` |
+          | IA-64 build | \`${build_rc}\` |
+          | Development-firmware smoke | \`${smoke_rc}\` |
+
+          Built emulator SHA-256: \`${qemu_sha}\`
+
+          The canonical third-party Xen/IPF \`Flash.fd\` is intentionally not
+          stored in this repository or artifact. Runtime acceptance is performed
+          separately against SHA-256
+          \`e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513\`.
+          EOF
+
+          printf 'patch_rc=%s\nsource_test_rc=%s\nconfigure_rc=%s\nbuild_rc=%s\nsmoke_rc=%s\nqemu_sha=%s\n' \
+            "$patch_rc" "$source_test_rc" "$configure_rc" "$build_rc" \
+            "$smoke_rc" "$qemu_sha" > "$out/result.env"
+
+          # Always let the following evidence-retention steps run.  Gate status
+          # is explicit in report.md and result.env rather than hidden by an
+          # early shell exit.
+          exit 0
+
+      - name: Upload patched emulator and diagnostic evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ia64-rse-nonlocal-${{ github.sha }}
-          path: |
-            scratch/ci-rse-nonlocal/emulator/
-            scratch/ci-rse-nonlocal/dev/
+          name: ia64-rse-nonlocal-diagnostic-${{ github.run_id }}
+          path: scratch/ci-rse-nonlocal/
           retention-days: 7
           if-no-files-found: error
 
-      - name: Publish validated source to feature branch
+      - name: Publish diagnostic report without promoting the patch
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
-          git rm -- \
-            scratch/ia64-rse-nonlocal-return.patch \
-            .github/workflows/ia64-rse-nonlocal-return.yml
-          git add -- \
-            target/ia64/helper.c \
+          report=docs/reviews/2026-08-24_ia64_rse_nonlocal_validation.md
+          saved="$(mktemp)"
+          cp scratch/ci-rse-nonlocal/report.md "$saved"
+          git reset --hard HEAD
+          git clean -f -- \
             scripts/test-ia64-rse-nonlocal-source.py \
             docs/reviews/2026-08-24_ia64_rse_nonlocal_return.md
+          cp "$saved" "$report"
+          git add -- "$report"
           git diff --cached --check
           git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'ia64: reconcile non-local returns with RSE shadow stack [skip ci]'
-          git push origin HEAD:fix/ia64-rse-nonlocal-return
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m \
+              'diag: record IA-64 non-local return validation [skip ci]'
+            git push origin HEAD:fix/ia64-rse-nonlocal-return
+          fi
