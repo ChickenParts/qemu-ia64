@@ -1,0 +1,11 @@
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -6654,7 +6654,7 @@
+     /* Deliver the vector through the processor's local SAPIC state. */
+     if (m->cpu && !ia64_cpu_deposit_interrupt(m->cpu, vector)) {
+         qemu_log_mask(LOG_GUEST_ERROR,
+-                      "IPF IOSAPIC: rejected reserved vector %#x on pin %d\n",
++                      "IPF IOSAPIC: rejected reserved vector 0x%x on pin %d\n",
+                       vector, pin);
+     }
+ }
