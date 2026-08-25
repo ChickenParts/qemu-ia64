@@ -1,8 +1,6 @@
-diff --git a/MAINTAINERS b/MAINTAINERS
-index 2f63b84ffa16b62a4419eb6bf1a146c1a4515126..23022e073ee4bd0042523e23b42e3ae06af395fb 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -1289,6 +1289,7 @@ F: docs/devel/ia64-*
+@@ -1289,6 +1289,7 @@
  F: hw/ia64/
  F: target/ia64/
  F: tests/unit/test-ia64-*
@@ -10,8 +8,6 @@ index 2f63b84ffa16b62a4419eb6bf1a146c1a4515126..23022e073ee4bd0042523e23b42e3ae0
  
  LoongArch Machines
  ------------------
-diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
-index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82306207a2 100644
 --- a/hw/ia64/ipf.c
 +++ b/hw/ia64/ipf.c
 @@ -39,6 +39,8 @@
@@ -23,7 +19,7 @@ index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82
  #include "qemu/typedefs.h"
  #include "hw/sysbus.h"
  #include "qom/object.h"
-@@ -3416,52 +3418,18 @@ static int cmos_get_fd_drive_type(int fd0)
+@@ -3416,52 +3418,18 @@
   * ISA devices are typically accessed through an LPC bus or similar, which
   * we emulate using the legacy I/O port mapping at IPF_LEGACY_IO_BASE.
   */
@@ -84,7 +80,7 @@ index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82
  }
  
  /*
-@@ -5151,15 +5119,56 @@ static void ipf_init_pci(IPFMachineState *m)
+@@ -5151,15 +5119,57 @@
      pci_create_simple(m->pcibus, PCI_DEVFN(0, 0), TYPE_IPF_PCI_ROOT_DEVICE);
  }
  
@@ -93,7 +89,8 @@ index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82
 +
 +static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
  {
-+    DeviceState *dev;
++    PCIDevice *ide;
++    DeviceState *pm;
 +    PCIDevice *piix;
 +    unsigned int i;
 +
@@ -124,19 +121,19 @@ index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82
      m->piix4 = piix;
 +    ipf_resolve_isa_devices(m);
 +
-+    dev = DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
-+    if (!dev) {
++    ide = PCI_DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
++    if (!ide) {
 +        error_report("PIIX4 did not create its IDE function");
 +        exit(1);
 +    }
-+    pci_ide_create_devs(PCI_DEVICE(dev));
++    pci_ide_create_devs(ide);
 +
-+    dev = DEVICE(object_resolve_path_component(OBJECT(piix), "pm"));
-+    if (!dev) {
++    pm = DEVICE(object_resolve_path_component(OBJECT(piix), "pm"));
++    if (!pm) {
 +        error_report("PIIX4 did not create its PM/SMBus function");
 +        exit(1);
 +    }
-+    m->smbus = I2C_BUS(qdev_get_child_bus(dev, "i2c"));
++    m->smbus = I2C_BUS(qdev_get_child_bus(pm, "i2c"));
 +    if (!m->smbus) {
 +        error_report("PIIX4 PM function did not create its SMBus");
 +        exit(1);
@@ -145,7 +142,7 @@ index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82
  }
  
  static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
-@@ -5410,6 +5419,9 @@ static void ipf_init(MachineState *machine)
+@@ -5410,6 +5420,9 @@
      uint64_t cmdline_addr = IPF_CMDLINE_ADDR;
      int64_t image_size;
      bool run_firmware = (!kernel_filename) || m->firmware_preboot;
@@ -155,7 +152,7 @@ index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82
      /* Initialize the cpu core */
      cpu = IA64_CPU(cpu_create(machine->cpu_type));
      if (!cpu) {
-@@ -5620,25 +5632,18 @@ static void ipf_init(MachineState *machine)
+@@ -5620,25 +5633,18 @@
          }
      }
  
@@ -191,11 +188,9 @@ index 71604a6c0b671ec8c874998d7d694644fa55969e..fa4c051b5245e4315a2f646f61cdce82
          MachineClass *mc = MACHINE_GET_CLASS(machine);
          pci_init_nic_devices(m->pcibus, mc->default_nic);
      }
-diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
-index 669d07c06bdedc6be0c69acadeba989dc15ddf3f..1cdc8fa956e28090f9b911dde4616eda5926cb6d 100644
 --- a/tests/qtest/meson.build
 +++ b/tests/qtest/meson.build
-@@ -140,6 +140,8 @@ qtests_alpha = ['boot-serial-test'] + \
+@@ -140,6 +140,8 @@
    qtests_filter + \
    (config_all_devices.has_key('CONFIG_VGA') ? ['display-vga-test'] : [])
  
