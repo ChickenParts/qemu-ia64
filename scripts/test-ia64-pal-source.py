@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 pal = Path("target/ia64/pal.c").read_text(encoding="utf-8")
@@ -41,8 +42,26 @@ for token in (
 
 if "  'pal.c'," not in meson:
     raise SystemExit("target/ia64/pal.c is not in the Meson source set")
-if "matches SKI" in helper or "SKI returns" in helper:
-    raise SystemExit("PAL implementation still contains explicit SKI-derived behavior")
+
+#
+# helper.c still contains older SAL and MMU compatibility comments.  Do not
+# mistake those independent cleanup candidates for PAL-copy dependencies, but
+# reject any explicit SKI reference inside the PAL implementation itself.
+#
+pal_start = helper.find("#define IA64_PAL_")
+sal_start = helper.find("#define IA64_SAL_", pal_start)
+if pal_start < 0 or sal_start < 0:
+    raise SystemExit("could not isolate the PAL implementation in helper.c")
+pal_section = helper[pal_start:sal_start]
+for name, text in (
+    ("target/ia64/pal.c", pal),
+    ("target/ia64/pal.h", header),
+    ("target/ia64/pal-gateway.S", gateway),
+    ("PAL section of target/ia64/helper.c", pal_section),
+):
+    if re.search(r"\bSKI\b", text, flags=re.IGNORECASE):
+        raise SystemExit(f"{name} still contains an explicit SKI reference")
+
 if "32768" in pal or "PAL_COPY_BUFFER_SIZE" in pal:
     raise SystemExit("PAL copy size must derive from the project-owned gateway")
 if "IA64_PAL_COPY_TYPE_DEFAULT 0" not in header:
