@@ -7,6 +7,7 @@ on:
     paths:
       - scratch/ia64-iosapic-qom.patch.gz.b64.00
       - scratch/ia64-iosapic-qom.patch.gz.b64.01
+      - scratch/ia64-iosapic-pending-retry.patch
       - .github/workflows/agent-ia64-iosapic-qom.yml
   workflow_dispatch:
 
@@ -69,6 +70,12 @@ jobs:
               path.write_text(text)
           PY
 
+          # A rejected delivery remains pending in IRR. Reprogramming an edge
+          # RTE must not discard that request while clearing the level-only
+          # Remote IRR status bit.
+          git apply --check scratch/ia64-iosapic-pending-retry.patch
+          git apply scratch/ia64-iosapic-pending-retry.patch
+
           git diff --check
 
           # checkpatch emits a generic warning for every added file. These
@@ -78,6 +85,8 @@ jobs:
           grep -Fx 'F: tests/unit/test-ia64-*' MAINTAINERS
           perl scripts/checkpatch.pl --no-signoff \
             /tmp/ia64-iosapic-qom.patch
+          perl scripts/checkpatch.pl --no-signoff \
+            scratch/ia64-iosapic-pending-retry.patch
 
       - name: Upload exact patch-applied source for review
         uses: actions/upload-artifact@v4
@@ -153,7 +162,7 @@ jobs:
           git diff --cached --check
           git commit \
             -m 'hw/ia64: extract a real I/O SAPIC device' \
-            -m 'Replace the machine-local 16-pin shim with a 48-input migratable QOM device. Model edge and level requests, read-only Remote IRR, shared-vector EOI, destination and delivery rejection, and route standalone ISA inputs through the device. Add focused tests without firmware- or image-specific behavior.'
+            -m 'Replace the machine-local 16-pin shim with a 48-input migratable QOM device. Model edge and level requests, read-only Remote IRR, shared-vector EOI, destination and delivery rejection, and retry rejected requests after route repair. Route standalone ISA inputs through the device and add focused tests without firmware- or image-specific behavior.'
           git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
           git rev-parse HEAD | tee /tmp/ia64-iosapic-qom-commit.txt
 
