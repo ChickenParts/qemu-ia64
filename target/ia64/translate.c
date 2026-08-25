@@ -1827,7 +1827,11 @@ static TCGv_i64 gen_load_cr_reg(uint8_t idx)
     case 24: return cpu_cr_iim;
     case 25: return cpu_cr_iha;
     case 65: /* cr.ivr: virtual interrupt request vector */
-        break;
+    {
+        TCGv_i64 t = tcg_temp_new_i64();
+        gen_helper_get_ivr(t, tcg_env);
+        return t;
+    }
     default:
         break;
     }
@@ -1841,6 +1845,9 @@ static void gen_store_cr_reg(uint8_t idx, TCGv_i64 v)
     switch (idx) {
     case 1:  /* cr.itm */
         gen_helper_set_itm(tcg_env, v);
+        return;
+    case 66: /* cr.tpr */
+        gen_helper_set_tpr(tcg_env, v);
         return;
     case 67: /* cr.eoi */
         gen_helper_eoi(tcg_env);

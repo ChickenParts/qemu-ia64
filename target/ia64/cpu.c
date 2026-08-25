@@ -8,6 +8,7 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "qemu/bswap.h"
+#include "qemu/host-utils.h"
 #include "qemu/qemu-print.h"
 #include "qemu/timer.h"
 #include "qemu/module.h"
@@ -42,6 +43,134 @@ static void ia64_rse_ctxs_free(IA64CPU *cpu)
     cpu->rse_ctxs = NULL;
     cpu->rse_ctxs_len = 0;
     cpu->rse_ctxs_cap = 0;
+}
+
+/*
+ * IA-64 local SAPIC interrupt arbitration.
+ *
+ * The pending vectors are the architecturally visible cr.irr0..3 bitmap.
+ * cr.ivr moves the highest eligible vector from pending to in-service, and
+ * cr.eoi retires the highest in-service vector.  Eligibility is determined
+ * by both the highest in-service vector and cr.tpr's mask-interrupt-class and
+ * mask-maskable-interrupt fields.
+ */
+static int ia64_interrupt_highest(const uint64_t bitmap[4])
+{
+    for (int word = 3; word >= 0; word--) {
+        uint64_t pending = bitmap[word];
+
+        if (pending) {
+            return word * 64 + 63 - clz64(pending);
+        }
+    }
+    return -1;
+}
+
+static int ia64_cpu_highest_pending(const CPUIA64State *env)
+{
+    const uint64_t *irr = &env->cr[IA64_CR_IRR0];
+
+    return ia64_interrupt_highest(irr);
+}
+
+static int ia64_cpu_highest_in_service(const CPUIA64State *env)
+{
+    return ia64_interrupt_highest(env->interrupt_in_service);
+}
+
+static int ia64_cpu_next_interrupt(const CPUIA64State *env)
+{
+    int pending = ia64_cpu_highest_pending(env);
+    int in_service;
+    unsigned int tpr_class;
+
+    if (pending < 0) {
+        return -1;
+    }
+
+    in_service = ia64_cpu_highest_in_service(env);
+    if (in_service >= pending) {
+        return -1;
+    }
+
+    /* cr.tpr.mmi masks every maskable external interrupt. */
+    if (env->cr[IA64_CR_TPR] & (1ULL << 16)) {
+        return -1;
+    }
+
+    /* cr.tpr.mic masks interrupt classes less than or equal to MIC. */
+    tpr_class = extract64(env->cr[IA64_CR_TPR], 4, 4);
+    if (((unsigned int)pending >> 4) <= tpr_class) {
+        return -1;
+    }
+
+    return pending;
+}
+
+static void ia64_cpu_recompute_interrupt(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    if (ia64_cpu_next_interrupt(env) >= 0) {
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    } else {
+        cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    }
+}
+
+bool ia64_cpu_deposit_interrupt(IA64CPU *cpu, uint8_t vector)
+{
+    CPUIA64State *env = &cpu->env;
+    unsigned int word;
+    uint64_t mask;
+
+    /* Vectors 0..15 are reserved; vector 15 is the spurious indication. */
+    if (vector < 16) {
+        return false;
+    }
+
+    word = vector >> 6;
+    mask = 1ULL << (vector & 63);
+    env->cr[IA64_CR_IRR0 + word] |= mask;
+    ia64_cpu_recompute_interrupt(env);
+    return true;
+}
+
+uint64_t ia64_cpu_get_ivr(CPUIA64State *env)
+{
+    int vector = ia64_cpu_next_interrupt(env);
+
+    if (vector < 0) {
+        env->cr[IA64_CR_IVR] = IA64_SPURIOUS_INT_VECTOR;
+        ia64_cpu_recompute_interrupt(env);
+        return IA64_SPURIOUS_INT_VECTOR;
+    }
+
+    env->cr[IA64_CR_IRR0 + ((unsigned int)vector >> 6)] &=
+        ~(1ULL << (vector & 63));
+    env->interrupt_in_service[(unsigned int)vector >> 6] |=
+        1ULL << (vector & 63);
+    env->cr[IA64_CR_IVR] = vector;
+    ia64_cpu_recompute_interrupt(env);
+    return vector;
+}
+
+void ia64_cpu_set_tpr(CPUIA64State *env, uint64_t value)
+{
+    env->cr[IA64_CR_TPR] = value;
+    ia64_cpu_recompute_interrupt(env);
+}
+
+void ia64_cpu_eoi(CPUIA64State *env)
+{
+    int vector = ia64_cpu_highest_in_service(env);
+
+    if (vector >= 0) {
+        env->interrupt_in_service[(unsigned int)vector >> 6] &=
+            ~(1ULL << (vector & 63));
+    }
+    env->cr[IA64_CR_EOI] = 0;
+    ia64_cpu_recompute_interrupt(env);
 }
 #endif
 static void ia64_cpu_do_interrupt(CPUState *cs);
@@ -236,8 +365,9 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
 
 #ifndef CONFIG_USER_ONLY
     /* External interrupts start idle/spurious; timer vector masked by default. */
-    env->cr[65] = IA64_SPURIOUS_INT_VECTOR; /* cr.ivr */
-    env->cr[72] = IA64_ITV_MASK;            /* cr.itv */
+    env->cr[IA64_CR_IVR] = IA64_SPURIOUS_INT_VECTOR;
+    env->cr[IA64_CR_ITV] = IA64_ITV_MASK;
+    cpu_reset_interrupt(CPU(cpu), CPU_INTERRUPT_HARD);
     if (cpu->itm_timer) {
         timer_del(cpu->itm_timer);
     }
@@ -279,19 +409,14 @@ static void ia64_cpu_finalizefn(Object *obj)
 static void ia64_itm_timer_cb(void *opaque)
 {
     IA64CPU *cpu = opaque;
-    CPUState *cs = CPU(cpu);
     CPUIA64State *env = &cpu->env;
 
-    uint64_t itv = env->cr[72];
+    uint64_t itv = env->cr[IA64_CR_ITV];
     if (itv & IA64_ITV_MASK) {
         return; /* masked */
     }
 
-    uint8_t vec = itv & 0xff;
-    if ((env->cr[65] & 0xff) == IA64_SPURIOUS_INT_VECTOR) {
-        env->cr[65] = vec;
-    }
-    cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    ia64_cpu_deposit_interrupt(cpu, itv & 0xff);
 }
 
 void ia64_itm_update(CPUIA64State *env)
@@ -301,7 +426,7 @@ void ia64_itm_update(CPUIA64State *env)
         return;
     }
 
-    uint64_t itv = env->cr[72];
+    uint64_t itv = env->cr[IA64_CR_ITV];
     if ((itv & IA64_ITV_MASK) || env->cr[1] == 0) {
         timer_del(cpu->itm_timer);
         return;
@@ -433,8 +558,8 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     CPUIA64State *env = &cpu->env;
 
     if (interrupt_request & CPU_INTERRUPT_HARD) {
-        uint8_t vec = env->cr[65] & 0xff;
-        if ((env->psr & IA64_PSR_I) && vec != IA64_SPURIOUS_INT_VECTOR) {
+        if ((env->psr & IA64_PSR_I) &&
+            ia64_cpu_next_interrupt(env) >= 0) {
             ia64_intr_push_window(env);
             env->cr_ipsr = env->psr;
             env->cr_iip = env->ip & ~0xFULL;
@@ -443,7 +568,6 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             env->cr_iim = 0;
 
             cs->exception_index = IA64_EXCP_BASE + IA64_VEC_EXTERNAL_INTERRUPT;
-            cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
             ia64_cpu_do_interrupt(cs);
             return true;
         }

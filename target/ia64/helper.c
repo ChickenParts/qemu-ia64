@@ -29590,18 +29590,36 @@ void HELPER(set_itm)(CPUIA64State *env, uint64_t val)
 
 void HELPER(set_itv)(CPUIA64State *env, uint64_t val)
 {
-    env->cr[72] = val; /* cr.itv */
+    env->cr[IA64_CR_ITV] = val;
 #ifndef CONFIG_USER_ONLY
     ia64_itm_update(env);
 #endif
 }
 
+uint64_t HELPER(get_ivr)(CPUIA64State *env)
+{
+#ifndef CONFIG_USER_ONLY
+    return ia64_cpu_get_ivr(env);
+#else
+    return IA64_SPURIOUS_INT_VECTOR;
+#endif
+}
+
+void HELPER(set_tpr)(CPUIA64State *env, uint64_t val)
+{
+#ifndef CONFIG_USER_ONLY
+    ia64_cpu_set_tpr(env, val);
+#else
+    env->cr[IA64_CR_TPR] = val;
+#endif
+}
+
 void HELPER(eoi)(CPUIA64State *env)
 {
-    CPUState *cs = env_cpu(env);
-    env->cr[65] = IA64_SPURIOUS_INT_VECTOR; /* cr.ivr */
 #ifndef CONFIG_USER_ONLY
-    cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    ia64_cpu_eoi(env);
+#else
+    env->cr[IA64_CR_EOI] = 0;
 #endif
 }
 
