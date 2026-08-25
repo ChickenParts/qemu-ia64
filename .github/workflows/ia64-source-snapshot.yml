@@ -43,6 +43,7 @@ jobs:
           set -euo pipefail
           out="$PWD/scratch/ci-ia64-export"
           git clone --depth 1 https://github.com/tianocore/edk2.git /tmp/edk2
+          make -C /tmp/edk2/BaseTools/Source/C/Common
           make -C /tmp/edk2/BaseTools/Source/C/TianoCompress
           tool="$(find /tmp/edk2/BaseTools -type f -name TianoCompress \
             -perm -111 -print | head -n 1)"
@@ -53,6 +54,7 @@ jobs:
           sha256sum "$out/TianoCompress" >> "$out/SHA256SUMS"
 
       - name: Upload source and analysis tool
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ia64-source-export-${{ github.run_id }}
