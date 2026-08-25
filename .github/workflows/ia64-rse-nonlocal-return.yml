@@ -127,4 +127,6 @@ jobs:
           git config user.email \
             '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'target/ia64: reconcile RSE state on non-local returns'
+          git fetch origin fix/ia64-rse-nonlocal-return
+          git rebase origin/fix/ia64-rse-nonlocal-return
           git push origin HEAD:fix/ia64-rse-nonlocal-return
