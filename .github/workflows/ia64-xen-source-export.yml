@@ -1,0 +1,56 @@
+name: IA-64 Xen firmware source export
+
+on:
+  push:
+    branches:
+      - fix/ia64-rse-nonlocal-return
+    paths:
+      - .github/workflows/ia64-xen-source-export.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-rse-nonlocal-return
+          fetch-depth: 1
+
+      - name: Install Mercurial
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mercurial
+
+      - name: Fetch canonical Xen IA-64 firmware and retain source
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-xen-source
+          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
+            scripts/fetch-ia64-xen-firmware.sh "$out"
+          test "$(sha256sum "$out/Flash.fd" | awk '{print $1}')" = \
+            e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+
+          find "$out/source" -type f \
+            \( -iname '*metronome*' -o -iname '*pal*' -o -iname '*sal*' \) \
+            -print | sort > "$out/relevant-files.txt"
+          tar --exclude-vcs -czf "$out/efi-vfirmware-source.tar.gz" \
+            -C "$out/source" .
+          rm -rf "$out/source" "$out/Flash.fd"
+          sha256sum "$out/efi-vfirmware-source.tar.gz" \
+            > "$out/SHA256SUMS"
+
+      - name: Upload source and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-source-${{ github.run_id }}
+          path: scratch/ci-xen-source/
+          retention-days: 1
+          if-no-files-found: error
