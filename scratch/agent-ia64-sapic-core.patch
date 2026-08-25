@@ -1,0 +1,366 @@
+diff --git a/target/ia64/cpu.c b/target/ia64/cpu.c
+index f889d97..2f514ba 100644
+--- a/target/ia64/cpu.c
++++ b/target/ia64/cpu.c
+@@ -7,6 +7,7 @@
+ #include "qemu/osdep.h"
+ #include "qapi/error.h"
+ #include "cpu.h"
++#include "interrupt.h"
+ #include "qemu/bswap.h"
+ #include "qemu/host-utils.h"
+ #include "qemu/qemu-print.h"
+@@ -46,65 +47,17 @@ static void ia64_rse_ctxs_free(IA64CPU *cpu)
+ }
+ 
+ /*
+- * IA-64 local SAPIC interrupt arbitration.
++ * IA-64 local SAPIC interrupt integration.
+  *
+- * The pending vectors are the architecturally visible cr.irr0..3 bitmap.
+- * cr.ivr moves the highest eligible vector from pending to in-service, and
+- * cr.eoi retires the highest in-service vector.  Eligibility is determined
+- * by both the highest in-service vector and cr.tpr's mask-interrupt-class and
+- * mask-maskable-interrupt fields.
++ * Arbitration itself lives in interrupt.c so the processor and unit tests use
++ * one implementation.  This layer only connects architectural state to QEMU's
++ * CPU_INTERRUPT_HARD wakeup mechanism.
+  */
+-static int ia64_interrupt_highest(const uint64_t bitmap[4])
+-{
+-    for (int word = 3; word >= 0; word--) {
+-        uint64_t pending = bitmap[word];
+-
+-        if (pending) {
+-            return word * 64 + 63 - clz64(pending);
+-        }
+-    }
+-    return -1;
+-}
+-
+-static int ia64_cpu_highest_pending(const CPUIA64State *env)
+-{
+-    const uint64_t *irr = &env->cr[IA64_CR_IRR0];
+-
+-    return ia64_interrupt_highest(irr);
+-}
+-
+-static int ia64_cpu_highest_in_service(const CPUIA64State *env)
+-{
+-    return ia64_interrupt_highest(env->interrupt_in_service);
+-}
+-
+ static int ia64_cpu_next_interrupt(const CPUIA64State *env)
+ {
+-    int pending = ia64_cpu_highest_pending(env);
+-    int in_service;
+-    unsigned int tpr_class;
+-
+-    if (pending < 0) {
+-        return -1;
+-    }
+-
+-    in_service = ia64_cpu_highest_in_service(env);
+-    if (in_service >= pending) {
+-        return -1;
+-    }
+-
+-    /* cr.tpr.mmi masks every maskable external interrupt. */
+-    if (env->cr[IA64_CR_TPR] & (1ULL << 16)) {
+-        return -1;
+-    }
+-
+-    /* cr.tpr.mic masks interrupt classes less than or equal to MIC. */
+-    tpr_class = extract64(env->cr[IA64_CR_TPR], 4, 4);
+-    if (((unsigned int)pending >> 4) <= tpr_class) {
+-        return -1;
+-    }
+-
+-    return pending;
++    return ia64_interrupt_next(&env->cr[IA64_CR_IRR0],
++                               env->interrupt_in_service,
++                               env->cr[IA64_CR_TPR]);
+ }
+ 
+ static void ia64_cpu_recompute_interrupt(CPUIA64State *env)
+@@ -121,35 +74,21 @@ static void ia64_cpu_recompute_interrupt(CPUIA64State *env)
+ bool ia64_cpu_deposit_interrupt(IA64CPU *cpu, uint8_t vector)
+ {
+     CPUIA64State *env = &cpu->env;
+-    unsigned int word;
+-    uint64_t mask;
+ 
+-    /* Vectors 0..15 are reserved; vector 15 is the spurious indication. */
+-    if (vector < 16) {
++    if (!ia64_interrupt_deposit(&env->cr[IA64_CR_IRR0], vector)) {
+         return false;
+     }
+ 
+-    word = vector >> 6;
+-    mask = 1ULL << (vector & 63);
+-    env->cr[IA64_CR_IRR0 + word] |= mask;
+     ia64_cpu_recompute_interrupt(env);
+     return true;
+ }
+ 
+ uint64_t ia64_cpu_get_ivr(CPUIA64State *env)
+ {
+-    int vector = ia64_cpu_next_interrupt(env);
++    unsigned int vector = ia64_interrupt_accept(&env->cr[IA64_CR_IRR0],
++                                                env->interrupt_in_service,
++                                                env->cr[IA64_CR_TPR]);
+ 
+-    if (vector < 0) {
+-        env->cr[IA64_CR_IVR] = IA64_SPURIOUS_INT_VECTOR;
+-        ia64_cpu_recompute_interrupt(env);
+-        return IA64_SPURIOUS_INT_VECTOR;
+-    }
+-
+-    env->cr[IA64_CR_IRR0 + ((unsigned int)vector >> 6)] &=
+-        ~(1ULL << (vector & 63));
+-    env->interrupt_in_service[(unsigned int)vector >> 6] |=
+-        1ULL << (vector & 63);
+     env->cr[IA64_CR_IVR] = vector;
+     ia64_cpu_recompute_interrupt(env);
+     return vector;
+@@ -157,22 +96,18 @@ uint64_t ia64_cpu_get_ivr(CPUIA64State *env)
+ 
+ void ia64_cpu_set_tpr(CPUIA64State *env, uint64_t value)
+ {
+-    env->cr[IA64_CR_TPR] = value;
++    env->cr[IA64_CR_TPR] = ia64_interrupt_sanitize_tpr(value);
+     ia64_cpu_recompute_interrupt(env);
+ }
+ 
+ void ia64_cpu_eoi(CPUIA64State *env)
+ {
+-    int vector = ia64_cpu_highest_in_service(env);
+-
+-    if (vector >= 0) {
+-        env->interrupt_in_service[(unsigned int)vector >> 6] &=
+-            ~(1ULL << (vector & 63));
+-    }
++    ia64_interrupt_eoi(env->interrupt_in_service);
+     env->cr[IA64_CR_EOI] = 0;
+     ia64_cpu_recompute_interrupt(env);
+ }
+ #endif
++
+ static void ia64_cpu_do_interrupt(CPUState *cs);
+ 
+ static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
+@@ -366,6 +301,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
+ #ifndef CONFIG_USER_ONLY
+     /* External interrupts start idle/spurious; timer vector masked by default. */
+     env->cr[IA64_CR_IVR] = IA64_SPURIOUS_INT_VECTOR;
++    env->cr[IA64_CR_TPR] = IA64_TPR_RESET;
+     env->cr[IA64_CR_ITV] = IA64_ITV_MASK;
+     cpu_reset_interrupt(CPU(cpu), CPU_INTERRUPT_HARD);
+     if (cpu->itm_timer) {
+@@ -506,8 +442,11 @@ void ia64_rse_switch_bspstore(CPUIA64State *env, uint64_t new_bspstore)
+ static bool ia64_cpu_has_work(CPUState *cs)
+ {
+     CPUIA64State *env = cpu_env(cs);
++    const uint64_t enable = IA64_PSR_I | IA64_PSR_IC;
++
+     return (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
+-            (env->psr & IA64_PSR_I));
++            (env->psr & enable) == enable &&
++            ia64_cpu_next_interrupt(env) >= 0);
+ }
+ 
+ static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
+@@ -558,7 +497,9 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+     CPUIA64State *env = &cpu->env;
+ 
+     if (interrupt_request & CPU_INTERRUPT_HARD) {
+-        if ((env->psr & IA64_PSR_I) &&
++        const uint64_t enable = IA64_PSR_I | IA64_PSR_IC;
++
++        if ((env->psr & enable) == enable &&
+             ia64_cpu_next_interrupt(env) >= 0) {
+             ia64_intr_push_window(env);
+             env->cr_ipsr = env->psr;
+diff --git a/target/ia64/helper.c b/target/ia64/helper.c
+index d2635a3..264c1d0 100644
+--- a/target/ia64/helper.c
++++ b/target/ia64/helper.c
+@@ -6,6 +6,7 @@
+ 
+ #include "qemu/osdep.h"
+ #include "cpu.h"
++#include "interrupt.h"
+ #include "exec/helper-proto.h"
+ #include "exec/cpu-common.h"
+ #include "exec/cputlb.h"
+@@ -29610,7 +29611,7 @@ void HELPER(set_tpr)(CPUIA64State *env, uint64_t val)
+ #ifndef CONFIG_USER_ONLY
+     ia64_cpu_set_tpr(env, val);
+ #else
+-    env->cr[IA64_CR_TPR] = val;
++    env->cr[IA64_CR_TPR] = ia64_interrupt_sanitize_tpr(val);
+ #endif
+ }
+ 
+diff --git a/target/ia64/interrupt.c b/target/ia64/interrupt.c
+new file mode 100644
+index 0000000..c42bc7a
+--- /dev/null
++++ b/target/ia64/interrupt.c
+@@ -0,0 +1,100 @@
++/*
++ * IA-64 local SAPIC interrupt arbitration
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "interrupt.h"
++#include "qemu/host-utils.h"
++
++int ia64_interrupt_highest(const uint64_t bitmap[IA64_INTERRUPT_BITMAP_WORDS])
++{
++    for (int word = IA64_INTERRUPT_BITMAP_WORDS - 1; word >= 0; word--) {
++        uint64_t vectors = bitmap[word];
++
++        if (word == 0) {
++            vectors &= ~((1ULL << IA64_INTERRUPT_VECTOR_MIN) - 1);
++        }
++        if (vectors) {
++            return word * 64 + 63 - clz64(vectors);
++        }
++    }
++
++    return -1;
++}
++
++uint64_t ia64_interrupt_sanitize_tpr(uint64_t value)
++{
++    return value & IA64_TPR_WRITABLE_MASK;
++}
++
++int ia64_interrupt_next(
++    const uint64_t pending[IA64_INTERRUPT_BITMAP_WORDS],
++    const uint64_t in_service[IA64_INTERRUPT_BITMAP_WORDS],
++    uint64_t tpr)
++{
++    int pending_vector = ia64_interrupt_highest(pending);
++    int in_service_vector;
++    unsigned int minimum_class;
++
++    if (pending_vector < 0) {
++        return -1;
++    }
++
++    in_service_vector = ia64_interrupt_highest(in_service);
++    if (in_service_vector >= pending_vector) {
++        return -1;
++    }
++
++    tpr = ia64_interrupt_sanitize_tpr(tpr);
++    if (tpr & IA64_TPR_MMI) {
++        return -1;
++    }
++
++    minimum_class = (tpr & IA64_TPR_MIC_MASK) >> IA64_TPR_MIC_SHIFT;
++    if (((unsigned int)pending_vector >> 4) <= minimum_class) {
++        return -1;
++    }
++
++    return pending_vector;
++}
++
++bool ia64_interrupt_deposit(
++    uint64_t pending[IA64_INTERRUPT_BITMAP_WORDS], unsigned int vector)
++{
++    if (vector < IA64_INTERRUPT_VECTOR_MIN || vector > UINT8_MAX) {
++        return false;
++    }
++
++    pending[vector >> 6] |= 1ULL << (vector & 63);
++    return true;
++}
++
++unsigned int ia64_interrupt_accept(
++    uint64_t pending[IA64_INTERRUPT_BITMAP_WORDS],
++    uint64_t in_service[IA64_INTERRUPT_BITMAP_WORDS],
++    uint64_t tpr)
++{
++    int vector = ia64_interrupt_next(pending, in_service, tpr);
++
++    if (vector < 0) {
++        return IA64_INTERRUPT_SPURIOUS_VECTOR;
++    }
++
++    pending[(unsigned int)vector >> 6] &= ~(1ULL << (vector & 63));
++    in_service[(unsigned int)vector >> 6] |= 1ULL << (vector & 63);
++    return vector;
++}
++
++int ia64_interrupt_eoi(
++    uint64_t in_service[IA64_INTERRUPT_BITMAP_WORDS])
++{
++    int vector = ia64_interrupt_highest(in_service);
++
++    if (vector >= 0) {
++        in_service[(unsigned int)vector >> 6] &=
++            ~(1ULL << (vector & 63));
++    }
++    return vector;
++}
+diff --git a/target/ia64/interrupt.h b/target/ia64/interrupt.h
+new file mode 100644
+index 0000000..04dda7c
+--- /dev/null
++++ b/target/ia64/interrupt.h
+@@ -0,0 +1,38 @@
++/*
++ * IA-64 local SAPIC interrupt arbitration
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef TARGET_IA64_INTERRUPT_H
++#define TARGET_IA64_INTERRUPT_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define IA64_INTERRUPT_BITMAP_WORDS 4
++#define IA64_INTERRUPT_VECTOR_MIN 16
++#define IA64_INTERRUPT_SPURIOUS_VECTOR 15
++
++#define IA64_TPR_MIC_SHIFT 4
++#define IA64_TPR_MIC_MASK (0xfULL << IA64_TPR_MIC_SHIFT)
++#define IA64_TPR_MMI (1ULL << 16)
++#define IA64_TPR_WRITABLE_MASK (IA64_TPR_MIC_MASK | IA64_TPR_MMI)
++#define IA64_TPR_RESET IA64_TPR_MMI
++
++int ia64_interrupt_highest(const uint64_t bitmap[IA64_INTERRUPT_BITMAP_WORDS]);
++uint64_t ia64_interrupt_sanitize_tpr(uint64_t value);
++int ia64_interrupt_next(
++    const uint64_t pending[IA64_INTERRUPT_BITMAP_WORDS],
++    const uint64_t in_service[IA64_INTERRUPT_BITMAP_WORDS],
++    uint64_t tpr);
++bool ia64_interrupt_deposit(
++    uint64_t pending[IA64_INTERRUPT_BITMAP_WORDS], unsigned int vector);
++unsigned int ia64_interrupt_accept(
++    uint64_t pending[IA64_INTERRUPT_BITMAP_WORDS],
++    uint64_t in_service[IA64_INTERRUPT_BITMAP_WORDS],
++    uint64_t tpr);
++int ia64_interrupt_eoi(
++    uint64_t in_service[IA64_INTERRUPT_BITMAP_WORDS]);
++
++#endif
+diff --git a/target/ia64/meson.build b/target/ia64/meson.build
+index ec0090b..9792c04 100644
+--- a/target/ia64/meson.build
++++ b/target/ia64/meson.build
+@@ -3,6 +3,7 @@ ia64_ss.add(files(
+   'cpu.c',
+   'gdbstub.c',
+   'helper.c',
++  'interrupt.c',
+   'translate.c',
+ ))
+ 
