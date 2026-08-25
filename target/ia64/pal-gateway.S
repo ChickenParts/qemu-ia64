@@ -16,12 +16,12 @@ qemu_ia64_pal_gateway:
         { .mii
           break.m 0x1000
           nop.i 0
-          nop.i 0
+          nop.i 0;;
         }
         { .mib
           nop.m 0
           nop.i 0
-          br.ret.sptk.many b0
+          br.ret.sptk.many b0;;
         }
         .endp qemu_ia64_pal_gateway
         .size qemu_ia64_pal_gateway, .-qemu_ia64_pal_gateway
