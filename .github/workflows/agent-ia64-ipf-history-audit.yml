@@ -1,0 +1,196 @@
+name: Temporary IA-64 historical IPF source audit
+
+on:
+  push:
+    branches:
+      - scratch/ia64-ipf-audit-source
+    paths:
+      - .github/workflows/agent-ia64-ipf-history-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch independently preserved qemu-kvm IPF sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/agent-ia64-ipf-history-audit
+          mkdir -p "$out/sources"
+          curl --fail --location --silent --show-error \
+            https://raw.githubusercontent.com/TritonDataCenter/illumos-kvm-cmd/1c9b441da90fe179451abab9aa8a4b926912d518/hw/ipf.c \
+            -o "$out/sources/illumos-kvm-cmd-ipf.c"
+          curl --fail --location --silent --show-error \
+            https://raw.githubusercontent.com/ut-osa/lacuna/6283404f2979ff79e8d7a7ebca02928dfd44f986/host/qemu-kvm-0.15.1/hw/ipf.c \
+            -o "$out/sources/qemu-kvm-0.15.1-ipf.c"
+          curl --fail --location --silent --show-error \
+            https://raw.githubusercontent.com/MurphysChaos/VirtualFirmware/829bfeb6bd37150a21170bc1033e50f30b9083b4/qemu-kvm-0.14.1/hw/ipf.c \
+            -o "$out/sources/qemu-kvm-0.14.1-ipf.c"
+          curl --fail --location --silent --show-error \
+            https://raw.githubusercontent.com/ddk50/qemu-kvm/8c9bb7ff6a2c267bcfb6fa9118bdb1a84dc5ccd1/hw/ipf.c \
+            -o "$out/sources/qemu-kvm-mirror-ipf.c"
+          curl --fail --location --silent --show-error \
+            https://raw.githubusercontent.com/blanham/qemu-ia64/5b416b9fb5a97aee32462e30dd23b5bdb3837db4/hw/ia64/ipf.c \
+            -o "$out/sources/blanham-early-port-ipf.c"
+          cp hw/ia64/ipf.c "$out/sources/current-metachicken-ipf.c"
+
+      - name: Generate provenance and structural comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/agent-ia64-ipf-history-audit
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import re
+          from collections import Counter
+          from pathlib import Path
+
+          root = Path('scratch/agent-ia64-ipf-history-audit')
+          sources = root / 'sources'
+
+          function_re = re.compile(
+              r'(?m)^(?:static\s+)?(?:inline\s+)?'
+              r'(?:[A-Za-z_][\w\s\*]*?\s+)?'
+              r'([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{'
+          )
+          excluded = {'if', 'for', 'while', 'switch', 'sizeof'}
+
+          def normalized_lines(text: str) -> list[str]:
+              result = []
+              for line in text.splitlines():
+                  line = re.sub(r'/\*.*?\*/', '', line)
+                  line = re.sub(r'//.*$', '', line)
+                  line = re.sub(r'\s+', ' ', line).strip()
+                  if line:
+                      result.append(line)
+              return result
+
+          rows = []
+          bodies = {}
+          functions = {}
+          for path in sorted(sources.glob('*.c')):
+              data = path.read_bytes()
+              text = data.decode('utf-8', errors='replace')
+              bodies[path.name] = normalized_lines(text)
+              functions[path.name] = sorted(
+                  {m.group(1) for m in function_re.finditer(text)} - excluded
+              )
+              rows.append({
+                  'file': path.name,
+                  'bytes': len(data),
+                  'lines': text.count('\n') + (not text.endswith('\n')),
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'functions': len(functions[path.name]),
+              })
+
+          current_name = 'current-metachicken-ipf.c'
+          current_counter = Counter(bodies[current_name])
+          comparisons = []
+          for name, lines in bodies.items():
+              if name == current_name:
+                  continue
+              other_counter = Counter(lines)
+              common = sum((current_counter & other_counter).values())
+              comparisons.append({
+                  'historical_file': name,
+                  'normalized_current_lines': sum(current_counter.values()),
+                  'normalized_historical_lines': sum(other_counter.values()),
+                  'common_normalized_lines_multiset': common,
+                  'historical_line_retention_percent': round(
+                      100.0 * common / max(1, sum(other_counter.values())), 2
+                  ),
+                  'current_line_provenance_percent': round(
+                      100.0 * common / max(1, sum(current_counter.values())), 2
+                  ),
+                  'shared_function_names': sorted(
+                      set(functions[current_name]) & set(functions[name])
+                  ),
+                  'historical_only_function_names': sorted(
+                      set(functions[name]) - set(functions[current_name])
+                  ),
+                  'current_only_function_names': sorted(
+                      set(functions[current_name]) - set(functions[name])
+                  ),
+              })
+
+          payload = {
+              'current_commit': '${{ github.sha }}',
+              'files': rows,
+              'comparisons': comparisons,
+              'functions': functions,
+          }
+          (root / 'ipf-history-audit.json').write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + '\n'
+          )
+
+          md = ['# IA-64 historical IPF source audit', '']
+          md.append(f"Current audit commit: `${{ github.sha }}`")
+          md.extend(['', '## Source inventory', '',
+                     '| File | Bytes | Lines | Functions | SHA-256 |',
+                     '|---|---:|---:|---:|---|'])
+          for row in rows:
+              md.append(
+                  f"| `{row['file']}` | {row['bytes']} | {row['lines']} | "
+                  f"{row['functions']} | `{row['sha256']}` |"
+              )
+          md.extend(['', '## Structural comparison to current metachicken', '',
+                     '| Historical file | Historical normalized lines retained | '
+                     'Current normalized lines traceable | Shared functions | '
+                     'Historical-only functions |',
+                     '|---|---:|---:|---:|---:|'])
+          for row in comparisons:
+              md.append(
+                  f"| `{row['historical_file']}` | "
+                  f"{row['historical_line_retention_percent']:.2f}% | "
+                  f"{row['current_line_provenance_percent']:.2f}% | "
+                  f"{len(row['shared_function_names'])} | "
+                  f"{len(row['historical_only_function_names'])} |"
+              )
+          md.extend([
+              '',
+              'The normalized-line figures are provenance aids, not device-completeness '
+              'scores. A copied declaration or helper does not establish working modern '
+              'QEMU device integration.',
+              '',
+              '## Historical-only function names',
+              '',
+          ])
+          for row in comparisons:
+              md.append(f"### {row['historical_file']}")
+              md.append('')
+              names = row['historical_only_function_names']
+              md.append(', '.join(f'`{name}`' for name in names) if names else '_None_')
+              md.append('')
+          (root / 'ipf-history-audit.md').write_text('\n'.join(md) + '\n')
+          PY
+
+          {
+            printf 'source\tbytes\tlines\tsha256\n'
+            for file in "$out"/sources/*.c; do
+              printf '%s\t%s\t%s\t%s\n' \
+                "$(basename "$file")" \
+                "$(wc -c < "$file")" \
+                "$(wc -l < "$file")" \
+                "$(sha256sum "$file" | cut -d' ' -f1)"
+            done
+          } > "$out/source-manifest.tsv"
+
+      - name: Upload audit evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-ipf-history-audit-${{ github.run_id }}
+          path: scratch/agent-ia64-ipf-history-audit/
+          retention-days: 1
+          if-no-files-found: error
