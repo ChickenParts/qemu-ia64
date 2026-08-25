@@ -14,7 +14,7 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Check out feature branch
@@ -23,19 +23,37 @@ jobs:
           ref: fix/ia64-rse-nonlocal-return
           fetch-depth: 1
 
+      - name: Install IA-64 firmware-analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-multiarch
+
       - name: Export complete source tree
         shell: bash
         run: |
           set -euo pipefail
           out=scratch/ci-ia64-export
-          mkdir -p "$out"
+          mkdir -p "$out/toolchain/lib"
           tar \
             --exclude=.git \
             --exclude=build \
             --exclude="$out" \
             -czf "$out/qemu-ia64-source.tar.gz" .
+
+          for tool in objdump objcopy readelf; do
+            path="$(command -v "$tool")"
+            cp "$path" "$out/toolchain/$tool"
+            ldd "$path" | awk '/=> \/|^\// { for (i=1; i<=NF; i++) if ($i ~ /^\//) print $i }'
+          done | sort -u > "$out/toolchain/linked-libraries.txt"
+          while IFS= read -r lib; do
+            test -f "$lib" || continue
+            cp -L "$lib" "$out/toolchain/lib/"
+          done < "$out/toolchain/linked-libraries.txt"
+          objdump -i > "$out/toolchain/objdump-targets.txt"
+
           sha256sum "$out/qemu-ia64-source.tar.gz" \
-            > "$out/SHA256SUMS"
+            "$out/toolchain/objdump" "$out/toolchain/objcopy" \
+            "$out/toolchain/readelf" > "$out/SHA256SUMS"
 
       - name: Build Tiano firmware decompressor
         shell: bash
@@ -53,7 +71,7 @@ jobs:
             > "$out/TianoCompress-help.txt" || true
           sha256sum "$out/TianoCompress" >> "$out/SHA256SUMS"
 
-      - name: Upload source and analysis tool
+      - name: Upload source and analysis tools
         if: always()
         uses: actions/upload-artifact@v4
         with:
