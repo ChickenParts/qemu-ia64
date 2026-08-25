@@ -17218,12 +17218,56 @@ static void ia64_fw_pei_maybe_handle_hob_flow_ret(CPUIA64State *env)
 #endif
 }
 
+static unsigned ia64_rse_unwind_to_return_target(CPUIA64State *env,
+                                                  uint64_t ret_addr)
+{
+    int match = -1;
+    uint32_t depth;
+    unsigned dropped = 0;
+
+    ret_addr &= ~0xFULL;
+    if (!ret_addr || !env->rse_frames || env->rse_depth < 2) {
+        return 0;
+    }
+
+    depth = env->rse_depth;
+    if (env->rse_frames[depth - 1].ret_addr == ret_addr) {
+        return 0;
+    }
+
+    /*
+     * A context restore can return directly to an older caller, bypassing
+     * one or more br.call frames.  The architectural RSE state is restored
+     * by the guest's loadrs/flushrs sequence, but QEMU's auxiliary shadow
+     * stack must discard those bypassed snapshots as well.  An exact saved
+     * return address is a strong, recursion-safe boundary; never infer this
+     * from CFM/PFS alone on the normal path.
+     */
+    for (int i = (int)depth - 2; i >= 0; i--) {
+        if (env->rse_frames[i].ret_addr == ret_addr) {
+            match = i;
+            break;
+        }
+    }
+    if (match < 0) {
+        return 0;
+    }
+
+    while (env->rse_depth > (uint32_t)match + 1) {
+        if (!ia64_rse_pop_window(env)) {
+            break;
+        }
+        dropped++;
+    }
+    return dropped;
+}
+
 void HELPER(ret_restore)(CPUIA64State *env)
 {
     static int log_count;
-    static int unwind_enabled = -1;
-    if (unwind_enabled == -1) {
-        unwind_enabled = getenv("QEMU_IA64_RET_UNWIND_PFS") ? 1 : 0;
+    static int pfs_unwind_enabled = -1;
+    if (pfs_unwind_enabled == -1) {
+        pfs_unwind_enabled = getenv("QEMU_IA64_RET_UNWIND_PFS") ? 1 : 0;
     }
     static uint64_t watch_b0;
     static bool watch_b0_inited;
@@ -17420,7 +17464,23 @@ void HELPER(ret_restore)(CPUIA64State *env)
     }
     uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 46) - 1);
     uint64_t b0 = env->b[0] & ~0xFULL;
-    if (unwind_enabled && env->rse_depth > 0) {
+    uint32_t depth_before = env->rse_depth;
+    unsigned exact_unwind = ia64_rse_unwind_to_return_target(env, b0);
+    if (exact_unwind && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+        static int exact_log_count;
+
+        if (exact_log_count < 64) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ret_nonlocal_unwind ip=%016" PRIx64
+                          " b0=%016" PRIx64 " dropped=%u depth=%u->%u\n",
+                          env->ip, b0, exact_unwind, depth_before,
+                          env->rse_depth);
+            exact_log_count++;
+        }
+    }
+
+    /* Retain the old PFS heuristic as an opt-in diagnostic fallback only. */
+    if (!exact_unwind && pfs_unwind_enabled && env->rse_depth > 0) {
         int unwind = 0;
         while (env->rse_depth > 0) {
             const struct IA64RSEFrame *frame =
