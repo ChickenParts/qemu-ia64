@@ -57,6 +57,7 @@
 #include "system/ioport.h"
 #include "elf.h"
 #include "hw/ia64/gfw.h"
+#include "hw/ia64/iosapic.h"
 #include "target/ia64/cpu.h"
 #include "migration/vmstate.h"
 #include "system/reset.h"
@@ -161,13 +162,10 @@ struct IPFMachineState {
     uint16_t acpi_pm1_evt_en;
     uint16_t acpi_pm1_cnt;
     uint64_t acpi_pm_timer_start_ns;
-    MemoryRegion iosapic_mmio;
+    IA64IOSAPICState *iosapic;
+    qemu_irq isa_irqs[ISA_NUM_IRQS];
     MemoryRegion gx_mmio;
     MemoryRegion gx_mmio_alias;
-    uint32_t iosapic_reg_select;
-    uint32_t iosapic_reg[0x40];
-    uint32_t iosapic_irr;        /* Interrupt Request Register */
-    uint32_t iosapic_remote_irr; /* For level-triggered coalescing */
     uint32_t gx_mmio_cb0;
     uint32_t gx_mmio_cc0;
 
@@ -184,9 +182,6 @@ struct IPFMachineState {
 #define IPF_VARSTORE_FORMATTED 0x5a
 #define IPF_VARSTORE_HEALTHY   0xfe
 
-/* Forward declaration for IOSAPIC EOI handling */
-static void iosapic_service(IPFMachineState *m, int pin);
-void ioapic_set_irq(void *opaque, int irq_num, int level);
 static void ipf_pci_fw_cfg_set_ro(IPFPciFwConfig *cfg, uint16_t off,
                                   unsigned size, uint64_t value);
 
@@ -582,11 +577,6 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 
 /* IA-64 IOSAPIC base used by Linux/ia64 (see asm/iosapic.h). */
 #define IPF_IOSAPIC_BASE 0x00000000fec00000ULL
-#define IPF_IOSAPIC_SIZE 0x00001000ULL
-
-#define IPF_IOSAPIC_REG_SELECT 0x0
-#define IPF_IOSAPIC_WINDOW     0x10
-#define IPF_IOSAPIC_EOI        0x40
 
 /*
  * 460GX/SDV control window used by firmware during early init.
@@ -631,15 +621,6 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
  */
 #define IPF_FW_PEI_TEMP_BASE 0x0000000004000000ULL
 #define IPF_FW_PEI_TEMP_SIZE (2ULL << 20)
-
-#define IPF_IOSAPIC_VERSION_REG 0x1
-#define IPF_IOSAPIC_NUM_PINS    16
-
-/* IOSAPIC redirection entry bits (same layout as IOAPIC) */
-#define IOSAPIC_LVT_MASKED      (1 << 16)
-#define IOSAPIC_LVT_TRIGGER_LEVEL (1 << 15)
-#define IOSAPIC_LVT_REMOTE_IRR  (1 << 14)
-#define IOSAPIC_VECTOR_MASK     0xff
 
 typedef struct QEMU_PACKED {
     uint64_t signature;
@@ -3467,8 +3448,11 @@ static void ipf_isa_bus_init(IPFMachineState *m)
     m->isa_bus = isa_bus_new(NULL, isa_address_space_io, isa_address_space_io,
                              &error_fatal);
 
-    /* Route ISA IRQs into the IOSAPIC handler. */
-    isa_irqs = qemu_allocate_irqs(ioapic_set_irq, m, ISA_NUM_IRQS);
+    /* Route ISA IRQs into the I/O SAPIC's architectural input pins. */
+    for (unsigned int i = 0; i < ISA_NUM_IRQS; i++) {
+        m->isa_irqs[i] = ia64_iosapic_get_irq(m->iosapic, i);
+    }
+    isa_irqs = m->isa_irqs;
     isa_bus_register_input_irqs(m->isa_bus, isa_irqs);
 
     /*
@@ -5391,112 +5375,18 @@ static void ipf_init_gx_mmio(IPFMachineState *m, MemoryRegion *sysmem)
             (uint64_t)IPF_GX_MMIO_BASE);
 }
 
-static uint64_t ipf_iosapic_read(void *opaque, hwaddr addr, unsigned size)
+static void ipf_init_iosapic(IPFMachineState *m)
 {
-    IPFMachineState *m = opaque;
-    uint32_t val = 0;
+    DeviceState *dev = qdev_new(TYPE_IA64_IOSAPIC);
 
-    switch (addr) {
-    case IPF_IOSAPIC_REG_SELECT:
-        val = m->iosapic_reg_select;
-        break;
-    case IPF_IOSAPIC_WINDOW: {
-        uint32_t sel = m->iosapic_reg_select & 0xff;
-        if (sel == IPF_IOSAPIC_VERSION_REG) {
-            val = 0x000f0020U; /* 16 redirection entries, version 0x20 */
-        } else if (sel < ARRAY_SIZE(m->iosapic_reg)) {
-            val = m->iosapic_reg[sel];
-        }
-        break;
-    }
-    case IPF_IOSAPIC_EOI:
-        val = 0;
-        break;
-    default:
-        val = 0;
-        break;
-    }
+    object_property_set_link(OBJECT(dev), "cpu", OBJECT(m->cpu),
+                             &error_abort);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, IPF_IOSAPIC_BASE);
+    m->iosapic = IA64_IOSAPIC(dev);
 
-    ipf_trace_mmio("iosapic", IPF_IOSAPIC_BASE + addr, size, val, false);
-    return val;
-}
-
-static void ipf_iosapic_write(void *opaque, hwaddr addr, uint64_t data,
-                              unsigned size)
-{
-    IPFMachineState *m = opaque;
-    uint32_t val = (uint32_t)data;
-
-    ipf_trace_mmio("iosapic", IPF_IOSAPIC_BASE + addr, size, data, true);
-    switch (addr) {
-    case IPF_IOSAPIC_REG_SELECT:
-        m->iosapic_reg_select = val;
-        break;
-    case IPF_IOSAPIC_WINDOW: {
-        uint32_t sel = m->iosapic_reg_select & 0xff;
-        if (sel < ARRAY_SIZE(m->iosapic_reg)) {
-            m->iosapic_reg[sel] = val;
-        }
-        break;
-    }
-    case IPF_IOSAPIC_EOI: {
-        /*
-         * EOI register: the value written is the vector that completed.
-         * Find the pin with that vector and clear its remote_irr bit.
-         */
-        uint8_t vector = val & IOSAPIC_VECTOR_MASK;
-        for (int pin = 0; pin < IPF_IOSAPIC_NUM_PINS; pin++) {
-            uint32_t lo = m->iosapic_reg[0x10 + pin * 2];
-            if ((lo & IOSAPIC_VECTOR_MASK) == vector) {
-                /* Clear remote IRR for this pin */
-                m->iosapic_remote_irr &= ~(1 << pin);
-                /* If still pending and level-triggered, re-service */
-                if ((lo & IOSAPIC_LVT_TRIGGER_LEVEL) &&
-                    (m->iosapic_irr & (1 << pin)) &&
-                    !(lo & IOSAPIC_LVT_MASKED)) {
-                    iosapic_service(m, pin);
-                }
-                break;
-            }
-        }
-        break;
-    }
-    default:
-        break;
-    }
-}
-
-static const MemoryRegionOps ipf_iosapic_ops = {
-    .read = ipf_iosapic_read,
-    .write = ipf_iosapic_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4,
-    },
-};
-
-static void ipf_init_iosapic(IPFMachineState *m, MemoryRegion *sysmem)
-{
-    /*
-     * Provide a minimal IOSAPIC register window so Linux can program interrupt
-     * routing based on MADT IO_SAPIC entries.
-     */
-    m->iosapic_reg_select = 0;
-    m->iosapic_irr = 0;
-    m->iosapic_remote_irr = 0;
-    memset(m->iosapic_reg, 0, sizeof(m->iosapic_reg));
-
-    for (int i = 0; i < 16; i++) {
-        /* Mask all entries by default. */
-        m->iosapic_reg[0x10 + i * 2] = 1U << 16;
-        m->iosapic_reg[0x11 + i * 2] = 0;
-    }
-
-    memory_region_init_io(&m->iosapic_mmio, OBJECT(m), &ipf_iosapic_ops, m,
-                          "ipf.iosapic", IPF_IOSAPIC_SIZE);
-    memory_region_add_subregion(sysmem, IPF_IOSAPIC_BASE, &m->iosapic_mmio);
-    DPRINTF("IOSAPIC: mapped at 0x%016" PRIx64 "\n", (uint64_t)IPF_IOSAPIC_BASE);
+    DPRINTF("IOSAPIC: mapped at 0x%016" PRIx64 " with %u inputs\n",
+            (uint64_t)IPF_IOSAPIC_BASE, IA64_IOSAPIC_NUM_PINS);
 }
 
 /* Itanium hardware initialisation */
@@ -5613,7 +5503,7 @@ static void ipf_init(MachineState *machine)
     ipf_init_debugcon(m);
     ipf_init_pci_fw_cfg(m);
     ipf_init_legacy_io(m, sysmem);
-    ipf_init_iosapic(m, sysmem);
+    ipf_init_iosapic(m);
     ipf_init_gx_mmio(m, sysmem);
     /*
      * Provide the ACPI PM1/PMTMR register block for both firmware and direct
@@ -6609,106 +6499,6 @@ static void ipf_init(MachineState *machine)
 //#define IOAPIC_NUM_PINS2 48
 //
 //static int ioapic_irq_count[IOAPIC_NUM_PINS2];
-/*
- * PCI slot to IOSAPIC pin mapping (standard PCI swizzle).
- * Offset by 16 to avoid ISA IRQ conflicts.
- */
-static int ipf_pci_map_irq(PCIDevice *pci_dev, int irq_num)
-{
-    int dev = PCI_SLOT(pci_dev->devfn);
-    /* Standard PCI swizzle + offset to avoid ISA conflicts */
-    return ((((dev << 2) + (dev >> 3) + irq_num) & 15) + 16) % IPF_IOSAPIC_NUM_PINS;
-}
-
-/*
- * Service a pending IOSAPIC interrupt by delivering it to the CPU.
- */
-static void iosapic_service(IPFMachineState *m, int pin)
-{
-    if (pin >= IPF_IOSAPIC_NUM_PINS) {
-        return;
-    }
-
-    /* Read redirection entry (64-bit split across two 32-bit registers) */
-    uint64_t entry = ((uint64_t)m->iosapic_reg[0x11 + pin * 2] << 32) |
-                     m->iosapic_reg[0x10 + pin * 2];
-
-    /* Check if masked */
-    if (entry & IOSAPIC_LVT_MASKED) {
-        return;
-    }
-
-    /* Extract vector */
-    uint8_t vector = entry & IOSAPIC_VECTOR_MASK;
-
-    /* For level-triggered, mark remote IRR to prevent coalescing */
-    if (entry & IOSAPIC_LVT_TRIGGER_LEVEL) {
-        if (m->iosapic_remote_irr & (1 << pin)) {
-            /* Already in service, coalesce */
-            return;
-        }
-        m->iosapic_remote_irr |= (1 << pin);
-        m->iosapic_reg[0x10 + pin * 2] |= IOSAPIC_LVT_REMOTE_IRR;
-    }
-
-    /* Deliver the vector through the processor's local SAPIC state. */
-    if (m->cpu && !ia64_cpu_deposit_interrupt(m->cpu, vector)) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IPF IOSAPIC: rejected reserved vector 0x%x on pin %d\n",
-                      vector, pin);
-    }
-}
-
-/*
- * Dummy function to provide match for call from hw/apic.c
- */
-void apic_set_irq_delivered(void);
-void apic_set_irq_delivered(void)
-{
-}
-
-/*
- * IOSAPIC interrupt input handler.
- * Called when a device asserts or deasserts an interrupt line.
- */
-void ioapic_set_irq(void *opaque, int irq_num, int level)
-{
-    IPFMachineState *m = opaque;
-
-    if (irq_num >= IPF_IOSAPIC_NUM_PINS) {
-        return;
-    }
-
-    uint32_t mask = 1 << irq_num;
-    uint64_t entry = ((uint64_t)m->iosapic_reg[0x11 + irq_num * 2] << 32) |
-                     m->iosapic_reg[0x10 + irq_num * 2];
-
-    bool level_triggered = (entry & IOSAPIC_LVT_TRIGGER_LEVEL) != 0;
-    bool masked = (entry & IOSAPIC_LVT_MASKED) != 0;
-
-    if (level_triggered) {
-        /* Level-triggered: track IRR based on level */
-        if (level) {
-            m->iosapic_irr |= mask;
-        } else {
-            m->iosapic_irr &= ~mask;
-        }
-    } else {
-        /* Edge-triggered: set IRR on rising edge only */
-        if (level && !masked) {
-            m->iosapic_irr |= mask;
-        }
-    }
-
-    /* Service the interrupt if pending and not masked */
-    if (!masked && (m->iosapic_irr & mask)) {
-        iosapic_service(m, irq_num);
-        /* Clear IRR for edge-triggered */
-        if (!level_triggered) {
-            m->iosapic_irr &= ~mask;
-        }
-    }
-}
 
 static bool ipf_machine_get_firmware_preboot(Object *obj, Error **errp)
 {

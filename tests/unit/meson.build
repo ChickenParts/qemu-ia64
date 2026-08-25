@@ -49,6 +49,7 @@ tests = {
   'test-interval-tree': [],
   'test-fifo': [],
   'test-ia64-interrupt': [meson.project_source_root() / 'target/ia64/interrupt.c'],
+  'test-ia64-iosapic': [meson.project_source_root() / 'hw/ia64/iosapic-core.c'],
 }
 
 if have_system or have_tools
