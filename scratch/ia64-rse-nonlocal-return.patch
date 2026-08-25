@@ -124,7 +124,7 @@
 @@ -0,0 +1,34 @@
 +# IA-64 non-local return shadow-stack reconciliation
 +
-+Date: 2026-08-24  
++Date: 2026-08-24
 +Integration target: `metachicken`
 +
 +## Failure
