@@ -79,6 +79,22 @@ jobs:
           perl scripts/checkpatch.pl --no-signoff \
             /tmp/ia64-iosapic-qom.patch
 
+      - name: Upload exact patch-applied source for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-iosapic-qom-source-${{ github.run_id }}
+          path: |
+            hw/ia64/iosapic-core.c
+            hw/ia64/iosapic-core.h
+            hw/ia64/iosapic.c
+            hw/ia64/iosapic.h
+            hw/ia64/ipf.c
+            hw/ia64/meson.build
+            tests/unit/meson.build
+            tests/unit/test-ia64-iosapic.c
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
