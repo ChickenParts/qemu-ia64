@@ -40,6 +40,10 @@ jobs:
         id: diagnostic
         shell: bash
         run: |
+          # GitHub Actions starts bash with -e.  Every diagnostic below records
+          # its own status, and a firmware timeout is the expected bounded-run
+          # result, so disable errexit for this evidence-collection step.
+          set +e
           set -u
           out=scratch/ci-rse-nonlocal
           artifact="$out/emulator"
