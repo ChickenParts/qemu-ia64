@@ -8,6 +8,7 @@
  */
 
         .text
+        .explicit
         .align 16
         .global qemu_ia64_pal_gateway
         .type qemu_ia64_pal_gateway, @function
