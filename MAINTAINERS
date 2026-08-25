@@ -1278,6 +1278,18 @@ F: pc-bios/hppa-firmware.img
 F: roms/seabios-hppa/
 F: tests/functional/hppa/
 
+IA-64 Machines
+--------------
+Itanium Platform
+M: Bryce Lanham <blanham@gmail.com>
+S: Maintained
+F: configs/devices/ia64-softmmu/
+F: configs/targets/ia64-softmmu.mak
+F: docs/devel/ia64-*
+F: hw/ia64/
+F: target/ia64/
+F: tests/unit/test-ia64-*
+
 LoongArch Machines
 ------------------
 Virt

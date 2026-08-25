@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "interrupt.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
@@ -29610,7 +29611,7 @@ void HELPER(set_tpr)(CPUIA64State *env, uint64_t val)
 #ifndef CONFIG_USER_ONLY
     ia64_cpu_set_tpr(env, val);
 #else
-    env->cr[IA64_CR_TPR] = val;
+    env->cr[IA64_CR_TPR] = ia64_interrupt_sanitize_tpr(val);
 #endif
 }
 

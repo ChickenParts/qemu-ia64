@@ -48,6 +48,7 @@ tests = {
   'test-qapi-util': [],
   'test-interval-tree': [],
   'test-fifo': [],
+  'test-ia64-interrupt': [meson.project_source_root() / 'target/ia64/interrupt.c'],
 }
 
 if have_system or have_tools
