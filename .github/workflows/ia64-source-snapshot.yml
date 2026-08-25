@@ -1,0 +1,45 @@
+name: IA-64 PAL source snapshot
+
+on:
+  push:
+    branches:
+      - fix/ia64-rse-nonlocal-return
+    paths:
+      - .github/workflows/ia64-source-snapshot.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-rse-nonlocal-return
+
+      - name: Capture PAL dispatcher context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/ci-ia64-source
+          cp target/ia64/helper.c scratch/ci-ia64-source/helper.c
+          sed -n '27460,27840p' target/ia64/helper.c \
+            > scratch/ci-ia64-source/helper-fw-pal-context.c
+          grep -n -E 'HELPER\(fw_pal\)|PAL_|IA64 UNIMPL|unsupported PAL' \
+            target/ia64/helper.c \
+            > scratch/ci-ia64-source/pal-symbols.txt || true
+          sha256sum target/ia64/helper.c \
+            > scratch/ci-ia64-source/helper.c.sha256
+
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-pal-source-${{ github.run_id }}
+          path: scratch/ci-ia64-source/
+          retention-days: 1
+          if-no-files-found: error
