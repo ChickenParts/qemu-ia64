@@ -1,0 +1,113 @@
+name: Temporary IA-64 local SAPIC hardening
+
+on:
+  push:
+    branches:
+      - fix/ia64-ipf-device-root-cause
+    paths:
+      - scratch/agent-ia64-sapic-core.patch
+      - scratch/agent-ia64-sapic-tests.patch
+      - scratch/agent-ia64-ipf-port-status.patch
+      - .github/workflows/agent-ia64-sapic-hardening.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_COMMIT: f1159632bb83529252333093ecc5c90658ee5b56
+      OUTPUT_BRANCH: fix/ia64-local-sapic-contract
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply the isolated architectural patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scratch/agent-ia64-sapic-core.patch /tmp/01-core.patch
+          cp scratch/agent-ia64-sapic-tests.patch /tmp/02-tests.patch
+          cp scratch/agent-ia64-ipf-port-status.patch /tmp/03-docs.patch
+
+          git checkout --detach "$BASE_COMMIT"
+          for patch in /tmp/01-core.patch /tmp/02-tests.patch /tmp/03-docs.patch; do
+            git apply --check "$patch"
+            git apply "$patch"
+          done
+
+          git diff --check
+          git diff > /tmp/ia64-sapic-hardening.patch
+          perl scripts/checkpatch.pl --no-signoff --strict \
+            /tmp/ia64-sapic-hardening.patch
+
+      - name: Install build and documentation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            python3-docutils libglib2.0-dev libpixman-1-dev zlib1g-dev \
+            libslirp-dev
+
+      - name: Validate the status document
+        run: rst2html docs/devel/ia64-ipf-port-status.rst /tmp/ia64-ipf-port-status.html
+
+      - name: Configure IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+
+      - name: Build IA-64 and production interrupt unit test
+        run: ninja -C build qemu-system-ia64 tests/unit/test-ia64-interrupt
+
+      - name: Run local SAPIC contract tests
+        run: build/tests/unit/test-ia64-interrupt --tap -k
+
+      - name: Basic executable smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/qemu-system-ia64 --version
+          build/qemu-system-ia64 -machine help | grep -q '^ipf '
+
+      - name: Publish one clean tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add \
+            MAINTAINERS \
+            docs/devel/ia64-ipf-port-status.rst \
+            target/ia64/cpu.c \
+            target/ia64/helper.c \
+            target/ia64/interrupt.c \
+            target/ia64/interrupt.h \
+            target/ia64/meson.build \
+            tests/unit/meson.build \
+            tests/unit/test-ia64-interrupt.c
+          git diff --cached --check
+          git commit \
+            -m 'target/ia64: harden the local SAPIC contract' \
+            -m 'Use one production arbitration implementation for IRR, IVR, TPR, and EOI; restore architectural reset masking and PSR.IC gating; sanitize TPR writes; add focused unit coverage; and record the honest IPF device-port/no-hacks status.'
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+          git rev-parse HEAD | tee /tmp/ia64-sapic-hardening-commit.txt
+
+      - name: Upload tested commit identity and unit output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-sapic-hardening-result
+          path: |
+            /tmp/ia64-sapic-hardening-commit.txt
+            /tmp/ia64-ipf-port-status.html
+          retention-days: 1
+          if-no-files-found: error
