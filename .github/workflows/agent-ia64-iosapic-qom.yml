@@ -35,6 +35,8 @@ jobs:
             scratch/ia64-iosapic-qom.patch.gz.b64.00 \
             scratch/ia64-iosapic-qom.patch.gz.b64.01 \
             | base64 --decode | gzip --decompress > /tmp/ia64-iosapic-qom.patch
+          cp scratch/ia64-iosapic-pending-retry.patch \
+            /tmp/ia64-iosapic-pending-retry.patch
           echo "$PATCH_SHA256  /tmp/ia64-iosapic-qom.patch" | sha256sum --check
 
           git checkout --detach "$BASE_COMMIT"
@@ -73,8 +75,8 @@ jobs:
           # A rejected delivery remains pending in IRR. Reprogramming an edge
           # RTE must not discard that request while clearing the level-only
           # Remote IRR status bit.
-          git apply --check scratch/ia64-iosapic-pending-retry.patch
-          git apply scratch/ia64-iosapic-pending-retry.patch
+          git apply --check /tmp/ia64-iosapic-pending-retry.patch
+          git apply /tmp/ia64-iosapic-pending-retry.patch
 
           git diff --check
 
@@ -86,7 +88,7 @@ jobs:
           perl scripts/checkpatch.pl --no-signoff \
             /tmp/ia64-iosapic-qom.patch
           perl scripts/checkpatch.pl --no-signoff \
-            scratch/ia64-iosapic-pending-retry.patch
+            /tmp/ia64-iosapic-pending-retry.patch
 
       - name: Upload exact patch-applied source for review
         uses: actions/upload-artifact@v4
