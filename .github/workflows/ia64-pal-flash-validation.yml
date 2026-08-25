@@ -1,0 +1,266 @@
+name: IA-64 Xen Flash PAL validation
+
+on:
+  push:
+    branches:
+      - fix/ia64-pal-copy-info
+    paths:
+      - .github/workflows/ia64-pal-flash-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-pal-flash-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out PAL feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-pal-copy-info
+          fetch-depth: 0
+
+      - name: Install build and firmware-fetch dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev mercurial
+
+      - name: Build and replay exact Xen Flash firmware
+        id: validate
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+
+          out=scratch/ci-pal-flash
+          firmware_dir="$out/firmware"
+          logdir="$out/logs"
+          report=docs/reviews/2026-08-25_ia64_pal_copy_validation.md
+          expected_sha=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+          expected_size=10485760
+
+          mkdir -p "$out" "$firmware_dir" "$logdir" "$(dirname "$report")"
+          : > "$report"
+
+          overall=0
+          source_rc=127
+          configure_rc=127
+          build_rc=127
+          fetch_rc=127
+          hash_rc=127
+          qemu_rc=127
+          actual_sha=-
+          actual_size=-
+          serial=-
+          qlog="$logdir/qemu.fw.log"
+
+          python3 scripts/test-ia64-pal-copy-source.py \
+            > "$out/source-test.log" 2>&1
+          source_rc=$?
+          if [[ "$source_rc" -ne 0 ]]; then
+            overall=1
+          fi
+
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
+            --disable-slirp \
+            > "$out/configure.log" 2>&1
+          configure_rc=$?
+          if [[ "$configure_rc" -eq 0 ]]; then
+            ninja -C build qemu-system-ia64 > "$out/build.log" 2>&1
+            build_rc=$?
+          else
+            build_rc=125
+          fi
+          if [[ "$build_rc" -ne 0 ]]; then
+            overall=1
+          fi
+
+          IA64_XEN_FIRMWARE_KEEP_SRC=0 \
+            bash scripts/fetch-ia64-xen-firmware.sh "$firmware_dir" \
+            > "$out/firmware-fetch.log" 2>&1
+          fetch_rc=$?
+
+          if [[ "$fetch_rc" -eq 0 && -s "$firmware_dir/Flash.fd" ]]; then
+            actual_sha="$(sha256sum "$firmware_dir/Flash.fd" | awk '{print $1}')"
+            actual_size="$(stat -c '%s' "$firmware_dir/Flash.fd")"
+            if [[ "$actual_sha" == "$expected_sha" && \
+                  "$actual_size" == "$expected_size" ]]; then
+              hash_rc=0
+            else
+              hash_rc=1
+              overall=1
+            fi
+          else
+            hash_rc=2
+            overall=1
+          fi
+
+          if [[ "$build_rc" -eq 0 && "$hash_rc" -eq 0 ]]; then
+            QEMU_IA64_FW_LOG=1 \
+            QEMU_IA64_HANG_LOG_EVERY=10000000 \
+            IA64_BIOS="$firmware_dir/Flash.fd" \
+            IA64_MEM=64M \
+            IA64_LOGDIR="$logdir" \
+            IA64_GUEST_ERRORS=1 \
+            IA64_EFI_HOB_PATCH=0 \
+            IA64_PEI_SYSMEM_HOB_FIX=1 \
+              timeout --signal=TERM --kill-after=5s 120s \
+                scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                > "$out/runner.stdout" 2> "$out/runner.stderr"
+            qemu_rc=$?
+
+            serial="$(find "$logdir" -maxdepth 1 \
+              -name 'serial.fw.*.log' -type f -print | sort | tail -n 1)"
+
+            if [[ "$qemu_rc" -ne 0 && "$qemu_rc" -ne 124 && \
+                  "$qemu_rc" -ne 143 ]]; then
+              overall=1
+            fi
+            if cat "$out/runner.stdout" "$out/runner.stderr" 2>/dev/null | \
+                 grep -aEq 'Segmentation fault|core dumped|qemu-system-ia64:.*assert'; then
+              overall=1
+            fi
+            if [[ -f "$qlog" ]] && \
+               grep -aEq 'unimplemented procedure 30|PAL.*unhandled.*(30|256)|IA64 UNIMPL.*PAL' "$qlog"; then
+              overall=1
+            fi
+          fi
+
+          pal30=0
+          pal256=0
+          unimpl=0
+          host_abort=0
+          asserts=0
+          if [[ -f "$qlog" ]]; then
+            pal30="$(grep -aEc 'func=0*1e([^0-9a-f]|$)|idx=30([^0-9]|$)|procedure 30([^0-9]|$)' "$qlog" || true)"
+            pal256="$(grep -aEc 'func=0*100([^0-9a-f]|$)|idx=256([^0-9]|$)|procedure 256([^0-9]|$)' "$qlog" || true)"
+            unimpl="$(grep -aEc 'IA64 UNIMPL|unimplemented procedure|PAL.*unhandled' "$qlog" || true)"
+          fi
+          if [[ "$serial" != - && -f "$serial" ]]; then
+            asserts="$(grep -ac 'ASSERT' "$serial" || true)"
+          fi
+          host_abort="$(cat "$out/runner.stdout" "$out/runner.stderr" 2>/dev/null | \
+            grep -aEc 'Segmentation fault|Aborted|core dumped|qemu-system-ia64:.*assert' || true)"
+
+          {
+            echo '# IA-64 relocatable PAL firmware validation'
+            echo
+            echo "- Commit tested: \`${GITHUB_SHA}\`"
+            echo "- Expected Flash.fd SHA-256: \`${expected_sha}\`"
+            echo "- Actual Flash.fd SHA-256: \`${actual_sha}\`"
+            echo "- Expected size: \`${expected_size}\` bytes"
+            echo "- Actual size: \`${actual_size}\` bytes"
+            echo
+            echo '## Result matrix'
+            echo
+            echo '| Check | Exit/status |'
+            echo '|---|---:|'
+            echo "| PAL source contract | ${source_rc} |"
+            echo "| Configure | ${configure_rc} |"
+            echo "| Build | ${build_rc} |"
+            echo "| Firmware fetch | ${fetch_rc} |"
+            echo "| Firmware identity | ${hash_rc} |"
+            echo "| Firmware replay | ${qemu_rc} |"
+            echo "| PAL 30 trace matches | ${pal30} |"
+            echo "| PAL 256 trace matches | ${pal256} |"
+            echo "| Unimplemented-operation matches | ${unimpl} |"
+            echo "| Serial ASSERT matches | ${asserts} |"
+            echo "| Host-abort matches | ${host_abort} |"
+            echo "| Overall validation status | ${overall} |"
+            echo
+            echo 'A replay exit of 124 is the expected timeout outcome and is not itself a failure.'
+            echo
+            echo '## Firmware provenance'
+            echo
+            echo '```text'
+            if [[ -f "$firmware_dir/PROVENANCE.txt" ]]; then
+              cat "$firmware_dir/PROVENANCE.txt"
+            else
+              cat "$out/firmware-fetch.log" 2>/dev/null | tail -n 80
+            fi
+            echo '```'
+            echo
+            echo '## PAL and DXE highlights'
+            echo
+            echo '```text'
+            if [[ -f "$qlog" ]]; then
+              grep -aEi 'PAL|DXE|Metronome|ASSERT|UNIMPL|unimplemented|null branch|abort|firmware volume' "$qlog" \
+                | tail -n 240 || true
+            fi
+            if [[ "$serial" != - && -f "$serial" ]]; then
+              grep -aEi 'PAL|DXE|Metronome|ASSERT|error|firmware volume' "$serial" \
+                | tail -n 240 || true
+            fi
+            echo '```'
+            echo
+            echo '## Serial tail'
+            echo
+            echo '```text'
+            if [[ "$serial" != - && -f "$serial" ]]; then
+              tail -n 160 "$serial" | tr -d '\r'
+            else
+              echo '<serial log unavailable>'
+            fi
+            echo '```'
+            echo
+            echo '## QEMU log tail'
+            echo
+            echo '```text'
+            if [[ -f "$qlog" ]]; then
+              tail -n 160 "$qlog"
+            else
+              cat "$out/runner.stdout" "$out/runner.stderr" 2>/dev/null | tail -n 160
+            fi
+            echo '```'
+          } > "$report"
+
+          echo "overall=$overall" >> "$GITHUB_OUTPUT"
+          exit "$overall"
+
+      - name: Upload complete replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-pal-flash-validation-${{ github.run_id }}
+          path: |
+            scratch/ci-pal-flash/
+            docs/reviews/2026-08-25_ia64_pal_copy_validation.md
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Commit bounded validation report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report=docs/reviews/2026-08-25_ia64_pal_copy_validation.md
+          test -f "$report"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "$report"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'docs/ia64: record Xen Flash PAL replay frontier'
+          git fetch origin fix/ia64-pal-copy-info
+          git rebase origin/fix/ia64-pal-copy-info
+          git push origin HEAD:fix/ia64-pal-copy-info
+
+      - name: Fail unsuccessful validation
+        if: steps.validate.outcome != 'success'
+        run: exit 1
