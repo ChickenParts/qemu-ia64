@@ -20,7 +20,7 @@ jobs:
     env:
       BASE_COMMIT: e58293d02ba7d02ca6e850377d955121d0cd26c5
       OUTPUT_BRANCH: fix/ia64-piix-topology
-      SOURCE_PATCH_SHA256: 58ade36e729d54e7aa23ec757379ca3c57d00b09b12daa313ae9e4e12aa452e4
+      SOURCE_PATCH_SHA256: 812f004651fd33b2f1a3c8fe3c9f7d20bd549f38937abf51dfa4e8ac4f99d1e1
       QTEST_SOURCE_SHA256: 2beae4c06e553dc13ef6e147d1c13cf6dc7d362c05af207102d1c466b247ed90
     steps:
       - uses: actions/checkout@v4
