@@ -37,8 +37,38 @@ jobs:
           echo "$PATCH_SHA256  /tmp/ia64-iosapic-qom.patch" | sha256sum --check
 
           git checkout --detach "$BASE_COMMIT"
-          git apply --check /tmp/ia64-iosapic-qom.patch
-          git apply /tmp/ia64-iosapic-qom.patch
+
+          # The source patch was prepared before the local-SAPIC test was added
+          # beside this entry.  Apply every source hunk normally, then add the
+          # independent test target against the current Meson dictionary.  This
+          # is staging plumbing only; the published branch contains ordinary
+          # source changes and no runtime compatibility path.
+          git apply --check \
+            --exclude=tests/unit/meson.build \
+            /tmp/ia64-iosapic-qom.patch
+          git apply \
+            --exclude=tests/unit/meson.build \
+            /tmp/ia64-iosapic-qom.patch
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/unit/meson.build')
+          text = path.read_text()
+          entry = (
+              "  'test-ia64-iosapic': "
+              "[meson.project_source_root() / 'hw/ia64/iosapic-core.c'],\n"
+          )
+          anchor = (
+              "  'test-ia64-interrupt': "
+              "[meson.project_source_root() / 'target/ia64/interrupt.c'],\n"
+          )
+          if entry not in text:
+              if anchor not in text:
+                  raise SystemExit('IA-64 unit-test insertion anchor is missing')
+              text = text.replace(anchor, anchor + entry, 1)
+              path.write_text(text)
+          PY
+
           git diff --check
           perl scripts/checkpatch.pl --no-signoff --strict --ignore ADDED_FILE \
             /tmp/ia64-iosapic-qom.patch
