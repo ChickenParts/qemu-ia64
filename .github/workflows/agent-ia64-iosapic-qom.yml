@@ -1,0 +1,117 @@
+name: Temporary IA-64 I/O SAPIC QOM validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-iosapic-qom
+    paths:
+      - scratch/ia64-iosapic-qom.patch.gz.b64.00
+      - scratch/ia64-iosapic-qom.patch.gz.b64.01
+      - .github/workflows/agent-ia64-iosapic-qom.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_COMMIT: f559054e3b5ced3831235945f08315287f5caa79
+      OUTPUT_BRANCH: fix/ia64-iosapic-qom
+      PATCH_SHA256: 58e842e5d901baa7a5c93a505751954ddf4911551129b61def34205fc70bfd90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and apply the isolated I/O SAPIC patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat \
+            scratch/ia64-iosapic-qom.patch.gz.b64.00 \
+            scratch/ia64-iosapic-qom.patch.gz.b64.01 \
+            | base64 --decode | gzip --decompress > /tmp/ia64-iosapic-qom.patch
+          echo "$PATCH_SHA256  /tmp/ia64-iosapic-qom.patch" | sha256sum --check
+
+          git checkout --detach "$BASE_COMMIT"
+          git apply --check /tmp/ia64-iosapic-qom.patch
+          git apply /tmp/ia64-iosapic-qom.patch
+          git diff --check
+          perl scripts/checkpatch.pl --no-signoff --strict --ignore ADDED_FILE \
+            /tmp/ia64-iosapic-qom.patch
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+
+      - name: Build IA-64 and focused interrupt tests
+        run: |
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic
+
+      - name: Run local and I/O SAPIC contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-interrupt --tap -k \
+            | tee /tmp/test-ia64-interrupt.tap
+          build/tests/unit/test-ia64-iosapic --tap -k \
+            | tee /tmp/test-ia64-iosapic.tap
+
+      - name: Basic executable smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/qemu-system-ia64 --version
+          build/qemu-system-ia64 -machine help | grep -q '^ipf '
+
+      - name: Publish one clean tested source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add \
+            hw/ia64/iosapic-core.c \
+            hw/ia64/iosapic-core.h \
+            hw/ia64/iosapic.c \
+            hw/ia64/iosapic.h \
+            hw/ia64/ipf.c \
+            hw/ia64/meson.build \
+            tests/unit/meson.build \
+            tests/unit/test-ia64-iosapic.c
+          git diff --cached --check
+          git commit \
+            -m 'hw/ia64: extract a real I/O SAPIC device' \
+            -m 'Replace the machine-local 16-pin shim with a 48-input migratable QOM device. Model edge and level requests, read-only Remote IRR, shared-vector EOI, destination and delivery rejection, and route standalone ISA inputs through the device. Add focused tests without firmware- or image-specific behavior.'
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+          git rev-parse HEAD | tee /tmp/ia64-iosapic-qom-commit.txt
+
+      - name: Upload tested commit identity and unit output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-iosapic-qom-result
+          path: |
+            /tmp/ia64-iosapic-qom-commit.txt
+            /tmp/test-ia64-interrupt.tap
+            /tmp/test-ia64-iosapic.tap
+          retention-days: 1
+          if-no-files-found: error
