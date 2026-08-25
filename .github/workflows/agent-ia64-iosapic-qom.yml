@@ -39,8 +39,8 @@ jobs:
           git checkout --detach "$BASE_COMMIT"
 
           # The source patch was prepared before the local-SAPIC test was added
-          # beside this entry.  Apply every source hunk normally, then add the
-          # independent test target against the current Meson dictionary.  This
+          # beside this entry. Apply every source hunk normally, then add the
+          # independent test target against the current Meson dictionary. This
           # is staging plumbing only; the published branch contains ordinary
           # source changes and no runtime compatibility path.
           git apply --check \
@@ -70,7 +70,7 @@ jobs:
           PY
 
           git diff --check
-          perl scripts/checkpatch.pl --no-signoff --strict --ignore ADDED_FILE \
+          perl scripts/checkpatch.pl --no-signoff --strict \
             /tmp/ia64-iosapic-qom.patch
 
       - name: Install build dependencies
