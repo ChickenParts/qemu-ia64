@@ -1,0 +1,50 @@
+name: Apply IA-64 PAL copy patch
+
+on:
+  push:
+    branches:
+      - fix/ia64-pal-copy-info
+    paths:
+      - scratch/ia64-pal-copy-helper.patch
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-ia64-pal-copy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out PAL feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-pal-copy-info
+          fetch-depth: 0
+
+      - name: Apply and commit helper change
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch=scratch/ia64-pal-copy-helper.patch
+          if [[ ! -f "$patch" ]]; then
+            echo "Patch is already consumed; nothing to do."
+            exit 0
+          fi
+          if git apply --reverse --check "$patch" >/dev/null 2>&1; then
+            echo "PAL helper patch is already applied."
+            exit 0
+          fi
+          git apply --check "$patch"
+          git apply "$patch"
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add target/ia64/helper.c
+          git commit -m "target/ia64: implement relocatable PAL copy"
+          git push origin HEAD:fix/ia64-pal-copy-info
