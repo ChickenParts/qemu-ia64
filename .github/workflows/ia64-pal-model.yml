@@ -1,0 +1,217 @@
+name: IA-64 independent PAL model
+
+on:
+  push:
+    branches:
+      - refactor/ia64-pal-model
+    paths:
+      - .github/workflows/ia64-pal-model.yml
+      - docs/devel/ia64-pal-model.rst
+      - scripts/gen-ia64-pal-gateway.py
+      - scripts/ia64-firmware-matrix.py
+      - scripts/promote-ia64-pal-model.py
+      - scripts/test-ia64-pal-source.py
+      - target/ia64/helper.c
+      - target/ia64/meson.build
+      - target/ia64/pal-gateway.S
+      - target/ia64/pal-gateway.inc
+      - target/ia64/pal.c
+      - target/ia64/pal.h
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-pal-model-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-build-and-probe:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out PAL feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: refactor/ia64-pal-model
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bison flex ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev \
+            mercurial curl xz-utils
+
+      - name: Build an IA-64 assembler when the runner lacks one
+        shell: bash
+        run: |
+          set -euo pipefail
+          if sudo apt-get install -y binutils-ia64-linux-gnu; then
+            echo "IA64_AS=$(command -v ia64-linux-gnu-as)" >> "$GITHUB_ENV"
+            echo "IA64_OBJCOPY=$(command -v ia64-linux-gnu-objcopy)" >> "$GITHUB_ENV"
+            echo "IA64_OBJDUMP=$(command -v ia64-linux-gnu-objdump)" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          version=2.44
+          curl --fail --location --retry 3 \
+            "https://ftp.gnu.org/gnu/binutils/binutils-${version}.tar.xz" \
+            -o /tmp/binutils.tar.xz
+          tar -C /tmp -xf /tmp/binutils.tar.xz
+          mkdir /tmp/binutils-build
+          cd /tmp/binutils-build
+          "/tmp/binutils-${version}/configure" \
+            --target=ia64-linux-gnu \
+            --disable-gdb --disable-gprofng --disable-ld --disable-nls \
+            --disable-sim --disable-werror
+          make -j2 all-binutils all-gas
+          echo "IA64_AS=/tmp/binutils-build/gas/as-new" >> "$GITHUB_ENV"
+          echo "IA64_OBJCOPY=/tmp/binutils-build/binutils/objcopy" >> "$GITHUB_ENV"
+          echo "IA64_OBJDUMP=/tmp/binutils-build/binutils/objdump" >> "$GITHUB_ENV"
+
+      - name: Assemble and promote the PAL gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-pal-model
+          mkdir -p "$out"
+
+          "$IA64_AS" -o "$out/pal-gateway.o" target/ia64/pal-gateway.S
+          "$IA64_OBJCOPY" -O binary --only-section=.text \
+            "$out/pal-gateway.o" "$out/pal-gateway.bin"
+          "$IA64_OBJDUMP" -d "$out/pal-gateway.o" \
+            > "$out/pal-gateway.disasm"
+          python3 scripts/gen-ia64-pal-gateway.py \
+            "$out/pal-gateway.bin" target/ia64/pal-gateway.inc
+          python3 scripts/promote-ia64-pal-model.py
+          python3 scripts/test-ia64-pal-source.py \
+            | tee "$out/source-test.log"
+
+          test "$(stat -c '%s' "$out/pal-gateway.bin")" -eq 32
+          grep -q 'break.m.*1000' "$out/pal-gateway.disasm"
+          grep -q 'br.ret' "$out/pal-gateway.disasm"
+          git diff --check
+
+      - name: Build qemu-system-ia64
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-pal-model
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
+            > "$out/configure.log" 2>&1
+          ninja -C build qemu-system-ia64 > "$out/build.log" 2>&1
+
+      - name: Prepare named Xen and SDV firmware inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-pal-model
+          scripts/fetch-ia64-xen-firmware.sh scratch/ia64-xen-firmware \
+            > "$out/xen-provenance.log"
+          python3 scripts/ia64-firmware-matrix.py xen \
+            | tee "$out/xen.json"
+          python3 scripts/ia64-firmware-matrix.py sdv-debug-0.99 \
+            | tee "$out/sdv-debug-0.99.json"
+
+      - name: Probe both firmware families
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ci-pal-model
+          printf 'id\trc\thost_abort\tpal_copy_info\tpal_copy_pal\n' \
+            > "$out/summary.tsv"
+
+          run_one() {
+            id="$1"
+            firmware="$2"
+            logdir="$out/$id"
+            mkdir -p "$logdir"
+
+            set +e
+            if [[ "$id" == xen ]]; then
+              IA64_FW_XENIPF_MPBUFFER_FIX=1 \
+              IA64_FW_XENIPF_MPBUFFER_STICKY=1 \
+              IA64_PEI_SYSMEM_HOB_FIX=1 \
+              IA64_BIOS="$firmware" IA64_LOGDIR="$logdir" \
+              IA64_GUEST_ERRORS=1 \
+                timeout --signal=TERM --kill-after=5s 35s \
+                  scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                  > "$logdir/runner.stdout" 2> "$logdir/runner.stderr"
+            else
+              IA64_FW_XENIPF_MPBUFFER_FIX=0 \
+              IA64_FW_XENIPF_MPBUFFER_STICKY=0 \
+              IA64_PEI_SYSMEM_HOB_FIX=0 \
+              IA64_EFI_HOB_PATCH=0 \
+              IA64_BIOS="$firmware" IA64_LOGDIR="$logdir" \
+              IA64_GUEST_ERRORS=1 \
+                timeout --signal=TERM --kill-after=5s 35s \
+                  scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                  > "$logdir/runner.stdout" 2> "$logdir/runner.stderr"
+            fi
+            rc=$?
+            set -e
+
+            qlog="$logdir/qemu.fw.log"
+            host_abort="$(cat "$logdir/runner.stdout" "$logdir/runner.stderr" \
+              2>/dev/null | grep -aEc \
+              'Segmentation fault|Aborted|core dumped|qemu-system-ia64:.*assert' \
+              || true)"
+            copy_info=0
+            copy_pal=0
+            if [[ -f "$qlog" ]]; then
+              copy_info="$(grep -ac 'IA64: PAL_COPY_INFO' "$qlog" || true)"
+              copy_pal="$(grep -ac 'IA64: PAL_COPY_PAL' "$qlog" || true)"
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$id" "$rc" "$host_abort" "$copy_info" "$copy_pal" \
+              | tee -a "$out/summary.tsv"
+
+            [[ "$rc" -eq 0 || "$rc" -eq 124 ]]
+            [[ "$host_abort" -eq 0 ]]
+            if [[ "$id" == xen ]]; then
+              [[ "$copy_info" -gt 0 ]]
+              [[ "$copy_pal" -gt 0 ]]
+            fi
+          }
+
+          run_one xen scratch/ia64-xen-firmware/Flash.fd
+          run_one sdv-debug-0.99 'stuff/EFI 0.99 Debug SDV.bin'
+
+      - name: Upload firmware and build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-pal-model-${{ github.run_id }}
+          path: scratch/ci-pal-model/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Commit generated gateway and promoted dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- \
+            target/ia64/helper.c \
+            target/ia64/meson.build \
+            target/ia64/pal-gateway.inc
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'target/ia64: add relocatable PAL gateway'
+          git fetch origin refactor/ia64-pal-model
+          git rebase origin/refactor/ia64-pal-model
+          git push origin HEAD:refactor/ia64-pal-model
