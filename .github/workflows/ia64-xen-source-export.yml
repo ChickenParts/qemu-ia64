@@ -34,7 +34,7 @@ jobs:
           set -euo pipefail
           out=scratch/ci-xen-source
           IA64_XEN_FIRMWARE_KEEP_SRC=1 \
-            scripts/fetch-ia64-xen-firmware.sh "$out"
+            bash scripts/fetch-ia64-xen-firmware.sh "$out"
           test "$(sha256sum "$out/Flash.fd" | awk '{print $1}')" = \
             e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
 
