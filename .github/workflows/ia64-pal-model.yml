@@ -81,7 +81,16 @@ jobs:
           out=scratch/ci-pal-model
           mkdir -p "$out"
 
-          "$IA64_AS" -o "$out/pal-gateway.o" target/ia64/pal-gateway.S
+          if ! "$IA64_AS" -o "$out/pal-gateway.o" \
+            target/ia64/pal-gateway.S 2> "$out/pal-gateway.as.stderr"; then
+            cat "$out/pal-gateway.as.stderr"
+            exit 1
+          fi
+          if [[ -s "$out/pal-gateway.as.stderr" ]]; then
+            cat "$out/pal-gateway.as.stderr"
+            echo "PAL gateway assembly emitted diagnostics" >&2
+            exit 1
+          fi
           "$IA64_OBJCOPY" -O binary --only-section=.text \
             "$out/pal-gateway.o" "$out/pal-gateway.bin"
           "$IA64_OBJDUMP" -d "$out/pal-gateway.o" \
@@ -116,7 +125,7 @@ jobs:
         run: |
           set -euo pipefail
           out=scratch/ci-pal-model
-          scripts/fetch-ia64-xen-firmware.sh scratch/ia64-xen-firmware \
+          bash scripts/fetch-ia64-xen-firmware.sh scratch/ia64-xen-firmware \
             > "$out/xen-provenance.log"
           python3 scripts/ia64-firmware-matrix.py xen \
             | tee "$out/xen.json"
@@ -145,7 +154,7 @@ jobs:
               IA64_BIOS="$firmware" IA64_LOGDIR="$logdir" \
               IA64_GUEST_ERRORS=1 \
                 timeout --signal=TERM --kill-after=5s 35s \
-                  scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                  bash scripts/run-ia64-firmware.sh -- -vga none -nic none \
                   > "$logdir/runner.stdout" 2> "$logdir/runner.stderr"
             else
               IA64_FW_XENIPF_MPBUFFER_FIX=0 \
@@ -155,7 +164,7 @@ jobs:
               IA64_BIOS="$firmware" IA64_LOGDIR="$logdir" \
               IA64_GUEST_ERRORS=1 \
                 timeout --signal=TERM --kill-after=5s 35s \
-                  scripts/run-ia64-firmware.sh -- -vga none -nic none \
+                  bash scripts/run-ia64-firmware.sh -- -vga none -nic none \
                   > "$logdir/runner.stdout" 2> "$logdir/runner.stderr"
             fi
             rc=$?
