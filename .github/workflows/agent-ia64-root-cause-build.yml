@@ -6,6 +6,7 @@ on:
       - fix/ia64-ipf-device-root-cause
     paths:
       - scratch/agent-ia64-interrupt-contract.patch
+      - scratch/agent-ia64-interrupt-style.patch
       - .github/workflows/agent-ia64-root-cause-build.yml
   workflow_dispatch:
 
@@ -20,6 +21,7 @@ jobs:
       BASE_COMMIT: ca30eed7cad1f6090b5b3ac5da22ea4c2c68ce99
       OUTPUT_BRANCH: scratch/ia64-ipf-device-root-cause-built
       PATCH_FILE: scratch/agent-ia64-interrupt-contract.patch
+      STYLE_PATCH_FILE: scratch/agent-ia64-interrupt-style.patch
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,8 +34,18 @@ jobs:
           git merge-base --is-ancestor "$BASE_COMMIT" HEAD
           git apply --check "$PATCH_FILE"
           git apply "$PATCH_FILE"
+          git apply --check "$STYLE_PATCH_FILE"
+          git apply "$STYLE_PATCH_FILE"
           git diff --check
-          perl scripts/checkpatch.pl --no-signoff --strict "$PATCH_FILE"
+          git diff "$BASE_COMMIT" -- \
+            target/ia64/cpu.c \
+            target/ia64/cpu.h \
+            target/ia64/helper.c \
+            target/ia64/helper.h \
+            target/ia64/translate.c \
+            hw/ia64/ipf.c > /tmp/ia64-interrupt-contract.patch
+          perl scripts/checkpatch.pl --no-signoff --strict \
+            /tmp/ia64-interrupt-contract.patch
 
       - name: Install build dependencies
         run: |
