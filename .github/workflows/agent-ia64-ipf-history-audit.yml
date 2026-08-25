@@ -22,26 +22,71 @@ jobs:
 
       - name: Fetch independently preserved qemu-kvm IPF sources
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           out=scratch/agent-ia64-ipf-history-audit
           mkdir -p "$out/sources"
-          curl --fail --location --silent --show-error \
-            https://raw.githubusercontent.com/TritonDataCenter/illumos-kvm-cmd/1c9b441da90fe179451abab9aa8a4b926912d518/hw/ipf.c \
-            -o "$out/sources/illumos-kvm-cmd-ipf.c"
-          curl --fail --location --silent --show-error \
-            https://raw.githubusercontent.com/ut-osa/lacuna/6283404f2979ff79e8d7a7ebca02928dfd44f986/host/qemu-kvm-0.15.1/hw/ipf.c \
-            -o "$out/sources/qemu-kvm-0.15.1-ipf.c"
-          curl --fail --location --silent --show-error \
-            https://raw.githubusercontent.com/MurphysChaos/VirtualFirmware/829bfeb6bd37150a21170bc1033e50f30b9083b4/qemu-kvm-0.14.1/hw/ipf.c \
-            -o "$out/sources/qemu-kvm-0.14.1-ipf.c"
-          curl --fail --location --silent --show-error \
-            https://raw.githubusercontent.com/ddk50/qemu-kvm/8c9bb7ff6a2c267bcfb6fa9118bdb1a84dc5ccd1/hw/ipf.c \
-            -o "$out/sources/qemu-kvm-mirror-ipf.c"
-          curl --fail --location --silent --show-error \
-            https://raw.githubusercontent.com/blanham/qemu-ia64/5b416b9fb5a97aee32462e30dd23b5bdb3837db4/hw/ia64/ipf.c \
-            -o "$out/sources/blanham-early-port-ipf.c"
+          : > "$out/fetch-status.tsv"
+
+          fetch_source() {
+            local name=$1
+            local repo=$2
+            local ref=$3
+            local path=$4
+            local output="$out/sources/$name"
+            local url="https://api.github.com/repos/$repo/contents/$path?ref=$ref"
+
+            if curl --fail --location --silent --show-error \
+                --header 'Accept: application/vnd.github.raw+json' \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header 'X-GitHub-Api-Version: 2022-11-28' \
+                "$url" -o "$output"; then
+              printf '%s\tok\t%s\t%s\t%s\n' \
+                "$name" "$repo" "$ref" "$path" >> "$out/fetch-status.tsv"
+            else
+              rm -f "$output"
+              printf '%s\tmissing\t%s\t%s\t%s\n' \
+                "$name" "$repo" "$ref" "$path" >> "$out/fetch-status.tsv"
+            fi
+          }
+
+          fetch_source \
+            illumos-kvm-cmd-ipf.c \
+            TritonDataCenter/illumos-kvm-cmd \
+            1c9b441da90fe179451abab9aa8a4b926912d518 \
+            hw/ipf.c
+          fetch_source \
+            qemu-kvm-0.15.1-ipf.c \
+            ut-osa/lacuna \
+            6283404f2979ff79e8d7a7ebca02928dfd44f986 \
+            host/qemu-kvm-0.15.1/hw/ipf.c
+          fetch_source \
+            qemu-kvm-0.14.1-ipf.c \
+            MurphysChaos/VirtualFirmware \
+            829bfeb6bd37150a21170bc1033e50f30b9083b4 \
+            qemu-kvm-0.14.1/hw/ipf.c
+          fetch_source \
+            qemu-kvm-mirror-ipf.c \
+            ddk50/qemu-kvm \
+            8c9bb7ff6a2c267bcfb6fa9118bdb1a84dc5ccd1 \
+            hw/ipf.c
+          fetch_source \
+            blanham-early-port-ipf.c \
+            blanham/qemu-ia64 \
+            5b416b9fb5a97aee32462e30dd23b5bdb3837db4 \
+            hw/ia64/ipf.c
+
           cp hw/ia64/ipf.c "$out/sources/current-metachicken-ipf.c"
+
+          historical_count=$(find "$out/sources" -maxdepth 1 -type f \
+            ! -name current-metachicken-ipf.c | wc -l)
+          if [ "$historical_count" -lt 2 ]; then
+            echo "Need at least two independently preserved historical sources; got $historical_count" >&2
+            cat "$out/fetch-status.tsv" >&2
+            exit 1
+          fi
 
       - name: Generate provenance and structural comparison
         shell: bash
