@@ -1,0 +1,26 @@
+--- a/hw/ia64/iosapic-core.c
++++ b/hw/ia64/iosapic-core.c
+@@ -97,7 +97,6 @@
+                                     uint32_t value)
+ {
+     unsigned int pin = ia64_iosapic_selected_pin(selector);
+-    uint64_t bit = UINT64_C(1) << pin;
+     uint64_t old = s->rte[pin];
+     uint64_t updated;
+ 
+@@ -108,10 +107,13 @@
+         uint32_t new_low = (value & ~IA64_IOSAPIC_RTE_READ_ONLY) |
+                            (old_low & IA64_IOSAPIC_RTE_READ_ONLY);
+ 
+-        /* Remote IRR is meaningful only for level-triggered entries. */
++        /*
++         * Remote IRR is meaningful only for level-triggered entries.  It is
++         * distinct from the pending-request bit in irr: rewriting an edge RTE
++         * must not discard a request whose previous delivery was rejected.
++         */
+         if (!(new_low & IA64_IOSAPIC_TRIGGER_LEVEL)) {
+             new_low &= ~IA64_IOSAPIC_REMOTE_IRR;
+-            s->irr &= ~bit;
+         }
+ 
+         updated = (old & UINT64_C(0xffffffff00000000)) | new_low;
