@@ -41,6 +41,16 @@ typedef struct CPUArchState {
     uint64_t cr_iim;     /* Interruption immediate */
     uint64_t cr_iha;     /* Interruption handler address */
     uint64_t cr[128];
+
+    /*
+     * Local SAPIC interrupt state.
+     *
+     * cr.irr0..3 hold the architecturally visible pending vectors.  The
+     * in-service set is internal processor state used by cr.ivr/cr.eoi to
+     * enforce IA-64 interrupt priority and nesting rules.
+     */
+    uint64_t interrupt_in_service[4];
+
     uint64_t ar[128];
     uint64_t msr[IA64_MSR_COUNT];
     uint64_t pkr[IA64_PKR_COUNT];
@@ -484,6 +494,10 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n);
 
 #ifndef CONFIG_USER_ONLY
 void ia64_itm_update(CPUIA64State *env);
+bool ia64_cpu_deposit_interrupt(IA64CPU *cpu, uint8_t vector);
+uint64_t ia64_cpu_get_ivr(CPUIA64State *env);
+void ia64_cpu_set_tpr(CPUIA64State *env, uint64_t value);
+void ia64_cpu_eoi(CPUIA64State *env);
 void ia64_rse_switch_bspstore(CPUIA64State *env, uint64_t new_bspstore);
 void ia64_fw_dump_hobs_and_gcd(CPUIA64State *env);
 #endif

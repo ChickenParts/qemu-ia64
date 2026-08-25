@@ -7,7 +7,9 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
+#include "interrupt.h"
 #include "qemu/bswap.h"
+#include "qemu/host-utils.h"
 #include "qemu/qemu-print.h"
 #include "qemu/timer.h"
 #include "qemu/module.h"
@@ -43,7 +45,69 @@ static void ia64_rse_ctxs_free(IA64CPU *cpu)
     cpu->rse_ctxs_len = 0;
     cpu->rse_ctxs_cap = 0;
 }
+
+/*
+ * IA-64 local SAPIC interrupt integration.
+ *
+ * Arbitration itself lives in interrupt.c so the processor and unit tests use
+ * one implementation.  This layer only connects architectural state to QEMU's
+ * CPU_INTERRUPT_HARD wakeup mechanism.
+ */
+static int ia64_cpu_next_interrupt(const CPUIA64State *env)
+{
+    return ia64_interrupt_next(&env->cr[IA64_CR_IRR0],
+                               env->interrupt_in_service,
+                               env->cr[IA64_CR_TPR]);
+}
+
+static void ia64_cpu_recompute_interrupt(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    if (ia64_cpu_next_interrupt(env) >= 0) {
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    } else {
+        cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    }
+}
+
+bool ia64_cpu_deposit_interrupt(IA64CPU *cpu, uint8_t vector)
+{
+    CPUIA64State *env = &cpu->env;
+
+    if (!ia64_interrupt_deposit(&env->cr[IA64_CR_IRR0], vector)) {
+        return false;
+    }
+
+    ia64_cpu_recompute_interrupt(env);
+    return true;
+}
+
+uint64_t ia64_cpu_get_ivr(CPUIA64State *env)
+{
+    unsigned int vector = ia64_interrupt_accept(&env->cr[IA64_CR_IRR0],
+                                                env->interrupt_in_service,
+                                                env->cr[IA64_CR_TPR]);
+
+    env->cr[IA64_CR_IVR] = vector;
+    ia64_cpu_recompute_interrupt(env);
+    return vector;
+}
+
+void ia64_cpu_set_tpr(CPUIA64State *env, uint64_t value)
+{
+    env->cr[IA64_CR_TPR] = ia64_interrupt_sanitize_tpr(value);
+    ia64_cpu_recompute_interrupt(env);
+}
+
+void ia64_cpu_eoi(CPUIA64State *env)
+{
+    ia64_interrupt_eoi(env->interrupt_in_service);
+    env->cr[IA64_CR_EOI] = 0;
+    ia64_cpu_recompute_interrupt(env);
+}
 #endif
+
 static void ia64_cpu_do_interrupt(CPUState *cs);
 
 static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
@@ -236,8 +300,10 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
 
 #ifndef CONFIG_USER_ONLY
     /* External interrupts start idle/spurious; timer vector masked by default. */
-    env->cr[65] = IA64_SPURIOUS_INT_VECTOR; /* cr.ivr */
-    env->cr[72] = IA64_ITV_MASK;            /* cr.itv */
+    env->cr[IA64_CR_IVR] = IA64_SPURIOUS_INT_VECTOR;
+    env->cr[IA64_CR_TPR] = IA64_TPR_RESET;
+    env->cr[IA64_CR_ITV] = IA64_ITV_MASK;
+    cpu_reset_interrupt(CPU(cpu), CPU_INTERRUPT_HARD);
     if (cpu->itm_timer) {
         timer_del(cpu->itm_timer);
     }
@@ -279,19 +345,14 @@ static void ia64_cpu_finalizefn(Object *obj)
 static void ia64_itm_timer_cb(void *opaque)
 {
     IA64CPU *cpu = opaque;
-    CPUState *cs = CPU(cpu);
     CPUIA64State *env = &cpu->env;
 
-    uint64_t itv = env->cr[72];
+    uint64_t itv = env->cr[IA64_CR_ITV];
     if (itv & IA64_ITV_MASK) {
         return; /* masked */
     }
 
-    uint8_t vec = itv & 0xff;
-    if ((env->cr[65] & 0xff) == IA64_SPURIOUS_INT_VECTOR) {
-        env->cr[65] = vec;
-    }
-    cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    ia64_cpu_deposit_interrupt(cpu, itv & 0xff);
 }
 
 void ia64_itm_update(CPUIA64State *env)
@@ -301,7 +362,7 @@ void ia64_itm_update(CPUIA64State *env)
         return;
     }
 
-    uint64_t itv = env->cr[72];
+    uint64_t itv = env->cr[IA64_CR_ITV];
     if ((itv & IA64_ITV_MASK) || env->cr[1] == 0) {
         timer_del(cpu->itm_timer);
         return;
@@ -381,8 +442,11 @@ void ia64_rse_switch_bspstore(CPUIA64State *env, uint64_t new_bspstore)
 static bool ia64_cpu_has_work(CPUState *cs)
 {
     CPUIA64State *env = cpu_env(cs);
+    const uint64_t enable = IA64_PSR_I | IA64_PSR_IC;
+
     return (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
-            (env->psr & IA64_PSR_I));
+            (env->psr & enable) == enable &&
+            ia64_cpu_next_interrupt(env) >= 0);
 }
 
 static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
@@ -433,8 +497,10 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     CPUIA64State *env = &cpu->env;
 
     if (interrupt_request & CPU_INTERRUPT_HARD) {
-        uint8_t vec = env->cr[65] & 0xff;
-        if ((env->psr & IA64_PSR_I) && vec != IA64_SPURIOUS_INT_VECTOR) {
+        const uint64_t enable = IA64_PSR_I | IA64_PSR_IC;
+
+        if ((env->psr & enable) == enable &&
+            ia64_cpu_next_interrupt(env) >= 0) {
             ia64_intr_push_window(env);
             env->cr_ipsr = env->psr;
             env->cr_iip = env->ip & ~0xFULL;
@@ -443,7 +509,6 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             env->cr_iim = 0;
 
             cs->exception_index = IA64_EXCP_BASE + IA64_VEC_EXTERNAL_INTERRUPT;
-            cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
             ia64_cpu_do_interrupt(cs);
             return true;
         }

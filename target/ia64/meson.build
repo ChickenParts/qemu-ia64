@@ -3,6 +3,7 @@ ia64_ss.add(files(
   'cpu.c',
   'gdbstub.c',
   'helper.c',
+  'interrupt.c',
   'translate.c',
 ))
 

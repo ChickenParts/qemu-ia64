@@ -6651,15 +6651,11 @@ static void iosapic_service(IPFMachineState *m, int pin)
         m->iosapic_reg[0x10 + pin * 2] |= IOSAPIC_LVT_REMOTE_IRR;
     }
 
-    /* Deliver external interrupt to CPU */
-    if (m->cpu) {
-        CPUState *cs = CPU(m->cpu);
-        CPUIA64State *env = &m->cpu->env;
-
-        /* Set the interrupt vector in cr.ivr or similar mechanism */
-        /* For IA-64, external interrupts go through the IVT at vector 0x3000 */
-        cs->exception_index = IA64_VEC_EXTERNAL_INTERRUPT + vector;
-        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    /* Deliver the vector through the processor's local SAPIC state. */
+    if (m->cpu && !ia64_cpu_deposit_interrupt(m->cpu, vector)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IPF IOSAPIC: rejected reserved vector 0x%x on pin %d\n",
+                      vector, pin);
     }
 }
 
