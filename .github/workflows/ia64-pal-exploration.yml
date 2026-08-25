@@ -1,0 +1,76 @@
+name: IA-64 PAL firmware exploration
+
+on:
+  push:
+    branches:
+      - fix/ia64-pal-copy-info
+    paths:
+      - target/ia64/helper.c
+      - .github/workflows/ia64-pal-exploration.yml
+      - scripts/test-ia64-pal-copy-source.py
+      - docs/reviews/2026-08-25_ia64_pal_copy.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-pal-exploration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out PAL feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-pal-copy-info
+          fetch-depth: 1
+
+      - name: Install IA-64 build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure and build IA-64 system emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/ci-pal-exploration
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
+            > scratch/ci-pal-exploration/configure.log 2>&1
+          ninja -C build qemu-system-ia64 \
+            > scratch/ci-pal-exploration/build.log 2>&1
+          build/qemu-system-ia64 --version \
+            | tee scratch/ci-pal-exploration/version.txt
+          sha256sum build/qemu-system-ia64 target/ia64/helper.c \
+            | tee scratch/ci-pal-exploration/sha256.txt
+
+      - name: Run PAL source guard when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f scripts/test-ia64-pal-copy-source.py ]]; then
+            python3 scripts/test-ia64-pal-copy-source.py \
+              | tee scratch/ci-pal-exploration/source-test.log
+          fi
+
+      - name: Upload emulator and build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-pal-emulator-${{ github.run_id }}
+          path: |
+            build/qemu-system-ia64
+            scratch/ci-pal-exploration/
+          retention-days: 7
+          if-no-files-found: error
