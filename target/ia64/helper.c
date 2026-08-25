@@ -27490,8 +27490,10 @@ static void ia64_fw_trace_dump(void)
     }
 }
 
-#define IA64_PAL_STATUS_SUCCESS        0
-#define IA64_PAL_STATUS_UNIMPLEMENTED  (-1)
+#define IA64_PAL_STATUS_SUCCESS          0
+#define IA64_PAL_STATUS_UNIMPLEMENTED    (-1)
+#define IA64_PAL_STATUS_INVALID_ARGUMENT (-2)
+#define IA64_PAL_STATUS_ERROR            (-3)
 
 #define IA64_PAL_CACHE_FLUSH     1
 #define IA64_PAL_CACHE_INFO      2
@@ -27513,9 +27515,16 @@ static void ia64_fw_trace_dump(void)
 #define IA64_PAL_VM_PAGE_SIZE    34
 #define IA64_PAL_HALT            28
 #define IA64_PAL_HALT_LIGHT      29
+#define IA64_PAL_COPY_INFO       30
 #define IA64_PAL_LOGICAL_TO_PHYSICAL 42
 #define IA64_PAL_CACHE_SHARED_INFO   43
+#define IA64_PAL_COPY_PAL            256
 #define IA64_PAL_BRAND_INFO          274
+
+#define IA64_PAL_COPY_BUFFER_SIZE      0x1000ULL
+#define IA64_PAL_COPY_BUFFER_ALIGN     0x1000ULL
+#define IA64_PAL_COPY_PROC_OFFSET      0
+#define IA64_PAL_COPY_TARGET_CACHE_ATTR (1ULL << 63)
 
 void HELPER(fw_pal)(CPUIA64State *env)
 {
@@ -27700,6 +27709,64 @@ void HELPER(fw_pal)(CPUIA64State *env)
         v0 = 96;
         v1 = 0;
         break;
+    case IA64_PAL_COPY_INFO:
+        /*
+         * Return the storage contract for the relocatable PAL procedure.
+         *
+         * copy_type 0 is the native IA-64 PAL image.  This single-processor
+         * machine has no platform-specific processor or I/O-PIC payload, so
+         * both counts must be zero.  copy_type 1 requests the separate IA-32
+         * system-environment PAL, which this target does not implement.
+         */
+        if (a1 == 0 && a2 == 0 && a3 == 0) {
+            v0 = IA64_PAL_COPY_BUFFER_SIZE;
+            v1 = IA64_PAL_COPY_BUFFER_ALIGN;
+        } else if (a1 == 1) {
+            status = IA64_PAL_STATUS_ERROR;
+        } else {
+            status = IA64_PAL_STATUS_INVALID_ARGUMENT;
+        }
+        break;
+    case IA64_PAL_COPY_PAL: {
+        /*
+         * Install a two-bundle PAL trampoline in the firmware-provided,
+         * page-aligned buffer.  The first bundle executes break 0x100000,
+         * which the IA-64 translator routes to fw_pal; the second returns to
+         * b0.  This is the same architected relocation shape used by the
+         * standalone QEMU IA-64 PAL implementation.
+         */
+        static const uint64_t pal_proc_words[] = {
+            0x000002000000000aULL,
+            0x0004000000000200ULL,
+            0x0000000100000010ULL,
+            0x0084000080000200ULL,
+        };
+        uint64_t target_addr = a1 & ~IA64_PAL_COPY_TARGET_CACHE_ATTR;
+        hwaddr target_pa = ia64_phys_mode_addr(target_addr);
+        uint8_t code[sizeof(pal_proc_words)];
+
+        if (a3 > 1 || a2 < IA64_PAL_COPY_BUFFER_SIZE ||
+            (target_pa & (IA64_PAL_COPY_BUFFER_ALIGN - 1)) != 0) {
+            status = IA64_PAL_STATUS_INVALID_ARGUMENT;
+            break;
+        }
+
+        if (a3 == 0) {
+            for (size_t i = 0; i < ARRAY_SIZE(pal_proc_words); i++) {
+                stq_le_p(code + i * sizeof(pal_proc_words[i]),
+                         pal_proc_words[i]);
+            }
+            if (!ia64_fw_write_phys(target_pa, code, sizeof(code))) {
+                status = IA64_PAL_STATUS_ERROR;
+                break;
+            }
+            tb_invalidate_phys_range(cs, target_pa,
+                                     target_pa + sizeof(code) - 1);
+        }
+
+        v0 = IA64_PAL_COPY_PROC_OFFSET;
+        break;
+    }
     case IA64_PAL_LOGICAL_TO_PHYSICAL: {
         /*
          * Logical-to-physical mapping query.
