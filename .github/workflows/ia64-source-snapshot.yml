@@ -1,4 +1,4 @@
-name: IA-64 PAL source snapshot
+name: IA-64 source and firmware-analysis export
 
 on:
   push:
@@ -12,41 +12,50 @@ permissions:
   contents: read
 
 jobs:
-  capture:
+  export:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Check out feature branch
         uses: actions/checkout@v4
         with:
           ref: fix/ia64-rse-nonlocal-return
+          fetch-depth: 1
 
-      - name: Capture PAL dispatcher and stub sources
+      - name: Export complete source tree
         shell: bash
         run: |
           set -euo pipefail
-          out=scratch/ci-ia64-source
-          mkdir -p "$out/target/ia64" "$out/hw/ia64" "$out/include/hw/ia64"
-          cp target/ia64/helper.c "$out/target/ia64/"
-          cp target/ia64/cpu.h "$out/target/ia64/"
-          cp hw/ia64/ipf.c "$out/hw/ia64/"
-          cp hw/ia64/gfw.h "$out/hw/ia64/"
-          if [[ -f include/hw/ia64/gfw.h ]]; then
-            cp include/hw/ia64/gfw.h "$out/include/hw/ia64/"
-          fi
-          grep -RIn -E \
-            'IA64_IPF_FW_PAL|HELPER\(fw_pal\)|PAL_COPY|break[[:space:]]+0|0x100000' \
-            target/ia64 hw/ia64 include/hw/ia64 2>/dev/null \
-            > "$out/pal-symbols.txt" || true
-          sha256sum \
-            target/ia64/helper.c target/ia64/cpu.h hw/ia64/ipf.c hw/ia64/gfw.h \
-            > "$out/source.sha256"
+          out=scratch/ci-ia64-export
+          mkdir -p "$out"
+          tar \
+            --exclude=.git \
+            --exclude=build \
+            --exclude="$out" \
+            -czf "$out/qemu-ia64-source.tar.gz" .
+          sha256sum "$out/qemu-ia64-source.tar.gz" \
+            > "$out/SHA256SUMS"
 
-      - name: Upload source snapshot
+      - name: Build Tiano firmware decompressor
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$PWD/scratch/ci-ia64-export"
+          git clone --depth 1 https://github.com/tianocore/edk2.git /tmp/edk2
+          make -C /tmp/edk2/BaseTools/Source/C/TianoCompress
+          tool="$(find /tmp/edk2/BaseTools -type f -name TianoCompress \
+            -perm -111 -print | head -n 1)"
+          test -n "$tool"
+          cp "$tool" "$out/TianoCompress"
+          "$out/TianoCompress" 2>&1 | head -n 80 \
+            > "$out/TianoCompress-help.txt" || true
+          sha256sum "$out/TianoCompress" >> "$out/SHA256SUMS"
+
+      - name: Upload source and analysis tool
         uses: actions/upload-artifact@v4
         with:
-          name: ia64-pal-source-${{ github.run_id }}
-          path: scratch/ci-ia64-source/
+          name: ia64-source-export-${{ github.run_id }}
+          path: scratch/ci-ia64-export/
           retention-days: 1
           if-no-files-found: error
