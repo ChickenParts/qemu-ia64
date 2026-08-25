@@ -1,0 +1,43 @@
+name: Temporary current-branch source export
+
+on:
+  push:
+    branches:
+      - fix/ia64-ipf-device-root-cause
+    paths:
+      - .github/workflows/agent-source-export-current.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Pack source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/agent-source-export-current
+          tar \
+            --exclude=.git \
+            --exclude=build \
+            --exclude=scratch/agent-source-export-current \
+            -czf scratch/agent-source-export-current/qemu-ia64-source.tar.gz .
+          sha256sum scratch/agent-source-export-current/qemu-ia64-source.tar.gz \
+            > scratch/agent-source-export-current/SHA256SUMS
+
+      - name: Upload source tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-current-source-${{ github.run_id }}
+          path: scratch/agent-source-export-current/
+          retention-days: 1
+          if-no-files-found: error
