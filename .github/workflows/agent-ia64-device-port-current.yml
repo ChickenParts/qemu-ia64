@@ -1,0 +1,116 @@
+name: Temporary IA-64 device-port validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-device-port-current
+    paths:
+      - scratch/0001-hw-ia64-wire-configured-ISA-parallel-ports.patch
+      - scratch/0002-hw-ia64-restore-PCI-storage-interfaces.patch
+      - .github/workflows/agent-ia64-device-port-current.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_COMMIT: 533456d2140502d2f5b9092e2797ba7145954248
+      OUTPUT_BRANCH: fix/ia64-device-port-current
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply the clean two-commit series to the verified integration base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scratch/0001-hw-ia64-wire-configured-ISA-parallel-ports.patch \
+            /tmp/0001.patch
+          cp scratch/0002-hw-ia64-restore-PCI-storage-interfaces.patch \
+            /tmp/0002.patch
+
+          git fetch origin metachicken
+          test "$(git rev-parse origin/metachicken)" = "$BASE_COMMIT"
+          git checkout --detach "$BASE_COMMIT"
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git am /tmp/0001.patch /tmp/0002.patch
+          git diff --check "$BASE_COMMIT..HEAD"
+          perl scripts/checkpatch.pl --no-signoff --strict /tmp/0001.patch \
+            | tee /tmp/checkpatch-0001.txt
+          perl scripts/checkpatch.pl --no-signoff --strict /tmp/0002.patch \
+            | tee /tmp/checkpatch-0002.txt
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure and build IA-64
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run architectural and machine contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-interrupt --tap -k \
+            | tee /tmp/test-ia64-interrupt.tap
+          build/tests/unit/test-ia64-iosapic --tap -k \
+            | tee /tmp/test-ia64-iosapic.tap
+          QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
+            build/tests/qtest/ia64-ipf-test --tap -k \
+            | tee /tmp/ia64-ipf-test.tap
+          build/qemu-system-ia64 --version \
+            | tee /tmp/qemu-system-ia64-version.txt
+          build/qemu-system-ia64 -machine help \
+            | tee /tmp/qemu-system-ia64-machines.txt
+          grep -q '^ipf ' /tmp/qemu-system-ia64-machines.txt
+
+      - name: Publish tested branch and fast-forward metachicken
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+          git fetch origin metachicken
+          test "$(git rev-parse origin/metachicken)" = "$BASE_COMMIT"
+          git push origin "HEAD:refs/heads/metachicken"
+          git rev-parse HEAD | tee /tmp/ia64-device-port-head.txt
+          git log --reverse --format='%H %s' "$BASE_COMMIT..HEAD" \
+            | tee /tmp/ia64-device-port-commits.txt
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-device-port-current-result
+          path: |
+            /tmp/checkpatch-0001.txt
+            /tmp/checkpatch-0002.txt
+            /tmp/test-ia64-interrupt.tap
+            /tmp/test-ia64-iosapic.tap
+            /tmp/ia64-ipf-test.tap
+            /tmp/qemu-system-ia64-version.txt
+            /tmp/qemu-system-ia64-machines.txt
+            /tmp/ia64-device-port-head.txt
+            /tmp/ia64-device-port-commits.txt
+          retention-days: 1
+          if-no-files-found: warn
