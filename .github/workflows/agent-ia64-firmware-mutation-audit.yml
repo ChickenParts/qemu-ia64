@@ -1,0 +1,217 @@
+name: Temporary IA-64 firmware mutation audit
+
+on:
+  push:
+    branches:
+      - stage/ia64-firmware-mutation-audit
+    paths:
+      - .github/workflows/agent-ia64-firmware-mutation-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify audited source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD 4b06966d96110ca7ac2a5abd51c78e1852ce9b48)" = \
+               4b06966d96110ca7ac2a5abd51c78e1852ce9b48
+          grep -q 'IPF_FW_GP_GLOB_SENTINEL' hw/ia64/ipf.c
+          grep -q 'ipf_fw_patch_fit(buf' hw/ia64/ipf.c
+          grep -q 'ipf_patch_firmware_statuscode_callgate' hw/ia64/ipf.c
+
+      - name: Extract all bundled firmware sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ia64-firmware-audit/xen /tmp/ia64-firmware-audit/sdv
+          tar -xzf stuff/xen-3.4.1.tar.gz \
+            -C /tmp/ia64-firmware-audit/xen
+          tar -xf stuff/SDV_Debug_Bios.tar \
+            -C /tmp/ia64-firmware-audit/sdv
+
+      - name: Inventory exact mutation predicates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import struct
+          from pathlib import Path
+
+          GFW_SIZE = 16 << 20
+          GFW_END = 4 << 30
+          GP_TARGET = 0xFFE30070
+          GP_SENTINEL = 0xDEADBEEF2BADBEEF
+          STATUS_CALLER = 0xFFE00076
+          STATUS_REPORT = 0xFFE011B6
+          VARSTORE_BASE = 0xFFE00000
+          NVRAM_START = 0xFFA00000
+          NVRAM_SIZE = 64 << 10
+          FIT_SIGNATURE = b"_FIT_   "
+          FVH_SIGNATURE = b"_FVH"
+          UNUSED_TYPE = 0x7F
+
+          roots = [Path("stuff"), Path("/tmp/ia64-firmware-audit/xen"),
+                   Path("/tmp/ia64-firmware-audit/sdv")]
+          candidates: list[Path] = []
+          seen: set[tuple[int, str]] = set()
+          for root in roots:
+              for path in root.rglob("*"):
+                  if not path.is_file() or path.stat().st_size == 0:
+                      continue
+                  name = path.name.lower()
+                  if not (name.endswith((".bin", ".rom", ".fd")) or
+                          "gfw" in name or name == "flash.fd"):
+                      continue
+                  data = path.read_bytes()
+                  digest = hashlib.sha256(data).hexdigest()
+                  key = (len(data), digest)
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  candidates.append(path)
+
+          def read_phys(data: bytes, base: int, address: int, size: int) -> bytes | None:
+              offset = address - base
+              if offset < 0 or offset + size > len(data):
+                  return None
+              return data[offset:offset + size]
+
+          records = []
+          for path in sorted(candidates, key=lambda p: (p.name.lower(), str(p))):
+              data = path.read_bytes()
+              size = len(data)
+              if size > GFW_SIZE:
+                  base = None
+              else:
+                  base = GFW_END - size
+
+              gp_raw = read_phys(data, base, GP_TARGET, 8) if base is not None else None
+              caller_raw = read_phys(data, base, STATUS_CALLER, 8) if base is not None else None
+              report_raw = read_phys(data, base, STATUS_REPORT, 8) if base is not None else None
+              nvram = read_phys(data, base, NVRAM_START, NVRAM_SIZE) if base is not None else None
+              var_fvh = read_phys(data, base, VARSTORE_BASE + 0x28, 4) if base is not None else None
+
+              fit_records = []
+              start = 0
+              while True:
+                  off = data.find(FIT_SIGNATURE, start)
+                  if off < 0:
+                      break
+                  start = off + 1
+                  fit = {"offset": off, "physical": None, "valid": False}
+                  if base is not None:
+                      fit["physical"] = base + off
+                  if off + 16 <= size:
+                      count = int.from_bytes(data[off + 8:off + 11], "little")
+                      fit["entry_count"] = count
+                      fit["header_type"] = data[off + 14] & 0x7F
+                      if count and off + count * 16 <= size:
+                          entries = []
+                          all_unused = True
+                          for index in range(1, count):
+                              ent = data[off + index * 16:off + (index + 1) * 16]
+                              address = int.from_bytes(ent[0:8], "little")
+                              units = int.from_bytes(ent[8:11], "little")
+                              entry_type = ent[14] & 0x7F
+                              unused = address == 0 and units == 0 and entry_type == UNUSED_TYPE
+                              all_unused &= unused
+                              entries.append({
+                                  "index": index,
+                                  "address": address,
+                                  "size_units": units,
+                                  "type": entry_type,
+                                  "unused": unused,
+                              })
+                          fit.update({"valid": True,
+                                      "all_payload_entries_unused": all_unused,
+                                      "entries": entries})
+                  fit_records.append(fit)
+
+              record = {
+                  "path": str(path),
+                  "size": size,
+                  "sha256": hashlib.sha256(data).hexdigest(),
+                  "load_base": base,
+                  "gp_target_qword": int.from_bytes(gp_raw, "little") if gp_raw else None,
+                  "gp_patch_predicate": bool(gp_raw and int.from_bytes(gp_raw, "little") == GP_SENTINEL),
+                  "gp_sentinel_occurrences": data.count(struct.pack("<Q", GP_SENTINEL)),
+                  "status_caller_qword": int.from_bytes(caller_raw, "little") if caller_raw else None,
+                  "status_report_qword": int.from_bytes(report_raw, "little") if report_raw else None,
+                  "status_callgate_predicate": bool(caller_raw and report_raw and
+                                                    (int.from_bytes(caller_raw, "little") == (1 << 64) - 1 or
+                                                     int.from_bytes(report_raw, "little") == (1 << 64) - 1)),
+                  "varstore_fvh_at_fixed_base": var_fvh == FVH_SIGNATURE,
+                  "nvram_blank_ff": bool(nvram and all(byte == 0xFF for byte in nvram)),
+                  "nvram_blank_zero": bool(nvram and all(byte == 0 for byte in nvram)),
+                  "fit": fit_records,
+              }
+              records.append(record)
+
+          summary = {
+              "schema": 1,
+              "firmware_count": len(records),
+              "gp_patch_matches": [r["path"] for r in records if r["gp_patch_predicate"]],
+              "status_callgate_matches": [r["path"] for r in records if r["status_callgate_predicate"]],
+              "fit_patch_candidates": [
+                  r["path"] for r in records
+                  if any(f.get("valid") and f.get("all_payload_entries_unused")
+                         for f in r["fit"])
+              ],
+              "fixed_varstore_fvhs": [r["path"] for r in records if r["varstore_fvh_at_fixed_base"]],
+              "blank_nvram_regions": [
+                  r["path"] for r in records
+                  if r["nvram_blank_ff"] or r["nvram_blank_zero"]
+              ],
+          }
+          output = {"summary": summary, "firmware": records}
+          out = Path("/tmp/ia64-firmware-audit")
+          out.mkdir(parents=True, exist_ok=True)
+          (out / "mutation-inventory.json").write_text(
+              json.dumps(output, indent=2, sort_keys=True) + "\n")
+
+          lines = ["# IA-64 firmware mutation predicate inventory", "", "```json",
+                   json.dumps(summary, indent=2, sort_keys=True), "```", "",
+                   "## Per-image predicates", ""]
+          for record in records:
+              lines.extend([
+                  f"### `{record['path']}`",
+                  "",
+                  f"- size: `{record['size']}`",
+                  f"- sha256: `{record['sha256']}`",
+                  f"- load base: `{record['load_base'] and hex(record['load_base'])}`",
+                  f"- GP target qword: `{record['gp_target_qword'] is not None and hex(record['gp_target_qword'])}`",
+                  f"- GP patch predicate: `{record['gp_patch_predicate']}`",
+                  f"- status CallerId qword: `{record['status_caller_qword'] is not None and hex(record['status_caller_qword'])}`",
+                  f"- status reporter qword: `{record['status_report_qword'] is not None and hex(record['status_report_qword'])}`",
+                  f"- status call-gate predicate: `{record['status_callgate_predicate']}`",
+                  f"- FIT records: `{len(record['fit'])}`",
+                  "",
+              ])
+          (out / "mutation-inventory.md").write_text("\n".join(lines))
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload mutation audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-firmware-mutation-audit
+          path: |
+            /tmp/ia64-firmware-audit/mutation-inventory.json
+            /tmp/ia64-firmware-audit/mutation-inventory.md
+          retention-days: 2
+          if-no-files-found: error
