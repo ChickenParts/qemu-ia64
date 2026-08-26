@@ -343,7 +343,6 @@ static uint64_t ipf_ram_size;
 static uint64_t ipf_kernel_low;
 static uint64_t ipf_kernel_high;
 static uint64_t ipf_kernel_bias;
-static uint64_t ipf_sym_io_space;
 static uint64_t ipf_sym_ia64_bad_break;
 static uint64_t ipf_sym_search_extable;
 static uint64_t ipf_sym_stext;
@@ -365,9 +364,6 @@ static void ipf_kernel_sym_cb(const char *st_name, int st_info,
     (void)st_info;
     (void)st_size;
 
-    if (!ipf_sym_io_space && st_name && strcmp(st_name, "io_space") == 0) {
-        ipf_sym_io_space = st_value;
-    }
     if (!ipf_sym_ia64_bad_break && st_name &&
         strcmp(st_name, "ia64_bad_break") == 0) {
         ipf_sym_ia64_bad_break = st_value;
@@ -410,45 +406,6 @@ static void ipf_kernel_sym_cb(const char *st_name, int st_info,
         ipf_sym_load_switch_stack = st_value;
         ipf_sym_load_switch_stack_size = st_size;
     }
-}
-
-static void ipf_patch_io_space(uint64_t io_space_va, uint64_t kernel_bias,
-                               uint64_t ram_size)
-{
-    /*
-     * Linux/ia64 early serial console uses io_space[] to translate the
-     * simulator-style 32-bit I/O encoding (segment:offset) into a region-6
-     * uncached physical mapping. On real platforms this is initialized by
-     * firmware/platform code; for bringup, seed segment 0xff to the GFW window
-     * so 0xff5e0000 becomes 0xc0000000ff5e0000 and hits our serial-mm UART.
-     */
-    if ((io_space_va >> 61) != 5) {
-        DPRINTF("io_space: unexpected VA 0x%016" PRIx64 ", skipping\n",
-                io_space_va);
-        return;
-    }
-
-    uint64_t io_space_pa = io_space_va - kernel_bias;
-    if (io_space_pa + 0x1000 > ram_size) {
-        DPRINTF("io_space: PA 0x%016" PRIx64 " out of RAM, skipping\n",
-                io_space_pa);
-        return;
-    }
-
-    struct QEMU_PACKED {
-        uint64_t base;
-        uint32_t flags;
-        uint32_t pad;
-    } entry = {
-        .base = (6ULL << 61) | 0x00000000ff000000ULL,
-        .flags = 0,
-        .pad = 0,
-    };
-
-    hwaddr slot = io_space_pa + 0xff * sizeof(entry);
-    address_space_write(&address_space_memory, slot, MEMTXATTRS_UNSPECIFIED,
-                        (const uint8_t *)&entry, sizeof(entry));
-    DPRINTF("io_space: seeded seg 0xff at PA 0x%016" HWADDR_PRIx "\n", slot);
 }
 
 static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
@@ -5101,7 +5058,6 @@ static void ipf_init(MachineState *machine)
      * Load the ELF kernel. The IA-64 ELF uses physical p_paddr; entry
      * point phys_start is a low PA (see System.map).
      */
-    ipf_sym_io_space = 0;
     ipf_sym_ia64_bad_break = 0;
     ipf_sym_search_extable = 0;
     ipf_sym_stext = 0;
@@ -5155,10 +5111,6 @@ static void ipf_init(MachineState *machine)
                            MEMTXATTRS_UNSPECIFIED, &val, sizeof(val));
         DPRINTF("console_srcu+8: PA=0x%016" HWADDR_PRIx " val=%016" PRIx64 "\n",
                 field_pa, (uint64_t)le64_to_cpu(val));
-    }
-    if (ipf_sym_io_space) {
-        ipf_patch_io_space(ipf_sym_io_space, ipf_kernel_bias,
-                           machine->ram_size);
     }
     const char *watch = getenv("QEMU_IA64_WATCH_TEXT");
     if (watch && *watch) {

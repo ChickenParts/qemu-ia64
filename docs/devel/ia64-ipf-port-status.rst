@@ -52,8 +52,9 @@ device paths from remaining partial platform behavior.
      - Required work
    * - RAM and firmware windows
      - Present
-     - Replace image-specific aliases and firmware mutation with documented
-       platform mappings and boot contracts.
+     - Direct-kernel port I/O comes from the EFI memory map without editing
+       guest kernel symbols.  Replace the remaining image-specific aliases and
+       firmware mutation with documented platform mappings and boot contracts.
    * - PCI host/root
      - Custom current-QOM model
      - Validate 460GX address windows, DMA reachability, reset, and migration.
@@ -151,6 +152,10 @@ models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
 floppy, serial, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI
 buses, and the standard virtio PCI storage transport.  The I/O SAPIC and 460GX
 facade are separate QOM devices rather than in-file register shims.
+
+Direct-kernel boot now advertises its legacy port-I/O window through an
+``EFI_MEMORY_MAPPED_IO_PORT_SPACE`` descriptor, leaves loaded ELF data
+intact, and verifies both properties in qtest.
 
 That does not make the platform complete.  The largest remaining risks are CPU
 and chipset architectural coverage, SMP/IPI support, migration completeness,
