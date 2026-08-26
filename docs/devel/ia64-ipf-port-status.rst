@@ -31,122 +31,163 @@ Non-negotiable implementation rules
 * Interrupts cross a device/CPU contract: devices assert routed sources, the
   I/O SAPIC selects a vector, and the local SAPIC performs IRR/IVR/TPR/EOI
   arbitration.  Devices must not inject exception indexes directly.
-* Scratch patches, firmware call gates, and compatibility probes are not
-  acceptable substitutes for production code or tests.
+* Scratch patches, firmware call gates, compatibility probes, and arbitrary
+  host delays are not acceptable substitutes for production code or tests.
 * A behavior change needs an architectural or device-level test whenever the
   contract can be isolated from a complete firmware boot.
+
+Completion rule
+---------------
+
+A matching model name, source symbol, successful firmware boot, or historical
+function body is not enough to mark a component complete.  Completion requires
+review of its register interface, reset values, interrupt and DMA behavior,
+firmware discovery, migration state, multi-CPU behavior, and a focused test or
+guest probe.  The structural and runtime audit scripts report evidence toward
+that review; they do not certify correctness.
 
 Historical device inventory and current state
 ----------------------------------------------
 
-The inherited historical machine configured a conventional PC-derived device
-set around the IA-64 firmware interface.  The table distinguishes a real port
-using a current QEMU device model from an in-file shim or an unported device.
+The inherited machine configured a PC-derived compatibility device set around
+an IA-64 firmware interface.  The current tree has now replaced several of the
+largest machine-local shims with normal QEMU devices, but the 460GX host model,
+ACPI exposure, PCI routing, SMP, and firmware compatibility paths remain
+substantial work.
 
 .. list-table::
    :header-rows: 1
-   :widths: 20 24 56
+   :widths: 20 27 53
 
    * - Historical component
      - Current state
      - Required work
    * - RAM and firmware windows
-     - Present
-     - Replace image-specific aliases with documented platform maps.
+     - Present, with machine-local mapping and aliases
+     - Derive every window and alias from the selected platform contract;
+       remove image-shaped mappings and validate reset and migration.
    * - PCI host/root
-     - Custom current-QOM model
-     - Validate 460GX windows, routing, DMA, and migration state.
+     - Custom current-QOM host and root function
+     - Validate 460GX windows, configuration cycles, INTx routing, DMA address
+       spaces, reset, and migration.
    * - 460GX host functions
-     - Config-space shadows
-     - Convert firmware-visible shadows into explicit chipset devices.
+     - Machine-local configuration shadows and MMIO registers
+     - Replace the shadows with explicit migratable chipset devices and focused
+       configuration/MMIO tests.
    * - I/O SAPIC
-     - In-file partial model
-     - Split into a QOM device; complete delivery modes, destination,
-       polarity, EOI, and migration.
+     - Separate 48-input SysBus/QOM device with VMState
+     - Edge and level requests, masking, Remote IRR, shared-vector EOI,
+       rejected-delivery retry, and reset have focused coverage.  Add the
+       platform's remaining delivery modes and multi-CPU destination routing.
    * - Local SAPIC
-     - Architectural CPU model
-     - IRR/IVR/TPR/EOI arbitration is isolated and unit tested; add
-       NMI/ExtINT/IPI and migration.
+     - Architectural CPU model with isolated arbitration tests
+     - Complete IPI, NMI/ExtINT, multi-CPU targeting, reset/rendezvous, and
+       migration state.
    * - PIIX southbridge
-     - Function 0 only
-     - Wire one coherent PIIX4 instance and use its ISA/IDE/UHCI/PM/SMBus
-       child functions where appropriate.
+     - One coherent PIIX4 multifunction device
+     - Functions 0 through 3 are realized together.  Continue validating PCI
+       routing registers, reset, migration, and firmware enumeration.
    * - ISA bus
-     - Standalone workaround
-     - Derive it from the southbridge and route IRQs through the platform.
+     - Owned by PIIX4; IRQ lines 0 through 15 feed the I/O SAPIC
+     - Validate polarity and trigger expectations for each attached source and
+       document the chosen IA-64 legacy-interrupt contract.
    * - 8259 PIC
-     - Not ported
-     - Decide from platform documentation whether legacy PIC exposure is
-       required; do not fake it in CPU code.
+     - Deliberately disabled in the PIIX4 instance
+     - Confirm from platform documentation whether a visible legacy PIC is
+       required.  Do not emulate one in CPU helpers or leave a dead PIC output.
    * - RTC/CMOS
-     - Current QEMU RTC
-     - Integrate with southbridge/reset and validate firmware-visible contents.
+     - PIIX4 MC146818 RTC with machine CMOS initialization
+     - Validate reset values and firmware-visible memory, and stop advertising
+       absent equipment in the CMOS equipment byte.
    * - Serial
-     - One serial-mm UART
-     - Validate the real IPF address/IRQ; add legacy ports only if specified.
+     - One MMIO UART
+     - Validate the platform address and interrupt route; add legacy COM ports
+       only when the compatibility platform requires them.
    * - Parallel
      - Not ported
-     - Port only if part of the chosen IPF compatibility platform.
+     - Port only if required by the selected compatibility platform.
    * - VGA
-     - Current PCI VGA
-     - Keep payload-independent; validate PCI routing and firmware discovery.
+     - Current PCI VGA, payload-independent
+     - Validate firmware discovery, BAR placement, legacy aperture ownership,
+       and INTx routing.
    * - IDE
-     - Not ported
-     - Wire the PIIX IDE function and drives.
+     - PIIX4 IDE function with normal drive attachment
+     - Add configuration, channel IRQ, reset, DMA, and firmware-enumeration
+       coverage.
    * - i8042 keyboard/mouse
      - Not ported
-     - Wire through the coherent ISA path.
+     - Attach through the PIIX ISA bus if specified; until then CMOS must not
+       claim that a PS/2 mouse exists.
    * - ISA DMA
      - Not ported
-     - Add with ISA devices that require it.
+     - Add before any compatibility device that depends on it.
    * - Floppy
      - Not ported
-     - Optional compatibility device after DMA/PIC routing is correct.
+     - Optional after the DMA and interrupt contracts are established.
    * - UHCI USB
-     - Not ported
-     - Wire the PIIX UHCI function.
+     - PIIX4 UHCI function follows the machine USB setting
+     - Validate PCI identity, interrupt routing, reset, and guest operation.
    * - ACPI PM/SMBus
-     - In-file PM shim; no SMBus
-     - Replace with PIIX4 PM/SMBus and populate documented EEPROM devices.
+     - PIIX4 PM/SMBus plus populated SMBus EEPROMs; old MMIO PM shim remains
+     - Reconcile the firmware ACPI tables and Generic Address Structures with
+       one authoritative PM implementation.  Remove duplicate state only after
+       proving which interface the platform specifies.
    * - Network
      - Current PCI NIC creation
-     - Validate INTx routing and defaults; ISA NE2000 remains unported.
+     - Validate defaults, BARs, DMA, and INTx end to end; the historical ISA
+       NE2000 path remains unported.
    * - SCSI
-     - Not ported by default
-     - Reintroduce supported PCI SCSI enumeration and interrupt routing.
+     - Not present by default
+     - Reintroduce the documented PCI SCSI controller and test discovery, DMA,
+       reset, and interrupts.
    * - Virtio block
-     - Generic PCI available
-     - Validate firmware support and INTx; do not special-case it in IPF code.
+     - Generic PCI model available
+     - Validate firmware support and PCI interrupt behavior without adding
+       IPF-specific shortcuts.
    * - Audio
      - Not ported
-     - Optional after core platform devices.
+     - Optional after the core platform is complete.
    * - SMP/IPI
      - Incomplete
-     - Implement LID targeting, IPI space, rendezvous/reset, and per-CPU state.
+     - Implement LID targeting, IPI space, startup/rendezvous, per-CPU reset,
+       and multi-CPU interrupt delivery.
    * - Migration
-     - Incomplete
-     - Add VMState for CPU architectural state and every custom IPF device.
+     - Partial
+     - The I/O SAPIC has VMState; complete CPU, chipset, firmware/NVRAM, and
+       every remaining custom machine state before claiming migration support.
 
 Current assessment
 ------------------
 
-The original current-tree import contained roughly nine hundred lines of
-largely disabled, old-QEMU PC-machine scaffolding.  The current ``ipf.c`` is
-roughly 6.7 thousand lines, but line growth is not device-port completion.  A
-large share is firmware table construction, tracing, flash/NVRAM handling, and
-firmware compatibility machinery.  Fewer than half of the historical device
-categories are currently represented by a coherent, current-QEMU device path,
-and several represented categories are partial shims rather than finished
-ports.
+The device topology is now independent of firmware versus direct-kernel boot.
+The I/O SAPIC is no longer embedded in ``ipf.c``, and PIIX4 now owns the single
+ISA bus, RTC, IDE, UHCI, PM, and SMBus functions.  Focused tests exercise the
+local-SAPIC arbitration contract, the I/O-SAPIC core, all four PIIX4 PCI
+functions, and a real PIIX4 SCI path through ISA IRQ 9 and the I/O SAPIC.
+
+That progress does not make the machine complete.  The current ``ipf.c`` still
+contains machine-local 460GX register shadows, a second ACPI PM implementation,
+firmware table and flash/NVRAM machinery, extensive diagnostic paths, and
+firmware compatibility code that must be audited for guest mutation and
+trace-shaped behavior.  PCI INTx beyond the SCI test, DMA contracts, SMP/IPI,
+and several compatibility devices remain unproven or absent.  Neither a Xen nor
+an SDV firmware milestone may be used to waive those platform obligations.
 
 Priority order
 --------------
 
-#. Keep local SAPIC arbitration in the CPU and unit-test its architectural
-   contract.
-#. Remove guest-firmware mutation from MMU and instruction execution paths.
-#. Make one payload-independent machine topology.
-#. Extract the I/O SAPIC and 460GX functions into migratable QOM devices.
-#. Integrate a coherent southbridge/ISA/IDE/UHCI/PM/SMBus topology.
-#. Port the remaining compatibility devices through current QEMU APIs.
-#. Validate Xen firmware, SDV firmware, and direct kernels independently.
+#. Remove firmware mutation, call gates, magic-PC behavior, synthetic success,
+   and other trace-shaped compatibility code by fixing the underlying CPU,
+   memory, firmware-interface, or device contract.
+#. Convert the 460GX host functions and MMIO shadows into explicit QOM devices
+   with reset, VMState, and focused tests.
+#. Reconcile the machine-local ACPI PM MMIO block with PIIX4 PM/SMBus and the
+   firmware-visible ACPI tables, preserving only the documented platform
+   interface.
+#. Validate PCI INTx, BAR placement, and DMA end to end for VGA, IDE, USB,
+   network, and the selected SCSI controller.
+#. Add only the documented remaining ISA compatibility devices through the
+   coherent PIIX/ISA path.
+#. Complete SMP, IPI, local-SAPIC targeting, and per-CPU migration state.
+#. Run Xen firmware, SDV firmware, and direct kernels as independent regression
+   lanes against the same machine topology.
