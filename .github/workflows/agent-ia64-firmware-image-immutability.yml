@@ -1,4 +1,4 @@
-name: Temporary IA-64 firmware image immutability validation
+name: Temporary IA-64 firmware executable-state validation
 
 on:
   push:
@@ -17,13 +17,13 @@ jobs:
     timeout-minutes: 55
     env:
       BASE_COMMIT: 4b06966d96110ca7ac2a5abd51c78e1852ce9b48
-      OUTPUT_BRANCH: fix/ia64-firmware-image-immutability
+      OUTPUT_BRANCH: fix/ia64-firmware-executable-state
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Remove firmware-image patch paths on the verified base
+      - name: Remove firmware executable-state patch paths on the verified base
         shell: bash
         run: |
           set -euo pipefail
@@ -35,10 +35,13 @@ jobs:
 
           def remove_between(text: str, start: str, end: str) -> str:
               assert text.count(start) == 1, start
-              assert text.count(end) == 1, end
               first = text.index(start)
-              last = text.index(end, first)
+              last = text.index(end, first + len(start))
               return text[:first] + text[last:]
+
+          def replace_once(text: str, old: str, new: str) -> str:
+              assert text.count(old) == 1, old
+              return text.replace(old, new, 1)
 
           path = Path("hw/ia64/ipf.c")
           text = path.read_text()
@@ -47,12 +50,14 @@ jobs:
               text,
               "/*\n * Firmware call-gates / stubs.\n",
               "/*\n * xenipf SPad scratchpad area.")
-          text = text.replace(
+          text = replace_once(
+              text,
               "#define EFI_SECTION_PE32                   0x10\n"
               "#define EFI_SECTION_TE                     0x12\n"
               "#define EFI_TE_IMAGE_HEADER_SIGNATURE      0x5A56\n",
               "")
-          text = text.replace(
+          text = replace_once(
+              text,
               "#define IPF_FW_GP_BASE_ADDR   0x000000010002FEB0ULL\n"
               "#define IPF_FW_GP_GLOB_OFF    0x00000000001FFE40ULL\n"
               "#define IPF_FW_GP_GLOB_SENTINEL 0xDEADBEEF2BADBEEFULL\n\n",
@@ -81,24 +86,24 @@ jobs:
               "static void ipf_patch_firmware_statuscode_callgate(void)\n",
               "static void ipf_fw_setup_pei_handoff")
 
-          old = (
+          text = replace_once(
+              text,
               "        ipf_fw_patch_fit(buf, (size_t)image_size, fw_offset);\n"
-              "        ipf_fw_patch_gp_globals(buf, (size_t)image_size, fw_offset);\n")
-          assert text.count(old) == 1
-          text = text.replace(old, "")
-          old = (
+              "        ipf_fw_patch_gp_globals(buf, (size_t)image_size, fw_offset);\n",
+              "")
+          text = replace_once(
+              text,
               "        if (run_firmware) {\n"
               "            ipf_patch_firmware_statuscode_callgate();\n"
-              "        }\n")
-          assert text.count(old) == 1
-          text = text.replace(old, "")
+              "        }\n",
+              "")
           path.write_text(text)
 
           path = Path("tests/qtest/ia64-ipf-test.c")
           text = path.read_text()
           marker = "#define TEST_KERNEL_SENTINEL_SIZE   16\n"
-          assert text.count(marker) == 1
-          text = text.replace(
+          text = replace_once(
+              text,
               marker,
               marker +
               "\n"
@@ -120,8 +125,8 @@ jobs:
           globals_marker = (
               "static char *firmware_path;\n"
               "static char *kernel_path;\n")
-          assert text.count(globals_marker) == 1
-          text = text.replace(
+          text = replace_once(
+              text,
               globals_marker,
               globals_marker +
               "\n"
@@ -138,10 +143,10 @@ jobs:
               "}\n")
 
           create_marker = "static void create_test_kernel(void)\n"
-          assert text.count(create_marker) == 1
-          text = text.replace(
+          text = replace_once(
+              text,
               create_marker,
-              "static void test_firmware_image_is_immutable(void)\n"
+              "static void test_firmware_executable_state_is_unpatched(void)\n"
               "{\n"
               "    uint8_t expected_fit[TEST_FIRMWARE_FIT_SIZE];\n"
               "    uint8_t actual_fit[TEST_FIRMWARE_FIT_SIZE];\n"
@@ -189,8 +194,8 @@ jobs:
 
               /*
                * Supply the minimum FV/PEI-core/TE shape that made the old FIT
-               * rewrite path actionable.  It is data for the immutability
-               * contract, not firmware executed by qtest.
+               * rewrite path actionable.  It is test data and is not executed
+               * under qtest.
                */
               fv = image + TEST_FIRMWARE_FV_OFFSET;
               stq_le_p(fv + 0x20, TEST_FIRMWARE_FV_SIZE);
@@ -219,12 +224,13 @@ jobs:
           marker = (
               "    qtest_add_func(\"/ia64/ipf/direct-kernel-io-contract\",\n"
               "                   test_direct_kernel_io_contract);\n")
-          assert text.count(marker) == 1
-          text = text.replace(
+          text = replace_once(
+              text,
               marker,
               marker +
-              "    qtest_add_func(\"/ia64/ipf/firmware-image-immutable\",\n"
-              "                   test_firmware_image_is_immutable);\n")
+              "    qtest_add_func(\n"
+              "        \"/ia64/ipf/firmware-executable-state-unpatched\",\n"
+              "        test_firmware_executable_state_is_unpatched);\n")
           path.write_text(text)
 
           path = Path("docs/devel/ia64-ipf-port-status.rst")
@@ -235,30 +241,30 @@ jobs:
               "       firmware mutation with documented platform mappings and boot contracts.\n")
           new = (
               "     - Direct-kernel port I/O comes from the EFI memory map without editing\n"
-              "       guest kernel symbols.  Loaded firmware payload bytes are immutable;\n"
-              "       replace the remaining image-specific aliases with documented platform\n"
-              "       mappings and boot contracts.\n")
-          assert text.count(old) == 1
-          text = text.replace(old, new)
+              "       guest kernel symbols.  Firmware loading no longer rewrites FIT metadata,\n"
+              "       GP-relative globals, or fixed status-code pointers; move the remaining\n"
+              "       variable-store and scratchpad provisioning into explicit platform state.\n")
+          text = replace_once(text, old, new)
           old = (
               "Direct-kernel boot now advertises its legacy port-I/O window through an\n"
               "``EFI_MEMORY_MAPPED_IO_PORT_SPACE`` descriptor, leaves loaded ELF data\n"
               "intact, and verifies both properties in qtest.\n")
           new = old + (
-              "The firmware loader likewise copies ROM bytes without rewriting FIT entries,\n"
-              "GP-relative globals, or fixed status-code pointers.  A synthetic image that\n"
-              "would have triggered all three historical paths is verified unchanged.\n")
-          assert text.count(old) == 1
-          text = text.replace(old, new)
+              "The firmware loader also leaves FIT entries, GP-relative globals, and fixed\n"
+              "status-code pointers untouched.  A synthetic image satisfying all three old\n"
+              "mutation predicates is verified unchanged; the bundled-firmware audit found\n"
+              "no image that depended on those paths.\n")
+          text = replace_once(text, old, new)
           path.write_text(text)
           PY
 
-          ! grep -Eq 'ipf_fw_patch_(fit|gp_globals)|firmware_statuscode_callgate|IPF_FW_GP_GLOB_SENTINEL' \
+          ! grep -Eq \
+            'ipf_fw_patch_(fit|gp_globals)|ipf_patch_firmware_statuscode_callgate|IPF_FW_GP_GLOB_SENTINEL|IPF_FW_STATUS_(CALLER_ID|REPORT_PLABEL)_ADDR' \
             hw/ia64/ipf.c
           git diff --check
-          git diff > /tmp/ia64-firmware-image-immutability.patch
+          git diff > /tmp/ia64-firmware-executable-state.patch
           perl scripts/checkpatch.pl --no-signoff --strict \
-            /tmp/ia64-firmware-image-immutability.patch
+            /tmp/ia64-firmware-executable-state.patch
 
       - name: Install build and documentation dependencies
         run: |
@@ -298,9 +304,10 @@ jobs:
           QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
             build/tests/qtest/ia64-ipf-test --tap -k \
             | tee /tmp/ia64-ipf-test.tap
-          grep -q 'ok .*firmware-image-immutable' /tmp/ia64-ipf-test.tap
+          grep -q 'ok .*firmware-executable-state-unpatched' \
+            /tmp/ia64-ipf-test.tap
 
-      - name: Smoke every bundled SDV firmware image
+      - name: Smoke bundled SDV firmware without executable-state patching
         shell: bash
         run: |
           set -euo pipefail
@@ -316,6 +323,7 @@ jobs:
             'stuff/mybios.bin' \
             'stuff/rx4610_109B.BIN' \
             'stuff/rx4610_117B.BIN'; do
+            test -f "$firmware"
             stem="$(basename "$firmware" | tr ' ' '_')"
             serial="$out/$stem.serial.log"
             qlog="$out/$stem.qemu.log"
@@ -341,14 +349,15 @@ jobs:
                 exit 1
                 ;;
             esac
-            ! grep -Eq 'FIT patch|GP globals patch|status-code callgate patched' \
+            ! grep -Eq \
+              'FIT patch|GP globals patch|status-code callgate patched' \
               "$qlog"
             printf '%s\t%s\t%s\t%s\n' \
               "$firmware" "$rc" \
               "$(wc -c < "$serial")" \
-              "$(tail -n 1 "$serial" | tr '\t\r\n' '   ')" \
-              >> "$out/summary.tsv"
+              "$(wc -c < "$qlog")" >> "$out/summary.tsv"
           done
+
           cat "$out/summary.tsv"
 
       - name: Publish the tested commit and fast-forward metachicken
@@ -356,33 +365,39 @@ jobs:
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+
           git add \
-            docs/devel/ia64-ipf-port-status.rst \
             hw/ia64/ipf.c \
-            tests/qtest/ia64-ipf-test.c
+            tests/qtest/ia64-ipf-test.c \
+            docs/devel/ia64-ipf-port-status.rst
           git diff --cached --check
           git commit \
-            -m 'hw/ia64: keep loaded firmware images immutable' \
-            -m 'Delete the FIT rewrite, fixed GP-global edit, and synthetic status-code callgate. Prove a ROM crafted to trigger all three historical paths remains unchanged, while preserving the separate platform handoff and NVRAM contracts.'
-          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+            -m 'hw/ia64: stop patching firmware executable state' \
+            -m 'Remove the image-specific FIT rewrite, GP-global sentinel clearing, and fixed status-code callgate patch. Keep those firmware bytes intact, cover all three old predicates with qtest, and smoke the bundled SDV firmware matrix.'
 
-          remote_base="$(git ls-remote origin refs/heads/metachicken | cut -f1)"
-          test "$remote_base" = "$BASE_COMMIT"
-          git push origin HEAD:refs/heads/metachicken
-          git rev-parse HEAD | tee /tmp/ia64-firmware-image-immutability-commit.txt
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+          git fetch origin metachicken
+          test "$(git rev-parse HEAD^)" = "$BASE_COMMIT"
+          test "$(git rev-parse origin/metachicken)" = "$BASE_COMMIT"
+          git push origin "HEAD:refs/heads/metachicken"
+          git rev-parse HEAD \
+            | tee /tmp/ia64-firmware-executable-state-commit.txt
 
       - name: Upload validation evidence
         uses: actions/upload-artifact@v4
         with:
-          name: ia64-firmware-image-immutability-result
+          name: ia64-firmware-executable-state-result
           path: |
-            /tmp/ia64-firmware-image-immutability-commit.txt
-            /tmp/ia64-firmware-image-immutability.patch
-            /tmp/ia64-ipf-port-status.html
+            /tmp/ia64-firmware-executable-state.patch
+            /tmp/ia64-firmware-executable-state-commit.txt
+            /tmp/ia64-ipf-test.tap
             /tmp/test-ia64-interrupt.tap
             /tmp/test-ia64-iosapic.tap
-            /tmp/ia64-ipf-test.tap
-            /tmp/ia64-firmware-smoke/
+            /tmp/ia64-ipf-port-status.html
+            /tmp/ia64-firmware-smoke/summary.tsv
+            /tmp/ia64-firmware-smoke/*.serial.log
+            /tmp/ia64-firmware-smoke/*.qemu.log
           retention-days: 2
           if-no-files-found: error
