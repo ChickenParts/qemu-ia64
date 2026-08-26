@@ -10,6 +10,8 @@
 #include "libqtest.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_ids.h"
+#include "qobject/qdict.h"
+#include "qobject/qlist.h"
 
 #define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
 #define IPF_GX_MMIO_BASE            UINT64_C(0xfeb00000)
@@ -155,6 +157,33 @@ static QTestState *ipf_qtest_start_args(const char *args)
 static QTestState *ipf_qtest_start(void)
 {
     return ipf_qtest_start_args("");
+}
+
+static void test_qmp_target(void)
+{
+    QTestState *qts = ipf_qtest_start();
+    QDict *response;
+    QDict *target;
+    QList *cpus;
+
+    response = qtest_qmp(qts, "{'execute': 'query-target'}");
+    g_assert_nonnull(response);
+    g_assert_false(qdict_haskey(response, "error"));
+    target = qdict_get_qdict(response, "return");
+    g_assert_nonnull(target);
+    g_assert_cmpstr(qdict_get_try_str(target, "arch"), ==, "ia64");
+    qobject_unref(response);
+
+    /* This used to abort in qapi_enum_parse() before producing a response. */
+    response = qtest_qmp(qts, "{'execute': 'query-cpus-fast'}");
+    g_assert_nonnull(response);
+    g_assert_false(qdict_haskey(response, "error"));
+    cpus = qdict_get_qlist(response, "return");
+    g_assert_nonnull(cpus);
+    g_assert_cmpuint(qlist_size(cpus), ==, 1);
+    qobject_unref(response);
+
+    qtest_quit(qts);
 }
 
 static void assert_pci_id(QTestState *qts, unsigned int function,
@@ -522,6 +551,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     create_test_firmware();
 
+    qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
     qtest_add_func("/ia64/ipf/piix4-pm-reset",
                    test_piix4_pm_reset);
