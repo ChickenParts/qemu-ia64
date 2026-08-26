@@ -3,12 +3,12 @@ index 062da0507..000000000 100644
 --- a/configs/devices/ia64-softmmu/default.mak
 +++ b/configs/devices/ia64-softmmu/default.mak
 @@ -2,6 +2,7 @@
-
+ 
  # Basic UART for early console/debug (hw/char/serial-mm.c).
  CONFIG_SERIAL=y
 +CONFIG_SERIAL_ISA=y
  CONFIG_SERIAL_MM=y
-
+ 
  # PCI + VGA for guest firmware (Flash.fd) UI and device enumeration.
 diff --git a/docs/devel/ia64-ipf-port-status.rst b/docs/devel/ia64-ipf-port-status.rst
 index 78e65df6d..000000000 100644
@@ -29,7 +29,7 @@ index 78e65df6d..000000000 100644
       - Current ISA parallel ports on request
       - LPT1 register reset and IRQ7 delivery through the I/O SAPIC are tested;
 @@ -146,9 +147,9 @@ Current assessment
-
+ 
  The boot-critical PC-derived topology is now represented by current QEMU device
  models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
 -floppy, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI buses, and the
@@ -38,7 +38,7 @@ index 78e65df6d..000000000 100644
 +floppy, serial, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI
 +buses, and the standard virtio PCI storage transport.  The I/O SAPIC and 460GX
 +facade are separate QOM devices rather than in-file register shims.
-
+ 
  That does not make the platform complete.  The largest remaining risks are CPU
  and chipset architectural coverage, SMP/IPI support, migration completeness,
 diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
@@ -56,7 +56,7 @@ index cc90207b2..000000000 100644
 @@ -3744,11 +3745,6 @@ static void main_cpu_reset(void *opaque)
      }
  }
-
+ 
 -static void ipf_uart_dummy_irq(void *opaque, int n, int level)
 -{
 -    /* Polled UART use (earlycon) does not require an interrupt controller. */
@@ -65,7 +65,7 @@ index cc90207b2..000000000 100644
  static uint64_t ipf_debugcon_read(void *opaque, hwaddr addr, unsigned size)
  {
      (void)opaque;
-@@ -4211,14 +4207,27 @@ static const MemoryRegionOps ipf_uart_ioport_ops = {
+@@ -4211,14 +4207,28 @@ static const MemoryRegionOps ipf_uart_ioport_ops = {
  static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
  {
      Chardev *chr = serial_hd(0);
@@ -83,14 +83,14 @@ index cc90207b2..000000000 100644
          DPRINTF("UART: no serial backend (-serial), skipping\n");
          return;
      }
-
+ 
 -    qemu_irq irq = qemu_allocate_irq(ipf_uart_dummy_irq, NULL, 0);
 +    /*
 +     * The primary UART is exposed through both the platform MMIO address and
 +     * legacy COM1, but its interrupt is still the architectural ISA IRQ4.
 +     */
 +    irq = isa_bus_get_irq(m->isa_bus, 4);
-
+ 
 -    SerialMM *uart = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
 +    uart = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
      qdev_prop_set_uint8(DEVICE(uart), "regshift", 0);
@@ -98,17 +98,17 @@ index cc90207b2..000000000 100644
      qdev_prop_set_chr(DEVICE(uart), "chardev", chr);
 @@ -4230,7 +4239,7 @@ static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
      serial_mm_set_line_hook(ipf_uart_line_hook, m);
-
+ 
      /* Overlay the UART on top of the GFW RAM window. */
 -    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
 +    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
      memory_region_add_subregion_overlap(sysmem, IPF_UART_BASE, mr, 1);
      DPRINTF("UART: mapped serial-mm at 0x%016" PRIx64 "\n", (uint64_t)IPF_UART_BASE);
-
+ 
 @@ -4946,7 +4955,6 @@ static void ipf_init(MachineState *machine)
                                  IPF_FW_WORKRAM_BASE | (1ULL << 63),
                                  &m->fw_workram_alias);
-
+ 
 -    ipf_init_uart(m, sysmem);
      ipf_init_debugcon(m);
      ipf_init_460gx(m);
@@ -127,13 +127,13 @@ index 8b9a21a8d..000000000 100644
 +++ b/tests/qtest/ia64-ipf-test.c
 @@ -13,6 +13,7 @@
  #include "qobject/qlist.h"
-
+ 
  #define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
 +#define IPF_UART_BASE               UINT64_C(0xff5e0000)
  #define IPF_GX_MMIO_BASE            UINT64_C(0xfeb00000)
  #define IPF_GX_MMIO_ALIAS_BASE      UINT64_C(0x80000000feb00000)
  #define IPF_GX_MMIO_CB0             0x0cb0
-@@ -88,6 +89,17 @@
+@@ -88,6 +89,16 @@
  #define TEST_PARALLEL_CONTROL_SELECT 0x08
  #define TEST_PARALLEL_CONTROL_INIT  0x04
  #define TEST_PARALLEL_CONTROL_STROBE 0x01
@@ -150,10 +150,10 @@ index 8b9a21a8d..000000000 100644
  #define TEST_PM_IO_BASE             0x0400
  #define TEST_PM_TIMER_OFFSET        0x08
  #define TEST_PM_TIMER_MASK          0x00ffffffU
-@@ -699,6 +711,63 @@ static void test_parallel_irq_and_reset(void)
+@@ -699,6 +711,71 @@ static void test_parallel_irq_and_reset(void)
      qtest_quit(qts);
  }
-
+ 
 +static void test_serial_irqs_aliases_and_reset(void)
 +{
 +    const uint8_t com1_vector = 0x56;
