@@ -1,0 +1,169 @@
+diff --git a/configs/devices/ia64-softmmu/default.mak b/configs/devices/ia64-softmmu/default.mak
+index 998c356..0d183f6 100644
+--- a/configs/devices/ia64-softmmu/default.mak
++++ b/configs/devices/ia64-softmmu/default.mak
+@@ -10,3 +10,7 @@ CONFIG_PCI_DEVICES=y
+ CONFIG_PIIX=y
+ CONFIG_SMBUS_EEPROM=y
+ CONFIG_PCKBD=y
++
++# Legacy IPF compatibility peripherals on the PIIX ISA bus.
++CONFIG_FDC_ISA=y
++CONFIG_PARALLEL=y
+diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
+index d979ab4..422e4c4 100644
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -39,6 +39,7 @@
+ #include "hw/southbridge/piix.h"
+ #include "qemu/cutils.h"
+ #include "hw/block/block.h"
++#include "hw/block/fdc.h"
+ #include "hw/ide/pci.h"
+ #include "hw/i2c/smbus_eeprom.h"
+ #include "hw/input/i8042.h"
+@@ -52,6 +53,7 @@
+ //#include "ia64intrin.h"
+ #include "hw/virtio/virtio-blk.h"
+ #include "hw/char/serial-mm.h"
++#include "hw/char/parallel.h"
+ #include "hw/irq.h"
+ #include "qemu/error-report.h"
+ #include "qemu/bswap.h"
+@@ -115,6 +117,7 @@ struct IPFMachineState {
+     I2CBus *smbus;
+     ISABus *isa_bus;
+     MC146818RtcState *rtc;
++    ISADevice *fdc;
+     uint8_t cmos_ext_index;
+     uint8_t cmos_ext[256];
+     PCIDevice *piix4;
+@@ -3385,6 +3388,27 @@ static void ipf_resolve_isa_devices(IPFMachineState *m)
+     DPRINTF("ISA bus/RTC: using PIIX4 southbridge\n");
+ }
+ 
++static void ipf_init_legacy_peripherals(IPFMachineState *m)
++{
++    parallel_hds_isa_init(m->isa_bus, MAX_PARALLEL_PORTS);
++
++#ifdef CONFIG_FDC_ISA
++    DriveInfo *fd[MAX_FD];
++    bool create_fdc = defaults_enabled();
++
++    for (unsigned int i = 0; i < MAX_FD; i++) {
++        fd[i] = drive_get(IF_FLOPPY, 0, i);
++        create_fdc |= fd[i] != NULL;
++    }
++
++    if (create_fdc) {
++        m->fdc = isa_new(TYPE_ISA_FDC);
++        isa_realize_and_unref(m->fdc, m->isa_bus, &error_fatal);
++        isa_fdc_init_drives(m->fdc, fd);
++    }
++#endif
++}
++
+ /*
+  * Initialize CMOS settings based on system configuration.
+  *
+@@ -3440,11 +3464,25 @@ static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
+     mc146818rtc_set_cmos_data(s, 0x35, (val >> 8) & 0xff);
+ 
+     /*
+-     * Equipment byte (0x14).
+-     * 0x02 = FPU present
+-     * 0x04 = PS/2 mouse installed
++     * Equipment byte (0x14) and floppy type register (0x10).
++     *
++     * Bit 0 reports a floppy controller, bits 7:6 encode the number of
++     * attached drives minus one, bit 1 reports the FPU, and bit 2 reports the
++     * PS/2 mouse.  Keep the CMOS view derived from the realized ISA devices.
+      */
+     val = 0x02 | 0x04;
++    if (m->fdc) {
++        int fd0 = cmos_get_fd_drive_type(isa_fdc_get_drive_type(m->fdc, 0));
++        int fd1 = cmos_get_fd_drive_type(isa_fdc_get_drive_type(m->fdc, 1));
++        unsigned int drive_count = !!fd0 + !!fd1;
++
++        mc146818rtc_set_cmos_data(s, 0x10, (fd0 << 4) | fd1);
++        if (drive_count) {
++            val |= 0x01 | ((drive_count - 1) << 6);
++        }
++    } else {
++        mc146818rtc_set_cmos_data(s, 0x10, 0);
++    }
+     mc146818rtc_set_cmos_data(s, 0x14, val);
+ 
+     /*
+@@ -4713,6 +4751,7 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
+     pci_realize_and_unref(piix, m->pcibus, &error_fatal);
+     m->piix4 = piix;
+     ipf_resolve_isa_devices(m);
++    ipf_init_legacy_peripherals(m);
+ 
+     /*
+      * The PIIX ISA bus owns the platform PS/2 controller.  Its default IRQ1
+diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
+index b906034..13f1697 100644
+--- a/tests/qtest/ia64-ipf-test.c
++++ b/tests/qtest/ia64-ipf-test.c
+@@ -51,6 +51,14 @@
+ #define TEST_PM_IO_BASE             0x0400
+ #define TEST_PM_TIMER_OFFSET        0x08
+ #define TEST_PM_TIMER_MASK          0x00ffffffU
++#define TEST_FDC_MSR                 0x3f4
++#define TEST_PARALLEL_STATUS         0x379
++#define TEST_FDC_RQM                 0x80
++#define TEST_PARALLEL_RESET_STATUS   0xd9
++#define TEST_CMOS_INDEX              0x70
++#define TEST_CMOS_DATA               0x71
++#define TEST_CMOS_FLOPPY             0x10
++#define TEST_CMOS_EQUIPMENT          0x14
+ #define TEST_E1000_MMIO_BASE        UINT64_C(0x10000000)
+ #define E1000_ICR                   0x00c0
+ #define E1000_ICS                   0x00c8
+@@ -159,6 +167,35 @@ static QTestState *ipf_qtest_start(void)
+     return ipf_qtest_start_args("");
+ }
+ 
++static uint8_t cmos_read(QTestState *qts, uint8_t index)
++{
++    qtest_writeb(qts, legacy_io_address(TEST_CMOS_INDEX), index);
++    return qtest_readb(qts, legacy_io_address(TEST_CMOS_DATA));
++}
++
++static void test_legacy_peripherals(void)
++{
++    QTestState *qts = ipf_qtest_start_args(
++        "-drive if=floppy,file=null-co://,file.read-zeroes=on,"
++        "format=raw,size=1440k -parallel null");
++    uint8_t equipment;
++    uint8_t parallel_status;
++
++    g_assert_cmphex(qtest_readb(qts, legacy_io_address(TEST_FDC_MSR)),
++                    ==, TEST_FDC_RQM);
++    g_assert_cmphex(cmos_read(qts, TEST_CMOS_FLOPPY), ==, 0x40);
++
++    equipment = cmos_read(qts, TEST_CMOS_EQUIPMENT);
++    g_assert_cmphex(equipment & 0x01, ==, 0x01);
++    g_assert_cmphex(equipment & 0xc0, ==, 0);
++
++    parallel_status = qtest_readb(
++        qts, legacy_io_address(TEST_PARALLEL_STATUS));
++    g_assert_cmphex(parallel_status, ==, TEST_PARALLEL_RESET_STATUS);
++
++    qtest_quit(qts);
++}
++
+ static void test_qmp_target(void)
+ {
+     QTestState *qts = ipf_qtest_start();
+@@ -552,6 +589,8 @@ int main(int argc, char **argv)
+     create_test_firmware();
+ 
+     qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
++    qtest_add_func("/ia64/ipf/legacy-peripherals",
++                   test_legacy_peripherals);
+     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
+     qtest_add_func("/ia64/ipf/piix4-pm-reset",
+                    test_piix4_pm_reset);
