@@ -41,6 +41,7 @@
 #include "hw/block/block.h"
 #include "hw/ide/pci.h"
 #include "hw/i2c/smbus_eeprom.h"
+#include "hw/input/i8042.h"
 #include "qemu/typedefs.h"
 #include "hw/sysbus.h"
 #include "qom/object.h"
@@ -5186,6 +5187,13 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
     pci_realize_and_unref(piix, m->pcibus, &error_fatal);
     m->piix4 = piix;
     ipf_resolve_isa_devices(m);
+
+    /*
+     * The PIIX ISA bus owns the platform PS/2 controller.  Its default IRQ1
+     * and IRQ12 outputs use the same ISA-to-I/O-SAPIC wiring as every other
+     * legacy source.  The x86-only A20 output is deliberately left unused.
+     */
+    isa_create_simple(m->isa_bus, TYPE_I8042);
 
     ide = PCI_DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
     if (!ide) {

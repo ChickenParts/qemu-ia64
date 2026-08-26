@@ -28,6 +28,18 @@
 #define TEST_GXB_FN1_DEVICE_ID      0x84ea
 #define TEST_GXB_FN2_DEVICE_ID      0x84e2
 #define TEST_GXB_REVISION           0x04
+#define TEST_I8042_KBD_IRQ           1
+#define TEST_I8042_MOUSE_IRQ         12
+#define TEST_I8042_DATA_PORT         0x60
+#define TEST_I8042_STATUS_PORT       0x64
+#define TEST_I8042_WRITE_MODE        0x60
+#define TEST_I8042_SELF_TEST         0xaa
+#define TEST_I8042_WRITE_OBUF        0xd2
+#define TEST_I8042_WRITE_AUX_OBUF    0xd3
+#define TEST_I8042_SELF_TEST_OK      0x55
+#define TEST_I8042_MODE_KBD_IRQ      0x01
+#define TEST_I8042_MODE_MOUSE_IRQ    0x02
+#define TEST_I8042_STATUS_AUX_OBF    0x20
 #define TEST_PM_IO_BASE             0x0400
 #define TEST_E1000_MMIO_BASE        UINT64_C(0x10000000)
 #define E1000_ICR                   0x00c0
@@ -333,6 +345,70 @@ static void test_gxb_sparse_config_identity(void)
     qtest_quit(qts);
 }
 
+static void program_iosapic_level_route(QTestState *qts,
+                                         unsigned int pin, uint8_t vector)
+{
+    const uint32_t rte_low = IPF_IOSAPIC_RTE_BASE + pin * 2;
+
+    iosapic_select(qts, rte_low + 1);
+    iosapic_write_window(qts, 0);
+    iosapic_select(qts, rte_low);
+    iosapic_write_window(qts, vector | IPF_IOSAPIC_TRIGGER_LEVEL);
+}
+
+static void assert_iosapic_remote_irr(QTestState *qts, unsigned int pin,
+                                      bool asserted)
+{
+    const uint32_t rte_low = IPF_IOSAPIC_RTE_BASE + pin * 2;
+    uint32_t low;
+
+    iosapic_select(qts, rte_low);
+    low = iosapic_read_window(qts);
+    g_assert_cmphex(low & IPF_IOSAPIC_REMOTE_IRR, ==,
+                    asserted ? IPF_IOSAPIC_REMOTE_IRR : 0);
+}
+
+static void test_i8042_irqs_reach_iosapic(void)
+{
+    const uint8_t kbd_vector = 0x52;
+    const uint8_t mouse_vector = 0x53;
+    const uint8_t kbd_data = 0x5a;
+    const uint8_t mouse_data = 0xa5;
+    QTestState *qts = ipf_qtest_start();
+
+    /* Exercise the actual controller registers before testing its IRQ lines. */
+    qtest_outb(qts, TEST_I8042_STATUS_PORT, TEST_I8042_SELF_TEST);
+    g_assert_cmphex(qtest_inb(qts, TEST_I8042_DATA_PORT), ==,
+                    TEST_I8042_SELF_TEST_OK);
+
+    program_iosapic_level_route(qts, TEST_I8042_KBD_IRQ, kbd_vector);
+    program_iosapic_level_route(qts, TEST_I8042_MOUSE_IRQ, mouse_vector);
+
+    /* Enable both outputs and inject one byte through each controller path. */
+    qtest_outb(qts, TEST_I8042_STATUS_PORT, TEST_I8042_WRITE_MODE);
+    qtest_outb(qts, TEST_I8042_DATA_PORT,
+               TEST_I8042_MODE_KBD_IRQ | TEST_I8042_MODE_MOUSE_IRQ);
+
+    qtest_outb(qts, TEST_I8042_STATUS_PORT, TEST_I8042_WRITE_OBUF);
+    qtest_outb(qts, TEST_I8042_DATA_PORT, kbd_data);
+    assert_iosapic_remote_irr(qts, TEST_I8042_KBD_IRQ, true);
+    g_assert_cmphex(qtest_inb(qts, TEST_I8042_DATA_PORT), ==, kbd_data);
+    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, kbd_vector);
+    assert_iosapic_remote_irr(qts, TEST_I8042_KBD_IRQ, false);
+
+    qtest_outb(qts, TEST_I8042_STATUS_PORT, TEST_I8042_WRITE_AUX_OBUF);
+    qtest_outb(qts, TEST_I8042_DATA_PORT, mouse_data);
+    g_assert_cmphex(qtest_inb(qts, TEST_I8042_STATUS_PORT) &
+                    TEST_I8042_STATUS_AUX_OBF,
+                    ==, TEST_I8042_STATUS_AUX_OBF);
+    assert_iosapic_remote_irr(qts, TEST_I8042_MOUSE_IRQ, true);
+    g_assert_cmphex(qtest_inb(qts, TEST_I8042_DATA_PORT), ==, mouse_data);
+    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, mouse_vector);
+    assert_iosapic_remote_irr(qts, TEST_I8042_MOUSE_IRQ, false);
+
+    qtest_quit(qts);
+}
+
 static void create_test_firmware(void)
 {
     g_autoptr(GError) error = NULL;
@@ -364,6 +440,8 @@ int main(int argc, char **argv)
                    test_pci_intx_reaches_iosapic);
     qtest_add_func("/ia64/ipf/gxb-sparse-config",
                    test_gxb_sparse_config_identity);
+    qtest_add_func("/ia64/ipf/i8042-iosapic",
+                   test_i8042_irqs_reach_iosapic);
     ret = g_test_run();
 
     unlink(firmware_path);
