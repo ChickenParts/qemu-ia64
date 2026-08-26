@@ -22,7 +22,7 @@ index 038eab2..cf65dbb 100644
               'ppc64', 'riscv32', 'riscv64', 'rx', 's390x', 'sh4',
               'sh4eb', 'sparc', 'sparc64', 'tricore',
 diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
-index 763bf7d..993dab4 100644
+index fb2f242..b906034 100644
 --- a/tests/qtest/ia64-ipf-test.c
 +++ b/tests/qtest/ia64-ipf-test.c
 @@ -10,6 +10,8 @@
@@ -34,7 +34,7 @@ index 763bf7d..993dab4 100644
  
  #define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
  #define IPF_GX_MMIO_BASE            UINT64_C(0xfeb00000)
-@@ -155,6 +157,33 @@ static QTestState *ipf_qtest_start(void)
+@@ -157,6 +159,33 @@ static QTestState *ipf_qtest_start(void)
      return ipf_qtest_start_args("");
  }
  
@@ -68,11 +68,11 @@ index 763bf7d..993dab4 100644
  static void assert_pci_id(QTestState *qts, unsigned int function,
                            uint16_t device_id)
  {
-@@ -487,6 +516,7 @@ int main(int argc, char **argv)
+@@ -522,6 +551,7 @@ int main(int argc, char **argv)
      g_test_init(&argc, &argv, NULL);
      create_test_firmware();
  
 +    qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
      qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
-     qtest_add_func("/ia64/ipf/piix4-sci-iosapic",
-                    test_piix4_sci_reaches_iosapic);
+     qtest_add_func("/ia64/ipf/piix4-pm-reset",
+                    test_piix4_pm_reset);
