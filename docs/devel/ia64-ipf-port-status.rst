@@ -90,8 +90,9 @@ device paths from remaining partial platform behavior.
      - Validate the platform address and interrupt contract across all firmware
        lanes.
    * - Parallel
-     - Not ported
-     - Port only if it is part of the selected IPF compatibility platform.
+     - Current ISA parallel ports on request
+     - LPT1 register reset and IRQ7 delivery through the I/O SAPIC are tested;
+       validate firmware demand and additional configured ports.
    * - VGA
      - Current PCI VGA
      - Validate firmware discovery, option-ROM execution, and INTx behavior.
@@ -145,8 +146,8 @@ Current assessment
 
 The boot-critical PC-derived topology is now represented by current QEMU device
 models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
-floppy, VGA, and generic PCI NIC attachment.  The I/O SAPIC and 460GX facade are
-separate QOM devices rather than in-file register shims.
+floppy, parallel, VGA, and generic PCI NIC attachment.  The I/O SAPIC and 460GX
+facade are separate QOM devices rather than in-file register shims.
 
 That does not make the platform complete.  The largest remaining risks are CPU
 and chipset architectural coverage, SMP/IPI support, migration completeness,

@@ -67,6 +67,18 @@
 #define TEST_CMOS_DATA_PORT          0x71
 #define TEST_CMOS_FLOPPY_TYPE        0x10
 #define TEST_CMOS_EQUIPMENT          0x14
+#define TEST_PARALLEL_BASE          0x378
+#define TEST_PARALLEL_DATA          (TEST_PARALLEL_BASE + 0)
+#define TEST_PARALLEL_STATUS        (TEST_PARALLEL_BASE + 1)
+#define TEST_PARALLEL_CONTROL       (TEST_PARALLEL_BASE + 2)
+#define TEST_PARALLEL_IRQ           7
+#define TEST_PARALLEL_STATUS_RESET  0xd9
+#define TEST_PARALLEL_CONTROL_RESET 0xcc
+#define TEST_PARALLEL_CONTROL_FIXED 0xc0
+#define TEST_PARALLEL_CONTROL_INTEN 0x10
+#define TEST_PARALLEL_CONTROL_SELECT 0x08
+#define TEST_PARALLEL_CONTROL_INIT  0x04
+#define TEST_PARALLEL_CONTROL_STROBE 0x01
 #define TEST_PM_IO_BASE             0x0400
 #define TEST_PM_TIMER_OFFSET        0x08
 #define TEST_PM_TIMER_MASK          0x00ffffffU
@@ -597,6 +609,61 @@ static void test_fdc_dma_irq_and_cmos(void)
     qtest_quit(qts);
 }
 
+static void test_parallel_irq_and_reset(void)
+{
+    const uint8_t vector = 0x55;
+    const uint8_t armed_control = TEST_PARALLEL_CONTROL_FIXED |
+                                  TEST_PARALLEL_CONTROL_INTEN |
+                                  TEST_PARALLEL_CONTROL_SELECT |
+                                  TEST_PARALLEL_CONTROL_INIT |
+                                  TEST_PARALLEL_CONTROL_STROBE;
+    const uint8_t interrupt_control = armed_control &
+                                      ~TEST_PARALLEL_CONTROL_STROBE;
+    QTestState *qts = ipf_qtest_start_args("-parallel null");
+
+    g_assert_cmphex(qtest_readb(qts,
+                                legacy_io_address(TEST_PARALLEL_DATA)),
+                    ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts,
+                                legacy_io_address(TEST_PARALLEL_STATUS)),
+                    ==, TEST_PARALLEL_STATUS_RESET);
+    g_assert_cmphex(qtest_readb(qts,
+                                legacy_io_address(TEST_PARALLEL_CONTROL)),
+                    ==, TEST_PARALLEL_CONTROL_RESET);
+
+    qtest_writeb(qts, legacy_io_address(TEST_PARALLEL_DATA), 0x5a);
+    g_assert_cmphex(qtest_readb(qts,
+                                legacy_io_address(TEST_PARALLEL_DATA)),
+                    ==, 0x5a);
+
+    program_iosapic_level_route(qts, TEST_PARALLEL_IRQ, vector);
+
+    /* A strobe transition writes the byte; dropping strobe raises ACK IRQ7. */
+    qtest_writeb(qts, legacy_io_address(TEST_PARALLEL_CONTROL),
+                 armed_control);
+    qtest_writeb(qts, legacy_io_address(TEST_PARALLEL_CONTROL),
+                 interrupt_control);
+    assert_iosapic_remote_irr(qts, TEST_PARALLEL_IRQ, true);
+
+    /* Reading status acknowledges the device before the I/O SAPIC EOI. */
+    qtest_readb(qts, legacy_io_address(TEST_PARALLEL_STATUS));
+    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, vector);
+    assert_iosapic_remote_irr(qts, TEST_PARALLEL_IRQ, false);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readb(qts,
+                                legacy_io_address(TEST_PARALLEL_DATA)),
+                    ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts,
+                                legacy_io_address(TEST_PARALLEL_STATUS)),
+                    ==, TEST_PARALLEL_STATUS_RESET);
+    g_assert_cmphex(qtest_readb(qts,
+                                legacy_io_address(TEST_PARALLEL_CONTROL)),
+                    ==, TEST_PARALLEL_CONTROL_RESET);
+
+    qtest_quit(qts);
+}
+
 static void test_i8042_irqs_reach_iosapic(void)
 {
     const uint8_t kbd_vector = 0x52;
@@ -676,6 +743,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64/ipf/460gx-reset", test_460gx_reset);
     qtest_add_func("/ia64/ipf/fdc-dma-iosapic-cmos",
                    test_fdc_dma_irq_and_cmos);
+    qtest_add_func("/ia64/ipf/parallel-iosapic-reset",
+                   test_parallel_irq_and_reset);
     qtest_add_func("/ia64/ipf/i8042-iosapic",
                    test_i8042_irqs_reach_iosapic);
     ret = g_test_run();

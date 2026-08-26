@@ -13,3 +13,6 @@ CONFIG_PCKBD=y
 
 # Standard ISA floppy controller; PIIX supplies its IRQ and i8257 DMA paths.
 CONFIG_FDC_ISA=y
+
+# Legacy printer ports use the same PIIX ISA-to-I/O-SAPIC routing.
+CONFIG_PARALLEL=y

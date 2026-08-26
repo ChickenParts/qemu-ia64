@@ -33,6 +33,7 @@
 #include "hw/isa/isa.h"
 #include "hw/rtc/mc146818rtc.h"
 #include "hw/block/fdc.h"
+#include "hw/char/parallel.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_host.h"
@@ -4757,6 +4758,9 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
     m->fdc = isa_new(TYPE_ISA_FDC);
     isa_realize_and_unref(m->fdc, m->isa_bus, &error_fatal);
     isa_fdc_init_drives(m->fdc, fd);
+
+    /* Instantiate configured LPT ports on the same routed ISA bus. */
+    parallel_hds_isa_init(m->isa_bus, MAX_PARALLEL_PORTS);
 
     ide = PCI_DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
     if (!ide) {
