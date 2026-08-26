@@ -4706,6 +4706,29 @@ static void ipf_init_pci_fw_cfg(IPFMachineState *m)
                             PCI_CLASS_BRIDGE_HOST & 0xff,
                             0x00, 0x00);
     ipf_pci_fw_cfg_init_sdc(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SDC][0]);
+
+    /*
+     * GXB functions 1 and 2 are chipset-internal configuration functions.
+     * Function 0 remains the real PCI device occupying slot 2 (normally VGA,
+     * or a user-selected device); do not replace it with a synthetic model.
+     */
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][1],
+                            PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_GXB_FN1,
+                            PCI_CLASS_BRIDGE_HOST >> 8,
+                            PCI_CLASS_BRIDGE_HOST & 0xff,
+                            0x00, 0x00);
+    ipf_pci_fw_cfg_set_ro(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][1],
+                          PCI_REVISION_ID, 1, 0x04);
+    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][2],
+                            PCI_VENDOR_ID_INTEL,
+                            IPF_PCI_FW_DEVICE_ID_GXB_FN2,
+                            PCI_CLASS_BRIDGE_HOST >> 8,
+                            PCI_CLASS_BRIDGE_HOST & 0xff,
+                            0x00, 0x00);
+    ipf_pci_fw_cfg_set_ro(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][2],
+                          PCI_REVISION_ID, 1, 0x04);
+
     ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][0],
                             PCI_VENDOR_ID_INTEL,
                             IPF_PCI_FW_DEVICE_ID_MAC,

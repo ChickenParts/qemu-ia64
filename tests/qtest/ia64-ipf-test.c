@@ -11,6 +11,7 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_ids.h"
 
+#define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
 #define IPF_IOSAPIC_BASE            UINT64_C(0xfec00000)
 #define IPF_IOSAPIC_REG_SELECT      0x00
 #define IPF_IOSAPIC_WINDOW          0x10
@@ -24,6 +25,9 @@
 #define IPF_PIIX4_SMBUS_IO_BASE     0xb100
 #define TEST_PCI_DEV                2
 #define TEST_PCI_IRQ                11
+#define TEST_GXB_FN1_DEVICE_ID      0x84ea
+#define TEST_GXB_FN2_DEVICE_ID      0x84e2
+#define TEST_GXB_REVISION           0x04
 #define TEST_PM_IO_BASE             0x0400
 #define TEST_E1000_MMIO_BASE        UINT64_C(0x10000000)
 #define E1000_ICR                   0x00c0
@@ -36,10 +40,59 @@
 
 static char *firmware_path;
 
+static uint32_t pci_config_address_bus(unsigned int bus, unsigned int dev,
+                                       unsigned int function,
+                                       unsigned int offset)
+{
+    return 0x80000000U | (bus << 16) | (dev << 11) | (function << 8) |
+           (offset & 0xfc);
+}
+
 static uint32_t pci_config_address(unsigned int dev, unsigned int function,
                                    unsigned int offset)
 {
-    return 0x80000000U | (dev << 11) | (function << 8) | (offset & 0xfc);
+    return pci_config_address_bus(0, dev, function, offset);
+}
+
+static uint64_t legacy_io_address(unsigned int port)
+{
+    return IPF_LEGACY_IO_BASE + ((uint64_t)(port >> 2) << 12) + (port & 3);
+}
+
+static uint32_t pci_fw_config_readl(QTestState *qts, unsigned int bus,
+                                    unsigned int dev, unsigned int function,
+                                    unsigned int offset)
+{
+    qtest_writel(qts, legacy_io_address(0xcf8),
+                 pci_config_address_bus(bus, dev, function, offset));
+    return qtest_readl(qts, legacy_io_address(0xcfc));
+}
+
+static uint8_t pci_fw_config_readb(QTestState *qts, unsigned int bus,
+                                   unsigned int dev, unsigned int function,
+                                   unsigned int offset)
+{
+    qtest_writel(qts, legacy_io_address(0xcf8),
+                 pci_config_address_bus(bus, dev, function, offset));
+    return qtest_readb(qts, legacy_io_address(0xcfc + (offset & 3)));
+}
+
+static void pci_fw_config_writel(QTestState *qts, unsigned int bus,
+                                 unsigned int dev, unsigned int function,
+                                 unsigned int offset, uint32_t value)
+{
+    qtest_writel(qts, legacy_io_address(0xcf8),
+                 pci_config_address_bus(bus, dev, function, offset));
+    qtest_writel(qts, legacy_io_address(0xcfc), value);
+}
+
+static void pci_fw_config_writeb(QTestState *qts, unsigned int bus,
+                                 unsigned int dev, unsigned int function,
+                                 unsigned int offset, uint8_t value)
+{
+    qtest_writel(qts, legacy_io_address(0xcf8),
+                 pci_config_address_bus(bus, dev, function, offset));
+    qtest_writeb(qts, legacy_io_address(0xcfc + (offset & 3)), value);
 }
 
 static uint32_t pci_config_readl(QTestState *qts, unsigned int dev,
@@ -225,6 +278,61 @@ static void test_pci_intx_reaches_iosapic(void)
     qtest_quit(qts);
 }
 
+static void assert_gxb_identity(QTestState *qts, unsigned int bus,
+                                unsigned int function, uint16_t device_id)
+{
+    uint32_t id = pci_fw_config_readl(qts, bus, TEST_PCI_DEV, function,
+                                      PCI_VENDOR_ID);
+    uint32_t class_revision = pci_fw_config_readl(qts, bus, TEST_PCI_DEV,
+                                                  function,
+                                                  PCI_REVISION_ID);
+
+    g_assert_cmphex(id & 0xffff, ==, PCI_VENDOR_ID_INTEL);
+    g_assert_cmphex(id >> 16, ==, device_id);
+    g_assert_cmphex(class_revision, ==,
+                    (PCI_CLASS_BRIDGE_HOST << 16) | TEST_GXB_REVISION);
+    g_assert_cmphex(pci_fw_config_readb(qts, bus, TEST_PCI_DEV, function,
+                                       PCI_HEADER_TYPE),
+                    ==, 0);
+}
+
+static void test_gxb_sparse_config_identity(void)
+{
+    QTestState *qts = ipf_qtest_start_args("-device e1000,addr=2.0");
+    uint32_t real_id;
+
+    /* Function 0 remains a real QOM PCI device and is forwarded unchanged. */
+    real_id = pci_config_readl(qts, TEST_PCI_DEV, 0, PCI_VENDOR_ID);
+    g_assert_cmphex(real_id & 0xffff, ==, PCI_VENDOR_ID_INTEL);
+    g_assert_cmphex(real_id >> 16, ==, 0x100e);
+    g_assert_cmphex(pci_fw_config_readl(qts, 0, TEST_PCI_DEV, 0,
+                                       PCI_VENDOR_ID),
+                    ==, real_id);
+
+    assert_gxb_identity(qts, 0, 1, TEST_GXB_FN1_DEVICE_ID);
+    assert_gxb_identity(qts, 0, 2, TEST_GXB_FN2_DEVICE_ID);
+    assert_gxb_identity(qts, 0xff, 1, TEST_GXB_FN1_DEVICE_ID);
+    assert_gxb_identity(qts, 0xff, 2, TEST_GXB_FN2_DEVICE_ID);
+
+    /* The façade must not invent ordinary root-bus QOM functions. */
+    g_assert_cmphex(pci_config_readl(qts, TEST_PCI_DEV, 1, PCI_VENDOR_ID),
+                    ==, UINT32_MAX);
+    g_assert_cmphex(pci_config_readl(qts, TEST_PCI_DEV, 2, PCI_VENDOR_ID),
+                    ==, UINT32_MAX);
+    g_assert_cmphex(pci_fw_config_readl(qts, 0xff, TEST_PCI_DEV, 3,
+                                       PCI_VENDOR_ID),
+                    ==, UINT32_MAX);
+
+    /* Identity, class, revision, and header type are immutable. */
+    pci_fw_config_writel(qts, 0, TEST_PCI_DEV, 1, PCI_VENDOR_ID, 0);
+    pci_fw_config_writel(qts, 0, TEST_PCI_DEV, 1, PCI_REVISION_ID,
+                         UINT32_MAX);
+    pci_fw_config_writeb(qts, 0, TEST_PCI_DEV, 1, PCI_HEADER_TYPE, 0xff);
+    assert_gxb_identity(qts, 0, 1, TEST_GXB_FN1_DEVICE_ID);
+
+    qtest_quit(qts);
+}
+
 static void create_test_firmware(void)
 {
     g_autoptr(GError) error = NULL;
@@ -254,6 +362,8 @@ int main(int argc, char **argv)
                    test_piix4_sci_reaches_iosapic);
     qtest_add_func("/ia64/ipf/pci-intx-iosapic",
                    test_pci_intx_reaches_iosapic);
+    qtest_add_func("/ia64/ipf/gxb-sparse-config",
+                   test_gxb_sparse_config_identity);
     ret = g_test_run();
 
     unlink(firmware_path);
