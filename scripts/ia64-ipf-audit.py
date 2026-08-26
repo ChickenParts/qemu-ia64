@@ -15,8 +15,12 @@ import pathlib
 import re
 import subprocess
 from collections import Counter
+from typing import Any
 
-SOURCE_SUFFIXES = {".c", ".h", ".inc", ".mak", ".meson"}
+SOURCE_SUFFIXES = {".c", ".h", ".inc", ".mak"}
+SOURCE_FILENAMES = {"meson.build", "Kconfig", "Kconfig.host", "Kconfig.target"}
+DEFAULT_LEGACY_PATH = "hw/ipf.c"
+CURRENT_MACHINE_PATH = "hw/ia64/ipf.c"
 CALL_RE = re.compile(
     r"\b(qdev_create|qdev_new|qdev_realize(?:_and_unref)?|"
     r"sysbus_create_simple|sysbus_realize(?:_and_unref)?|"
@@ -44,28 +48,104 @@ def git(root: pathlib.Path, *args: str) -> str:
         stderr=subprocess.DEVNULL)
 
 
-def find_legacy(root: pathlib.Path) -> tuple[str, str, bytes]:
-    candidates = []
-    for line in git(root, "rev-list", "--objects", "--all").splitlines():
+def normalize_repo_path(value: str) -> str:
+    value = value.replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    return value.lstrip("/")
+
+
+def legacy_candidates(root: pathlib.Path,
+                      pathspecs: list[str],
+                      accepted_paths: set[str] | None = None) -> list[dict[str, Any]]:
+    """Return unique historical blobs matching pathspecs.
+
+    Path-limited revision walks are dramatically faster than reading every
+    object in a QEMU repository and prevent the current hw/ia64/ipf.c from
+    silently winning a largest-file heuristic.
+    """
+    output = git(root, "rev-list", "--objects", "--all", "--", *pathspecs)
+    accepted = {path.casefold() for path in accepted_paths} if accepted_paths else None
+    candidates: list[dict[str, Any]] = []
+    seen_blobs: set[str] = set()
+
+    for line in output.splitlines():
         parts = line.split(" ", 1)
-        if len(parts) != 2 or not re.search(r"(^|/)ipf\.c$", parts[1], re.I):
+        if len(parts) != 2:
+            continue
+        blob, path = parts
+        path = normalize_repo_path(path)
+        if accepted is not None and path.casefold() not in accepted:
+            continue
+        if blob in seen_blobs:
             continue
         try:
+            if git(root, "cat-file", "-t", blob).strip() != "blob":
+                continue
             data = subprocess.check_output(
-                ["git", "-C", str(root), "cat-file", "blob", parts[0]])
+                ["git", "-C", str(root), "cat-file", "blob", blob])
         except subprocess.CalledProcessError:
             continue
-        candidates.append((data.count(b"\n") + 1, len(data), parts[0], parts[1], data))
-    if not candidates:
-        raise SystemExit("no historical IPF.c blob found in reachable Git history")
-    _, _, blob, path, data = max(candidates)
-    return blob, path, data
+        seen_blobs.add(blob)
+        candidates.append({
+            "blob": blob,
+            "path": path,
+            "data": data,
+            "bytes": len(data),
+            "lines": data.count(b"\n") + 1,
+        })
+    return candidates
+
+
+def find_legacy(root: pathlib.Path,
+                requested_path: str | None = None) -> tuple[str, str, bytes, dict[str, Any]]:
+    if requested_path:
+        path = normalize_repo_path(requested_path)
+        candidates = legacy_candidates(root, [path], {path})
+        strategy = "explicit-path"
+        if not candidates:
+            raise SystemExit(
+                f"no historical IPF.c blob found at requested path {path!r}")
+    else:
+        path = DEFAULT_LEGACY_PATH
+        candidates = legacy_candidates(root, [path], {path})
+        strategy = "preferred-historical-path"
+        if not candidates:
+            all_ipf = legacy_candidates(
+                root, [":(icase,glob)**/ipf.c"])
+            candidates = [
+                row for row in all_ipf
+                if row["path"].casefold() != CURRENT_MACHINE_PATH.casefold()
+            ]
+            strategy = "fallback-noncurrent-ipf-path"
+            if not candidates:
+                raise SystemExit(
+                    "no historical IPF.c ledger found outside current "
+                    f"{CURRENT_MACHINE_PATH}; use --legacy-path to select one")
+
+    selected = max(
+        candidates,
+        key=lambda row: (row["lines"], row["bytes"], row["blob"]),
+    )
+    selection = {
+        "strategy": strategy,
+        "requested_path": normalize_repo_path(requested_path)
+        if requested_path else None,
+        "preferred_path": DEFAULT_LEGACY_PATH,
+        "candidate_count": len(candidates),
+        "selected_by": "largest-line-count-then-bytes",
+    }
+    return selected["blob"], selected["path"], selected["data"], selection
+
+
+def is_source_file(path: pathlib.Path) -> bool:
+    return path.suffix in SOURCE_SUFFIXES or path.name in SOURCE_FILENAMES
 
 
 def source_tree(root: pathlib.Path) -> dict[str, str]:
     tree = {}
     for path in root.rglob("*"):
-        if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
+        if not path.is_file() or not is_source_file(path):
             continue
         rel = path.relative_to(root)
         if ".git" in rel.parts or any(part.startswith("build") for part in rel.parts):
@@ -99,18 +179,22 @@ def present(text: str, value: str) -> bool:
     return value in text
 
 
-def audit(root: pathlib.Path) -> dict:
-    blob, old_path, raw = find_legacy(root)
+def audit(root: pathlib.Path, legacy_path: str | None = None) -> dict[str, Any]:
+    blob, old_path, raw, selection = find_legacy(root, legacy_path)
     legacy = raw.decode("utf-8", errors="replace")
     tree = source_tree(root)
-    ia64 = {p: text for p, text in tree.items()
-            if p.startswith("hw/ia64/") or p.startswith("include/hw/ia64/")}
+    ia64 = {
+        p: text for p, text in tree.items()
+        if p.startswith("hw/ia64/")
+        or p.startswith("include/hw/ia64/")
+        or p.startswith("configs/devices/ia64-softmmu/")
+    }
     other = {p: text for p, text in tree.items() if p not in ia64}
     ia64_text = "\n".join(ia64.values())
     other_text = "\n".join(other.values())
 
     old_functions = sorted((m.start(), m.group("name")) for m in FUNC_RE.finditer(legacy))
-    current_symbols = {}
+    current_symbols: dict[str, list[dict[str, Any]]] = {}
     for path, text in tree.items():
         for match in FUNC_RE.finditer(text):
             current_symbols.setdefault(match.group("name"), []).append(
@@ -164,9 +248,14 @@ def audit(root: pathlib.Path) -> dict:
                        "legacy_line": line_at(legacy, match.start()), "status": status})
 
     counts = Counter(row["status"] for row in obligations)
+    identity_rows = [row for row in obligations if row["kind"] != "call"]
+    identity_counts = Counter(row["status"] for row in identity_rows)
     total = len(obligations)
+    identity_total = len(identity_rows)
     wired = counts["machine-wired"]
     available = counts["model-available"]
+    identity_wired = identity_counts["machine-wired"]
+    identity_available = identity_counts["model-available"]
     return {
         "schema": 1,
         "warning": "Structural correspondence is evidence, not architectural proof.",
@@ -174,6 +263,7 @@ def audit(root: pathlib.Path) -> dict:
             "git_blob": blob, "repository_path": old_path,
             "sha256": hashlib.sha256(raw).hexdigest(),
             "bytes": len(raw), "lines": raw.count(b"\n") + 1,
+            "selection": selection,
         },
         "current": {"ia64_files": sorted(ia64)},
         "summary": {
@@ -183,6 +273,14 @@ def audit(root: pathlib.Path) -> dict:
             "machine_wired_percent": round(100 * wired / total, 1) if total else 100.0,
             "machine_or_model_present_percent":
                 round(100 * (wired + available) / total, 1) if total else 100.0,
+            "identity_obligations": identity_total,
+            "identity_obligation_status": dict(sorted(identity_counts.items())),
+            "identity_machine_wired_percent":
+                round(100 * identity_wired / identity_total, 1)
+                if identity_total else 100.0,
+            "identity_machine_or_model_present_percent":
+                round(100 * (identity_wired + identity_available) / identity_total, 1)
+                if identity_total else 100.0,
             "legacy_address_irq_macros": len(macros),
         },
         "functions": functions, "obligations": obligations,
@@ -193,9 +291,14 @@ def audit(root: pathlib.Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=pathlib.Path, default=pathlib.Path.cwd())
+    parser.add_argument(
+        "--legacy-path",
+        help=("repository path of the historical ledger; defaults to "
+              f"{DEFAULT_LEGACY_PATH}"),
+    )
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
-    result = audit(args.root.resolve())
+    result = audit(args.root.resolve(), args.legacy_path)
     encoded = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(encoded, encoding="utf-8")
