@@ -1,0 +1,73 @@
+diff --git a/qapi/machine.json b/qapi/machine.json
+--- a/qapi/machine.json
++++ b/qapi/machine.json
+@@ -26,6 +26,8 @@
+ #
+ # @avr: since 5.1
+ #
++# @ia64: since 10.2
++#
+ # @loongarch64: since 7.1
+ #
+ # .. note:: The resulting QMP strings can be appended to the
+@@ -37,7 +39,7 @@
+ ##
+ { 'enum' : 'SysEmuTarget',
+   'data' : [ 'aarch64', 'alpha', 'arm', 'avr', 'hppa', 'i386',
+-             'loongarch64', 'm68k', 'microblaze', 'microblazeel', 'mips', 'mips64',
++             'ia64', 'loongarch64', 'm68k', 'microblaze', 'microblazeel', 'mips', 'mips64',
+              'mips64el', 'mipsel', 'or1k', 'ppc',
+              'ppc64', 'riscv32', 'riscv64', 'rx', 's390x', 'sh4',
+              'sh4eb', 'sparc', 'sparc64', 'tricore',
+diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
+--- a/tests/qtest/ia64-ipf-test.c
++++ b/tests/qtest/ia64-ipf-test.c
+@@ -10,6 +10,8 @@
+ #include "libqtest.h"
+ #include "hw/pci/pci.h"
+ #include "hw/pci/pci_ids.h"
++#include "qobject/qdict.h"
++#include "qobject/qlist.h"
+ 
+ #define IPF_IOSAPIC_BASE            UINT64_C(0xfec00000)
+ #define IPF_IOSAPIC_REG_SELECT      0x00
+@@ -68,6 +70,32 @@ static QTestState *ipf_qtest_start(void)
+                        firmware_path);
+ }
+ 
++static void test_qmp_target(void)
++{
++    QTestState *qts = ipf_qtest_start();
++    QDict *response;
++    QDict *target;
++    QList *cpus;
++
++    response = qtest_qmp(qts, "{'execute': 'query-target'}");
++    g_assert_false(qmp_rsp_is_err(response));
++    target = qdict_get_qdict(response, "return");
++    g_assert_nonnull(target);
++    g_assert_cmpstr(qdict_get_try_str(target, "arch"), ==, "ia64");
++    qobject_unref(response);
++
++    /* This used to abort in qapi_enum_parse() before producing a response. */
++    response = qtest_qmp(qts, "{'execute': 'query-cpus-fast'}");
++    g_assert_false(qmp_rsp_is_err(response));
++    cpus = qdict_get_qlist(response, "return");
++    g_assert_nonnull(cpus);
++    g_assert_cmpuint(qlist_size(cpus), ==, 1);
++    qobject_unref(response);
++
++    qtest_quit(qts);
++}
++
+ static void assert_pci_id(QTestState *qts, unsigned int function,
+                           uint16_t device_id)
+ {
+@@ -190,6 +218,7 @@ int main(int argc, char **argv)
+     g_test_init(&argc, &argv, NULL);
+     create_test_firmware();
+ 
++    qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
+     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
+     qtest_add_func("/ia64/ipf/piix4-sci-iosapic",
+                    test_piix4_sci_reaches_iosapic);
