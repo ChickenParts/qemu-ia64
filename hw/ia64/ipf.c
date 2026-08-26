@@ -60,6 +60,7 @@
 #include "system/ioport.h"
 #include "elf.h"
 #include "hw/ia64/gfw.h"
+#include "hw/ia64/ipf-460gx.h"
 #include "hw/ia64/iosapic.h"
 #include "target/ia64/cpu.h"
 #include "migration/vmstate.h"
@@ -106,17 +107,6 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPFMachineState, IPF_MACHINE)
  * by Xen/KVM GFW, and match the location of the IA-64 reset vector
  * (0xffff0000 == GFW_START + 0x00ff0000).
  */
-
-#define IPF_PCI_FW_BUS 0xff
-#define IPF_PCI_FW_DEV_COUNT 32
-#define IPF_PCI_FW_MAX_FUNC 8
-
-typedef struct IPFPciFwConfig {
-    bool present;
-    uint8_t cfg[PCI_CONFIG_SPACE_SIZE];
-    uint8_t wmask[PCI_CONFIG_SPACE_SIZE];
-    uint8_t w1c[PCI_CONFIG_SPACE_SIZE];
-} IPFPciFwConfig;
 
 struct IPFMachineState {
     MachineState parent;
@@ -167,26 +157,18 @@ struct IPFMachineState {
     uint64_t acpi_pm_timer_start_ns;
     IA64IOSAPICState *iosapic;
     qemu_irq isa_irqs[ISA_NUM_IRQS];
-    MemoryRegion gx_mmio;
-    MemoryRegion gx_mmio_alias;
-    uint32_t gx_mmio_cb0;
-    uint32_t gx_mmio_cc0;
+    IA64IPF460GXState *gx;
 
     /* Lightweight debug watchpoints (see QEMU_IA64_WATCH_* env vars). */
     struct IpfTextWatch *text_watch[8];
 
     /* I/O tracing state (QEMU_IPF_TRACE_* env vars). */
-    uint32_t pci_cfgaddr;
     uint32_t trace_pci_cfgaddr;
-    IPFPciFwConfig pci_fw_cfg[IPF_PCI_FW_DEV_COUNT][IPF_PCI_FW_MAX_FUNC];
 };
 
 #define IPF_VARSTORE_SIGNATURE 0x53535624U /* "$VSS" */
 #define IPF_VARSTORE_FORMATTED 0x5a
 #define IPF_VARSTORE_HEALTHY   0xfe
-
-static void ipf_pci_fw_cfg_set_ro(IPFPciFwConfig *cfg, uint16_t off,
-                                  unsigned size, uint64_t value);
 
 static bool ipf_fw_nvram_blank(const uint8_t *buf, size_t size)
 {
@@ -563,21 +545,6 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 #define IPF_LEGACY_IO_BASE_FW 0x00000ffffc000000ULL
 #define IPF_LEGACY_IO_SIZE (64ULL * 1024 * 1024)
 
-#define IPF_PCI_FW_DEV_SAC 0
-#define IPF_PCI_FW_DEV_SDC 4
-#define IPF_PCI_FW_DEV_GXB 2
-#define IPF_PCI_FW_DEV_MAC 5 /* Memory Card A */
-#define IPF_PCI_FW_DEV_MDC 6 /* Memory Card B */
-
-#define IPF_PCI_FW_DEVICE_ID_SAC 0x84e0 /* 460GX System Address Controller */
-#define IPF_PCI_FW_DEVICE_ID_SDC 0x84e1 /* 460GX System Data Controller */
-#define IPF_PCI_FW_DEVICE_ID_GXB_FN1 0x84ea /* 460GX AGP Bridge (GXB function 1) */
-#define IPF_PCI_FW_DEVICE_ID_GXB_FN2 0x84e2 /* 460GX AGP Bridge (GXB function 2) */
-#define IPF_PCI_FW_DEVICE_ID_MAC 0x84e3 /* 460GX Memory Address Controller */
-#define IPF_PCI_FW_DEVICE_ID_MDC 0x84e4 /* 460GX Memory Data Controller */
-#define IPF_PCI_FW_DEVICE_ID_WXB 0x84e6 /* 460GX Wide PCI Expander Bridge */
-#define IPF_PCI_FW_DEVICE_ID_IHPC 0x123f /* 460GX WXB Integrated Hot-Plug Controller */
-
 /* IA-64 IOSAPIC base used by Linux/ia64 (see asm/iosapic.h). */
 #define IPF_IOSAPIC_BASE 0x00000000fec00000ULL
 
@@ -586,9 +553,6 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
  * The SDV ROM programs 0xfeb00cb0/0xfeb00cc0 as a simple doorbell/ID latch.
  */
 #define IPF_GX_MMIO_BASE 0x00000000feb00000ULL
-#define IPF_GX_MMIO_SIZE 0x00001000ULL
-#define IPF_GX_MMIO_REG_CB0 0x0cb0
-#define IPF_GX_MMIO_REG_CC0 0x0cc0
 
 /*
  * Xen-style VGA hole compensation.
@@ -3524,8 +3488,7 @@ static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
         if (!(strap & 0x4)) {
             sac44 |= (1U << 7);
         }
-        ipf_pci_fw_cfg_set_ro(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0],
-                              0x44, 2, sac44);
+        ia64_ipf_460gx_set_sac_strap(m->gx, sac44);
     }
 
     DPRINTF("CMOS initialized: RAM %lu MB\n",
@@ -4480,442 +4443,13 @@ static void ipf_trace_mmio(const char *dev, hwaddr addr, unsigned size,
                   dev ? dev : "unknown", (uint64_t)addr, size, data);
 }
 
-static int ipf_pci_fw_dev_index(uint8_t dev)
-{
-    return (dev < IPF_PCI_FW_DEV_COUNT) ? (int)dev : -1;
-}
-
-static void ipf_pci_fw_cfg_set(IPFPciFwConfig *cfg, uint16_t off, unsigned size,
-                               uint64_t value, uint64_t wmask, uint64_t w1c)
-{
-    for (unsigned i = 0; i < size; i++) {
-        uint16_t idx = off + i;
-        if (idx >= PCI_CONFIG_SPACE_SIZE) {
-            break;
-        }
-        cfg->cfg[idx] = (value >> (i * 8)) & 0xff;
-        cfg->wmask[idx] = (wmask >> (i * 8)) & 0xff;
-        cfg->w1c[idx] = (w1c >> (i * 8)) & 0xff;
-    }
-}
-
-static void ipf_pci_fw_cfg_set_ro(IPFPciFwConfig *cfg, uint16_t off,
-                                  unsigned size, uint64_t value)
-{
-    ipf_pci_fw_cfg_set(cfg, off, size, value, 0, 0);
-}
-
-static void ipf_pci_fw_cfg_set_rw(IPFPciFwConfig *cfg, uint16_t off,
-                                  unsigned size, uint64_t value, uint64_t wmask)
-{
-    ipf_pci_fw_cfg_set(cfg, off, size, value, wmask, 0);
-}
-
-static void ipf_pci_fw_cfg_set_w1c(IPFPciFwConfig *cfg, uint16_t off,
-                                   unsigned size, uint64_t value,
-                                   uint64_t w1c)
-{
-    ipf_pci_fw_cfg_set(cfg, off, size, value, 0, w1c);
-}
-
-static void ipf_pci_fw_cfg_init_one(IPFPciFwConfig *cfg,
-                                    uint16_t vendor_id,
-                                    uint16_t device_id,
-                                    uint8_t base_class,
-                                    uint8_t sub_class,
-                                    uint8_t prog_if,
-                                    uint8_t header_type)
-{
-    cfg->present = true;
-    memset(cfg->cfg, 0, sizeof(cfg->cfg));
-    memset(cfg->wmask, 0xff, sizeof(cfg->wmask));
-    memset(cfg->w1c, 0, sizeof(cfg->w1c));
-
-    ipf_pci_fw_cfg_set_ro(cfg, PCI_VENDOR_ID, 2, vendor_id);
-    ipf_pci_fw_cfg_set_ro(cfg, PCI_DEVICE_ID, 2, device_id);
-    ipf_pci_fw_cfg_set_ro(cfg, PCI_REVISION_ID, 1, 0x00);
-    ipf_pci_fw_cfg_set_ro(cfg, PCI_CLASS_PROG, 1, prog_if);
-    ipf_pci_fw_cfg_set_ro(cfg, PCI_CLASS_DEVICE, 2,
-                          (base_class << 8) | sub_class);
-    ipf_pci_fw_cfg_set_ro(cfg, PCI_HEADER_TYPE, 1, header_type);
-
-    /* Keep identity fields read-only. */
-    cfg->wmask[PCI_VENDOR_ID] = 0;
-    cfg->wmask[PCI_VENDOR_ID + 1] = 0;
-    cfg->wmask[PCI_DEVICE_ID] = 0;
-    cfg->wmask[PCI_DEVICE_ID + 1] = 0;
-    cfg->wmask[PCI_REVISION_ID] = 0;
-    cfg->wmask[PCI_CLASS_PROG] = 0;
-    cfg->wmask[PCI_CLASS_DEVICE] = 0;
-    cfg->wmask[PCI_CLASS_DEVICE + 1] = 0;
-    cfg->wmask[PCI_HEADER_TYPE] = 0;
-}
-
-static void ipf_pci_fw_cfg_init_sac(IPFPciFwConfig *fn0,
-                                    IPFPciFwConfig *fn1,
-                                    IPFPciFwConfig *fn2)
-{
-    /* SECTID/DEDTID/FSETID: bit7 RW, bit6 W1C, bits5:0 RO. */
-    ipf_pci_fw_cfg_set(fn0, 0x80, 1, 0x00, 0x80, 0x40);
-    ipf_pci_fw_cfg_set(fn0, 0x81, 1, 0x00, 0x80, 0x40);
-    ipf_pci_fw_cfg_set(fn0, 0x82, 1, 0x00, 0x80, 0x40);
-
-    /* XTPRS: read-only, default 0x80 in each byte. */
-    ipf_pci_fw_cfg_set_ro(fn0, 0xC0, 8, 0x8080808080808080ULL);
-
-    /* FERR_SAC / NERR_SAC: write-1-clear status registers. */
-    ipf_pci_fw_cfg_set_w1c(fn1, 0x40, 4, 0x00000000U, 0xffffffffU);
-    ipf_pci_fw_cfg_set_w1c(fn1, 0x44, 4, 0x00000000U, 0xffffffffU);
-
-    /* BIUITID: bits 5:0 RW. */
-    ipf_pci_fw_cfg_set_rw(fn1, 0x80, 1, 0x00, 0x3f);
-
-    /* IT_MON PMD/PMC counters. */
-    for (int i = 0; i < 6; i++) {
-        uint16_t pmd = 0x90 + (i * 8);
-        uint16_t pmc = 0xD0 + (i * 8);
-        ipf_pci_fw_cfg_set_rw(fn2, pmd, 8, 0x0,
-                              0x000000ffffffffffULL);
-        ipf_pci_fw_cfg_set_rw(fn2, pmc, 8, 0x0,
-                              0x000001ffffffffffULL);
-    }
-}
-
-static void ipf_pci_fw_cfg_init_wxb(IPFPciFwConfig *cfg)
-{
-    /* WXB expander bus ID (firmware programs reg 0x40 early). */
-    ipf_pci_fw_cfg_set_rw(cfg, 0x40, 2, 0x00ff, 0x00ff);
-    /* WXB ERRSTS: write-1-clear flags. */
-    ipf_pci_fw_cfg_set_w1c(cfg, 0x44, 1, 0x00, 0xAB);
-    /* WXB ERRCMD: control bits. Default 0x8040. */
-    ipf_pci_fw_cfg_set_rw(cfg, 0x45, 2, 0x8040, 0xB800);
-}
-
-static void ipf_pci_fw_cfg_init_sdc(IPFPciFwConfig *cfg)
-{
-    /* SDC first-error logs (RO). */
-    ipf_pci_fw_cfg_set_ro(cfg, 0x40, 8, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x48, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x49, 2, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x50, 8, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x58, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x59, 2, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x60, 8, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x68, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x69, 2, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x70, 8, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x78, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x79, 2, 0);
-
-    ipf_pci_fw_cfg_set_w1c(cfg, 0x80, 4, 0x00000000U, 0xffffffffU);
-    ipf_pci_fw_cfg_set_w1c(cfg, 0x84, 4, 0x00000000U, 0xffffffffU);
-
-    ipf_pci_fw_cfg_set_ro(cfg, 0x88, 4, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x8C, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x8D, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x8E, 1, 0);
-
-    ipf_pci_fw_cfg_set_rw(cfg, 0x98, 3, 0x000000, 0x01ffff);
-    ipf_pci_fw_cfg_set_rw(cfg, 0x9C, 3, 0x000000, 0x01ffff);
-    ipf_pci_fw_cfg_set_rw(cfg, 0xA0, 8, 0x0, 0x000000ffffffffffULL);
-    ipf_pci_fw_cfg_set_rw(cfg, 0xA8, 8, 0x0, 0x000000ffffffffffULL);
-
-    ipf_pci_fw_cfg_set_rw(cfg, 0xC8, 1, 0x00, 0xff);
-    ipf_pci_fw_cfg_set_rw(cfg, 0xC9, 1, 0x00, 0xff);
-    ipf_pci_fw_cfg_set_rw(cfg, 0xCA, 1, 0x00, 0xff);
-    ipf_pci_fw_cfg_set_rw(cfg, 0xCB, 1, 0x00, 0xff);
-
-    ipf_pci_fw_cfg_set_ro(cfg, 0xD0, 8, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0xD8, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0xD9, 2, 0);
-
-    ipf_pci_fw_cfg_set_ro(cfg, 0xE0, 8, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0xE8, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0xE9, 2, 0);
-
-    ipf_pci_fw_cfg_set_ro(cfg, 0xF0, 8, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0xF8, 1, 0);
-    ipf_pci_fw_cfg_set_ro(cfg, 0xF9, 2, 0);
-}
-
-static void ipf_pci_fw_cfg_init_mac(IPFPciFwConfig *cfg)
-{
-    ipf_pci_fw_cfg_set_ro(cfg, 0x98, 1, 0x00);
-    ipf_pci_fw_cfg_set_ro(cfg, 0x9C, 3, 0x000000);
-}
-
-static void ipf_pci_fw_cfg_init_ihpc(IPFPciFwConfig *cfg)
-{
-    /* IHPC command: SERR, parity enable, memory space. */
-    ipf_pci_fw_cfg_set_rw(cfg, PCI_COMMAND, 2, 0x0000, 0x0142);
-    /* IHPC status: DEVSEL medium (01), W1C on error bits. */
-    ipf_pci_fw_cfg_set(cfg, PCI_STATUS, 2, 0x0200, 0x0000, 0xC000);
-
-    /* Cache line size / latency timer. */
-    ipf_pci_fw_cfg_set_rw(cfg, PCI_CACHE_LINE_SIZE, 1, 0x00, 0xff);
-    ipf_pci_fw_cfg_set_rw(cfg, PCI_LATENCY_TIMER, 1, 0x00, 0xff);
-
-    /* Interrupt line/pin. */
-    ipf_pci_fw_cfg_set_rw(cfg, PCI_INTERRUPT_LINE, 1, 0xff, 0xff);
-    ipf_pci_fw_cfg_set_ro(cfg, PCI_INTERRUPT_PIN, 1, 0x01);
-
-    /* Hot-plug slot identifier. */
-    ipf_pci_fw_cfg_set_rw(cfg, 0x40, 2, 0x0000, 0x00ff);
-    /* Misc hot-plug configuration. */
-    ipf_pci_fw_cfg_set_rw(cfg, 0x42, 2, 0x0002, 0xF080);
-    /* Hot-plug features. */
-    ipf_pci_fw_cfg_set_ro(cfg, 0x44, 2, 0x0000);
-    /* Switch change / power fault SERR status. */
-    ipf_pci_fw_cfg_set_w1c(cfg, 0x48, 1, 0x00, 0x3f);
-    ipf_pci_fw_cfg_set_w1c(cfg, 0x49, 1, 0x00, 0x3f);
-    /* Arbiter SERR status. */
-    ipf_pci_fw_cfg_set_ro(cfg, 0x4A, 1, 0x00);
-    /* Memory index / access port. */
-    ipf_pci_fw_cfg_set_rw(cfg, 0x50, 4, 0x00000000, 0x000000fc);
-    ipf_pci_fw_cfg_set_rw(cfg, 0x54, 4, 0x00000000, 0xffffffff);
-}
-
-static void ipf_init_pci_fw_cfg(IPFMachineState *m)
-{
-    memset(m->pci_fw_cfg, 0, sizeof(m->pci_fw_cfg));
-
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_SAC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x80);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][1],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_SAC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][2],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_SAC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
-    ipf_pci_fw_cfg_init_sac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0],
-                            &m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][1],
-                            &m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][2]);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SDC][0],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_SDC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
-    ipf_pci_fw_cfg_init_sdc(&m->pci_fw_cfg[IPF_PCI_FW_DEV_SDC][0]);
-
-    /*
-     * GXB functions 1 and 2 are chipset-internal configuration functions.
-     * Function 0 remains the real PCI device occupying slot 2 (normally VGA,
-     * or a user-selected device); do not replace it with a synthetic model.
-     */
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][1],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_GXB_FN1,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
-    ipf_pci_fw_cfg_set_ro(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][1],
-                          PCI_REVISION_ID, 1, 0x04);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][2],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_GXB_FN2,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
-    ipf_pci_fw_cfg_set_ro(&m->pci_fw_cfg[IPF_PCI_FW_DEV_GXB][2],
-                          PCI_REVISION_ID, 1, 0x04);
-
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][0],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_MAC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x80);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][1],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_MDC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
-    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][0]);
-    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MAC][1]);
-
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][0],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_MAC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x80);
-    ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][1],
-                            PCI_VENDOR_ID_INTEL,
-                            IPF_PCI_FW_DEVICE_ID_MDC,
-                            PCI_CLASS_BRIDGE_HOST >> 8,
-                            PCI_CLASS_BRIDGE_HOST & 0xff,
-                            0x00, 0x00);
-    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][0]);
-    ipf_pci_fw_cfg_init_mac(&m->pci_fw_cfg[IPF_PCI_FW_DEV_MDC][1]);
-
-    for (int dev = 16; dev <= 23; dev++) {
-        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][0], PCI_VENDOR_ID_INTEL,
-                                IPF_PCI_FW_DEVICE_ID_WXB,
-                                PCI_CLASS_BRIDGE_PCI >> 8,
-                                PCI_CLASS_BRIDGE_PCI & 0xff,
-                                0x00, 0x81);
-        ipf_pci_fw_cfg_init_one(&m->pci_fw_cfg[dev][1], PCI_VENDOR_ID_INTEL,
-                                IPF_PCI_FW_DEVICE_ID_IHPC,
-                                0x08, 0x04, 0x00, 0x00);
-        ipf_pci_fw_cfg_init_wxb(&m->pci_fw_cfg[dev][0]);
-        ipf_pci_fw_cfg_init_ihpc(&m->pci_fw_cfg[dev][1]);
-    }
-
-    /* SDV firmware pokes this control register on the SAC device. */
-    pci_set_long(m->pci_fw_cfg[IPF_PCI_FW_DEV_SAC][0].cfg + 0x70, 0xffffffffU);
-}
-
-static uint32_t ipf_pci_fw_cfg_read(IPFMachineState *m, uint8_t dev,
-                                    uint8_t func, uint16_t reg, unsigned size)
-{
-    static int trace_special = -1;
-    if (trace_special == -1) {
-        trace_special = getenv("QEMU_IPF_TRACE_PCI_SPECIAL") ? 1 : 0;
-    }
-    int idx = ipf_pci_fw_dev_index(dev);
-    if (idx < 0 || func >= IPF_PCI_FW_MAX_FUNC ||
-        !m->pci_fw_cfg[idx][func].present) {
-        return (size == 1) ? 0xffU :
-               (size == 2) ? 0xffffU :
-               0xffffffffU;
-    }
-
-    uint32_t val = 0;
-    IPFPciFwConfig *cfg = &m->pci_fw_cfg[idx][func];
-    for (unsigned i = 0; i < size; i++) {
-        uint16_t off = reg + i;
-        uint8_t byte = 0xff;
-        if (off < PCI_CONFIG_SPACE_SIZE) {
-            byte = cfg->cfg[off];
-        }
-        val |= (uint32_t)byte << (i * 8);
-    }
-    if (trace_special && dev == IPF_PCI_FW_DEV_MDC) {
-        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) ||
-            (func >= 4 && reg == 0x48)) {
-            uint64_t pc = 0;
-            CPUState *cs = current_cpu;
-            if (cs) {
-                CPUIA64State *env = cpu_env(cs);
-                pc = env->ip;
-            }
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "ipf pci special rd dev=%u fn=%u reg=0x%02x size=%u val=0x%08x pc=%016" PRIx64 "\n",
-                          dev, func, reg, size, val, pc);
-        }
-    }
-    return val;
-}
-
-static void ipf_pci_fw_cfg_write(IPFMachineState *m, uint8_t dev,
-                                 uint8_t func,
-                                 uint16_t reg, unsigned size, uint32_t val)
-{
-    static int trace_special = -1;
-    if (trace_special == -1) {
-        trace_special = getenv("QEMU_IPF_TRACE_PCI_SPECIAL") ? 1 : 0;
-    }
-    int idx = ipf_pci_fw_dev_index(dev);
-    if (idx < 0 || func >= IPF_PCI_FW_MAX_FUNC ||
-        !m->pci_fw_cfg[idx][func].present) {
-        return;
-    }
-
-    IPFPciFwConfig *cfg = &m->pci_fw_cfg[idx][func];
-    for (unsigned i = 0; i < size; i++) {
-        uint16_t off = reg + i;
-        if (off >= PCI_CONFIG_SPACE_SIZE) {
-            break;
-        }
-        uint8_t w1c = cfg->w1c[off];
-        uint8_t mask = cfg->wmask[off] & ~w1c;
-        uint8_t byte = (val >> (i * 8)) & 0xff;
-        uint8_t cur = cfg->cfg[off];
-        if (w1c) {
-            cur &= ~(byte & w1c);
-        }
-        cur = (cur & ~mask) | (byte & mask);
-        cfg->cfg[off] = cur;
-    }
-    if (trace_special && dev == IPF_PCI_FW_DEV_MDC) {
-        if ((func <= 1 && (reg == 0x90 || reg == 0x94)) ||
-            (func >= 4 && reg == 0x48)) {
-            uint64_t pc = 0;
-            CPUState *cs = current_cpu;
-            if (cs) {
-                CPUIA64State *env = cpu_env(cs);
-                pc = env->ip;
-            }
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "ipf pci special wr dev=%u fn=%u reg=0x%02x size=%u val=0x%08x pc=%016" PRIx64 "\n",
-                          dev, func, reg, size, val, pc);
-        }
-    }
-}
-
-static bool ipf_pci_fw_cfg_io(IPFMachineState *m, bool is_write, uint32_t port,
-                              unsigned size, uint32_t *val)
-{
-    if (port < 0xcfc || port > 0xcff) {
-        return false;
-    }
-
-    uint32_t cfgaddr = m->pci_cfgaddr;
-    if (!(cfgaddr & 0x80000000U)) {
-        return false;
-    }
-
-    uint8_t bus = (cfgaddr >> 16) & 0xff;
-    uint8_t dev = (cfgaddr >> 11) & 0x1f;
-    uint8_t func = (cfgaddr >> 8) & 0x7;
-    bool cse_bus = (bus == IPF_PCI_FW_BUS);
-    bool legacy_bus0 = (bus == 0);
-
-    /* Firmware probes internal chipset devices on bus 0 and via CSE (0xff). */
-    if (!cse_bus && !legacy_bus0) {
-        return false;
-    }
-
-    int idx = ipf_pci_fw_dev_index(dev);
-    if (idx < 0 || func >= IPF_PCI_FW_MAX_FUNC ||
-        !m->pci_fw_cfg[idx][func].present) {
-        if (legacy_bus0) {
-            return false;
-        }
-        if (!is_write && val) {
-            *val = ~0U;
-        }
-        return true;
-    }
-
-    uint16_t reg = (cfgaddr & 0xfc) + (port & 0x3);
-    if (is_write) {
-        ipf_pci_fw_cfg_write(m, dev, func, reg, size, val ? *val : 0);
-    } else if (val) {
-        *val = ipf_pci_fw_cfg_read(m, dev, func, reg, size);
-    }
-    return true;
-}
-
 static uint64_t ipf_legacy_io_read(void *opaque, hwaddr addr, unsigned size)
 {
     IPFMachineState *m = opaque;
     uint32_t port = ipf_to_legacy_io(addr);
     uint32_t val = 0;
 
-    if (ipf_pci_fw_cfg_io(m, false, port, size, &val)) {
+    if (ia64_ipf_460gx_config_data(m->gx, false, port, size, &val)) {
         ipf_trace_ioport(m, false, port, size, val);
         ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, val, false);
         return val;
@@ -4962,13 +4496,13 @@ static void ipf_legacy_io_write(void *opaque, hwaddr addr, uint64_t data,
     uint32_t port = ipf_to_legacy_io(addr);
 
     if (port == 0xcf8 && size == 4) {
-        m->pci_cfgaddr = (uint32_t)data;
+        ia64_ipf_460gx_set_config_address(m->gx, data);
     }
     ipf_trace_ioport(m, true, port, size, (uint32_t)data);
     ipf_trace_mmio("legacy-io", IPF_LEGACY_IO_BASE + addr, size, data, true);
 
     uint32_t val32 = (uint32_t)data;
-    if (ipf_pci_fw_cfg_io(m, true, port, size, &val32)) {
+    if (ia64_ipf_460gx_config_data(m->gx, true, port, size, &val32)) {
         return;
     }
 
@@ -5328,104 +4862,20 @@ static void ipf_init_acpi_pm(IPFMachineState *m, MemoryRegion *sysmem)
     DPRINTF("ACPI-PM: mapped at 0x%016" PRIx64 "\n", (uint64_t)IPF_ACPI_PM_BASE);
 }
 
-static uint32_t ipf_gx_mmio_read_reg(IPFMachineState *m, hwaddr addr)
+static void ipf_init_460gx(IPFMachineState *m)
 {
-    switch (addr) {
-    case IPF_GX_MMIO_REG_CB0:
-        return m->gx_mmio_cb0 | (1U << 7);
-    case IPF_GX_MMIO_REG_CC0:
-        return m->gx_mmio_cc0 | (1U << 7);
-    default:
-        return 0;
-    }
-}
+    DeviceState *dev = qdev_new(TYPE_IA64_IPF_460GX);
 
-static void ipf_gx_mmio_write_reg(IPFMachineState *m, hwaddr addr,
-                                  uint32_t value, uint32_t mask)
-{
-    switch (addr) {
-    case IPF_GX_MMIO_REG_CB0:
-        m->gx_mmio_cb0 = (m->gx_mmio_cb0 & ~mask) | (value & mask);
-        /* Doorbell: firmware expects bit1 to reflect bit0 activity. */
-        if (m->gx_mmio_cb0 & 0x1) {
-            m->gx_mmio_cb0 |= 0x2;
-        } else {
-            m->gx_mmio_cb0 &= ~0x2;
-        }
-        break;
-    case IPF_GX_MMIO_REG_CC0:
-        m->gx_mmio_cc0 = (m->gx_mmio_cc0 & ~mask) | (value & mask);
-        break;
-    default:
-        break;
-    }
-}
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, IPF_GX_MMIO_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1,
+                    IPF_GX_MMIO_BASE | (1ULL << 63));
+    m->gx = IA64_IPF_460GX(dev);
 
-static uint64_t ipf_gx_mmio_read(void *opaque, hwaddr addr, unsigned size)
-{
-    IPFMachineState *m = opaque;
-    uint64_t val = 0;
-
-    if (size >= 1 && size <= 4) {
-        uint32_t reg = ipf_gx_mmio_read_reg(m, addr & ~0x3ULL);
-        unsigned shift = (addr & 3) * 8;
-        uint64_t mask = (size >= 8) ? UINT64_MAX :
-                        ((1ULL << (size * 8)) - 1);
-        val = (reg >> shift) & mask;
-    }
-
-    ipf_trace_mmio("gx-mmio", IPF_GX_MMIO_BASE + addr, size, val, false);
-    return val;
-}
-
-static void ipf_gx_mmio_write(void *opaque, hwaddr addr, uint64_t data,
-                              unsigned size)
-{
-    IPFMachineState *m = opaque;
-
-    ipf_trace_mmio("gx-mmio", IPF_GX_MMIO_BASE + addr, size, data, true);
-    if (size >= 1 && size <= 4) {
-        unsigned shift = (addr & 3) * 8;
-        uint32_t mask = (size == 4) ? 0xffffffffU :
-                        (uint32_t)((1ULL << (size * 8)) - 1);
-        uint32_t value = (uint32_t)data & mask;
-        if (shift) {
-            mask <<= shift;
-            value <<= shift;
-        }
-        ipf_gx_mmio_write_reg(m, addr & ~0x3ULL, value, mask);
-    }
-}
-
-static const MemoryRegionOps ipf_gx_mmio_ops = {
-    .read = ipf_gx_mmio_read,
-    .write = ipf_gx_mmio_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 4,
-    },
-};
-
-static void ipf_init_gx_mmio(IPFMachineState *m, MemoryRegion *sysmem)
-{
-    m->gx_mmio_cb0 = 0;
-    m->gx_mmio_cc0 = 0;
-    memory_region_init_io(&m->gx_mmio, OBJECT(m), &ipf_gx_mmio_ops, m,
-                          "ipf.gx-mmio", IPF_GX_MMIO_SIZE);
-    memory_region_add_subregion(sysmem, IPF_GX_MMIO_BASE, &m->gx_mmio);
-    /*
-     * Firmware uses region-4 addresses (bit63 set) for the doorbell window.
-     * Mirror the GX MMIO block there so CB0/CC0 reads hit the same registers.
-     */
-    memory_region_init_alias(&m->gx_mmio_alias, OBJECT(m),
-                             "ipf.gx-mmio.alias", &m->gx_mmio, 0,
-                             IPF_GX_MMIO_SIZE);
-    memory_region_add_subregion(sysmem,
-                                IPF_GX_MMIO_BASE | (1ULL << 63),
-                                &m->gx_mmio_alias);
-    DPRINTF("GX-MMIO: mapped at 0x%016" PRIx64 "\n",
-            (uint64_t)IPF_GX_MMIO_BASE);
+    DPRINTF("460GX: mapped control windows at 0x%016" PRIx64
+            " and 0x%016" PRIx64 "\n",
+            (uint64_t)IPF_GX_MMIO_BASE,
+            (uint64_t)(IPF_GX_MMIO_BASE | (1ULL << 63)));
 }
 
 static void ipf_init_iosapic(IPFMachineState *m)
@@ -5557,10 +5007,9 @@ static void ipf_init(MachineState *machine)
 
     ipf_init_uart(m, sysmem);
     ipf_init_debugcon(m);
-    ipf_init_pci_fw_cfg(m);
+    ipf_init_460gx(m);
     ipf_init_legacy_io(m, sysmem);
     ipf_init_iosapic(m);
-    ipf_init_gx_mmio(m, sysmem);
     /*
      * Provide the ACPI PM1/PMTMR register block for both firmware and direct
      * -kernel boots.

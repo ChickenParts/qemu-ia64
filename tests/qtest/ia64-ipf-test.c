@@ -12,6 +12,10 @@
 #include "hw/pci/pci_ids.h"
 
 #define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
+#define IPF_GX_MMIO_BASE            UINT64_C(0xfeb00000)
+#define IPF_GX_MMIO_ALIAS_BASE      UINT64_C(0x80000000feb00000)
+#define IPF_GX_MMIO_CB0             0x0cb0
+#define IPF_GX_MMIO_CC0             0x0cc0
 #define IPF_IOSAPIC_BASE            UINT64_C(0xfec00000)
 #define IPF_IOSAPIC_REG_SELECT      0x00
 #define IPF_IOSAPIC_WINDOW          0x10
@@ -23,6 +27,8 @@
 #define IPF_PIIX_DEV                1
 #define IPF_PIIX_PIRQB              0x61
 #define IPF_PIIX4_SMBUS_IO_BASE     0xb100
+#define TEST_SAC_DEV                0
+#define TEST_SAC_SECTID             0x80
 #define TEST_PCI_DEV                2
 #define TEST_PCI_IRQ                11
 #define TEST_GXB_FN1_DEVICE_ID      0x84ea
@@ -345,6 +351,54 @@ static void test_gxb_sparse_config_identity(void)
     qtest_quit(qts);
 }
 
+static void test_460gx_reset(void)
+{
+    const uint32_t cc0_value = 0x12340001;
+    QTestState *qts = ipf_qtest_start_args("-device e1000,addr=2.0");
+
+    g_assert_cmphex(pci_fw_config_readb(qts, 0xff, TEST_SAC_DEV, 0,
+                                       TEST_SAC_SECTID),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IPF_GX_MMIO_BASE + IPF_GX_MMIO_CB0),
+                    ==, 0x80);
+    g_assert_cmphex(qtest_readl(qts,
+                               IPF_GX_MMIO_ALIAS_BASE + IPF_GX_MMIO_CB0),
+                    ==, 0x80);
+    g_assert_cmphex(qtest_readl(qts, IPF_GX_MMIO_BASE + IPF_GX_MMIO_CC0),
+                    ==, 0x80);
+
+    pci_fw_config_writeb(qts, 0xff, TEST_SAC_DEV, 0,
+                         TEST_SAC_SECTID, 0x80);
+    g_assert_cmphex(pci_fw_config_readb(qts, 0xff, TEST_SAC_DEV, 0,
+                                       TEST_SAC_SECTID),
+                    ==, 0x80);
+
+    qtest_writel(qts, IPF_GX_MMIO_ALIAS_BASE + IPF_GX_MMIO_CB0, 1);
+    g_assert_cmphex(qtest_readl(qts, IPF_GX_MMIO_BASE + IPF_GX_MMIO_CB0),
+                    ==, 0x83);
+    qtest_writel(qts, IPF_GX_MMIO_BASE + IPF_GX_MMIO_CC0, cc0_value);
+    g_assert_cmphex(qtest_readl(qts,
+                               IPF_GX_MMIO_ALIAS_BASE + IPF_GX_MMIO_CC0),
+                    ==, cc0_value | 0x80);
+
+    qtest_system_reset(qts);
+
+    g_assert_cmphex(pci_fw_config_readb(qts, 0xff, TEST_SAC_DEV, 0,
+                                       TEST_SAC_SECTID),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IPF_GX_MMIO_BASE + IPF_GX_MMIO_CB0),
+                    ==, 0x80);
+    g_assert_cmphex(qtest_readl(qts, IPF_GX_MMIO_BASE + IPF_GX_MMIO_CC0),
+                    ==, 0x80);
+    g_assert_cmphex(qtest_readl(qts,
+                               IPF_GX_MMIO_ALIAS_BASE + IPF_GX_MMIO_CC0),
+                    ==, 0x80);
+    assert_gxb_identity(qts, 0xff, 1, TEST_GXB_FN1_DEVICE_ID);
+    assert_gxb_identity(qts, 0xff, 2, TEST_GXB_FN2_DEVICE_ID);
+
+    qtest_quit(qts);
+}
+
 static void program_iosapic_level_route(QTestState *qts,
                                          unsigned int pin, uint8_t vector)
 {
@@ -440,6 +494,7 @@ int main(int argc, char **argv)
                    test_pci_intx_reaches_iosapic);
     qtest_add_func("/ia64/ipf/gxb-sparse-config",
                    test_gxb_sparse_config_identity);
+    qtest_add_func("/ia64/ipf/460gx-reset", test_460gx_reset);
     qtest_add_func("/ia64/ipf/i8042-iosapic",
                    test_i8042_irqs_reach_iosapic);
     ret = g_test_run();
