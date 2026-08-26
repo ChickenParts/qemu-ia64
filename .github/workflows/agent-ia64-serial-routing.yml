@@ -1,0 +1,118 @@
+name: Temporary IA-64 serial routing validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-serial-routing
+    paths:
+      - scratch/ia64-serial-routing.patch
+      - .github/workflows/agent-ia64-serial-routing.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_COMMIT: 874512e2d4e4546e6467780dae2bf42838a9dea5
+      OUTPUT_BRANCH: fix/ia64-serial-routing
+      PATCH_FILE: scratch/ia64-serial-routing.patch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply the serial routing patch to the verified integration base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$PATCH_FILE" /tmp/ia64-serial-routing.patch
+          git merge-base --is-ancestor "$BASE_COMMIT" HEAD
+          git checkout --detach "$BASE_COMMIT"
+          git apply --check /tmp/ia64-serial-routing.patch
+          git apply /tmp/ia64-serial-routing.patch
+          git diff --check
+          git diff > /tmp/ia64-serial-routing-review.patch
+          perl scripts/checkpatch.pl --no-signoff --strict \
+            /tmp/ia64-serial-routing-review.patch
+
+      - name: Install build and documentation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            python3-docutils libglib2.0-dev libpixman-1-dev zlib1g-dev \
+            libslirp-dev
+
+      - name: Validate the status document
+        run: |
+          rst2html docs/devel/ia64-ipf-port-status.rst \
+            /tmp/ia64-ipf-port-status.html
+
+      - name: Configure and build IA-64
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run architectural and machine contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-interrupt --tap -k \
+            | tee /tmp/test-ia64-interrupt.tap
+          build/tests/unit/test-ia64-iosapic --tap -k \
+            | tee /tmp/test-ia64-iosapic.tap
+          QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
+            build/tests/qtest/ia64-ipf-test --tap -k \
+            | tee /tmp/ia64-ipf-test.tap
+          build/qemu-system-ia64 --version
+          build/qemu-system-ia64 -machine help | grep -q '^ipf '
+
+      - name: Publish the tested commit and fast-forward metachicken
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add \
+            configs/devices/ia64-softmmu/default.mak \
+            docs/devel/ia64-ipf-port-status.rst \
+            hw/ia64/ipf.c \
+            tests/qtest/ia64-ipf-test.c
+          git diff --cached --check
+          git commit \
+            -m 'hw/ia64: route serial interrupts through the I/O SAPIC' \
+            -m 'Connect the platform MMIO/COM1 UART to architectural IRQ4, create configured auxiliary ISA UARTs on the PIIX bus, and test shared register state, IRQ3/IRQ4 delivery, acknowledgement, EOI, and reset without firmware-specific behavior.'
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+
+          remote_base="$(git ls-remote origin refs/heads/metachicken | cut -f1)"
+          test "$remote_base" = "$BASE_COMMIT"
+          git push origin HEAD:refs/heads/metachicken
+          git rev-parse HEAD | tee /tmp/ia64-serial-routing-commit.txt
+
+      - name: Upload validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-serial-routing-result
+          path: |
+            /tmp/ia64-serial-routing-commit.txt
+            /tmp/ia64-serial-routing-review.patch
+            /tmp/ia64-ipf-port-status.html
+            /tmp/test-ia64-interrupt.tap
+            /tmp/test-ia64-iosapic.tap
+            /tmp/ia64-ipf-test.tap
+          retention-days: 1
+          if-no-files-found: error
