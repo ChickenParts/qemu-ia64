@@ -134,6 +134,21 @@
 #define TEST_KERNEL_SENTINEL        0xa5
 #define TEST_KERNEL_SENTINEL_SIZE   16
 
+#define TEST_FIRMWARE_SIZE          (4 * 1024 * 1024)
+#define TEST_FIRMWARE_BASE          UINT64_C(0xffc00000)
+#define TEST_FIRMWARE_GP_TARGET     UINT64_C(0xffe30070)
+#define TEST_FIRMWARE_GP_SENTINEL   UINT64_C(0xdeadbeef2badbeef)
+#define TEST_FIRMWARE_STATUS_CALLER UINT64_C(0xffe00076)
+#define TEST_FIRMWARE_STATUS_REPORT UINT64_C(0xffe011b6)
+#define TEST_FIRMWARE_FIT_OFFSET    0x10000
+#define TEST_FIRMWARE_FIT_SIZE      64
+#define TEST_FIRMWARE_FV_OFFSET     0x30000
+#define TEST_FIRMWARE_FV_SIZE       0x1000
+#define TEST_FIRMWARE_FV_HEADER_LEN 0x48
+#define TEST_FIRMWARE_PEI_FILE_SIZE 0x44
+#define TEST_FIRMWARE_TE_SECTION_SIZE 0x2c
+#define TEST_FIT_UNUSED_TYPE        0x7f
+
 typedef struct QEMU_PACKED TestElf64Ehdr {
     uint8_t ident[16];
     uint16_t type;
@@ -191,6 +206,18 @@ G_STATIC_ASSERT(sizeof(TestElf64Sym) == 24);
 
 static char *firmware_path;
 static char *kernel_path;
+
+static void build_test_firmware_fit(
+    uint8_t fit[TEST_FIRMWARE_FIT_SIZE])
+{
+    memset(fit, 0, TEST_FIRMWARE_FIT_SIZE);
+    memcpy(fit, "_FIT_   ", 8);
+    fit[8] = TEST_FIRMWARE_FIT_SIZE / 16;
+    for (unsigned int entry = 1;
+         entry < TEST_FIRMWARE_FIT_SIZE / 16; entry++) {
+        fit[entry * 16 + 14] = TEST_FIT_UNUSED_TYPE;
+    }
+}
 
 static uint32_t pci_config_address_bus(unsigned int bus, unsigned int dev,
                                        unsigned int function,
@@ -960,6 +987,29 @@ static void test_i8042_irqs_reach_iosapic(void)
     qtest_quit(qts);
 }
 
+static void test_firmware_executable_state_is_unpatched(void)
+{
+    uint8_t expected_fit[TEST_FIRMWARE_FIT_SIZE];
+    uint8_t actual_fit[TEST_FIRMWARE_FIT_SIZE];
+    QTestState *qts = ipf_qtest_start();
+
+    g_assert_cmphex(qtest_readq(qts, TEST_FIRMWARE_GP_TARGET),
+                    ==, TEST_FIRMWARE_GP_SENTINEL);
+    g_assert_cmphex(qtest_readq(qts, TEST_FIRMWARE_STATUS_CALLER),
+                    ==, UINT64_MAX);
+    g_assert_cmphex(qtest_readq(qts, TEST_FIRMWARE_STATUS_REPORT),
+                    ==, UINT64_MAX);
+
+    build_test_firmware_fit(expected_fit);
+    qtest_memread(qts,
+                  TEST_FIRMWARE_BASE + TEST_FIRMWARE_FIT_OFFSET,
+                  actual_fit, sizeof(actual_fit));
+    g_assert_cmpmem(actual_fit, sizeof(actual_fit),
+                    expected_fit, sizeof(expected_fit));
+
+    qtest_quit(qts);
+}
+
 static void create_test_kernel(void)
 {
     static const char strtab[] = "\0io_space";
@@ -1053,18 +1103,48 @@ static void create_test_kernel(void)
 
 static void create_test_firmware(void)
 {
+    g_autofree uint8_t *image = g_malloc(TEST_FIRMWARE_SIZE);
     g_autoptr(GError) error = NULL;
-    uint8_t image[4096];
+    uint8_t *fv;
+    uint8_t *file;
+    uint8_t *section;
     ssize_t written;
     int fd;
 
-    fd = g_file_open_tmp("ia64-ipf-qtest-XXXXXX", &firmware_path, &error);
+    fd = g_file_open_tmp("ia64-ipf-qtest-XXXXXX", &firmware_path,
+                         &error);
     g_assert_no_error(error);
     g_assert_cmpint(fd, >=, 0);
 
-    memset(image, 0xff, sizeof(image));
-    written = write(fd, image, sizeof(image));
-    g_assert_cmpint(written, ==, sizeof(image));
+    memset(image, 0xff, TEST_FIRMWARE_SIZE);
+    build_test_firmware_fit(image + TEST_FIRMWARE_FIT_OFFSET);
+    stq_le_p(image + TEST_FIRMWARE_GP_TARGET - TEST_FIRMWARE_BASE,
+             TEST_FIRMWARE_GP_SENTINEL);
+
+    /*
+     * Supply the minimum FV/PEI-core/TE shape that made the old FIT
+     * rewrite path actionable.  It is test data and is not executed
+     * under qtest.
+     */
+    fv = image + TEST_FIRMWARE_FV_OFFSET;
+    stq_le_p(fv + 0x20, TEST_FIRMWARE_FV_SIZE);
+    memcpy(fv + 0x28, "_FVH", 4);
+    stw_le_p(fv + 0x30, TEST_FIRMWARE_FV_HEADER_LEN);
+
+    file = fv + TEST_FIRMWARE_FV_HEADER_LEN;
+    memset(file, 0, TEST_FIRMWARE_PEI_FILE_SIZE);
+    file[18] = 0x04;
+    file[20] = TEST_FIRMWARE_PEI_FILE_SIZE;
+    file[23] = 0x07;
+
+    section = file + 24;
+    section[0] = TEST_FIRMWARE_TE_SECTION_SIZE;
+    section[3] = 0x12;
+    stw_le_p(section + 4, 0x5a56);
+    stw_le_p(section + 10, 40);
+
+    written = write(fd, image, TEST_FIRMWARE_SIZE);
+    g_assert_cmpint(written, ==, TEST_FIRMWARE_SIZE);
     close(fd);
 }
 
@@ -1079,6 +1159,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
     qtest_add_func("/ia64/ipf/direct-kernel-io-contract",
                    test_direct_kernel_io_contract);
+    qtest_add_func(
+        "/ia64/ipf/firmware-executable-state-unpatched",
+        test_firmware_executable_state_is_unpatched);
     qtest_add_func("/ia64/ipf/pci-storage-interfaces",
                    test_pci_storage_interfaces);
     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);

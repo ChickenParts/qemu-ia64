@@ -748,24 +748,6 @@ static void ipf_fill_fw_window_erased(void)
 }
 
 /*
- * Firmware call-gates / stubs.
- *
- * The xenipf/EDK firmware uses a status-code reporter very early during PEI
- * memory services init. In some builds the reporter function pointer and
- * CallerId GUID pointer are sourced from GP-relative indirections into the
- * variable FV region (0xffe0....). When those entries are left in the erased
- * (0xff) state, the firmware attempts to call through a NULL/garbage plabel
- * and crashes before it can initialize devices like VGA.
- *
- * Provide a tiny IA-64 stub function that executes break(0) so the existing
- * fw_break0 helper can consume the status-code arguments and return to b0.
- * Patch the early global pointers if they appear uninitialized.
- */
-
-#define IPF_FW_STATUS_CALLER_ID_ADDR      0x00000000ffe00076ULL
-#define IPF_FW_STATUS_REPORT_PLABEL_ADDR  0x00000000ffe011b6ULL
-
-/*
  * xenipf SPad scratchpad area. The SPad PEIM initializes the lock table at
  * SPAD_BASE+0x10 but leaves the base pointer (SPAD_BASE+0x8) unset. Seed that
  * pointer so later PEIMs can find the lock array.
@@ -783,9 +765,6 @@ static void ipf_fill_fw_window_erased(void)
 #define EFI_FV_FILETYPE_FIRMWARE_VOLUME_IMAGE 0x0B
 #define EFI_FFS_FILE_HEADER_SIZE           24
 #define EFI_FFS_FILE_HEADER2_SIZE          32
-#define EFI_SECTION_PE32                   0x10
-#define EFI_SECTION_TE                     0x12
-#define EFI_TE_IMAGE_HEADER_SIGNATURE      0x5A56
 
 #define COMP_TYPE_FIT_PEICORE 0x10
 #define COMP_TYPE_FIT_BFV     0x7E
@@ -793,18 +772,6 @@ static void ipf_fill_fw_window_erased(void)
 #define FIT_TYPE_MASK         0x7F
 #define CHECKSUM_BIT_MASK     0x80
 #define EFI_SAL_FIT_PALB_TYPE 0x01
-
-#define IPF_FW_GP_BASE_ADDR   0x000000010002FEB0ULL
-#define IPF_FW_GP_GLOB_OFF    0x00000000001FFE40ULL
-#define IPF_FW_GP_GLOB_SENTINEL 0xDEADBEEF2BADBEEFULL
-
-typedef struct {
-    uint8_t Size[3];
-    uint8_t Type;
-} EFI_COMMON_SECTION_HEADER;
-
-#define SECTION_SIZE(SectionHeaderPtr) \
-    ((uint32_t)(*(const uint32_t *)(SectionHeaderPtr)->Size) & 0x00ffffff)
 
 static size_t ipf_fw_align_up(size_t val, size_t align);
 static bool ipf_fw_find_pei_core_fv(const uint8_t *buf, size_t size,
@@ -1038,55 +1005,6 @@ static bool ipf_fw_probe_fit_enabled(void)
     return enabled;
 }
 
-static bool ipf_fw_patch_fit_enabled(void)
-{
-    static int enabled = -1;
-    if (enabled == -1) {
-        const char *s = getenv("QEMU_IPF_FW_PATCH_FIT");
-        if (s && *s) {
-            enabled = (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 ||
-                       strcmp(s, "no") == 0) ? 0 : 1;
-        } else {
-            enabled = 1;
-        }
-    }
-    return enabled;
-}
-
-static bool ipf_fw_patch_gp_globals_enabled(void)
-{
-    static int enabled = -1;
-    if (enabled == -1) {
-        const char *s = getenv("QEMU_IPF_FW_PATCH_GP_GLOBALS");
-        enabled = (s && *s) ? 1 : 0;
-        if (enabled == 0) {
-            enabled = 1;
-        }
-    }
-    return enabled;
-}
-
-static void ipf_fw_patch_gp_globals(uint8_t *fw, size_t fw_size, hwaddr fw_base)
-{
-    if (!ipf_fw_patch_gp_globals_enabled()) {
-        return;
-    }
-
-    uint64_t target = IPF_FW_GP_BASE_ADDR - IPF_FW_GP_GLOB_OFF;
-    if (target < fw_base || target + 8 > fw_base + fw_size) {
-        return;
-    }
-    size_t off = (size_t)(target - fw_base);
-    uint64_t cur = ldq_le_p(&fw[off]);
-    if (cur != IPF_FW_GP_GLOB_SENTINEL) {
-        return;
-    }
-    stq_le_p(&fw[off], 0);
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "IPF: GP globals patch: cleared sentinel at %016" PRIx64 "\n",
-                  target);
-}
-
 static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
 {
     if (!ipf_fw_probe_fit_enabled()) {
@@ -1188,15 +1106,6 @@ static void ipf_fw_probe_fit(const uint8_t *fw, size_t fw_size, hwaddr fw_base)
     }
 }
 
-static uint8_t ipf_fw_fit_checksum8(const uint8_t *buf, size_t len)
-{
-    uint8_t sum = 0;
-    for (size_t i = 0; i < len; i++) {
-        sum = (uint8_t)(sum + buf[i]);
-    }
-    return (uint8_t)(0 - sum);
-}
-
 static const char *ipf_fw_fit_type_name(uint8_t type)
 {
     switch (type) {
@@ -1250,228 +1159,6 @@ static void ipf_fw_fit_ascii4(char out[5], const uint8_t *buf)
         out[i] = (c >= 0x20 && c <= 0x7e) ? (char)c : '.';
     }
     out[4] = '\0';
-}
-
-static bool ipf_fw_pe32_entry(const uint8_t *img, size_t len,
-                              uint32_t *entry_out)
-{
-    if (len < 0x40) {
-        return false;
-    }
-    uint16_t te_sig = lduw_le_p(img);
-    if (te_sig == EFI_TE_IMAGE_HEADER_SIGNATURE) {
-        if (len < 40) {
-            return false;
-        }
-        uint16_t stripped = lduw_le_p(img + 6);
-        uint32_t entry = ldl_le_p(img + 8);
-        *entry_out = entry + 40 - stripped;
-        return true;
-    }
-
-    if (lduw_le_p(img) != 0x5a4d) { /* MZ */
-        return false;
-    }
-    uint32_t lfanew = ldl_le_p(img + 0x3c);
-    if (lfanew + 0x18 + 2 > len) {
-        return false;
-    }
-    if (ldl_le_p(img + lfanew) != 0x00004550) { /* PE\0\0 */
-        return false;
-    }
-    uint32_t opt = lfanew + 0x18;
-    uint16_t magic = lduw_le_p(img + opt);
-    if (magic != 0x10b && magic != 0x20b) {
-        return false;
-    }
-    uint32_t entry = ldl_le_p(img + opt + 0x10);
-    *entry_out = entry;
-    return true;
-}
-
-static bool ipf_fw_find_pei_core_entry(const uint8_t *buf, size_t size,
-                                       hwaddr fw_base, uint64_t *entry_out)
-{
-    size_t fv_off = 0;
-    uint64_t fv_len = 0;
-    if (!ipf_fw_find_pei_core_fv(buf, size, &fv_off, &fv_len)) {
-        return ipf_fw_find_fit_pei_entry(buf, size, entry_out);
-    }
-    if (fv_off + 0x38 > size || fv_len < 0x38 || fv_off + fv_len > size) {
-        return false;
-    }
-    uint16_t fv_hdr_len = lduw_le_p(&buf[fv_off + 0x30]);
-    if (fv_hdr_len < 0x38 || fv_hdr_len > fv_len) {
-        return false;
-    }
-
-    size_t fv_end = fv_off + (size_t)fv_len;
-    size_t off = fv_off + fv_hdr_len;
-    while (off + EFI_FFS_FILE_HEADER_SIZE <= fv_end) {
-        const uint8_t *fh = &buf[off];
-        if (ipf_fw_is_erased(fh, EFI_FFS_FILE_HEADER_SIZE)) {
-            break;
-        }
-        uint8_t type = fh[18];
-        uint32_t size24 = (uint32_t)fh[20] |
-                          ((uint32_t)fh[21] << 8) |
-                          ((uint32_t)fh[22] << 16);
-        uint64_t fsize = size24;
-        size_t hdr_size = EFI_FFS_FILE_HEADER_SIZE;
-        if (size24 == 0xffffff) {
-            if (EFI_FFS_FILE_HEADER2_SIZE > fv_end - off) {
-                break;
-            }
-            fsize = ldq_le_p(&fh[24]);
-            hdr_size = EFI_FFS_FILE_HEADER2_SIZE;
-        }
-        if (fsize < hdr_size || fsize > fv_end - off) {
-            break;
-        }
-
-        if (type == EFI_FV_FILETYPE_PEI_CORE) {
-            size_t file_end = off + (size_t)fsize;
-            size_t sec_off = off + hdr_size;
-            while (sec_off + sizeof(EFI_COMMON_SECTION_HEADER) <= file_end) {
-                const EFI_COMMON_SECTION_HEADER *sh =
-                    (const EFI_COMMON_SECTION_HEADER *)&buf[sec_off];
-                uint32_t sec_size = SECTION_SIZE(sh);
-                if (sec_size < sizeof(EFI_COMMON_SECTION_HEADER) ||
-                    sec_off + sec_size > file_end) {
-                    break;
-                }
-                uint8_t sec_type = sh->Type;
-                if (sec_type == EFI_SECTION_PE32 ||
-                    sec_type == EFI_SECTION_TE) {
-                    uint32_t entry = 0;
-                    const uint8_t *img = &buf[sec_off + sizeof(*sh)];
-                    size_t img_len = sec_size - sizeof(*sh);
-                    if (ipf_fw_pe32_entry(img, img_len, &entry)) {
-                        uint64_t phys = fw_base + sec_off +
-                                        sizeof(*sh) + entry;
-                        phys |= 0x8000000000000000ULL;
-                        *entry_out = phys;
-                        return true;
-                    }
-                }
-                size_t advance = ipf_fw_align_up(sec_size, 4);
-                if (advance == 0 || sec_off + advance < sec_off) {
-                    break;
-                }
-                sec_off += advance;
-            }
-            return false;
-        }
-
-        size_t advance = ipf_fw_align_up((size_t)fsize, 8);
-        if (advance == 0 || advance > fv_end - off) {
-            break;
-        }
-        off += advance;
-    }
-    return false;
-}
-
-static void ipf_fw_patch_fit(uint8_t *fw, size_t fw_size, hwaddr fw_base)
-{
-    if (!ipf_fw_patch_fit_enabled()) {
-        return;
-    }
-
-    const uint8_t sig[8] = { '_', 'F', 'I', 'T', '_', ' ', ' ', ' ' };
-    size_t fit_off = SIZE_MAX;
-    for (size_t i = 0; i + sizeof(sig) <= fw_size; i++) {
-        if (memcmp(fw + i, sig, sizeof(sig)) == 0) {
-            fit_off = i;
-            break;
-        }
-    }
-    if (fit_off == SIZE_MAX || fit_off + 16 > fw_size) {
-        return;
-    }
-
-    uint32_t entry_count = fw[fit_off + 8] |
-                           (fw[fit_off + 9] << 8) |
-                           (fw[fit_off + 10] << 16);
-    if (entry_count == 0 || (size_t)entry_count * 16 > fw_size - fit_off) {
-        return;
-    }
-
-    bool any_nonzero = false;
-    for (size_t i = 1; i < entry_count; i++) {
-        const uint8_t *ent = fw + fit_off + i * 16;
-        uint64_t addr = ldq_le_p(ent);
-        uint32_t size = ent[8] | (ent[9] << 8) | (ent[10] << 16);
-        uint8_t type = ent[14] & FIT_TYPE_MASK;
-        bool unused = (addr == 0 && size == 0 && type == COMP_TYPE_FIT_UNUSED);
-        if (!unused) {
-            any_nonzero = true;
-            break;
-        }
-        if (any_nonzero) {
-            break;
-        }
-    }
-    if (any_nonzero) {
-        return;
-    }
-
-    uint64_t pei_entry = 0;
-    if (!ipf_fw_find_pei_core_entry(fw, fw_size, fw_base, &pei_entry)) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IPF: FIT patch: PEI core entry not found\n");
-        return;
-    }
-    size_t bfv_off = 0;
-    uint64_t bfv_len = 0;
-    if (!ipf_fw_find_pei_core_fv(fw, fw_size, &bfv_off, &bfv_len)) {
-        bfv_off = 0;
-        bfv_len = fw_size;
-    }
-    uint64_t bfv_phys = fw_base + bfv_off;
-    uint32_t bfv_size = (uint32_t)MIN(bfv_len, 0x20000U);
-    bfv_phys |= 0x8000000000000000ULL;
-
-    for (size_t i = 1; i < entry_count; i++) {
-        uint8_t *ent = fw + fit_off + i * 16;
-        memset(ent, 0, 16);
-        ent[14] = COMP_TYPE_FIT_UNUSED;
-    }
-
-    uint8_t *ent = fw + fit_off + 16;
-    stq_le_p(ent, pei_entry);
-    stl_le_p(ent + 8, 0);
-    stw_le_p(ent + 12, 0);
-    ent[14] = COMP_TYPE_FIT_PEICORE;
-    ent[15] = 0;
-
-    if (entry_count > 2) {
-        uint8_t *pal = fw + fit_off + 32;
-        stq_le_p(pal, IA64_IPF_FW_PAL_PROC_ADDR);
-        stl_le_p(pal + 8, (uint32_t)(IA64_IPF_FW_PAL_SIZE / 16));
-        stw_le_p(pal + 12, 0);
-        pal[14] = EFI_SAL_FIT_PALB_TYPE;
-        pal[15] = 0;
-    }
-    if (entry_count > 3) {
-        uint8_t *bfv = fw + fit_off + 48;
-        stq_le_p(bfv, bfv_phys);
-        stl_le_p(bfv + 8, bfv_size);
-        stw_le_p(bfv + 12, 0);
-        bfv[14] = COMP_TYPE_FIT_BFV;
-        bfv[15] = 0;
-    }
-
-    if (fw[fit_off + 14] & 0x80) {
-        uint8_t *fit = fw + fit_off;
-        fit[15] = 0;
-        fit[15] = ipf_fw_fit_checksum8(fit, (size_t)entry_count * 16);
-    }
-
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "IPF: FIT patch: PEI core entry=%016" PRIx64
-                  " bfv=%016" PRIx64 " bfv_size=0x%x\n",
-                  pei_entry, bfv_phys, bfv_size);
 }
 
 static void ipf_fw_seed_spad(void)
@@ -1880,120 +1567,6 @@ static void ipf_fw_dump_dxe_core(const uint8_t *buf, size_t size,
         qemu_log_mask(LOG_GUEST_ERROR,
                       "IPF: FW DXE dump: wrote %s (%zu bytes)\n",
                       path, dump_len);
-    }
-}
-
-static void ipf_patch_firmware_statuscode_callgate(void)
-{
-    /*
-     * IA-64 bundle:
-     *   [MII] break.m 0
-     *         nop.i 0
-     *         nop.i 0
-     *
-     * Assembled with ia64-suse-linux-as for reproducibility.
-     */
-    static const uint8_t break0_bundle[16] = {
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
-    };
-
-    uint64_t caller_id_raw = 0;
-    MemTxResult caller_res =
-        address_space_read(&address_space_memory, IPF_FW_STATUS_CALLER_ID_ADDR,
-                           MEMTXATTRS_UNSPECIFIED, &caller_id_raw,
-                           sizeof(caller_id_raw));
-    uint64_t caller_id = le64_to_cpu(caller_id_raw);
-
-    uint64_t report_plabel_ptr_raw = 0;
-    MemTxResult report_res =
-        address_space_read(&address_space_memory,
-                           IPF_FW_STATUS_REPORT_PLABEL_ADDR,
-                           MEMTXATTRS_UNSPECIFIED, &report_plabel_ptr_raw,
-                           sizeof(report_plabel_ptr_raw));
-    uint64_t report_plabel_ptr = le64_to_cpu(report_plabel_ptr_raw);
-
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IPF: firmware status-code prepatch: caller_id=%016" PRIx64
-                      " report_plabel_ptr=%016" PRIx64
-                      " (caller_res=%d report_res=%d)\n",
-                      caller_id, report_plabel_ptr, (int)caller_res,
-                      (int)report_res);
-    }
-
-    if (caller_res != MEMTX_OK || report_res != MEMTX_OK) {
-        return;
-    }
-
-    if (caller_id != UINT64_MAX && report_plabel_ptr != UINT64_MAX) {
-        return;
-    }
-
-    /*
-     * Reserve a small scratch area at the end of the firmware work RAM.
-     * Keep it self-contained so we can patch the early indirections without
-     * requiring symbol information from the guest firmware.
-     */
-    hwaddr scratch = (IPF_FW_WORKRAM_BASE + IPF_FW_WORKRAM_SIZE) - 0x1000;
-    scratch &= ~0xFULL;
-
-    hwaddr stub_code = scratch;
-    hwaddr stub_plabel = scratch + 0x20;
-    hwaddr stub_object = scratch + 0x40;
-
-    /* Write stub code. */
-    address_space_write(&address_space_memory, stub_code,
-                        MEMTXATTRS_UNSPECIFIED, break0_bundle,
-                        sizeof(break0_bundle));
-    cpu_flush_icache_range(stub_code, sizeof(break0_bundle));
-
-    /* Function descriptor (plabel): { entry, gp }. */
-    struct QEMU_PACKED {
-        uint64_t entry;
-        uint64_t gp;
-    } plabel = {
-        .entry = cpu_to_le64((uint64_t)stub_code),
-        .gp = cpu_to_le64(0),
-    };
-    address_space_write(&address_space_memory, stub_plabel,
-                        MEMTXATTRS_UNSPECIFIED, (const uint8_t *)&plabel,
-                        sizeof(plabel));
-
-    /* Object with a function pointer at offset 0x70 (112). */
-    uint8_t obj[0x80];
-    memset(obj, 0, sizeof(obj));
-    stq_le_p(&obj[0x70], (uint64_t)stub_plabel);
-    address_space_write(&address_space_memory, stub_object,
-                        MEMTXATTRS_UNSPECIFIED, obj, sizeof(obj));
-
-    /*
-     * Patch early globals:
-     * - CallerId: default to NULL
-     * - ReportStatusCode: point at our stub object
-     *
-     * Only patch if the firmware left them in the erased (all-0xff) state.
-     */
-    if (caller_id == UINT64_MAX) {
-        uint64_t zero = 0;
-        address_space_write(&address_space_memory, IPF_FW_STATUS_CALLER_ID_ADDR,
-                            MEMTXATTRS_UNSPECIFIED, &zero, sizeof(zero));
-    }
-
-    if (report_plabel_ptr == UINT64_MAX) {
-        uint64_t g = cpu_to_le64((uint64_t)stub_object);
-        address_space_write(&address_space_memory,
-                            IPF_FW_STATUS_REPORT_PLABEL_ADDR,
-                            MEMTXATTRS_UNSPECIFIED, &g, sizeof(g));
-    }
-
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "IPF: firmware status-code callgate patched: caller_id=%016" PRIx64
-                      " report_plabel_ptr=%016" PRIx64 " stub_code=%016" HWADDR_PRIx
-                      " stub_plabel=%016" HWADDR_PRIx " stub_object=%016" HWADDR_PRIx "\n",
-                      caller_id, report_plabel_ptr,
-                      stub_code, stub_plabel, stub_object);
     }
 }
 
@@ -4926,8 +4499,6 @@ static void ipf_init(MachineState *machine)
         if (ipf_fw_scan_enabled()) {
             ipf_fw_scan_firmware(buf, (size_t)image_size, fw_offset);
         }
-        ipf_fw_patch_fit(buf, (size_t)image_size, fw_offset);
-        ipf_fw_patch_gp_globals(buf, (size_t)image_size, fw_offset);
         ipf_fw_probe_fit(buf, (size_t)image_size, fw_offset);
         address_space_write(&address_space_memory, fw_offset,
                             MEMTXATTRS_UNSPECIFIED, buf, (size_t)image_size);
@@ -5014,9 +4585,6 @@ static void ipf_init(MachineState *machine)
             ipf_write_sal_systab();
         }
 
-        if (run_firmware) {
-            ipf_patch_firmware_statuscode_callgate();
-        }
     }
 
     /*

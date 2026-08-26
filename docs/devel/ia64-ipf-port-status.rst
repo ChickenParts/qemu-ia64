@@ -53,8 +53,9 @@ device paths from remaining partial platform behavior.
    * - RAM and firmware windows
      - Present
      - Direct-kernel port I/O comes from the EFI memory map without editing
-       guest kernel symbols.  Replace the remaining image-specific aliases and
-       firmware mutation with documented platform mappings and boot contracts.
+       guest kernel symbols.  Firmware loading no longer rewrites FIT metadata,
+       GP-relative globals, or fixed status-code pointers; move the remaining
+       variable-store and scratchpad provisioning into explicit platform state.
    * - PCI host/root
      - Custom current-QOM model
      - Validate 460GX address windows, DMA reachability, reset, and migration.
@@ -156,6 +157,10 @@ facade are separate QOM devices rather than in-file register shims.
 Direct-kernel boot now advertises its legacy port-I/O window through an
 ``EFI_MEMORY_MAPPED_IO_PORT_SPACE`` descriptor, leaves loaded ELF data
 intact, and verifies both properties in qtest.
+The firmware loader also leaves FIT entries, GP-relative globals, and fixed
+status-code pointers untouched.  A synthetic image satisfying all three old
+mutation predicates is verified unchanged; the bundled-firmware audit found
+no image that depended on those paths.
 
 That does not make the platform complete.  The largest remaining risks are CPU
 and chipset architectural coverage, SMP/IPI support, migration completeness,
