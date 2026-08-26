@@ -63,6 +63,7 @@
 #include "elf.h"
 #include "hw/ia64/gfw.h"
 #include "hw/ia64/ipf-460gx.h"
+#include "hw/ia64/ipf-spad.h"
 #include "hw/ia64/iosapic.h"
 #include "target/ia64/cpu.h"
 #include "migration/vmstate.h"
@@ -156,6 +157,7 @@ struct IPFMachineState {
     IA64IOSAPICState *iosapic;
     qemu_irq isa_irqs[ISA_NUM_IRQS];
     IA64IPF460GXState *gx;
+    IA64IPFSPADState *spad;
 
     /* Lightweight debug watchpoints (see QEMU_IA64_WATCH_* env vars). */
     struct IpfTextWatch *text_watch[8];
@@ -747,17 +749,6 @@ static void ipf_fill_fw_window_erased(void)
     }
 }
 
-/*
- * xenipf SPad scratchpad area. The SPad PEIM initializes the lock table at
- * SPAD_BASE+0x10 but leaves the base pointer (SPAD_BASE+0x8) unset. Seed that
- * pointer so later PEIMs can find the lock array.
- */
-#define IPF_SPAD_BASE             0x00000000ff37fc00ULL
-#define IPF_SPAD_LOCK_PTR_OFFSET  0x8ULL
-#define IPF_SPAD_MP_RECORD_OFFSET 0x168ULL
-#define IPF_SPAD_MP_RECORD_SIZE   0x100ULL
-#define IPF_SPAD_MP_RECORD_SIG_OFFSET 0x20ULL
-
 /* Firmware volume / file type values from EDK1 headers. */
 #define EFI_FVH_SIGNATURE                  0x4856465fU /* "_FVH" */
 #define EFI_FV_FILETYPE_PEI_CORE           0x04
@@ -1159,55 +1150,6 @@ static void ipf_fw_fit_ascii4(char out[5], const uint8_t *buf)
         out[i] = (c >= 0x20 && c <= 0x7e) ? (char)c : '.';
     }
     out[4] = '\0';
-}
-
-static void ipf_fw_seed_spad(void)
-{
-    uint8_t cur[8];
-    MemTxResult res = address_space_read(&address_space_memory,
-                                         IPF_SPAD_BASE + IPF_SPAD_LOCK_PTR_OFFSET,
-                                         MEMTXATTRS_UNSPECIFIED,
-                                         cur, sizeof(cur));
-    if (res != MEMTX_OK) {
-        return;
-    }
-    if (!ipf_fw_is_erased(cur, sizeof(cur))) {
-        return;
-    }
-
-    uint8_t out[8];
-    stq_le_p(out, IPF_SPAD_BASE);
-    address_space_write(&address_space_memory,
-                        IPF_SPAD_BASE + IPF_SPAD_LOCK_PTR_OFFSET,
-                        MEMTXATTRS_UNSPECIFIED,
-                        out, sizeof(out));
-}
-
-static void ipf_fw_seed_spad_mp(void)
-{
-    hwaddr record_base = IPF_SPAD_BASE + IPF_SPAD_MP_RECORD_OFFSET;
-    hwaddr sig_addr = record_base + IPF_SPAD_MP_RECORD_SIG_OFFSET;
-    uint8_t cur[8];
-    MemTxResult res = address_space_read(&address_space_memory, sig_addr,
-                                         MEMTXATTRS_UNSPECIFIED,
-                                         cur, sizeof(cur));
-    if (res != MEMTX_OK) {
-        return;
-    }
-    if (!ipf_fw_is_erased(cur, sizeof(cur))) {
-        return;
-    }
-
-    uint8_t rec[IPF_SPAD_MP_RECORD_SIZE];
-    memset(rec, 0, sizeof(rec));
-    address_space_write(&address_space_memory, record_base,
-                        MEMTXATTRS_UNSPECIFIED, rec, sizeof(rec));
-
-    static const uint8_t sig[8] = {
-        0x20, 0x5f, 0x5f, 0x42, 0x53, 0x50, 0x5f, 0x5f,
-    };
-    address_space_write(&address_space_memory, sig_addr,
-                        MEMTXATTRS_UNSPECIFIED, sig, sizeof(sig));
 }
 
 static size_t ipf_fw_align_up(size_t val, size_t align)
@@ -4339,6 +4281,26 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
     smbus_eeprom_init(m->smbus, 8, NULL, 0);
 }
 
+static void ipf_init_spad(IPFMachineState *m,
+                          MemoryRegion *sysmem)
+{
+    DeviceState *dev = qdev_new(TYPE_IA64_IPF_SPAD);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    MemoryRegion *mmio;
+
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    mmio = sysbus_mmio_get_region(sbd, 0);
+    memory_region_add_subregion_overlap(sysmem,
+                                        IA64_IPF_SPAD_BASE,
+                                        mmio, 2);
+    m->spad = IA64_IPF_SPAD(dev);
+
+    DPRINTF("SPad: mapped at 0x%016" PRIx64
+            " size=0x%x\n",
+            (uint64_t)IA64_IPF_SPAD_BASE,
+            IA64_IPF_SPAD_SIZE);
+}
+
 static void ipf_init_460gx(IPFMachineState *m)
 {
     DeviceState *dev = qdev_new(TYPE_IA64_IPF_460GX);
@@ -4505,10 +4467,6 @@ static void ipf_init(MachineState *machine)
         cpu_flush_icache_range(fw_offset, (size_t)image_size);
         DPRINTF("Loaded firmware '%s' at 0x%lx\n", bios_name, fw_offset);
         if (run_firmware) {
-            ipf_fw_seed_spad();
-            ipf_fw_seed_spad_mp();
-        }
-        if (run_firmware) {
             ipf_fw_setup_pei_handoff(buf, (size_t)image_size, fw_offset);
             ipf_fw_init_nvram(m);
             ipf_fw_init_varstore(m);
@@ -4586,6 +4544,8 @@ static void ipf_init(MachineState *machine)
         }
 
     }
+
+    ipf_init_spad(m, sysmem);
 
     /*
      * Hardware topology is independent of the selected payload. Firmware and

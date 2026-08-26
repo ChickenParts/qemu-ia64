@@ -22,6 +22,14 @@
 #define IPF_GX_MMIO_ALIAS_BASE      UINT64_C(0x80000000feb00000)
 #define IPF_GX_MMIO_CB0             0x0cb0
 #define IPF_GX_MMIO_CC0             0x0cc0
+#define IPF_SPAD_BASE               UINT64_C(0xff37fc00)
+#define IPF_SPAD_LOCK_PTR_OFFSET    0x008
+#define IPF_SPAD_TEST_OFFSET        0x100
+#define IPF_SPAD_MP_RECORD_OFFSET   0x168
+#define IPF_SPAD_MP_SIGNATURE_OFFSET 0x020
+#define IPF_SPAD_ERASED_OFFSET      0x300
+#define IPF_SPAD_BSP_SIGNATURE      UINT64_C(0x5f5f5053425f5f20)
+#define IPF_SPAD_TEST_VALUE         UINT64_C(0x123456789abcdef0)
 #define IPF_IOSAPIC_BASE            UINT64_C(0xfec00000)
 #define IPF_IOSAPIC_REG_SELECT      0x00
 #define IPF_IOSAPIC_WINDOW          0x10
@@ -699,6 +707,49 @@ static void test_gxb_sparse_config_identity(void)
     qtest_quit(qts);
 }
 
+static void test_spad_state_and_reset(void)
+{
+    QTestState *qts = ipf_qtest_start();
+
+    g_assert_cmphex(
+        qtest_readq(qts, IPF_SPAD_BASE +
+                    IPF_SPAD_LOCK_PTR_OFFSET),
+        ==, IPF_SPAD_BASE);
+    g_assert_cmphex(
+        qtest_readq(qts, IPF_SPAD_BASE +
+                    IPF_SPAD_MP_RECORD_OFFSET),
+        ==, 0);
+    g_assert_cmphex(
+        qtest_readq(qts, IPF_SPAD_BASE +
+                    IPF_SPAD_MP_RECORD_OFFSET +
+                    IPF_SPAD_MP_SIGNATURE_OFFSET),
+        ==, IPF_SPAD_BSP_SIGNATURE);
+    g_assert_cmphex(
+        qtest_readq(qts, IPF_SPAD_BASE +
+                    IPF_SPAD_ERASED_OFFSET),
+        ==, UINT64_MAX);
+
+    qtest_writeq(qts, IPF_SPAD_BASE + IPF_SPAD_TEST_OFFSET,
+                 IPF_SPAD_TEST_VALUE);
+    qtest_system_reset(qts);
+
+    g_assert_cmphex(
+        qtest_readq(qts, IPF_SPAD_BASE +
+                    IPF_SPAD_TEST_OFFSET),
+        ==, IPF_SPAD_TEST_VALUE);
+    g_assert_cmphex(
+        qtest_readq(qts, IPF_SPAD_BASE +
+                    IPF_SPAD_LOCK_PTR_OFFSET),
+        ==, IPF_SPAD_BASE);
+    g_assert_cmphex(
+        qtest_readq(qts, IPF_SPAD_BASE +
+                    IPF_SPAD_MP_RECORD_OFFSET +
+                    IPF_SPAD_MP_SIGNATURE_OFFSET),
+        ==, IPF_SPAD_BSP_SIGNATURE);
+
+    qtest_quit(qts);
+}
+
 static void test_460gx_reset(void)
 {
     const uint32_t cc0_value = 0x12340001;
@@ -1174,6 +1225,8 @@ int main(int argc, char **argv)
                    test_pci_intx_reaches_iosapic);
     qtest_add_func("/ia64/ipf/gxb-sparse-config",
                    test_gxb_sparse_config_identity);
+    qtest_add_func("/ia64/ipf/spad-state-reset",
+                   test_spad_state_and_reset);
     qtest_add_func("/ia64/ipf/460gx-reset", test_460gx_reset);
     qtest_add_func("/ia64/ipf/fdc-dma-iosapic-cmos",
                    test_fdc_dma_irq_and_cmos);

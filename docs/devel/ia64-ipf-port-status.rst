@@ -55,7 +55,7 @@ device paths from remaining partial platform behavior.
      - Direct-kernel port I/O comes from the EFI memory map without editing
        guest kernel symbols.  Firmware loading no longer rewrites FIT metadata,
        GP-relative globals, or fixed status-code pointers; move the remaining
-       variable-store and scratchpad provisioning into explicit platform state.
+       variable-store provisioning into explicit platform state.
    * - PCI host/root
      - Custom current-QOM model
      - Validate 460GX address windows, DMA reachability, reset, and migration.
@@ -63,6 +63,10 @@ device paths from remaining partial platform behavior.
      - Resettable, migratable QOM device
      - Complete chipset behavior beyond the firmware-visible sparse
        configuration and CB0/CC0 windows.
+   * - 460GX SPad scratchpad
+     - Dedicated migratable QOM device
+     - The base pointer and BSP record are platform state and guest writes
+       persist across reset; validate additional firmware-visible fields.
    * - I/O SAPIC
      - QOM device with isolated core tests
      - Complete destination modes, polarity semantics, special delivery modes,
@@ -142,8 +146,8 @@ device paths from remaining partial platform behavior.
        state, and SMP firmware tables.
    * - Migration
      - Partial
-     - Custom 460GX and I/O SAPIC devices have VMState; complete CPU, firmware,
-       and remaining machine-owned state and add migration tests.
+     - Custom 460GX, SPad, and I/O SAPIC devices have VMState; complete CPU,
+       firmware, and remaining machine-owned state and add migration tests.
 
 Current assessment
 ------------------
@@ -151,8 +155,9 @@ Current assessment
 The boot-critical PC-derived topology is now represented by current QEMU device
 models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
 floppy, serial, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI
-buses, and the standard virtio PCI storage transport.  The I/O SAPIC and 460GX
-facade are separate QOM devices rather than in-file register shims.
+buses, and the standard virtio PCI storage transport.  The I/O SAPIC, 460GX
+facade, and SPad scratchpad are separate QOM devices rather than in-file
+register shims.
 
 Direct-kernel boot now advertises its legacy port-I/O window through an
 ``EFI_MEMORY_MAPPED_IO_PORT_SPACE`` descriptor, leaves loaded ELF data
@@ -161,6 +166,9 @@ The firmware loader also leaves FIT entries, GP-relative globals, and fixed
 status-code pointers untouched.  A synthetic image satisfying all three old
 mutation predicates is verified unchanged; the bundled-firmware audit found
 no image that depended on those paths.
+The fixed SPad window is now one payload-independent device with VMState.
+Its base pointer and BSP record are initialized as chipset state instead of
+being written into erased GFW bytes during firmware loading.
 
 That does not make the platform complete.  The largest remaining risks are CPU
 and chipset architectural coverage, SMP/IPI support, migration completeness,
