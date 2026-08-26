@@ -8,6 +8,7 @@ on:
       - scratch/ia64-ipf-460gx.c
       - scratch/ia64-ipf-460gx.h
       - scratch/apply-ia64-460gx-qom.py
+      - scratch/extend-ia64-460gx-alias-test.py
       - .github/workflows/agent-ia64-460gx-qom.yml
   workflow_dispatch:
 
@@ -33,16 +34,20 @@ jobs:
           cp scratch/ia64-ipf-460gx.c /tmp/ipf-460gx.c
           cp scratch/ia64-ipf-460gx.h /tmp/ipf-460gx.h
           cp scratch/apply-ia64-460gx-qom.py /tmp/apply-ia64-460gx-qom.py
+          cp scratch/extend-ia64-460gx-alias-test.py \
+            /tmp/extend-ia64-460gx-alias-test.py
           sha256sum \
             /tmp/ipf-460gx.c \
             /tmp/ipf-460gx.h \
             /tmp/apply-ia64-460gx-qom.py \
+            /tmp/extend-ia64-460gx-alias-test.py \
             > /tmp/ia64-460gx-input-sha256.txt
 
           git checkout --detach "$BASE_COMMIT"
           cp /tmp/ipf-460gx.c hw/ia64/ipf-460gx.c
           cp /tmp/ipf-460gx.h hw/ia64/ipf-460gx.h
           python3 /tmp/apply-ia64-460gx-qom.py .
+          python3 /tmp/extend-ia64-460gx-alias-test.py .
 
           git add hw/ia64/ipf.c hw/ia64/ipf-460gx.c \
             hw/ia64/ipf-460gx.h hw/ia64/meson.build \
@@ -127,7 +132,7 @@ jobs:
           git diff --cached --check
           git commit \
             -m 'hw/ia64: extract the 460GX firmware device' \
-            -m 'Move the sparse firmware PCI configuration facade and CB0/CC0 control windows into one resettable, migratable SysBus/QOM device. Preserve real bus-0 forwarding and CSE-bus identities, keep the region-4 alias, and test mutable state, hardware defaults, and identity restoration across reset.'
+            -m 'Move the sparse firmware PCI configuration facade and CB0/CC0 control windows into one resettable, migratable SysBus/QOM device. Preserve real bus-0 forwarding and CSE-bus identities, verify the region-4 alias in both directions, and test mutable state, hardware defaults, and identity restoration across reset.'
           git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
           git rev-parse HEAD | tee /tmp/ia64-460gx-qom-commit.txt
 
