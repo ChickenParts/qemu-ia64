@@ -10,12 +10,13 @@ diff --git a/qapi/machine.json b/qapi/machine.json
  # @loongarch64: since 7.1
  #
  # .. note:: The resulting QMP strings can be appended to the
-@@ -37,7 +39,7 @@
+@@ -37,7 +39,8 @@
  ##
  { 'enum' : 'SysEmuTarget',
    'data' : [ 'aarch64', 'alpha', 'arm', 'avr', 'hppa', 'i386',
 -             'loongarch64', 'm68k', 'microblaze', 'microblazeel', 'mips', 'mips64',
-+             'ia64', 'loongarch64', 'm68k', 'microblaze', 'microblazeel', 'mips', 'mips64',
++             'ia64', 'loongarch64', 'm68k', 'microblaze',
++             'microblazeel', 'mips', 'mips64',
               'mips64el', 'mipsel', 'or1k', 'ppc',
               'ppc64', 'riscv32', 'riscv64', 'rx', 's390x', 'sh4',
               'sh4eb', 'sparc', 'sparc64', 'tricore',
