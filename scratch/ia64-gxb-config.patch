@@ -127,7 +127,7 @@
 +    g_assert_cmphex(id & 0xffff, ==, PCI_VENDOR_ID_INTEL);
 +    g_assert_cmphex(id >> 16, ==, device_id);
 +    g_assert_cmphex(class_revision, ==,
-+                    (PCI_CLASS_BRIDGE_HOST << 8) | TEST_GXB_REVISION);
++                    (PCI_CLASS_BRIDGE_HOST << 16) | TEST_GXB_REVISION);
 +    g_assert_cmphex(pci_fw_config_readb(qts, bus, TEST_PCI_DEV, function,
 +                                       PCI_HEADER_TYPE),
 +                    ==, 0);
