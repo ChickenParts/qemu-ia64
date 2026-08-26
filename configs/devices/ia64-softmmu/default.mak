@@ -2,6 +2,7 @@
 
 # Basic UART for early console/debug (hw/char/serial-mm.c).
 CONFIG_SERIAL=y
+CONFIG_SERIAL_ISA=y
 CONFIG_SERIAL_MM=y
 
 # PCI + VGA for guest firmware (Flash.fd) UI and device enumeration.

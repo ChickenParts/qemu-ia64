@@ -14,6 +14,7 @@
 #include "qobject/qlist.h"
 
 #define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
+#define IPF_UART_BASE               UINT64_C(0xff5e0000)
 #define IPF_GX_MMIO_BASE            UINT64_C(0xfeb00000)
 #define IPF_GX_MMIO_ALIAS_BASE      UINT64_C(0x80000000feb00000)
 #define IPF_GX_MMIO_CB0             0x0cb0
@@ -79,6 +80,16 @@
 #define TEST_PARALLEL_CONTROL_SELECT 0x08
 #define TEST_PARALLEL_CONTROL_INIT  0x04
 #define TEST_PARALLEL_CONTROL_STROBE 0x01
+#define TEST_SERIAL_COM1_BASE       0x3f8
+#define TEST_SERIAL_COM2_BASE       0x2f8
+#define TEST_SERIAL_COM1_IRQ        4
+#define TEST_SERIAL_COM2_IRQ        3
+#define TEST_SERIAL_IER             1
+#define TEST_SERIAL_IIR             2
+#define TEST_SERIAL_SCR             7
+#define TEST_SERIAL_IER_THRI        0x02
+#define TEST_SERIAL_IIR_ID          0x0e
+#define TEST_SERIAL_IIR_THRI        0x02
 #define TEST_PM_IO_BASE             0x0400
 #define TEST_PM_TIMER_OFFSET        0x08
 #define TEST_PM_TIMER_MASK          0x00ffffffU
@@ -704,6 +715,71 @@ static void test_parallel_irq_and_reset(void)
     qtest_quit(qts);
 }
 
+static void test_serial_irqs_aliases_and_reset(void)
+{
+    const uint8_t com1_vector = 0x56;
+    const uint8_t com2_vector = 0x57;
+    QTestState *qts = ipf_qtest_start_args("-serial null -serial null");
+    uint8_t iir;
+
+    /*
+     * The platform MMIO UART and COM1 are two address views of the same
+     * SerialState rather than independent devices.
+     */
+    qtest_writeb(qts, IPF_UART_BASE + TEST_SERIAL_SCR, 0x5a);
+    g_assert_cmphex(qtest_readb(
+                        qts,
+                        legacy_io_address(TEST_SERIAL_COM1_BASE +
+                                          TEST_SERIAL_SCR)),
+                    ==, 0x5a);
+    qtest_writeb(qts,
+                 legacy_io_address(TEST_SERIAL_COM1_BASE + TEST_SERIAL_SCR),
+                 0xa5);
+    g_assert_cmphex(qtest_readb(qts, IPF_UART_BASE + TEST_SERIAL_SCR),
+                    ==, 0xa5);
+
+    program_iosapic_level_route(qts, TEST_SERIAL_COM1_IRQ, com1_vector);
+    qtest_writeb(qts, IPF_UART_BASE + TEST_SERIAL_IER,
+                 TEST_SERIAL_IER_THRI);
+    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM1_IRQ, true);
+    iir = qtest_readb(qts, IPF_UART_BASE + TEST_SERIAL_IIR);
+    g_assert_cmphex(iir & TEST_SERIAL_IIR_ID, ==, TEST_SERIAL_IIR_THRI);
+    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, com1_vector);
+    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM1_IRQ, false);
+
+    /* The second configured backend is the current ISA COM2 device. */
+    qtest_writeb(qts,
+                 legacy_io_address(TEST_SERIAL_COM2_BASE + TEST_SERIAL_SCR),
+                 0x3c);
+    g_assert_cmphex(qtest_readb(
+                        qts,
+                        legacy_io_address(TEST_SERIAL_COM2_BASE +
+                                          TEST_SERIAL_SCR)),
+                    ==, 0x3c);
+    program_iosapic_level_route(qts, TEST_SERIAL_COM2_IRQ, com2_vector);
+    qtest_writeb(qts,
+                 legacy_io_address(TEST_SERIAL_COM2_BASE + TEST_SERIAL_IER),
+                 TEST_SERIAL_IER_THRI);
+    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM2_IRQ, true);
+    iir = qtest_readb(qts,
+                      legacy_io_address(TEST_SERIAL_COM2_BASE +
+                                        TEST_SERIAL_IIR));
+    g_assert_cmphex(iir & TEST_SERIAL_IIR_ID, ==, TEST_SERIAL_IIR_THRI);
+    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, com2_vector);
+    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM2_IRQ, false);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readb(qts, IPF_UART_BASE + TEST_SERIAL_SCR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readb(
+                        qts,
+                        legacy_io_address(TEST_SERIAL_COM2_BASE +
+                                          TEST_SERIAL_SCR)),
+                    ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_i8042_irqs_reach_iosapic(void)
 {
     const uint8_t kbd_vector = 0x52;
@@ -787,6 +863,8 @@ int main(int argc, char **argv)
                    test_fdc_dma_irq_and_cmos);
     qtest_add_func("/ia64/ipf/parallel-iosapic-reset",
                    test_parallel_irq_and_reset);
+    qtest_add_func("/ia64/ipf/serial-iosapic-aliases",
+                   test_serial_irqs_aliases_and_reset);
     qtest_add_func("/ia64/ipf/i8042-iosapic",
                    test_i8042_irqs_reach_iosapic);
     ret = g_test_run();

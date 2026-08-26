@@ -86,9 +86,10 @@ device paths from remaining partial platform behavior.
      - Memory, equipment, and floppy fields are populated; extend only from
        documented firmware requirements.
    * - Serial
-     - Current serial-mm UART with COM1 alias
-     - Validate the platform address and interrupt contract across all firmware
-       lanes.
+     - Routed serial-mm UART with COM1 alias and auxiliary ISA ports
+     - MMIO and COM1 share one UART state; IRQ4 and configured COM2--COM4 IRQs
+       traverse the PIIX ISA lines into the I/O SAPIC.  Validate console
+       discovery across every firmware lane.
    * - Parallel
      - Current ISA parallel ports on request
      - LPT1 register reset and IRQ7 delivery through the I/O SAPIC are tested;
@@ -147,9 +148,9 @@ Current assessment
 
 The boot-critical PC-derived topology is now represented by current QEMU device
 models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
-floppy, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI buses, and the
-standard virtio PCI storage transport.  The I/O SAPIC and 460GX facade are
-separate QOM devices rather than in-file register shims.
+floppy, serial, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI
+buses, and the standard virtio PCI storage transport.  The I/O SAPIC and 460GX
+facade are separate QOM devices rather than in-file register shims.
 
 That does not make the platform complete.  The largest remaining risks are CPU
 and chipset architectural coverage, SMP/IPI support, migration completeness,

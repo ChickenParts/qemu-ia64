@@ -34,6 +34,7 @@
 #include "hw/rtc/mc146818rtc.h"
 #include "hw/block/fdc.h"
 #include "hw/char/parallel.h"
+#include "hw/char/serial-isa.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_host.h"
@@ -3743,11 +3744,6 @@ static void main_cpu_reset(void *opaque)
     }
 }
 
-static void ipf_uart_dummy_irq(void *opaque, int n, int level)
-{
-    /* Polled UART use (earlycon) does not require an interrupt controller. */
-}
-
 static uint64_t ipf_debugcon_read(void *opaque, hwaddr addr, unsigned size)
 {
     (void)opaque;
@@ -4209,14 +4205,28 @@ static const MemoryRegionOps ipf_uart_ioport_ops = {
 static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
 {
     Chardev *chr = serial_hd(0);
+    MemoryRegion *mr;
+    SerialMM *uart;
+    qemu_irq irq;
+
+    /*
+     * Keep configured secondary backends as ordinary ISA UARTs.  Their
+     * standard IRQ3/IRQ4 outputs use the PIIX-owned ISA-to-I/O-SAPIC path.
+     */
+    serial_hds_isa_init(m->isa_bus, 1, MAX_ISA_SERIAL_PORTS);
+
     if (!chr) {
         DPRINTF("UART: no serial backend (-serial), skipping\n");
         return;
     }
 
-    qemu_irq irq = qemu_allocate_irq(ipf_uart_dummy_irq, NULL, 0);
+    /*
+     * The primary UART is exposed through both the platform MMIO address and
+     * legacy COM1, but its interrupt is still the architectural ISA IRQ4.
+     */
+    irq = isa_bus_get_irq(m->isa_bus, 4);
 
-    SerialMM *uart = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
+    uart = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
     qdev_prop_set_uint8(DEVICE(uart), "regshift", 0);
     qdev_prop_set_uint32(DEVICE(uart), "baudbase", 115200);
     qdev_prop_set_chr(DEVICE(uart), "chardev", chr);
@@ -4228,7 +4238,7 @@ static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
     serial_mm_set_line_hook(ipf_uart_line_hook, m);
 
     /* Overlay the UART on top of the GFW RAM window. */
-    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
     memory_region_add_subregion_overlap(sysmem, IPF_UART_BASE, mr, 1);
     DPRINTF("UART: mapped serial-mm at 0x%016" PRIx64 "\n", (uint64_t)IPF_UART_BASE);
 
@@ -4942,7 +4952,6 @@ static void ipf_init(MachineState *machine)
                                 IPF_FW_WORKRAM_BASE | (1ULL << 63),
                                 &m->fw_workram_alias);
 
-    ipf_init_uart(m, sysmem);
     ipf_init_debugcon(m);
     ipf_init_460gx(m);
     ipf_init_legacy_io(m, sysmem);
@@ -5060,6 +5069,7 @@ static void ipf_init(MachineState *machine)
      */
     ipf_init_pci(m);
     ipf_init_southbridge(m, machine);
+    ipf_init_uart(m, sysmem);
     ipf_init_scsi_storage(m);
     ipf_cmos_init(m, machine);
     pci_vga_init(m->pcibus);
