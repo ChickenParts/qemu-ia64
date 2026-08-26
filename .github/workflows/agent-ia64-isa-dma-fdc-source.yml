@@ -1,0 +1,43 @@
+name: Temporary IA-64 ISA DMA/FDC source export
+
+on:
+  push:
+    branches:
+      - stage/ia64-isa-dma-fdc
+    paths:
+      - .github/workflows/agent-ia64-isa-dma-fdc-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out staging tree
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Pack source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/agent-ia64-isa-dma-fdc-source
+          tar \
+            --exclude=.git \
+            --exclude=build \
+            --exclude=scratch/agent-ia64-isa-dma-fdc-source \
+            -czf scratch/agent-ia64-isa-dma-fdc-source/qemu-ia64-source.tar.gz .
+          sha256sum scratch/agent-ia64-isa-dma-fdc-source/qemu-ia64-source.tar.gz \
+            > scratch/agent-ia64-isa-dma-fdc-source/SHA256SUMS
+
+      - name: Upload source tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-isa-dma-fdc-source-${{ github.run_id }}
+          path: scratch/agent-ia64-isa-dma-fdc-source/
+          retention-days: 1
+          if-no-files-found: error
