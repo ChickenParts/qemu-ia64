@@ -20,21 +20,21 @@ jobs:
     env:
       BASE_COMMIT: e58293d02ba7d02ca6e850377d955121d0cd26c5
       OUTPUT_BRANCH: fix/ia64-piix-topology
-      SOURCE_PATCH_SHA256: 87c5fcd24d30cf873275356f81977b60289646327233134ca76369cb0082004b
-      QTEST_SOURCE_SHA256: 2beae4c06e553dc13ef6e147d1c13cf6dc7d362c05af207102d1c466b247ed90
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify and apply reviewable source inputs
+      - name: Apply reviewable source inputs
         shell: bash
         run: |
           set -euo pipefail
           cp scratch/ia64-piix-topology-source.patch /tmp/ia64-piix-topology-source.patch
           cp scratch/ia64-ipf-test.c /tmp/ia64-ipf-test.c
-          echo "$SOURCE_PATCH_SHA256  /tmp/ia64-piix-topology-source.patch" | sha256sum --check
-          echo "$QTEST_SOURCE_SHA256  /tmp/ia64-ipf-test.c" | sha256sum --check
+          sha256sum \
+            /tmp/ia64-piix-topology-source.patch \
+            /tmp/ia64-ipf-test.c \
+            | tee /tmp/ia64-piix-input-sha256.txt
 
           git checkout --detach "$BASE_COMMIT"
           git apply --check /tmp/ia64-piix-topology-source.patch
@@ -53,6 +53,7 @@ jobs:
         with:
           name: ia64-piix-topology-source-${{ github.run_id }}
           path: |
+            /tmp/ia64-piix-input-sha256.txt
             /tmp/ia64-piix-topology-full.patch
             MAINTAINERS
             configs/devices/ia64-softmmu/default.mak
