@@ -20,7 +20,7 @@ jobs:
     env:
       BASE_COMMIT: e58293d02ba7d02ca6e850377d955121d0cd26c5
       OUTPUT_BRANCH: fix/ia64-piix-topology
-      SOURCE_PATCH_SHA256: 812f004651fd33b2f1a3c8fe3c9f7d20bd549f38937abf51dfa4e8ac4f99d1e1
+      SOURCE_PATCH_SHA256: 0af446e2655e7edc514673ebbb9e47a705aff14eb0bf25c42890e46036340da2
       QTEST_SOURCE_SHA256: 2beae4c06e553dc13ef6e147d1c13cf6dc7d362c05af207102d1c466b247ed90
     steps:
       - uses: actions/checkout@v4
@@ -41,8 +41,8 @@ jobs:
           git apply /tmp/ia64-piix-topology-source.patch
           cp /tmp/ia64-ipf-test.c tests/qtest/ia64-ipf-test.c
 
-          git add MAINTAINERS hw/ia64/ipf.c tests/qtest/meson.build \
-            tests/qtest/ia64-ipf-test.c
+          git add MAINTAINERS configs/devices/ia64-softmmu/default.mak \
+            hw/ia64/ipf.c tests/qtest/meson.build tests/qtest/ia64-ipf-test.c
           git diff --cached --check
           git diff --cached > /tmp/ia64-piix-topology-full.patch
           perl scripts/checkpatch.pl --no-signoff \
@@ -55,6 +55,7 @@ jobs:
           path: |
             /tmp/ia64-piix-topology-full.patch
             MAINTAINERS
+            configs/devices/ia64-softmmu/default.mak
             hw/ia64/ipf.c
             tests/qtest/meson.build
             tests/qtest/ia64-ipf-test.c
