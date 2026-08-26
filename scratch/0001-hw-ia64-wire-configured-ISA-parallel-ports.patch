@@ -1,0 +1,164 @@
+From d4177d06ecd301dae8d32b1578414949b7a2c546 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Wed, 26 Aug 2026 11:18:57 +0000
+Subject: [PATCH 1/2] hw/ia64: wire configured ISA parallel ports
+
+Instantiate current ISA parallel devices on the PIIX4-owned ISA bus, route IRQ7 through the architectural I/O SAPIC path, exercise LPT1 through the sparse legacy-I/O window, and document the resulting compatibility topology.
+
+diff --git a/configs/devices/ia64-softmmu/default.mak b/configs/devices/ia64-softmmu/default.mak
+index bd6e038..062da05 100644
+--- a/configs/devices/ia64-softmmu/default.mak
++++ b/configs/devices/ia64-softmmu/default.mak
+@@ -13,3 +13,6 @@ CONFIG_PCKBD=y
+ 
+ # Standard ISA floppy controller; PIIX supplies its IRQ and i8257 DMA paths.
+ CONFIG_FDC_ISA=y
++
++# Legacy printer ports use the same PIIX ISA-to-I/O-SAPIC routing.
++CONFIG_PARALLEL=y
+diff --git a/docs/devel/ia64-ipf-port-status.rst b/docs/devel/ia64-ipf-port-status.rst
+index a7d4af2..e22e2cd 100644
+--- a/docs/devel/ia64-ipf-port-status.rst
++++ b/docs/devel/ia64-ipf-port-status.rst
+@@ -90,8 +90,9 @@ device paths from remaining partial platform behavior.
+      - Validate the platform address and interrupt contract across all firmware
+        lanes.
+    * - Parallel
+-     - Not ported
+-     - Port only if it is part of the selected IPF compatibility platform.
++     - Current ISA parallel ports on request
++     - LPT1 register reset and IRQ7 delivery through the I/O SAPIC are tested;
++       validate firmware demand and additional configured ports.
+    * - VGA
+      - Current PCI VGA
+      - Validate firmware discovery, option-ROM execution, and INTx behavior.
+@@ -145,8 +146,8 @@ Current assessment
+ 
+ The boot-critical PC-derived topology is now represented by current QEMU device
+ models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
+-floppy, VGA, and generic PCI NIC attachment.  The I/O SAPIC and 460GX facade are
+-separate QOM devices rather than in-file register shims.
++floppy, parallel, VGA, and generic PCI NIC attachment.  The I/O SAPIC and 460GX
++facade are separate QOM devices rather than in-file register shims.
+ 
+ That does not make the platform complete.  The largest remaining risks are CPU
+ and chipset architectural coverage, SMP/IPI support, migration completeness,
+diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
+index 6e7515e..0274c66 100644
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -33,6 +33,7 @@
+ #include "hw/isa/isa.h"
+ #include "hw/rtc/mc146818rtc.h"
+ #include "hw/block/fdc.h"
++#include "hw/char/parallel.h"
+ #include "hw/pci/pci.h"
+ #include "hw/pci/pci_ids.h"
+ #include "hw/pci/pci_host.h"
+@@ -4758,6 +4759,9 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
+     isa_realize_and_unref(m->fdc, m->isa_bus, &error_fatal);
+     isa_fdc_init_drives(m->fdc, fd);
+ 
++    /* Instantiate configured LPT ports on the same routed ISA bus. */
++    parallel_hds_isa_init(m->isa_bus, MAX_PARALLEL_PORTS);
++
+     ide = PCI_DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
+     if (!ide) {
+         error_report("PIIX4 did not create its IDE function");
+diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
+index b36fda5..fb13910 100644
+--- a/tests/qtest/ia64-ipf-test.c
++++ b/tests/qtest/ia64-ipf-test.c
+@@ -67,6 +67,18 @@
+ #define TEST_CMOS_DATA_PORT          0x71
+ #define TEST_CMOS_FLOPPY_TYPE        0x10
+ #define TEST_CMOS_EQUIPMENT          0x14
++#define TEST_PARALLEL_BASE          0x378
++#define TEST_PARALLEL_DATA          (TEST_PARALLEL_BASE + 0)
++#define TEST_PARALLEL_STATUS        (TEST_PARALLEL_BASE + 1)
++#define TEST_PARALLEL_CONTROL       (TEST_PARALLEL_BASE + 2)
++#define TEST_PARALLEL_IRQ           7
++#define TEST_PARALLEL_STATUS_RESET  0xd9
++#define TEST_PARALLEL_CONTROL_RESET 0xcc
++#define TEST_PARALLEL_CONTROL_FIXED 0xc0
++#define TEST_PARALLEL_CONTROL_INTEN 0x10
++#define TEST_PARALLEL_CONTROL_SELECT 0x08
++#define TEST_PARALLEL_CONTROL_INIT  0x04
++#define TEST_PARALLEL_CONTROL_STROBE 0x01
+ #define TEST_PM_IO_BASE             0x0400
+ #define TEST_PM_TIMER_OFFSET        0x08
+ #define TEST_PM_TIMER_MASK          0x00ffffffU
+@@ -597,6 +609,61 @@ static void test_fdc_dma_irq_and_cmos(void)
+     qtest_quit(qts);
+ }
+ 
++static void test_parallel_irq_and_reset(void)
++{
++    const uint8_t vector = 0x55;
++    const uint8_t armed_control = TEST_PARALLEL_CONTROL_FIXED |
++                                  TEST_PARALLEL_CONTROL_INTEN |
++                                  TEST_PARALLEL_CONTROL_SELECT |
++                                  TEST_PARALLEL_CONTROL_INIT |
++                                  TEST_PARALLEL_CONTROL_STROBE;
++    const uint8_t interrupt_control = armed_control &
++                                      ~TEST_PARALLEL_CONTROL_STROBE;
++    QTestState *qts = ipf_qtest_start_args("-parallel null");
++
++    g_assert_cmphex(qtest_readb(qts,
++                                legacy_io_address(TEST_PARALLEL_DATA)),
++                    ==, 0xff);
++    g_assert_cmphex(qtest_readb(qts,
++                                legacy_io_address(TEST_PARALLEL_STATUS)),
++                    ==, TEST_PARALLEL_STATUS_RESET);
++    g_assert_cmphex(qtest_readb(qts,
++                                legacy_io_address(TEST_PARALLEL_CONTROL)),
++                    ==, TEST_PARALLEL_CONTROL_RESET);
++
++    qtest_writeb(qts, legacy_io_address(TEST_PARALLEL_DATA), 0x5a);
++    g_assert_cmphex(qtest_readb(qts,
++                                legacy_io_address(TEST_PARALLEL_DATA)),
++                    ==, 0x5a);
++
++    program_iosapic_level_route(qts, TEST_PARALLEL_IRQ, vector);
++
++    /* A strobe transition writes the byte; dropping strobe raises ACK IRQ7. */
++    qtest_writeb(qts, legacy_io_address(TEST_PARALLEL_CONTROL),
++                 armed_control);
++    qtest_writeb(qts, legacy_io_address(TEST_PARALLEL_CONTROL),
++                 interrupt_control);
++    assert_iosapic_remote_irr(qts, TEST_PARALLEL_IRQ, true);
++
++    /* Reading status acknowledges the device before the I/O SAPIC EOI. */
++    qtest_readb(qts, legacy_io_address(TEST_PARALLEL_STATUS));
++    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, vector);
++    assert_iosapic_remote_irr(qts, TEST_PARALLEL_IRQ, false);
++
++    qtest_system_reset(qts);
++    g_assert_cmphex(qtest_readb(qts,
++                                legacy_io_address(TEST_PARALLEL_DATA)),
++                    ==, 0xff);
++    g_assert_cmphex(qtest_readb(qts,
++                                legacy_io_address(TEST_PARALLEL_STATUS)),
++                    ==, TEST_PARALLEL_STATUS_RESET);
++    g_assert_cmphex(qtest_readb(qts,
++                                legacy_io_address(TEST_PARALLEL_CONTROL)),
++                    ==, TEST_PARALLEL_CONTROL_RESET);
++
++    qtest_quit(qts);
++}
++
+ static void test_i8042_irqs_reach_iosapic(void)
+ {
+     const uint8_t kbd_vector = 0x52;
+@@ -676,6 +743,8 @@ int main(int argc, char **argv)
+     qtest_add_func("/ia64/ipf/460gx-reset", test_460gx_reset);
+     qtest_add_func("/ia64/ipf/fdc-dma-iosapic-cmos",
+                    test_fdc_dma_irq_and_cmos);
++    qtest_add_func("/ia64/ipf/parallel-iosapic-reset",
++                   test_parallel_irq_and_reset);
+     qtest_add_func("/ia64/ipf/i8042-iosapic",
+                    test_i8042_irqs_reach_iosapic);
+     ret = g_test_run();
+-- 
+2.47.3
