@@ -15,13 +15,26 @@ history::
 
   scripts/ia64-ipf-audit.py --root . --output /tmp/ia64-ipf-audit.json
 
-The audit locates the largest historical ``IPF.c`` blob, hashes it, extracts
-legacy machine functions, device-creation calls, model identifiers, address
-constants, and interrupt constants, then compares them with the modern tree.
+The audit deliberately selects the historical ``hw/ipf.c`` path, rather than
+the current and usually larger ``hw/ia64/ipf.c`` implementation.  Use
+``--legacy-path`` only when auditing a repository whose historical ledger lived
+at another path::
+
+  scripts/ia64-ipf-audit.py --root . --legacy-path hw/ipf.c \
+    --output /tmp/ia64-ipf-audit.json
+
+For the selected path, the largest reachable revision is hashed and recorded
+with the selection strategy and candidate count.  If ``hw/ipf.c`` is absent,
+the tool may fall back to another non-current path ending in ``ipf.c``; it will
+never silently use ``hw/ia64/ipf.c`` as the historical ledger.  The audit then
+extracts legacy machine functions, device-creation calls, model identifiers,
+address constants, and interrupt constants and compares them with the modern
+tree.
+
 It deliberately reports three distinct states:
 
 ``machine-wired``
-  The current ``hw/ia64`` or ``include/hw/ia64`` tree references the
+  The current IA-64 machine tree or IA-64 device configuration references the
   obligation.  This is evidence of integration, not proof of correctness.
 
 ``model-available``
@@ -33,6 +46,12 @@ It deliberately reports three distinct states:
   No structural correspondence was found.  Manual review is required; the old
   code may represent a missing device, an obsolete implementation detail, or a
   responsibility now provided under a different name.
+
+Generic creation-call names are retained as navigation evidence, but they are
+weak signals because nearly every machine uses helpers such as ``qdev_new`` or
+``pci_create_simple``.  The summary therefore also reports identity-only
+coverage derived from model and device literals.  Neither percentage is a
+completion score.
 
 Completion rule
 ---------------
