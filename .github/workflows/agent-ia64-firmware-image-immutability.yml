@@ -1,0 +1,388 @@
+name: Temporary IA-64 firmware image immutability validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-firmware-image-immutability
+    paths:
+      - .github/workflows/agent-ia64-firmware-image-immutability.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      BASE_COMMIT: 4b06966d96110ca7ac2a5abd51c78e1852ce9b48
+      OUTPUT_BRANCH: fix/ia64-firmware-image-immutability
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Remove firmware-image patch paths on the verified base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$BASE_COMMIT" HEAD
+          git checkout --detach "$BASE_COMMIT"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def remove_between(text: str, start: str, end: str) -> str:
+              assert text.count(start) == 1, start
+              assert text.count(end) == 1, end
+              first = text.index(start)
+              last = text.index(end, first)
+              return text[:first] + text[last:]
+
+          path = Path("hw/ia64/ipf.c")
+          text = path.read_text()
+
+          text = remove_between(
+              text,
+              "/*\n * Firmware call-gates / stubs.\n",
+              "/*\n * xenipf SPad scratchpad area.")
+          text = text.replace(
+              "#define EFI_SECTION_PE32                   0x10\n"
+              "#define EFI_SECTION_TE                     0x12\n"
+              "#define EFI_TE_IMAGE_HEADER_SIGNATURE      0x5A56\n",
+              "")
+          text = text.replace(
+              "#define IPF_FW_GP_BASE_ADDR   0x000000010002FEB0ULL\n"
+              "#define IPF_FW_GP_GLOB_OFF    0x00000000001FFE40ULL\n"
+              "#define IPF_FW_GP_GLOB_SENTINEL 0xDEADBEEF2BADBEEFULL\n\n",
+              "")
+          text = remove_between(
+              text,
+              "typedef struct {\n"
+              "    uint8_t Size[3];\n"
+              "    uint8_t Type;\n"
+              "} EFI_COMMON_SECTION_HEADER;\n\n",
+              "static size_t ipf_fw_align_up")
+          text = remove_between(
+              text,
+              "static bool ipf_fw_patch_fit_enabled(void)\n",
+              "static void ipf_fw_probe_fit")
+          text = remove_between(
+              text,
+              "static uint8_t ipf_fw_fit_checksum8(const uint8_t *buf, size_t len)\n",
+              "static const char *ipf_fw_fit_type_name")
+          text = remove_between(
+              text,
+              "static bool ipf_fw_pe32_entry(const uint8_t *img, size_t len,\n",
+              "static void ipf_fw_seed_spad")
+          text = remove_between(
+              text,
+              "static void ipf_patch_firmware_statuscode_callgate(void)\n",
+              "static void ipf_fw_setup_pei_handoff")
+
+          old = (
+              "        ipf_fw_patch_fit(buf, (size_t)image_size, fw_offset);\n"
+              "        ipf_fw_patch_gp_globals(buf, (size_t)image_size, fw_offset);\n")
+          assert text.count(old) == 1
+          text = text.replace(old, "")
+          old = (
+              "        if (run_firmware) {\n"
+              "            ipf_patch_firmware_statuscode_callgate();\n"
+              "        }\n")
+          assert text.count(old) == 1
+          text = text.replace(old, "")
+          path.write_text(text)
+
+          path = Path("tests/qtest/ia64-ipf-test.c")
+          text = path.read_text()
+          marker = "#define TEST_KERNEL_SENTINEL_SIZE   16\n"
+          assert text.count(marker) == 1
+          text = text.replace(
+              marker,
+              marker +
+              "\n"
+              "#define TEST_FIRMWARE_SIZE          (4 * 1024 * 1024)\n"
+              "#define TEST_FIRMWARE_BASE          UINT64_C(0xffc00000)\n"
+              "#define TEST_FIRMWARE_GP_TARGET     UINT64_C(0xffe30070)\n"
+              "#define TEST_FIRMWARE_GP_SENTINEL   UINT64_C(0xdeadbeef2badbeef)\n"
+              "#define TEST_FIRMWARE_STATUS_CALLER UINT64_C(0xffe00076)\n"
+              "#define TEST_FIRMWARE_STATUS_REPORT UINT64_C(0xffe011b6)\n"
+              "#define TEST_FIRMWARE_FIT_OFFSET    0x10000\n"
+              "#define TEST_FIRMWARE_FIT_SIZE      64\n"
+              "#define TEST_FIRMWARE_FV_OFFSET     0x30000\n"
+              "#define TEST_FIRMWARE_FV_SIZE       0x1000\n"
+              "#define TEST_FIRMWARE_FV_HEADER_LEN 0x48\n"
+              "#define TEST_FIRMWARE_PEI_FILE_SIZE 0x44\n"
+              "#define TEST_FIRMWARE_TE_SECTION_SIZE 0x2c\n"
+              "#define TEST_FIT_UNUSED_TYPE        0x7f\n")
+
+          globals_marker = (
+              "static char *firmware_path;\n"
+              "static char *kernel_path;\n")
+          assert text.count(globals_marker) == 1
+          text = text.replace(
+              globals_marker,
+              globals_marker +
+              "\n"
+              "static void build_test_firmware_fit(\n"
+              "    uint8_t fit[TEST_FIRMWARE_FIT_SIZE])\n"
+              "{\n"
+              "    memset(fit, 0, TEST_FIRMWARE_FIT_SIZE);\n"
+              "    memcpy(fit, \"_FIT_   \", 8);\n"
+              "    fit[8] = TEST_FIRMWARE_FIT_SIZE / 16;\n"
+              "    for (unsigned int entry = 1;\n"
+              "         entry < TEST_FIRMWARE_FIT_SIZE / 16; entry++) {\n"
+              "        fit[entry * 16 + 14] = TEST_FIT_UNUSED_TYPE;\n"
+              "    }\n"
+              "}\n")
+
+          create_marker = "static void create_test_kernel(void)\n"
+          assert text.count(create_marker) == 1
+          text = text.replace(
+              create_marker,
+              "static void test_firmware_image_is_immutable(void)\n"
+              "{\n"
+              "    uint8_t expected_fit[TEST_FIRMWARE_FIT_SIZE];\n"
+              "    uint8_t actual_fit[TEST_FIRMWARE_FIT_SIZE];\n"
+              "    QTestState *qts = ipf_qtest_start();\n"
+              "\n"
+              "    g_assert_cmphex(qtest_readq(qts, TEST_FIRMWARE_GP_TARGET),\n"
+              "                    ==, TEST_FIRMWARE_GP_SENTINEL);\n"
+              "    g_assert_cmphex(qtest_readq(qts, TEST_FIRMWARE_STATUS_CALLER),\n"
+              "                    ==, UINT64_MAX);\n"
+              "    g_assert_cmphex(qtest_readq(qts, TEST_FIRMWARE_STATUS_REPORT),\n"
+              "                    ==, UINT64_MAX);\n"
+              "\n"
+              "    build_test_firmware_fit(expected_fit);\n"
+              "    qtest_memread(qts,\n"
+              "                  TEST_FIRMWARE_BASE + TEST_FIRMWARE_FIT_OFFSET,\n"
+              "                  actual_fit, sizeof(actual_fit));\n"
+              "    g_assert_cmpmem(actual_fit, sizeof(actual_fit),\n"
+              "                    expected_fit, sizeof(expected_fit));\n"
+              "\n"
+              "    qtest_quit(qts);\n"
+              "}\n"
+              "\n" + create_marker)
+
+          start = text.index("static void create_test_firmware(void)\n")
+          end = text.index("\nint main(int argc, char **argv)\n", start)
+          replacement = r'''static void create_test_firmware(void)
+          {
+              g_autofree uint8_t *image = g_malloc(TEST_FIRMWARE_SIZE);
+              g_autoptr(GError) error = NULL;
+              uint8_t *fv;
+              uint8_t *file;
+              uint8_t *section;
+              ssize_t written;
+              int fd;
+
+              fd = g_file_open_tmp("ia64-ipf-qtest-XXXXXX", &firmware_path,
+                                   &error);
+              g_assert_no_error(error);
+              g_assert_cmpint(fd, >=, 0);
+
+              memset(image, 0xff, TEST_FIRMWARE_SIZE);
+              build_test_firmware_fit(image + TEST_FIRMWARE_FIT_OFFSET);
+              stq_le_p(image + TEST_FIRMWARE_GP_TARGET - TEST_FIRMWARE_BASE,
+                       TEST_FIRMWARE_GP_SENTINEL);
+
+              /*
+               * Supply the minimum FV/PEI-core/TE shape that made the old FIT
+               * rewrite path actionable.  It is data for the immutability
+               * contract, not firmware executed by qtest.
+               */
+              fv = image + TEST_FIRMWARE_FV_OFFSET;
+              stq_le_p(fv + 0x20, TEST_FIRMWARE_FV_SIZE);
+              memcpy(fv + 0x28, "_FVH", 4);
+              stw_le_p(fv + 0x30, TEST_FIRMWARE_FV_HEADER_LEN);
+
+              file = fv + TEST_FIRMWARE_FV_HEADER_LEN;
+              memset(file, 0, TEST_FIRMWARE_PEI_FILE_SIZE);
+              file[18] = 0x04;
+              file[20] = TEST_FIRMWARE_PEI_FILE_SIZE;
+              file[23] = 0x07;
+
+              section = file + 24;
+              section[0] = TEST_FIRMWARE_TE_SECTION_SIZE;
+              section[3] = 0x12;
+              stw_le_p(section + 4, 0x5a56);
+              stw_le_p(section + 10, 40);
+
+              written = write(fd, image, TEST_FIRMWARE_SIZE);
+              g_assert_cmpint(written, ==, TEST_FIRMWARE_SIZE);
+              close(fd);
+          }
+          '''
+          text = text[:start] + replacement + text[end:]
+
+          marker = (
+              "    qtest_add_func(\"/ia64/ipf/direct-kernel-io-contract\",\n"
+              "                   test_direct_kernel_io_contract);\n")
+          assert text.count(marker) == 1
+          text = text.replace(
+              marker,
+              marker +
+              "    qtest_add_func(\"/ia64/ipf/firmware-image-immutable\",\n"
+              "                   test_firmware_image_is_immutable);\n")
+          path.write_text(text)
+
+          path = Path("docs/devel/ia64-ipf-port-status.rst")
+          text = path.read_text()
+          old = (
+              "     - Direct-kernel port I/O comes from the EFI memory map without editing\n"
+              "       guest kernel symbols.  Replace the remaining image-specific aliases and\n"
+              "       firmware mutation with documented platform mappings and boot contracts.\n")
+          new = (
+              "     - Direct-kernel port I/O comes from the EFI memory map without editing\n"
+              "       guest kernel symbols.  Loaded firmware payload bytes are immutable;\n"
+              "       replace the remaining image-specific aliases with documented platform\n"
+              "       mappings and boot contracts.\n")
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = (
+              "Direct-kernel boot now advertises its legacy port-I/O window through an\n"
+              "``EFI_MEMORY_MAPPED_IO_PORT_SPACE`` descriptor, leaves loaded ELF data\n"
+              "intact, and verifies both properties in qtest.\n")
+          new = old + (
+              "The firmware loader likewise copies ROM bytes without rewriting FIT entries,\n"
+              "GP-relative globals, or fixed status-code pointers.  A synthetic image that\n"
+              "would have triggered all three historical paths is verified unchanged.\n")
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          path.write_text(text)
+          PY
+
+          ! grep -Eq 'ipf_fw_patch_(fit|gp_globals)|firmware_statuscode_callgate|IPF_FW_GP_GLOB_SENTINEL' \
+            hw/ia64/ipf.c
+          git diff --check
+          git diff > /tmp/ia64-firmware-image-immutability.patch
+          perl scripts/checkpatch.pl --no-signoff --strict \
+            /tmp/ia64-firmware-image-immutability.patch
+
+      - name: Install build and documentation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            python3-docutils libglib2.0-dev libpixman-1-dev zlib1g-dev \
+            libslirp-dev
+
+      - name: Validate documentation
+        run: |
+          rst2html docs/devel/ia64-ipf-port-status.rst \
+            /tmp/ia64-ipf-port-status.html
+
+      - name: Configure and build IA-64
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run architectural and machine contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-interrupt --tap -k \
+            | tee /tmp/test-ia64-interrupt.tap
+          build/tests/unit/test-ia64-iosapic --tap -k \
+            | tee /tmp/test-ia64-iosapic.tap
+          QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
+            build/tests/qtest/ia64-ipf-test --tap -k \
+            | tee /tmp/ia64-ipf-test.tap
+          grep -q 'ok .*firmware-image-immutable' /tmp/ia64-ipf-test.tap
+
+      - name: Smoke every bundled SDV firmware image
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=/tmp/ia64-firmware-smoke
+          mkdir -p "$out"
+          : > "$out/summary.tsv"
+
+          for firmware in \
+            'stuff/EFI 0.99 Debug SDV.bin' \
+            'stuff/Unknown Ver EFI.bin' \
+            'stuff/bios117c.BIN' \
+            'stuff/bios130.BIN' \
+            'stuff/mybios.bin' \
+            'stuff/rx4610_109B.BIN' \
+            'stuff/rx4610_117B.BIN'; do
+            stem="$(basename "$firmware" | tr ' ' '_')"
+            serial="$out/$stem.serial.log"
+            qlog="$out/$stem.qemu.log"
+            set +e
+            timeout --signal=TERM --kill-after=2s 4s \
+              build/qemu-system-ia64 \
+                -machine ipf \
+                -m 256M \
+                -bios "$firmware" \
+                -display none \
+                -serial "file:$serial" \
+                -monitor none \
+                -no-reboot \
+                -d guest_errors \
+                -D "$qlog"
+            rc=$?
+            set -e
+            case "$rc" in
+              0|124|143) ;;
+              *)
+                echo "firmware smoke failed: $firmware rc=$rc" >&2
+                cat "$qlog" >&2 || true
+                exit 1
+                ;;
+            esac
+            ! grep -Eq 'FIT patch|GP globals patch|status-code callgate patched' \
+              "$qlog"
+            printf '%s\t%s\t%s\t%s\n' \
+              "$firmware" "$rc" \
+              "$(wc -c < "$serial")" \
+              "$(tail -n 1 "$serial" | tr '\t\r\n' '   ')" \
+              >> "$out/summary.tsv"
+          done
+          cat "$out/summary.tsv"
+
+      - name: Publish the tested commit and fast-forward metachicken
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            docs/devel/ia64-ipf-port-status.rst \
+            hw/ia64/ipf.c \
+            tests/qtest/ia64-ipf-test.c
+          git diff --cached --check
+          git commit \
+            -m 'hw/ia64: keep loaded firmware images immutable' \
+            -m 'Delete the FIT rewrite, fixed GP-global edit, and synthetic status-code callgate. Prove a ROM crafted to trigger all three historical paths remains unchanged, while preserving the separate platform handoff and NVRAM contracts.'
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+
+          remote_base="$(git ls-remote origin refs/heads/metachicken | cut -f1)"
+          test "$remote_base" = "$BASE_COMMIT"
+          git push origin HEAD:refs/heads/metachicken
+          git rev-parse HEAD | tee /tmp/ia64-firmware-image-immutability-commit.txt
+
+      - name: Upload validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-firmware-image-immutability-result
+          path: |
+            /tmp/ia64-firmware-image-immutability-commit.txt
+            /tmp/ia64-firmware-image-immutability.patch
+            /tmp/ia64-ipf-port-status.html
+            /tmp/test-ia64-interrupt.tap
+            /tmp/test-ia64-iosapic.tap
+            /tmp/ia64-ipf-test.tap
+            /tmp/ia64-firmware-smoke/
+          retention-days: 2
+          if-no-files-found: error
