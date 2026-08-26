@@ -1,0 +1,455 @@
+diff --git a/configs/devices/ia64-softmmu/default.mak b/configs/devices/ia64-softmmu/default.mak
+index 998c356..bd6e038 100644
+--- a/configs/devices/ia64-softmmu/default.mak
++++ b/configs/devices/ia64-softmmu/default.mak
+@@ -10,3 +10,6 @@ CONFIG_PCI_DEVICES=y
+ CONFIG_PIIX=y
+ CONFIG_SMBUS_EEPROM=y
+ CONFIG_PCKBD=y
++
++# Standard ISA floppy controller; PIIX supplies its IRQ and i8257 DMA paths.
++CONFIG_FDC_ISA=y
+diff --git a/docs/devel/ia64-ipf-port-status.rst b/docs/devel/ia64-ipf-port-status.rst
+index e36207e..a7d4af2 100644
+--- a/docs/devel/ia64-ipf-port-status.rst
++++ b/docs/devel/ia64-ipf-port-status.rst
+@@ -40,113 +40,128 @@ Historical device inventory and current state
+ ----------------------------------------------
+ 
+ The inherited historical machine configured a conventional PC-derived device
+-set around the IA-64 firmware interface.  The table distinguishes a real port
+-using a current QEMU device model from an in-file shim or an unported device.
++set around the IA-64 firmware interface.  The table distinguishes current-QEMU
++device paths from remaining partial platform behavior.
+ 
+ .. list-table::
+    :header-rows: 1
+-   :widths: 20 24 56
++   :widths: 20 25 55
+ 
+    * - Historical component
+      - Current state
+      - Required work
+    * - RAM and firmware windows
+      - Present
+-     - Replace image-specific aliases with documented platform maps.
++     - Replace image-specific aliases and firmware mutation with documented
++       platform mappings and boot contracts.
+    * - PCI host/root
+      - Custom current-QOM model
+-     - Validate 460GX windows, routing, DMA, and migration state.
++     - Validate 460GX address windows, DMA reachability, reset, and migration.
+    * - 460GX host functions
+-     - Config-space shadows
+-     - Convert firmware-visible shadows into explicit chipset devices.
++     - Resettable, migratable QOM device
++     - Complete chipset behavior beyond the firmware-visible sparse
++       configuration and CB0/CC0 windows.
+    * - I/O SAPIC
+-     - In-file partial model
+-     - Split into a QOM device; complete delivery modes, destination,
+-       polarity, EOI, and migration.
++     - QOM device with isolated core tests
++     - Complete destination modes, polarity semantics, special delivery modes,
++       and multi-CPU routing.
+    * - Local SAPIC
+      - Architectural CPU model
+      - IRR/IVR/TPR/EOI arbitration is isolated and unit tested; add
+-       NMI/ExtINT/IPI and migration.
++       NMI/ExtINT/IPI and complete migration state.
+    * - PIIX southbridge
+-     - Function 0 only
+-     - Wire one coherent PIIX4 instance and use its ISA/IDE/UHCI/PM/SMBus
+-       child functions where appropriate.
++     - Coherent PIIX4 multifunction device
++     - Validate remaining reset and migration interactions across all child
++       functions.
+    * - ISA bus
+-     - Standalone workaround
+-     - Derive it from the southbridge and route IRQs through the platform.
++     - Owned by PIIX4
++     - IRQ0..15 route directly to I/O SAPIC inputs; retain this single-bus
++       topology as compatibility devices are added.
+    * - 8259 PIC
+-     - Not ported
+-     - Decide from platform documentation whether legacy PIC exposure is
+-       required; do not fake it in CPU code.
++     - Deliberately disabled
++     - Decide from platform documentation whether exposing a legacy PIC is
++       required; do not fake one in CPU code.
+    * - RTC/CMOS
+-     - Current QEMU RTC
+-     - Integrate with southbridge/reset and validate firmware-visible contents.
++     - PIIX4 RTC on the ISA bus
++     - Memory, equipment, and floppy fields are populated; extend only from
++       documented firmware requirements.
+    * - Serial
+-     - One serial-mm UART
+-     - Validate the real IPF address/IRQ; add legacy ports only if specified.
++     - Current serial-mm UART with COM1 alias
++     - Validate the platform address and interrupt contract across all firmware
++       lanes.
+    * - Parallel
+      - Not ported
+-     - Port only if part of the chosen IPF compatibility platform.
++     - Port only if it is part of the selected IPF compatibility platform.
+    * - VGA
+      - Current PCI VGA
+-     - Keep payload-independent; validate PCI routing and firmware discovery.
++     - Validate firmware discovery, option-ROM execution, and INTx behavior.
+    * - IDE
+-     - Not ported
+-     - Wire the PIIX IDE function and drives.
++     - PIIX IDE child with current drive creation
++     - Add boot and data-path coverage with IA-64 firmware and direct kernels.
+    * - i8042 keyboard/mouse
+-     - Not ported
+-     - Wire through the coherent ISA path.
++     - Current ISA i8042
++     - IRQ1 and IRQ12 are tested through the I/O SAPIC; leave the x86-only A20
++       output unused.
+    * - ISA DMA
+-     - Not ported
+-     - Add with ISA devices that require it.
++     - PIIX-owned dual i8257 controllers
++     - Standard channel registers, masking, and reset are machine-tested; add
++       end-to-end DMA coverage for each attached legacy device.
+    * - Floppy
+-     - Not ported
+-     - Optional compatibility device after DMA/PIC routing is correct.
++     - Current ISA FDC at I/O 0x3f0, IRQ6, DMA2
++     - Controller reset, IRQ routing, DMA attachment, and CMOS identity are
++       tested; add sector-transfer and firmware boot-media coverage.
+    * - UHCI USB
+-     - Not ported
+-     - Wire the PIIX UHCI function.
++     - PIIX UHCI child
++     - Validate firmware discovery and interrupt routing with real USB devices.
+    * - ACPI PM/SMBus
+-     - In-file PM shim; no SMBus
+-     - Replace with PIIX4 PM/SMBus and populate documented EEPROM devices.
++     - Authoritative PIIX4 PM/SMBus device
++     - PM1, timer, reset defaults, SCI, and EEPROM topology are tested; expand
++       ACPI tables without adding a second register implementation.
+    * - Network
+-     - Current PCI NIC creation
+-     - Validate INTx routing and defaults; ISA NE2000 remains unported.
++     - Current generic PCI NIC creation
++     - INTx reaches the I/O SAPIC; validate firmware defaults and additional
++       supported NIC models.
+    * - SCSI
+-     - Not ported by default
+-     - Reintroduce supported PCI SCSI enumeration and interrupt routing.
++     - Available as generic PCI devices, not a machine default
++     - Reintroduce the historical default only if firmware expectations and
++       device enumeration justify it.
+    * - Virtio block
+-     - Generic PCI available
+-     - Validate firmware support and INTx; do not special-case it in IPF code.
++     - Generic PCI device available
++     - Validate firmware support and INTx without IPF-specific special cases.
+    * - Audio
+-     - Not ported
+-     - Optional after core platform devices.
++     - Generic PCI devices available on request
++     - Optional after the boot-critical platform contract is complete.
+    * - SMP/IPI
+      - Incomplete
+-     - Implement LID targeting, IPI space, rendezvous/reset, and per-CPU state.
++     - Implement LID targeting, IPI space, rendezvous/reset, per-CPU platform
++       state, and SMP firmware tables.
+    * - Migration
+-     - Incomplete
+-     - Add VMState for CPU architectural state and every custom IPF device.
++     - Partial
++     - Custom 460GX and I/O SAPIC devices have VMState; complete CPU, firmware,
++       and remaining machine-owned state and add migration tests.
+ 
+ Current assessment
+ ------------------
+ 
+-The original current-tree import contained roughly nine hundred lines of
+-largely disabled, old-QEMU PC-machine scaffolding.  The current ``ipf.c`` is
+-roughly 6.7 thousand lines, but line growth is not device-port completion.  A
+-large share is firmware table construction, tracing, flash/NVRAM handling, and
+-firmware compatibility machinery.  Fewer than half of the historical device
+-categories are currently represented by a coherent, current-QEMU device path,
+-and several represented categories are partial shims rather than finished
+-ports.
++The boot-critical PC-derived topology is now represented by current QEMU device
++models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
++floppy, VGA, and generic PCI NIC attachment.  The I/O SAPIC and 460GX facade are
++separate QOM devices rather than in-file register shims.
++
++That does not make the platform complete.  The largest remaining risks are CPU
++and chipset architectural coverage, SMP/IPI support, migration completeness,
++and firmware compatibility code that still observes or changes image-private
++state.  Optional historical devices matter less than removing those shortcuts
++and validating one payload-independent machine against all three boot lanes.
+ 
+ Priority order
+ --------------
+ 
+-#. Keep local SAPIC arbitration in the CPU and unit-test its architectural
+-   contract.
+-#. Remove guest-firmware mutation from MMU and instruction execution paths.
+-#. Make one payload-independent machine topology.
+-#. Extract the I/O SAPIC and 460GX functions into migratable QOM devices.
+-#. Integrate a coherent southbridge/ISA/IDE/UHCI/PM/SMBus topology.
+-#. Port the remaining compatibility devices through current QEMU APIs.
+-#. Validate Xen firmware, SDV firmware, and direct kernels independently.
++#. Remove guest-firmware mutation and image-private behavior from execution and
++   machine code, replacing each case with the underlying architectural fix.
++#. Validate Xen firmware, SDV firmware, and direct kernels against one topology
++   and record reproducible frontier evidence for each lane.
++#. Complete 460GX, I/O SAPIC, local SAPIC, SMP/IPI, and migration semantics.
++#. Add end-to-end storage and DMA tests for IDE, floppy, SCSI, and virtio.
++#. Port optional compatibility devices only when platform evidence or firmware
++   enumeration requires them.
+diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
+index d979ab4..6e7515e 100644
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -32,7 +32,7 @@
+ #include "hw/irq.h"
+ #include "hw/isa/isa.h"
+ #include "hw/rtc/mc146818rtc.h"
+-/* #include "fdc.h" */
++#include "hw/block/fdc.h"
+ #include "hw/pci/pci.h"
+ #include "hw/pci/pci_ids.h"
+ #include "hw/pci/pci_host.h"
+@@ -118,6 +118,7 @@ struct IPFMachineState {
+     uint8_t cmos_ext_index;
+     uint8_t cmos_ext[256];
+     PCIDevice *piix4;
++    ISADevice *fdc;
+     IA64CPU *cpu;
+ 
+     /*
+@@ -3395,6 +3396,9 @@ static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
+ {
+     MC146818RtcState *s = m->rtc;
+     ram_addr_t ram_size = machine->ram_size;
++    FloppyDriveType fd0 = FLOPPY_DRIVE_TYPE_NONE;
++    FloppyDriveType fd1 = FLOPPY_DRIVE_TYPE_NONE;
++    unsigned int floppy_count = 0;
+     int val;
+ 
+     if (!s) {
+@@ -3440,11 +3444,31 @@ static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
+     mc146818rtc_set_cmos_data(s, 0x35, (val >> 8) & 0xff);
+ 
+     /*
+-     * Equipment byte (0x14).
+-     * 0x02 = FPU present
+-     * 0x04 = PS/2 mouse installed
++     * Floppy drive types (0x10) and equipment byte (0x14).  Keep these
++     * derived from the realized ISA FDC so firmware sees the same drive
++     * topology as the controller, including empty drive bays.
+      */
+-    val = 0x02 | 0x04;
++    if (m->fdc) {
++        fd0 = isa_fdc_get_drive_type(m->fdc, 0);
++        fd1 = isa_fdc_get_drive_type(m->fdc, 1);
++    }
++    val = (cmos_get_fd_drive_type(fd0) << 4) |
++          cmos_get_fd_drive_type(fd1);
++    mc146818rtc_set_cmos_data(s, 0x10, val);
++
++    if (fd0 != FLOPPY_DRIVE_TYPE_NONE) {
++        floppy_count++;
++    }
++    if (fd1 != FLOPPY_DRIVE_TYPE_NONE) {
++        floppy_count++;
++    }
++
++    val = 0x02 | 0x04; /* FPU and PS/2 mouse present. */
++    if (floppy_count == 1) {
++        val |= 0x01;
++    } else if (floppy_count == 2) {
++        val |= 0x41;
++    }
+     mc146818rtc_set_cmos_data(s, 0x14, val);
+ 
+     /*
+@@ -4682,6 +4706,7 @@ static void ipf_init_pci(IPFMachineState *m)
+ 
+ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
+ {
++    DriveInfo *fd[MAX_FD] = { NULL };
+     PCIDevice *ide;
+     DeviceState *pm;
+     PCIDevice *piix;
+@@ -4721,6 +4746,18 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
+      */
+     isa_create_simple(m->isa_bus, TYPE_I8042);
+ 
++    /*
++     * PIIX realization already installs the platform's dual i8257 DMA
++     * controllers on this ISA bus.  Attach the standard ISA FDC to that real
++     * DMA provider at its architectural I/O, IRQ6, and DMA2 defaults.
++     */
++    for (i = 0; i < MAX_FD; i++) {
++        fd[i] = drive_get(IF_FLOPPY, 0, i);
++    }
++    m->fdc = isa_new(TYPE_ISA_FDC);
++    isa_realize_and_unref(m->fdc, m->isa_bus, &error_fatal);
++    isa_fdc_init_drives(m->fdc, fd);
++
+     ide = PCI_DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
+     if (!ide) {
+         error_report("PIIX4 did not create its IDE function");
+diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
+index b906034..b36fda5 100644
+--- a/tests/qtest/ia64-ipf-test.c
++++ b/tests/qtest/ia64-ipf-test.c
+@@ -48,6 +48,25 @@
+ #define TEST_I8042_MODE_KBD_IRQ      0x01
+ #define TEST_I8042_MODE_MOUSE_IRQ    0x02
+ #define TEST_I8042_STATUS_AUX_OBF    0x20
++#define TEST_DMA_CHANNEL2_ADDRESS    0x04
++#define TEST_DMA_MASK_READ           0x09
++#define TEST_DMA_CLEAR_FLIP_FLOP     0x0c
++#define TEST_DMA_WRITE_ALL_MASK      0x0f
++#define TEST_DMA_CHANNEL2_PAGE       0x81
++#define TEST_FDC_BASE                0x3f0
++#define TEST_FDC_DOR                 (TEST_FDC_BASE + 2)
++#define TEST_FDC_MSR                 (TEST_FDC_BASE + 4)
++#define TEST_FDC_FIFO                (TEST_FDC_BASE + 5)
++#define TEST_FDC_IRQ                 6
++#define TEST_FDC_DOR_NRESET          0x04
++#define TEST_FDC_DOR_DMA_IRQ_ENABLE  0x08
++#define TEST_FDC_MSR_RQM             0x80
++#define TEST_FDC_MSR_DIO             0x40
++#define TEST_FDC_CMD_SENSE_INTERRUPT 0x08
++#define TEST_CMOS_INDEX_PORT         0x70
++#define TEST_CMOS_DATA_PORT          0x71
++#define TEST_CMOS_FLOPPY_TYPE        0x10
++#define TEST_CMOS_EQUIPMENT          0x14
+ #define TEST_PM_IO_BASE             0x0400
+ #define TEST_PM_TIMER_OFFSET        0x08
+ #define TEST_PM_TIMER_MASK          0x00ffffffU
+@@ -228,6 +247,42 @@ static void test_piix4_functions(void)
+     qtest_quit(qts);
+ }
+ 
++static uint16_t dma_channel2_address(QTestState *qts)
++{
++    uint16_t value;
++
++    qtest_outb(qts, TEST_DMA_CLEAR_FLIP_FLOP, 0);
++    value = qtest_inb(qts, TEST_DMA_CHANNEL2_ADDRESS);
++    value |= (uint16_t)qtest_inb(qts, TEST_DMA_CHANNEL2_ADDRESS) << 8;
++    return value;
++}
++
++static void test_isa_dma_contract(void)
++{
++    const uint16_t address = 0x1234;
++    const uint8_t page = 0x5a;
++    QTestState *qts = ipf_qtest_start();
++
++    /* PIIX supplies the primary i8257 and its standard channel-2 ports. */
++    g_assert_cmphex(qtest_inb(qts, TEST_DMA_MASK_READ) & 0x0f, ==, 0x0f);
++
++    qtest_outb(qts, TEST_DMA_CLEAR_FLIP_FLOP, 0);
++    qtest_outb(qts, TEST_DMA_CHANNEL2_ADDRESS, address & 0xff);
++    qtest_outb(qts, TEST_DMA_CHANNEL2_ADDRESS, address >> 8);
++    qtest_outb(qts, TEST_DMA_CHANNEL2_PAGE, page);
++
++    g_assert_cmphex(dma_channel2_address(qts), ==, address);
++    g_assert_cmphex(qtest_inb(qts, TEST_DMA_CHANNEL2_PAGE), ==, page);
++
++    qtest_outb(qts, TEST_DMA_WRITE_ALL_MASK, 0);
++    g_assert_cmphex(qtest_inb(qts, TEST_DMA_MASK_READ) & 0x0f, ==, 0);
++
++    qtest_system_reset(qts);
++    g_assert_cmphex(qtest_inb(qts, TEST_DMA_MASK_READ) & 0x0f, ==, 0x0f);
++
++    qtest_quit(qts);
++}
++
+ static void test_piix4_pm_reset(void)
+ {
+     const uint32_t alternate_base = 0x0800;
+@@ -486,6 +541,62 @@ static void assert_iosapic_remote_irr(QTestState *qts, unsigned int pin,
+                     asserted ? IPF_IOSAPIC_REMOTE_IRR : 0);
+ }
+ 
++static uint8_t cmos_read(QTestState *qts, uint8_t index)
++{
++    qtest_outb(qts, TEST_CMOS_INDEX_PORT, index);
++    return qtest_inb(qts, TEST_CMOS_DATA_PORT);
++}
++
++static void test_fdc_dma_irq_and_cmos(void)
++{
++    const uint8_t vector = 0x54;
++    const uint8_t normal_dor = TEST_FDC_DOR_NRESET |
++                               TEST_FDC_DOR_DMA_IRQ_ENABLE;
++    QTestState *qts = ipf_qtest_start_args(
++        "-drive if=floppy,file=null-co://,file.read-zeroes=on,"
++        "format=raw,size=1440k");
++    uint8_t msr;
++    uint8_t status;
++    uint8_t track;
++
++    /* A 1.44MB drive is visible through both the controller and CMOS. */
++    g_assert_cmphex(cmos_read(qts, TEST_CMOS_FLOPPY_TYPE), ==, 0x40);
++    g_assert_cmphex(cmos_read(qts, TEST_CMOS_EQUIPMENT) & 0x47, ==, 0x07);
++
++    g_assert_cmphex(qtest_inb(qts, TEST_FDC_DOR) & normal_dor, ==,
++                    normal_dor);
++    msr = qtest_inb(qts, TEST_FDC_MSR);
++    g_assert_cmphex(msr & (TEST_FDC_MSR_RQM | TEST_FDC_MSR_DIO), ==,
++                    TEST_FDC_MSR_RQM);
++
++    program_iosapic_level_route(qts, TEST_FDC_IRQ, vector);
++
++    /* Leaving and re-entering reset raises the standard IRQ6 indication. */
++    qtest_outb(qts, TEST_FDC_DOR, 0);
++    qtest_outb(qts, TEST_FDC_DOR, normal_dor);
++    assert_iosapic_remote_irr(qts, TEST_FDC_IRQ, true);
++
++    qtest_outb(qts, TEST_FDC_FIFO, TEST_FDC_CMD_SENSE_INTERRUPT);
++    msr = qtest_inb(qts, TEST_FDC_MSR);
++    g_assert_cmphex(msr & (TEST_FDC_MSR_RQM | TEST_FDC_MSR_DIO), ==,
++                    TEST_FDC_MSR_RQM | TEST_FDC_MSR_DIO);
++    status = qtest_inb(qts, TEST_FDC_FIFO);
++    track = qtest_inb(qts, TEST_FDC_FIFO);
++    g_assert_cmphex(status & 0xc0, ==, 0xc0);
++    g_assert_cmphex(track, ==, 0);
++
++    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, vector);
++    assert_iosapic_remote_irr(qts, TEST_FDC_IRQ, false);
++
++    qtest_system_reset(qts);
++    g_assert_cmphex(qtest_inb(qts, TEST_FDC_DOR) & normal_dor, ==,
++                    normal_dor);
++    g_assert_cmphex(qtest_inb(qts, TEST_FDC_MSR) & TEST_FDC_MSR_RQM, ==,
++                    TEST_FDC_MSR_RQM);
++
++    qtest_quit(qts);
++}
++
+ static void test_i8042_irqs_reach_iosapic(void)
+ {
+     const uint8_t kbd_vector = 0x52;
+@@ -553,6 +664,7 @@ int main(int argc, char **argv)
+ 
+     qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
+     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
++    qtest_add_func("/ia64/ipf/isa-dma", test_isa_dma_contract);
+     qtest_add_func("/ia64/ipf/piix4-pm-reset",
+                    test_piix4_pm_reset);
+     qtest_add_func("/ia64/ipf/piix4-sci-iosapic",
+@@ -562,6 +674,8 @@ int main(int argc, char **argv)
+     qtest_add_func("/ia64/ipf/gxb-sparse-config",
+                    test_gxb_sparse_config_identity);
+     qtest_add_func("/ia64/ipf/460gx-reset", test_460gx_reset);
++    qtest_add_func("/ia64/ipf/fdc-dma-iosapic-cmos",
++                   test_fdc_dma_irq_and_cmos);
+     qtest_add_func("/ia64/ipf/i8042-iosapic",
+                    test_i8042_irqs_reach_iosapic);
+     ret = g_test_run();
