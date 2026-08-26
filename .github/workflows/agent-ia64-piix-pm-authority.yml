@@ -1,0 +1,140 @@
+name: Temporary IA-64 PIIX PM authority validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-piix-pm-authority
+    paths:
+      - scratch/apply-ia64-piix-pm-authority.py
+      - .github/workflows/agent-ia64-piix-pm-authority.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_COMMIT: d2dddc4840919f999e460a3d5aa569875c8343da
+      OUTPUT_BRANCH: fix/ia64-piix-pm-authority
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply and review the exact source change
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scratch/apply-ia64-piix-pm-authority.py \
+            /tmp/apply-ia64-piix-pm-authority.py
+          python3 -m py_compile /tmp/apply-ia64-piix-pm-authority.py
+          sha256sum /tmp/apply-ia64-piix-pm-authority.py \
+            > /tmp/ia64-piix-pm-input-sha256.txt
+
+          git checkout --detach "$BASE_COMMIT"
+          python3 /tmp/apply-ia64-piix-pm-authority.py .
+
+          git add include/hw/acpi/piix4.h include/hw/southbridge/piix.h \
+            hw/acpi/piix4.c hw/isa/piix.c hw/ia64/ipf.c \
+            tests/qtest/ia64-ipf-test.c
+          git diff --cached --check
+          if git grep -n -E \
+            'IPF_ACPI_PM_BASE|acpi_pm_mmio|acpi_pm1_evt_sts|ipf_init_acpi_pm' \
+            -- hw/ia64/ipf.c; then
+            echo 'machine-local ACPI PM state survived reconciliation' >&2
+            exit 1
+          fi
+          git grep -q 'pm_io_base' -- hw/ia64/ipf.c hw/isa/piix.c
+          git grep -q 'reset-io-base' -- hw/acpi/piix4.c hw/isa/piix.c
+          git diff --cached > /tmp/ia64-piix-pm-authority-full.patch
+          perl scripts/checkpatch.pl --no-signoff \
+            /tmp/ia64-piix-pm-authority-full.patch
+
+      - name: Upload exact patch-applied source for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-piix-pm-authority-source-${{ github.run_id }}
+          path: |
+            /tmp/ia64-piix-pm-input-sha256.txt
+            /tmp/ia64-piix-pm-authority-full.patch
+            include/hw/acpi/piix4.h
+            include/hw/southbridge/piix.h
+            hw/acpi/piix4.c
+            hw/isa/piix.c
+            hw/ia64/ipf.c
+            tests/qtest/ia64-ipf-test.c
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+
+      - name: Build IA-64 and focused platform tests
+        run: |
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run architectural and PM authority contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-interrupt --tap -k \
+            | tee /tmp/test-ia64-interrupt.tap
+          build/tests/unit/test-ia64-iosapic --tap -k \
+            | tee /tmp/test-ia64-iosapic.tap
+          QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
+            build/tests/qtest/ia64-ipf-test --tap -k \
+            | tee /tmp/ia64-ipf-test.tap
+
+      - name: Basic executable smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/qemu-system-ia64 --version
+          build/qemu-system-ia64 -machine help | grep -q '^ipf '
+
+      - name: Publish one clean tested source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git diff --cached --check
+          git commit \
+            -m 'hw/ia64: make PIIX4 authoritative for ACPI PM' \
+            -m 'Give the generic PIIX southbridge configurable PM reset defaults, enable its real PM1/timer window at port 0x400 on IPF, and advertise that same device in the direct-kernel FADT. Remove the inert machine-local MMIO PM block and test timer progress, reset restoration, and power-button SCI delivery through the I/O SAPIC.'
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+          git rev-parse HEAD | tee /tmp/ia64-piix-pm-authority-commit.txt
+
+      - name: Upload tested commit identity and contract output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-piix-pm-authority-result
+          path: |
+            /tmp/ia64-piix-pm-authority-commit.txt
+            /tmp/test-ia64-interrupt.tap
+            /tmp/test-ia64-iosapic.tap
+            /tmp/ia64-ipf-test.tap
+          retention-days: 1
+          if-no-files-found: error
