@@ -1,0 +1,233 @@
+diff --git a/configs/devices/ia64-softmmu/default.mak b/configs/devices/ia64-softmmu/default.mak
+index 062da0507..000000000 100644
+--- a/configs/devices/ia64-softmmu/default.mak
++++ b/configs/devices/ia64-softmmu/default.mak
+@@ -2,6 +2,7 @@
+
+ # Basic UART for early console/debug (hw/char/serial-mm.c).
+ CONFIG_SERIAL=y
++CONFIG_SERIAL_ISA=y
+ CONFIG_SERIAL_MM=y
+
+ # PCI + VGA for guest firmware (Flash.fd) UI and device enumeration.
+diff --git a/docs/devel/ia64-ipf-port-status.rst b/docs/devel/ia64-ipf-port-status.rst
+index 78e65df6d..000000000 100644
+--- a/docs/devel/ia64-ipf-port-status.rst
++++ b/docs/devel/ia64-ipf-port-status.rst
+@@ -86,9 +86,10 @@ device paths from remaining partial platform behavior.
+      - Memory, equipment, and floppy fields are populated; extend only from
+        documented firmware requirements.
+    * - Serial
+-     - Current serial-mm UART with COM1 alias
+-     - Validate the platform address and interrupt contract across all firmware
+-       lanes.
++     - Routed serial-mm UART with COM1 alias and auxiliary ISA ports
++     - MMIO and COM1 share one UART state; IRQ4 and configured COM2--COM4 IRQs
++       traverse the PIIX ISA lines into the I/O SAPIC.  Validate console
++       discovery across every firmware lane.
+    * - Parallel
+      - Current ISA parallel ports on request
+      - LPT1 register reset and IRQ7 delivery through the I/O SAPIC are tested;
+@@ -146,9 +147,9 @@ Current assessment
+
+ The boot-critical PC-derived topology is now represented by current QEMU device
+ models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
+-floppy, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI buses, and the
+-standard virtio PCI storage transport.  The I/O SAPIC and 460GX facade are
+-separate QOM devices rather than in-file register shims.
++floppy, serial, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI
++buses, and the standard virtio PCI storage transport.  The I/O SAPIC and 460GX
++facade are separate QOM devices rather than in-file register shims.
+
+ That does not make the platform complete.  The largest remaining risks are CPU
+ and chipset architectural coverage, SMP/IPI support, migration completeness,
+diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
+index cc90207b2..000000000 100644
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -34,6 +34,7 @@
+ #include "hw/rtc/mc146818rtc.h"
+ #include "hw/block/fdc.h"
+ #include "hw/char/parallel.h"
++#include "hw/char/serial-isa.h"
+ #include "hw/pci/pci.h"
+ #include "hw/pci/pci_ids.h"
+ #include "hw/pci/pci_host.h"
+@@ -3744,11 +3745,6 @@ static void main_cpu_reset(void *opaque)
+     }
+ }
+
+-static void ipf_uart_dummy_irq(void *opaque, int n, int level)
+-{
+-    /* Polled UART use (earlycon) does not require an interrupt controller. */
+-}
+-
+ static uint64_t ipf_debugcon_read(void *opaque, hwaddr addr, unsigned size)
+ {
+     (void)opaque;
+@@ -4211,14 +4207,27 @@ static const MemoryRegionOps ipf_uart_ioport_ops = {
+ static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
+ {
+     Chardev *chr = serial_hd(0);
++    MemoryRegion *mr;
++    SerialMM *uart;
++    qemu_irq irq;
++
++    /*
++     * Keep configured secondary backends as ordinary ISA UARTs.  Their
++     * standard IRQ3/IRQ4 outputs use the PIIX-owned ISA-to-I/O-SAPIC path.
++     */
++    serial_hds_isa_init(m->isa_bus, 1, MAX_ISA_SERIAL_PORTS);
++
+     if (!chr) {
+         DPRINTF("UART: no serial backend (-serial), skipping\n");
+         return;
+     }
+
+-    qemu_irq irq = qemu_allocate_irq(ipf_uart_dummy_irq, NULL, 0);
++    /*
++     * The primary UART is exposed through both the platform MMIO address and
++     * legacy COM1, but its interrupt is still the architectural ISA IRQ4.
++     */
++    irq = isa_bus_get_irq(m->isa_bus, 4);
+
+-    SerialMM *uart = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
++    uart = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
+     qdev_prop_set_uint8(DEVICE(uart), "regshift", 0);
+     qdev_prop_set_uint32(DEVICE(uart), "baudbase", 115200);
+     qdev_prop_set_chr(DEVICE(uart), "chardev", chr);
+@@ -4230,7 +4239,7 @@ static void ipf_init_uart(IPFMachineState *m, MemoryRegion *sysmem)
+     serial_mm_set_line_hook(ipf_uart_line_hook, m);
+
+     /* Overlay the UART on top of the GFW RAM window. */
+-    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
++    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
+     memory_region_add_subregion_overlap(sysmem, IPF_UART_BASE, mr, 1);
+     DPRINTF("UART: mapped serial-mm at 0x%016" PRIx64 "\n", (uint64_t)IPF_UART_BASE);
+
+@@ -4946,7 +4955,6 @@ static void ipf_init(MachineState *machine)
+                                 IPF_FW_WORKRAM_BASE | (1ULL << 63),
+                                 &m->fw_workram_alias);
+
+-    ipf_init_uart(m, sysmem);
+     ipf_init_debugcon(m);
+     ipf_init_460gx(m);
+     ipf_init_legacy_io(m, sysmem);
+@@ -5061,6 +5069,7 @@ static void ipf_init(MachineState *machine)
+      */
+     ipf_init_pci(m);
+     ipf_init_southbridge(m, machine);
++    ipf_init_uart(m, sysmem);
+     ipf_init_scsi_storage(m);
+     ipf_cmos_init(m, machine);
+     pci_vga_init(m->pcibus);
+diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
+index 8b9a21a8d..000000000 100644
+--- a/tests/qtest/ia64-ipf-test.c
++++ b/tests/qtest/ia64-ipf-test.c
+@@ -13,6 +13,7 @@
+ #include "qobject/qlist.h"
+
+ #define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
++#define IPF_UART_BASE               UINT64_C(0xff5e0000)
+ #define IPF_GX_MMIO_BASE            UINT64_C(0xfeb00000)
+ #define IPF_GX_MMIO_ALIAS_BASE      UINT64_C(0x80000000feb00000)
+ #define IPF_GX_MMIO_CB0             0x0cb0
+@@ -88,6 +89,17 @@
+ #define TEST_PARALLEL_CONTROL_SELECT 0x08
+ #define TEST_PARALLEL_CONTROL_INIT  0x04
+ #define TEST_PARALLEL_CONTROL_STROBE 0x01
++#define TEST_SERIAL_COM1_BASE       0x3f8
++#define TEST_SERIAL_COM2_BASE       0x2f8
++#define TEST_SERIAL_COM1_IRQ        4
++#define TEST_SERIAL_COM2_IRQ        3
++#define TEST_SERIAL_IER             1
++#define TEST_SERIAL_IIR             2
++#define TEST_SERIAL_SCR             7
++#define TEST_SERIAL_IER_THRI        0x02
++#define TEST_SERIAL_IIR_ID          0x0e
++#define TEST_SERIAL_IIR_THRI        0x02
+ #define TEST_PM_IO_BASE             0x0400
+ #define TEST_PM_TIMER_OFFSET        0x08
+ #define TEST_PM_TIMER_MASK          0x00ffffffU
+@@ -699,6 +711,63 @@ static void test_parallel_irq_and_reset(void)
+     qtest_quit(qts);
+ }
+
++static void test_serial_irqs_aliases_and_reset(void)
++{
++    const uint8_t com1_vector = 0x56;
++    const uint8_t com2_vector = 0x57;
++    QTestState *qts = ipf_qtest_start_args("-serial null -serial null");
++    uint8_t iir;
++
++    /*
++     * The platform MMIO UART and COM1 are two address views of the same
++     * SerialState rather than independent devices.
++     */
++    qtest_writeb(qts, IPF_UART_BASE + TEST_SERIAL_SCR, 0x5a);
++    g_assert_cmphex(qtest_readb(
++                        qts,
++                        legacy_io_address(TEST_SERIAL_COM1_BASE +
++                                          TEST_SERIAL_SCR)),
++                    ==, 0x5a);
++    qtest_writeb(qts,
++                 legacy_io_address(TEST_SERIAL_COM1_BASE + TEST_SERIAL_SCR),
++                 0xa5);
++    g_assert_cmphex(qtest_readb(qts, IPF_UART_BASE + TEST_SERIAL_SCR),
++                    ==, 0xa5);
++
++    program_iosapic_level_route(qts, TEST_SERIAL_COM1_IRQ, com1_vector);
++    qtest_writeb(qts, IPF_UART_BASE + TEST_SERIAL_IER,
++                 TEST_SERIAL_IER_THRI);
++    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM1_IRQ, true);
++    iir = qtest_readb(qts, IPF_UART_BASE + TEST_SERIAL_IIR);
++    g_assert_cmphex(iir & TEST_SERIAL_IIR_ID, ==, TEST_SERIAL_IIR_THRI);
++    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, com1_vector);
++    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM1_IRQ, false);
++
++    /* The second configured backend is the current ISA COM2 device. */
++    qtest_writeb(qts,
++                 legacy_io_address(TEST_SERIAL_COM2_BASE + TEST_SERIAL_SCR),
++                 0x3c);
++    g_assert_cmphex(qtest_readb(
++                        qts,
++                        legacy_io_address(TEST_SERIAL_COM2_BASE +
++                                          TEST_SERIAL_SCR)),
++                    ==, 0x3c);
++    program_iosapic_level_route(qts, TEST_SERIAL_COM2_IRQ, com2_vector);
++    qtest_writeb(qts,
++                 legacy_io_address(TEST_SERIAL_COM2_BASE + TEST_SERIAL_IER),
++                 TEST_SERIAL_IER_THRI);
++    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM2_IRQ, true);
++    iir = qtest_readb(qts,
++                      legacy_io_address(TEST_SERIAL_COM2_BASE +
++                                        TEST_SERIAL_IIR));
++    g_assert_cmphex(iir & TEST_SERIAL_IIR_ID, ==, TEST_SERIAL_IIR_THRI);
++    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, com2_vector);
++    assert_iosapic_remote_irr(qts, TEST_SERIAL_COM2_IRQ, false);
++
++    qtest_system_reset(qts);
++    g_assert_cmphex(qtest_readb(qts, IPF_UART_BASE + TEST_SERIAL_SCR),
++                    ==, 0);
++    g_assert_cmphex(qtest_readb(
++                        qts,
++                        legacy_io_address(TEST_SERIAL_COM2_BASE +
++                                          TEST_SERIAL_SCR)),
++                    ==, 0);
++
++    qtest_quit(qts);
++}
++
+ static void test_i8042_irqs_reach_iosapic(void)
+ {
+     const uint8_t kbd_vector = 0x52;
+@@ -788,6 +857,8 @@ int main(int argc, char **argv)
+                    test_fdc_dma_irq_and_cmos);
+     qtest_add_func("/ia64/ipf/parallel-iosapic-reset",
+                    test_parallel_irq_and_reset);
++    qtest_add_func("/ia64/ipf/serial-iosapic-aliases",
++                   test_serial_irqs_aliases_and_reset);
+     qtest_add_func("/ia64/ipf/i8042-iosapic",
+                    test_i8042_irqs_reach_iosapic);
+     ret = g_test_run();
