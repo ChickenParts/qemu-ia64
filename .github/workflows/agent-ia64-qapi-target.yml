@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BASE_COMMIT: d2dddc4840919f999e460a3d5aa569875c8343da
+      BASE_COMMIT: ccd2328a8e2ee91ea05806e84c10be8a0ef70452
       OUTPUT_BRANCH: fix/ia64-qapi-target
       PATCH_FILE: scratch/ia64-qapi-target-current.patch
     steps:
