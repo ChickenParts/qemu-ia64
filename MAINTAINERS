@@ -1289,6 +1289,7 @@ F: docs/devel/ia64-*
 F: hw/ia64/
 F: target/ia64/
 F: tests/unit/test-ia64-*
+F: tests/qtest/ia64-ipf-test.c
 
 LoongArch Machines
 ------------------

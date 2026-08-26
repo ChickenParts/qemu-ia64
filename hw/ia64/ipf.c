@@ -39,6 +39,8 @@
 #include "hw/southbridge/piix.h"
 #include "qemu/cutils.h"
 #include "hw/block/block.h"
+#include "hw/ide/pci.h"
+#include "hw/i2c/smbus_eeprom.h"
 #include "qemu/typedefs.h"
 #include "hw/sysbus.h"
 #include "qom/object.h"
@@ -3416,52 +3418,18 @@ static int cmos_get_fd_drive_type(int fd0)
  * ISA devices are typically accessed through an LPC bus or similar, which
  * we emulate using the legacy I/O port mapping at IPF_LEGACY_IO_BASE.
  */
-static void ipf_isa_bus_init(IPFMachineState *m)
+static void ipf_resolve_isa_devices(IPFMachineState *m)
 {
-    MemoryRegion *isa_address_space_io = get_system_io();
-    qemu_irq *isa_irqs;
+    DeviceState *piix = DEVICE(m->piix4);
 
-    if (m->isa_bus) {
-        return;
+    m->isa_bus = ISA_BUS(qdev_get_child_bus(piix, "isa.0"));
+    if (!m->isa_bus) {
+        error_report("PIIX4 did not create its ISA bus");
+        exit(1);
     }
 
-    if (m->piix4) {
-        BusState *bus;
-        QLIST_FOREACH(bus, &DEVICE(m->piix4)->child_bus, sibling) {
-            if (object_dynamic_cast(OBJECT(bus), TYPE_ISA_BUS)) {
-                m->isa_bus = ISA_BUS(bus);
-                break;
-            }
-        }
-        if (m->isa_bus) {
-            PIIXState *piix = PIIX_PCI_DEVICE(m->piix4);
-            m->rtc = &piix->rtc;
-            DPRINTF("ISA bus/RTC: using PIIX4 southbridge\n");
-            return;
-        }
-    }
-
-    /*
-     * Create a standalone ISA bus. Since we don't have a PCI-ISA bridge,
-     * we create an ISA bus directly attached to system I/O.
-     */
-    m->isa_bus = isa_bus_new(NULL, isa_address_space_io, isa_address_space_io,
-                             &error_fatal);
-
-    /* Route ISA IRQs into the I/O SAPIC's architectural input pins. */
-    for (unsigned int i = 0; i < ISA_NUM_IRQS; i++) {
-        m->isa_irqs[i] = ia64_iosapic_get_irq(m->iosapic, i);
-    }
-    isa_irqs = m->isa_irqs;
-    isa_bus_register_input_irqs(m->isa_bus, isa_irqs);
-
-    /*
-     * Initialize the MC146818 RTC at ports 0x70-0x71.
-     * Use base year 2000 for Y2K compliance.
-     */
-    m->rtc = mc146818_rtc_init(m->isa_bus, 2000, NULL);
-
-    DPRINTF("ISA bus and RTC initialized\n");
+    m->rtc = &PIIX_PCI_DEVICE(m->piix4)->rtc;
+    DPRINTF("ISA bus/RTC: using PIIX4 southbridge\n");
 }
 
 /*
@@ -5151,15 +5119,57 @@ static void ipf_init_pci(IPFMachineState *m)
     pci_create_simple(m->pcibus, PCI_DEVFN(0, 0), TYPE_IPF_PCI_ROOT_DEVICE);
 }
 
-static void ipf_init_southbridge(IPFMachineState *m)
+#define IPF_PIIX4_SMBUS_IO_BASE 0xb100
+
+static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
 {
+    PCIDevice *ide;
+    DeviceState *pm;
+    PCIDevice *piix;
+    unsigned int i;
+
     /*
-     * Original IPF hardware used an Intel PCI-to-ISA southbridge.
-     * Provide a PIIX4-compatible device so firmware can discover it.
+     * PIIX4 owns the machine's single ISA bus and all legacy IRQ sources.
+     * Disable its internal 8259 and connect those logical ISA lines directly
+     * to I/O SAPIC inputs 0..15. This preserves the PIIX interrupt-routing
+     * registers for PCI INTx while avoiding a dead PIC output with no IA-64
+     * architectural consumer.
      */
-    PCIDevice *piix = pci_new_multifunction(PCI_DEVFN(1, 0), TYPE_PIIX4_PCI_DEVICE);
+    piix = pci_new_multifunction(PCI_DEVFN(1, 0), TYPE_PIIX4_PCI_DEVICE);
+    object_property_set_bool(OBJECT(piix), "has-pic", false, &error_abort);
+    object_property_set_bool(OBJECT(piix), "has-usb", machine_usb(machine),
+                             &error_abort);
+    qdev_prop_set_uint32(DEVICE(piix), "smb_io_base",
+                         IPF_PIIX4_SMBUS_IO_BASE);
+
+    for (i = 0; i < ISA_NUM_IRQS; i++) {
+        m->isa_irqs[i] = ia64_iosapic_get_irq(m->iosapic, i);
+        qdev_connect_gpio_out_named(DEVICE(piix), "isa-irqs", i,
+                                    m->isa_irqs[i]);
+    }
+
     pci_realize_and_unref(piix, m->pcibus, &error_fatal);
     m->piix4 = piix;
+    ipf_resolve_isa_devices(m);
+
+    ide = PCI_DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
+    if (!ide) {
+        error_report("PIIX4 did not create its IDE function");
+        exit(1);
+    }
+    pci_ide_create_devs(ide);
+
+    pm = DEVICE(object_resolve_path_component(OBJECT(piix), "pm"));
+    if (!pm) {
+        error_report("PIIX4 did not create its PM/SMBus function");
+        exit(1);
+    }
+    m->smbus = I2C_BUS(qdev_get_child_bus(pm, "i2c"));
+    if (!m->smbus) {
+        error_report("PIIX4 PM function did not create its SMBus");
+        exit(1);
+    }
+    smbus_eeprom_init(m->smbus, 8, NULL, 0);
 }
 
 static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
@@ -5410,6 +5420,9 @@ static void ipf_init(MachineState *machine)
     uint64_t cmdline_addr = IPF_CMDLINE_ADDR;
     int64_t image_size;
     bool run_firmware = (!kernel_filename) || m->firmware_preboot;
+
+    machine->usb |= defaults_enabled() && !machine->usb_disabled;
+
     /* Initialize the cpu core */
     cpu = IA64_CPU(cpu_create(machine->cpu_type));
     if (!cpu) {
@@ -5620,25 +5633,18 @@ static void ipf_init(MachineState *machine)
         }
     }
 
-    if (run_firmware) {
-        ipf_init_pci(m);
-        ipf_init_southbridge(m);
-        ipf_isa_bus_init(m);
-        ipf_cmos_init(m, machine);
-        /*
-         * Attach a PCI VGA device so the guest firmware can present a UI.
-         * This honors the user's -vga selection (e.g. std/cirrus/virtio).
-         */
-        pci_vga_init(m->pcibus);
-    }
-
-    if (!run_firmware) {
-        ipf_isa_bus_init(m);
-        ipf_cmos_init(m, machine);
-    }
+    /*
+     * Hardware topology is independent of the selected payload. Firmware and
+     * direct-kernel boots see the same PCI host, PIIX4 functions, ISA devices,
+     * storage buses, display, and network attachment points.
+     */
+    ipf_init_pci(m);
+    ipf_init_southbridge(m, machine);
+    ipf_cmos_init(m, machine);
+    pci_vga_init(m->pcibus);
 
     /* Initialize PCI network devices using the modern QEMU NIC API. */
-    if (m->pcibus) {
+    {
         MachineClass *mc = MACHINE_GET_CLASS(machine);
         pci_init_nic_devices(m->pcibus, mc->default_nic);
     }

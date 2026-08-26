@@ -140,6 +140,8 @@ qtests_alpha = ['boot-serial-test'] + \
   qtests_filter + \
   (config_all_devices.has_key('CONFIG_VGA') ? ['display-vga-test'] : [])
 
+qtests_ia64 = ['ia64-ipf-test']
+
 qtests_avr = [ 'boot-serial-test' ]
 
 qtests_hppa = \
