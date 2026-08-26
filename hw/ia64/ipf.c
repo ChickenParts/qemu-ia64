@@ -32,7 +32,7 @@
 #include "hw/irq.h"
 #include "hw/isa/isa.h"
 #include "hw/rtc/mc146818rtc.h"
-/* #include "fdc.h" */
+#include "hw/block/fdc.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_host.h"
@@ -118,6 +118,7 @@ struct IPFMachineState {
     uint8_t cmos_ext_index;
     uint8_t cmos_ext[256];
     PCIDevice *piix4;
+    ISADevice *fdc;
     IA64CPU *cpu;
 
     /*
@@ -3395,6 +3396,9 @@ static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
 {
     MC146818RtcState *s = m->rtc;
     ram_addr_t ram_size = machine->ram_size;
+    FloppyDriveType fd0 = FLOPPY_DRIVE_TYPE_NONE;
+    FloppyDriveType fd1 = FLOPPY_DRIVE_TYPE_NONE;
+    unsigned int floppy_count = 0;
     int val;
 
     if (!s) {
@@ -3440,11 +3444,31 @@ static void ipf_cmos_init(IPFMachineState *m, MachineState *machine)
     mc146818rtc_set_cmos_data(s, 0x35, (val >> 8) & 0xff);
 
     /*
-     * Equipment byte (0x14).
-     * 0x02 = FPU present
-     * 0x04 = PS/2 mouse installed
+     * Floppy drive types (0x10) and equipment byte (0x14).  Keep these
+     * derived from the realized ISA FDC so firmware sees the same drive
+     * topology as the controller, including empty drive bays.
      */
-    val = 0x02 | 0x04;
+    if (m->fdc) {
+        fd0 = isa_fdc_get_drive_type(m->fdc, 0);
+        fd1 = isa_fdc_get_drive_type(m->fdc, 1);
+    }
+    val = (cmos_get_fd_drive_type(fd0) << 4) |
+          cmos_get_fd_drive_type(fd1);
+    mc146818rtc_set_cmos_data(s, 0x10, val);
+
+    if (fd0 != FLOPPY_DRIVE_TYPE_NONE) {
+        floppy_count++;
+    }
+    if (fd1 != FLOPPY_DRIVE_TYPE_NONE) {
+        floppy_count++;
+    }
+
+    val = 0x02 | 0x04; /* FPU and PS/2 mouse present. */
+    if (floppy_count == 1) {
+        val |= 0x01;
+    } else if (floppy_count == 2) {
+        val |= 0x41;
+    }
     mc146818rtc_set_cmos_data(s, 0x14, val);
 
     /*
@@ -4682,6 +4706,7 @@ static void ipf_init_pci(IPFMachineState *m)
 
 static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
 {
+    DriveInfo *fd[MAX_FD] = { NULL };
     PCIDevice *ide;
     DeviceState *pm;
     PCIDevice *piix;
@@ -4720,6 +4745,18 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
      * legacy source.  The x86-only A20 output is deliberately left unused.
      */
     isa_create_simple(m->isa_bus, TYPE_I8042);
+
+    /*
+     * PIIX realization already installs the platform's dual i8257 DMA
+     * controllers on this ISA bus.  Attach the standard ISA FDC to that real
+     * DMA provider at its architectural I/O, IRQ6, and DMA2 defaults.
+     */
+    for (i = 0; i < MAX_FD; i++) {
+        fd[i] = drive_get(IF_FLOPPY, 0, i);
+    }
+    m->fdc = isa_new(TYPE_ISA_FDC);
+    isa_realize_and_unref(m->fdc, m->isa_bus, &error_fatal);
+    isa_fdc_init_drives(m->fdc, fd);
 
     ide = PCI_DEVICE(object_resolve_path_component(OBJECT(piix), "ide"));
     if (!ide) {

@@ -10,3 +10,6 @@ CONFIG_PCI_DEVICES=y
 CONFIG_PIIX=y
 CONFIG_SMBUS_EEPROM=y
 CONFIG_PCKBD=y
+
+# Standard ISA floppy controller; PIIX supplies its IRQ and i8257 DMA paths.
+CONFIG_FDC_ISA=y

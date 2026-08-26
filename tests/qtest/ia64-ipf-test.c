@@ -48,6 +48,25 @@
 #define TEST_I8042_MODE_KBD_IRQ      0x01
 #define TEST_I8042_MODE_MOUSE_IRQ    0x02
 #define TEST_I8042_STATUS_AUX_OBF    0x20
+#define TEST_DMA_CHANNEL2_ADDRESS    0x04
+#define TEST_DMA_MASK_READ           0x09
+#define TEST_DMA_CLEAR_FLIP_FLOP     0x0c
+#define TEST_DMA_WRITE_ALL_MASK      0x0f
+#define TEST_DMA_CHANNEL2_PAGE       0x81
+#define TEST_FDC_BASE                0x3f0
+#define TEST_FDC_DOR                 (TEST_FDC_BASE + 2)
+#define TEST_FDC_MSR                 (TEST_FDC_BASE + 4)
+#define TEST_FDC_FIFO                (TEST_FDC_BASE + 5)
+#define TEST_FDC_IRQ                 6
+#define TEST_FDC_DOR_NRESET          0x04
+#define TEST_FDC_DOR_DMA_IRQ_ENABLE  0x08
+#define TEST_FDC_MSR_RQM             0x80
+#define TEST_FDC_MSR_DIO             0x40
+#define TEST_FDC_CMD_SENSE_INTERRUPT 0x08
+#define TEST_CMOS_INDEX_PORT         0x70
+#define TEST_CMOS_DATA_PORT          0x71
+#define TEST_CMOS_FLOPPY_TYPE        0x10
+#define TEST_CMOS_EQUIPMENT          0x14
 #define TEST_PM_IO_BASE             0x0400
 #define TEST_PM_TIMER_OFFSET        0x08
 #define TEST_PM_TIMER_MASK          0x00ffffffU
@@ -224,6 +243,42 @@ static void test_piix4_functions(void)
                               TEST_PM_TIMER_OFFSET) &
                      TEST_PM_TIMER_MASK;
     g_assert_cmpuint((after - before) & TEST_PM_TIMER_MASK, >, 0);
+
+    qtest_quit(qts);
+}
+
+static uint16_t dma_channel2_address(QTestState *qts)
+{
+    uint16_t value;
+
+    qtest_outb(qts, TEST_DMA_CLEAR_FLIP_FLOP, 0);
+    value = qtest_inb(qts, TEST_DMA_CHANNEL2_ADDRESS);
+    value |= (uint16_t)qtest_inb(qts, TEST_DMA_CHANNEL2_ADDRESS) << 8;
+    return value;
+}
+
+static void test_isa_dma_contract(void)
+{
+    const uint16_t address = 0x1234;
+    const uint8_t page = 0x5a;
+    QTestState *qts = ipf_qtest_start();
+
+    /* PIIX supplies the primary i8257 and its standard channel-2 ports. */
+    g_assert_cmphex(qtest_inb(qts, TEST_DMA_MASK_READ) & 0x0f, ==, 0x0f);
+
+    qtest_outb(qts, TEST_DMA_CLEAR_FLIP_FLOP, 0);
+    qtest_outb(qts, TEST_DMA_CHANNEL2_ADDRESS, address & 0xff);
+    qtest_outb(qts, TEST_DMA_CHANNEL2_ADDRESS, address >> 8);
+    qtest_outb(qts, TEST_DMA_CHANNEL2_PAGE, page);
+
+    g_assert_cmphex(dma_channel2_address(qts), ==, address);
+    g_assert_cmphex(qtest_inb(qts, TEST_DMA_CHANNEL2_PAGE), ==, page);
+
+    qtest_outb(qts, TEST_DMA_WRITE_ALL_MASK, 0);
+    g_assert_cmphex(qtest_inb(qts, TEST_DMA_MASK_READ) & 0x0f, ==, 0);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_inb(qts, TEST_DMA_MASK_READ) & 0x0f, ==, 0x0f);
 
     qtest_quit(qts);
 }
@@ -486,6 +541,62 @@ static void assert_iosapic_remote_irr(QTestState *qts, unsigned int pin,
                     asserted ? IPF_IOSAPIC_REMOTE_IRR : 0);
 }
 
+static uint8_t cmos_read(QTestState *qts, uint8_t index)
+{
+    qtest_outb(qts, TEST_CMOS_INDEX_PORT, index);
+    return qtest_inb(qts, TEST_CMOS_DATA_PORT);
+}
+
+static void test_fdc_dma_irq_and_cmos(void)
+{
+    const uint8_t vector = 0x54;
+    const uint8_t normal_dor = TEST_FDC_DOR_NRESET |
+                               TEST_FDC_DOR_DMA_IRQ_ENABLE;
+    QTestState *qts = ipf_qtest_start_args(
+        "-drive if=floppy,file=null-co://,file.read-zeroes=on,"
+        "format=raw,size=1440k");
+    uint8_t msr;
+    uint8_t status;
+    uint8_t track;
+
+    /* A 1.44MB drive is visible through both the controller and CMOS. */
+    g_assert_cmphex(cmos_read(qts, TEST_CMOS_FLOPPY_TYPE), ==, 0x40);
+    g_assert_cmphex(cmos_read(qts, TEST_CMOS_EQUIPMENT) & 0x47, ==, 0x07);
+
+    g_assert_cmphex(qtest_inb(qts, TEST_FDC_DOR) & normal_dor, ==,
+                    normal_dor);
+    msr = qtest_inb(qts, TEST_FDC_MSR);
+    g_assert_cmphex(msr & (TEST_FDC_MSR_RQM | TEST_FDC_MSR_DIO), ==,
+                    TEST_FDC_MSR_RQM);
+
+    program_iosapic_level_route(qts, TEST_FDC_IRQ, vector);
+
+    /* Leaving and re-entering reset raises the standard IRQ6 indication. */
+    qtest_outb(qts, TEST_FDC_DOR, 0);
+    qtest_outb(qts, TEST_FDC_DOR, normal_dor);
+    assert_iosapic_remote_irr(qts, TEST_FDC_IRQ, true);
+
+    qtest_outb(qts, TEST_FDC_FIFO, TEST_FDC_CMD_SENSE_INTERRUPT);
+    msr = qtest_inb(qts, TEST_FDC_MSR);
+    g_assert_cmphex(msr & (TEST_FDC_MSR_RQM | TEST_FDC_MSR_DIO), ==,
+                    TEST_FDC_MSR_RQM | TEST_FDC_MSR_DIO);
+    status = qtest_inb(qts, TEST_FDC_FIFO);
+    track = qtest_inb(qts, TEST_FDC_FIFO);
+    g_assert_cmphex(status & 0xc0, ==, 0xc0);
+    g_assert_cmphex(track, ==, 0);
+
+    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, vector);
+    assert_iosapic_remote_irr(qts, TEST_FDC_IRQ, false);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_inb(qts, TEST_FDC_DOR) & normal_dor, ==,
+                    normal_dor);
+    g_assert_cmphex(qtest_inb(qts, TEST_FDC_MSR) & TEST_FDC_MSR_RQM, ==,
+                    TEST_FDC_MSR_RQM);
+
+    qtest_quit(qts);
+}
+
 static void test_i8042_irqs_reach_iosapic(void)
 {
     const uint8_t kbd_vector = 0x52;
@@ -553,6 +664,7 @@ int main(int argc, char **argv)
 
     qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
+    qtest_add_func("/ia64/ipf/isa-dma", test_isa_dma_contract);
     qtest_add_func("/ia64/ipf/piix4-pm-reset",
                    test_piix4_pm_reset);
     qtest_add_func("/ia64/ipf/piix4-sci-iosapic",
@@ -562,6 +674,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64/ipf/gxb-sparse-config",
                    test_gxb_sparse_config_identity);
     qtest_add_func("/ia64/ipf/460gx-reset", test_460gx_reset);
+    qtest_add_func("/ia64/ipf/fdc-dma-iosapic-cmos",
+                   test_fdc_dma_irq_and_cmos);
     qtest_add_func("/ia64/ipf/i8042-iosapic",
                    test_i8042_irqs_reach_iosapic);
     ret = g_test_run();
