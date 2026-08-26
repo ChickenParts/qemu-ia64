@@ -1,0 +1,397 @@
+diff --git a/docs/devel/ia64-ipf-port-status.rst b/docs/devel/ia64-ipf-port-status.rst
+index 908c87300..000000000 100644
+--- a/docs/devel/ia64-ipf-port-status.rst
++++ b/docs/devel/ia64-ipf-port-status.rst
+@@ -52,7 +52,8 @@ device paths from remaining partial platform behavior.
+    * - RAM and firmware windows
+      - Present
+-     - Replace image-specific aliases and firmware mutation with documented
+-       platform mappings and boot contracts.
++     - Direct-kernel port I/O comes from the EFI memory map without editing
++       guest kernel symbols.  Replace the remaining image-specific aliases and
++       firmware mutation with documented platform mappings and boot contracts.
+    * - PCI host/root
+      - Custom current-QOM model
+      - Validate 460GX address windows, DMA reachability, reset, and migration.
+@@ -151,6 +153,10 @@ floppy, serial, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI
+ buses, and the standard virtio PCI storage transport.  The I/O SAPIC and 460GX
+ facade are separate QOM devices rather than in-file register shims.
+ 
++Direct-kernel boot now advertises its legacy port-I/O window through an
++``EFI_MEMORY_MAPPED_IO_PORT_SPACE`` descriptor, leaves loaded ELF data
++intact, and verifies both properties in qtest.
++
+ That does not make the platform complete.  The largest remaining risks are CPU
+ and chipset architectural coverage, SMP/IPI support, migration completeness,
+ and firmware compatibility code that still observes or changes image-private
+diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
+index 4d9a72993..000000000 100644
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -344,6 +344,5 @@ static uint64_t ipf_kernel_low;
+ static uint64_t ipf_kernel_high;
+ static uint64_t ipf_kernel_bias;
+-static uint64_t ipf_sym_io_space;
+ static uint64_t ipf_sym_ia64_bad_break;
+ static uint64_t ipf_sym_search_extable;
+ static uint64_t ipf_sym_stext;
+@@ -369,9 +368,6 @@ static void ipf_kernel_sym_cb(const char *st_name, int st_info,
+     (void)st_info;
+     (void)st_size;
+ 
+-    if (!ipf_sym_io_space && st_name && strcmp(st_name, "io_space") == 0) {
+-        ipf_sym_io_space = st_value;
+-    }
+     if (!ipf_sym_ia64_bad_break && st_name &&
+         strcmp(st_name, "ia64_bad_break") == 0) {
+         ipf_sym_ia64_bad_break = st_value;
+@@ -411,45 +407,6 @@ static void ipf_kernel_sym_cb(const char *st_name, int st_info,
+     }
+ }
+ 
+-static void ipf_patch_io_space(uint64_t io_space_va, uint64_t kernel_bias,
+-                               uint64_t ram_size)
+-{
+-    /*
+-     * Linux/ia64 early serial console uses io_space[] to translate the
+-     * simulator-style 32-bit I/O encoding (segment:offset) into a region-6
+-     * uncached physical mapping. On real platforms this is initialized by
+-     * firmware/platform code; for bringup, seed segment 0xff to the GFW window
+-     * so 0xff5e0000 becomes 0xc0000000ff5e0000 and hits our serial-mm UART.
+-     */
+-    if ((io_space_va >> 61) != 5) {
+-        DPRINTF("io_space: unexpected VA 0x%016" PRIx64 ", skipping\n",
+-                io_space_va);
+-        return;
+-    }
+-
+-    uint64_t io_space_pa = io_space_va - kernel_bias;
+-    if (io_space_pa + 0x1000 > ram_size) {
+-        DPRINTF("io_space: PA 0x%016" PRIx64 " out of RAM, skipping\n",
+-                io_space_pa);
+-        return;
+-    }
+-
+-    struct QEMU_PACKED {
+-        uint64_t base;
+-        uint32_t flags;
+-        uint32_t pad;
+-    } entry = {
+-        .base = (6ULL << 61) | 0x00000000ff000000ULL,
+-        .flags = 0,
+-        .pad = 0,
+-    };
+-
+-    hwaddr slot = io_space_pa + 0xff * sizeof(entry);
+-    address_space_write(&address_space_memory, slot, MEMTXATTRS_UNSPECIFIED,
+-                        (const uint8_t *)&entry, sizeof(entry));
+-    DPRINTF("io_space: seeded seg 0xff at PA 0x%016" HWADDR_PRIx "\n", slot);
+-}
+-
+ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
+ {
+     CPUIA64State *env = &cpu->env;
+@@ -5094,7 +5046,6 @@ static void ipf_init(MachineState *machine)
+      * Load the ELF kernel. The IA-64 ELF uses physical p_paddr; entry
+      * point phys_start is a low PA (see System.map).
+      */
+-    ipf_sym_io_space = 0;
+     ipf_sym_ia64_bad_break = 0;
+     ipf_sym_search_extable = 0;
+     ipf_sym_stext = 0;
+@@ -5152,9 +5103,5 @@ static void ipf_init(MachineState *machine)
+                 field_pa, (uint64_t)le64_to_cpu(val));
+     }
+-    if (ipf_sym_io_space) {
+-        ipf_patch_io_space(ipf_sym_io_space, ipf_kernel_bias,
+-                           machine->ram_size);
+-    }
+     const char *watch = getenv("QEMU_IA64_WATCH_TEXT");
+     if (watch && *watch) {
+         if ((strcmp(watch, "1") == 0) ||
+diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
+index 5c6f00b6c..000000000 100644
+--- a/tests/qtest/ia64-ipf-test.c
++++ b/tests/qtest/ia64-ipf-test.c
+@@ -7,12 +7,15 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/bswap.h"
+ #include "libqtest.h"
+ #include "hw/pci/pci.h"
+ #include "hw/pci/pci_ids.h"
+ #include "qobject/qdict.h"
+ #include "qobject/qlist.h"
++#include "elf.h"
+ 
+ #define IPF_LEGACY_IO_BASE          UINT64_C(0xe0000000)
++#define IPF_LEGACY_IO_SIZE          (64ULL * 1024 * 1024)
+ #define IPF_UART_BASE               UINT64_C(0xff5e0000)
+ #define IPF_GX_MMIO_BASE            UINT64_C(0xfeb00000)
+@@ -105,6 +107,90 @@
+ #define ACPI_POWER_BUTTON_STATUS    0x0100
+ #define ACPI_POWER_BUTTON_ENABLE    0x0100
+ 
++#define IPF_BOOT_PARAM_ADDR         UINT64_C(0x8000)
++#define IPF_BOOT_PARAM_MEMMAP       0x10
++#define IPF_BOOT_PARAM_MEMMAP_SIZE  0x18
++#define IPF_BOOT_PARAM_DESC_SIZE    0x20
++#define TEST_EFI_IO_PORT_TYPE       12
++#define TEST_EFI_MEMORY_UC          UINT64_C(1)
++#define TEST_EFI_DESC_SIZE          40
++#define TEST_EFI_DESC_PHYS          8
++#define TEST_EFI_DESC_PAGES         24
++#define TEST_EFI_DESC_ATTR          32
++
++#define TEST_KERNEL_FILE_SIZE       0x5200
++#define TEST_KERNEL_SEGMENT_OFFSET  0x1000
++#define TEST_KERNEL_SEGMENT_SIZE    0x3000
++#define TEST_KERNEL_LOAD_PA         UINT64_C(0x100000)
++#define TEST_KERNEL_LOAD_VA         UINT64_C(0xa000000100000000)
++#define TEST_KERNEL_IO_SPACE_PA     (TEST_KERNEL_LOAD_PA + 0x1000)
++#define TEST_KERNEL_IO_SPACE_VA     (TEST_KERNEL_LOAD_VA + 0x1000)
++#define TEST_KERNEL_IO_SLOT_PA      (TEST_KERNEL_IO_SPACE_PA + 0xff * 16)
++#define TEST_KERNEL_IO_SLOT_OFFSET  \
++    (TEST_KERNEL_SEGMENT_OFFSET + TEST_KERNEL_IO_SLOT_PA - TEST_KERNEL_LOAD_PA)
++#define TEST_KERNEL_SYMTAB_OFFSET   0x4000
++#define TEST_KERNEL_STRTAB_OFFSET   0x4040
++#define TEST_KERNEL_SHSTRTAB_OFFSET 0x4060
++#define TEST_KERNEL_SHOFF           0x5000
++#define TEST_KERNEL_SENTINEL        0xa5
++#define TEST_KERNEL_SENTINEL_SIZE   16
++
++typedef struct QEMU_PACKED TestElf64Ehdr {
++    uint8_t ident[16];
++    uint16_t type;
++    uint16_t machine;
++    uint32_t version;
++    uint64_t entry;
++    uint64_t phoff;
++    uint64_t shoff;
++    uint32_t flags;
++    uint16_t ehsize;
++    uint16_t phentsize;
++    uint16_t phnum;
++    uint16_t shentsize;
++    uint16_t shnum;
++    uint16_t shstrndx;
++} TestElf64Ehdr;
++
++typedef struct QEMU_PACKED TestElf64Phdr {
++    uint32_t type;
++    uint32_t flags;
++    uint64_t offset;
++    uint64_t vaddr;
++    uint64_t paddr;
++    uint64_t filesz;
++    uint64_t memsz;
++    uint64_t align;
++} TestElf64Phdr;
++
++typedef struct QEMU_PACKED TestElf64Shdr {
++    uint32_t name;
++    uint32_t type;
++    uint64_t flags;
++    uint64_t addr;
++    uint64_t offset;
++    uint64_t size;
++    uint32_t link;
++    uint32_t info;
++    uint64_t addralign;
++    uint64_t entsize;
++} TestElf64Shdr;
++
++typedef struct QEMU_PACKED TestElf64Sym {
++    uint32_t name;
++    uint8_t info;
++    uint8_t other;
++    uint16_t shndx;
++    uint64_t value;
++    uint64_t size;
++} TestElf64Sym;
++
++G_STATIC_ASSERT(sizeof(TestElf64Ehdr) == 64);
++G_STATIC_ASSERT(sizeof(TestElf64Phdr) == 56);
++G_STATIC_ASSERT(sizeof(TestElf64Shdr) == 64);
++G_STATIC_ASSERT(sizeof(TestElf64Sym) == 24);
++
+ static char *firmware_path;
++static char *kernel_path;
+ 
+ static uint32_t pci_config_address_bus(unsigned int bus, unsigned int dev,
+@@ -197,6 +283,58 @@ static QTestState *ipf_qtest_start(void)
+     return ipf_qtest_start_args("");
+ }
+ 
++static QTestState *ipf_qtest_start_kernel(void)
++{
++    return qtest_initf("-machine ipf,usb=on -m 64M -bios %s "
++                       "-kernel %s -display none -nodefaults",
++                       firmware_path, kernel_path);
++}
++
++static void test_direct_kernel_io_contract(void)
++{
++    QTestState *qts = ipf_qtest_start_kernel();
++    uint64_t memmap = qtest_readq(qts, IPF_BOOT_PARAM_ADDR +
++                                  IPF_BOOT_PARAM_MEMMAP);
++    uint64_t memmap_size = qtest_readq(qts, IPF_BOOT_PARAM_ADDR +
++                                       IPF_BOOT_PARAM_MEMMAP_SIZE);
++    uint64_t desc_size = qtest_readq(qts, IPF_BOOT_PARAM_ADDR +
++                                     IPF_BOOT_PARAM_DESC_SIZE);
++    uint8_t sentinel[TEST_KERNEL_SENTINEL_SIZE];
++    bool found = false;
++
++    g_assert_cmpuint(desc_size, ==, TEST_EFI_DESC_SIZE);
++    g_assert_cmpuint(memmap_size % desc_size, ==, 0);
++
++    for (uint64_t offset = 0; offset < memmap_size; offset += desc_size) {
++        uint64_t desc = memmap + offset;
++
++        if (qtest_readl(qts, desc) != TEST_EFI_IO_PORT_TYPE) {
++            continue;
++        }
++        g_assert_false(found);
++        found = true;
++        g_assert_cmphex(qtest_readq(qts, desc + TEST_EFI_DESC_PHYS), ==,
++                        IPF_LEGACY_IO_BASE);
++        g_assert_cmpuint(qtest_readq(qts, desc + TEST_EFI_DESC_PAGES), ==,
++                         IPF_LEGACY_IO_SIZE / 4096);
++        g_assert_cmphex(qtest_readq(qts, desc + TEST_EFI_DESC_ATTR), ==,
++                        TEST_EFI_MEMORY_UC);
++    }
++    g_assert_true(found);
++
++    /*
++     * The test ELF deliberately exports an io_space symbol and fills the
++     * former machine-patched slot with a sentinel.  Boot data must describe
++     * hardware; machine initialization must not edit loaded kernel objects.
++     */
++    qtest_memread(qts, TEST_KERNEL_IO_SLOT_PA, sentinel, sizeof(sentinel));
++    for (size_t i = 0; i < sizeof(sentinel); i++) {
++        g_assert_cmphex(sentinel[i], ==, TEST_KERNEL_SENTINEL);
++    }
++
++    qtest_quit(qts);
++}
++
+ static unsigned int count_pci_devices(QTestState *qts, uint16_t vendor_id,
+                                       uint16_t device_id)
+ {
+@@ -828,6 +922,97 @@ static void test_i8042_irqs_reach_iosapic(void)
+     qtest_quit(qts);
+ }
+ 
++static void create_test_kernel(void)
++{
++    static const char strtab[] = "\0io_space";
++    static const char shstrtab[] =
++        "\0.data\0.symtab\0.strtab\0.shstrtab";
++    g_autofree uint8_t *image = g_malloc0(TEST_KERNEL_FILE_SIZE);
++    g_autoptr(GError) error = NULL;
++    TestElf64Ehdr *ehdr = (TestElf64Ehdr *)image;
++    TestElf64Phdr *phdr = (TestElf64Phdr *)(image + sizeof(*ehdr));
++    TestElf64Sym *symbols =
++        (TestElf64Sym *)(image + TEST_KERNEL_SYMTAB_OFFSET);
++    TestElf64Shdr *sections =
++        (TestElf64Shdr *)(image + TEST_KERNEL_SHOFF);
++    ssize_t written;
++    int fd;
++
++    memcpy(ehdr->ident, ELFMAG, SELFMAG);
++    ehdr->ident[EI_CLASS] = ELFCLASS64;
++    ehdr->ident[EI_DATA] = ELFDATA2LSB;
++    ehdr->ident[EI_VERSION] = EV_CURRENT;
++    ehdr->type = cpu_to_le16(ET_EXEC);
++    ehdr->machine = cpu_to_le16(EM_IA_64);
++    ehdr->version = cpu_to_le32(EV_CURRENT);
++    ehdr->entry = cpu_to_le64(TEST_KERNEL_LOAD_PA);
++    ehdr->phoff = cpu_to_le64(sizeof(*ehdr));
++    ehdr->shoff = cpu_to_le64(TEST_KERNEL_SHOFF);
++    ehdr->ehsize = cpu_to_le16(sizeof(*ehdr));
++    ehdr->phentsize = cpu_to_le16(sizeof(*phdr));
++    ehdr->phnum = cpu_to_le16(1);
++    ehdr->shentsize = cpu_to_le16(sizeof(*sections));
++    ehdr->shnum = cpu_to_le16(5);
++    ehdr->shstrndx = cpu_to_le16(4);
++
++    phdr->type = cpu_to_le32(PT_LOAD);
++    phdr->flags = cpu_to_le32(PF_R | PF_W | PF_X);
++    phdr->offset = cpu_to_le64(TEST_KERNEL_SEGMENT_OFFSET);
++    phdr->vaddr = cpu_to_le64(TEST_KERNEL_LOAD_VA);
++    phdr->paddr = cpu_to_le64(TEST_KERNEL_LOAD_PA);
++    phdr->filesz = cpu_to_le64(TEST_KERNEL_SEGMENT_SIZE);
++    phdr->memsz = cpu_to_le64(TEST_KERNEL_SEGMENT_SIZE);
++    phdr->align = cpu_to_le64(0x1000);
++
++    memset(image + TEST_KERNEL_IO_SLOT_OFFSET, TEST_KERNEL_SENTINEL,
++           TEST_KERNEL_SENTINEL_SIZE);
++
++    symbols[1].name = cpu_to_le32(1);
++    symbols[1].info = ELF_ST_INFO(STB_GLOBAL, STT_OBJECT);
++    symbols[1].shndx = cpu_to_le16(1);
++    symbols[1].value = cpu_to_le64(TEST_KERNEL_IO_SPACE_VA);
++    symbols[1].size = cpu_to_le64(0x1000);
++
++    memcpy(image + TEST_KERNEL_STRTAB_OFFSET, strtab, sizeof(strtab));
++    memcpy(image + TEST_KERNEL_SHSTRTAB_OFFSET, shstrtab, sizeof(shstrtab));
++
++    sections[1].name = cpu_to_le32(1);
++    sections[1].type = cpu_to_le32(SHT_PROGBITS);
++    sections[1].flags = cpu_to_le64(SHF_ALLOC | SHF_WRITE);
++    sections[1].addr = cpu_to_le64(TEST_KERNEL_LOAD_VA);
++    sections[1].offset = cpu_to_le64(TEST_KERNEL_SEGMENT_OFFSET);
++    sections[1].size = cpu_to_le64(TEST_KERNEL_SEGMENT_SIZE);
++    sections[1].addralign = cpu_to_le64(0x1000);
++
++    sections[2].name = cpu_to_le32(7);
++    sections[2].type = cpu_to_le32(SHT_SYMTAB);
++    sections[2].offset = cpu_to_le64(TEST_KERNEL_SYMTAB_OFFSET);
++    sections[2].size = cpu_to_le64(2 * sizeof(*symbols));
++    sections[2].link = cpu_to_le32(3);
++    sections[2].info = cpu_to_le32(1);
++    sections[2].addralign = cpu_to_le64(8);
++    sections[2].entsize = cpu_to_le64(sizeof(*symbols));
++
++    sections[3].name = cpu_to_le32(15);
++    sections[3].type = cpu_to_le32(SHT_STRTAB);
++    sections[3].offset = cpu_to_le64(TEST_KERNEL_STRTAB_OFFSET);
++    sections[3].size = cpu_to_le64(sizeof(strtab));
++    sections[3].addralign = cpu_to_le64(1);
++
++    sections[4].name = cpu_to_le32(23);
++    sections[4].type = cpu_to_le32(SHT_STRTAB);
++    sections[4].offset = cpu_to_le64(TEST_KERNEL_SHSTRTAB_OFFSET);
++    sections[4].size = cpu_to_le64(sizeof(shstrtab));
++    sections[4].addralign = cpu_to_le64(1);
++
++    fd = g_file_open_tmp("ia64-ipf-kernel-XXXXXX", &kernel_path, &error);
++    g_assert_no_error(error);
++    g_assert_cmpint(fd, >=, 0);
++    written = write(fd, image, TEST_KERNEL_FILE_SIZE);
++    g_assert_cmpint(written, ==, TEST_KERNEL_FILE_SIZE);
++    close(fd);
++}
++
+ static void create_test_firmware(void)
+ {
+     g_autoptr(GError) error = NULL;
+@@ -850,6 +1047,9 @@ int main(int argc, char **argv)
+     g_test_init(&argc, &argv, NULL);
+     create_test_firmware();
++    create_test_kernel();
+ 
+     qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
++    qtest_add_func("/ia64/ipf/direct-kernel-io-contract",
++                   test_direct_kernel_io_contract);
+     qtest_add_func("/ia64/ipf/pci-storage-interfaces",
+                    test_pci_storage_interfaces);
+@@ -879,5 +1079,7 @@ int main(int argc, char **argv)
+ 
+     unlink(firmware_path);
++    unlink(kernel_path);
+     g_free(firmware_path);
++    g_free(kernel_path);
+     return ret;
+ }
