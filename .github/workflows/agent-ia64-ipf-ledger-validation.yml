@@ -1,0 +1,158 @@
+name: Temporary IA-64 IPF ledger validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-ipf-ledger
+    paths:
+      - docs/devel/ia64-ipf-*.rst
+      - scripts/ia64-ipf-*.py
+      - scripts/ia64-machine-topology.py
+      - scripts/ia64-root-cause-audit.py
+      - .github/workflows/agent-ia64-ipf-ledger-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate audit sources and historical ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/ia64-ipf-audit.py \
+            scripts/ia64-ipf-runtime-audit.py \
+            scripts/ia64-machine-topology.py \
+            scripts/ia64-root-cause-audit.py
+          python3 scripts/ia64-ipf-audit.py \
+            --root . --output /tmp/ia64-ipf-static.json
+          python3 scripts/ia64-root-cause-audit.py \
+            --root . --output /tmp/ia64-root-cause.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          audit = json.loads(Path('/tmp/ia64-ipf-static.json').read_text())
+          assert audit['schema'] == 1
+          assert audit['legacy']['lines'] > 1000
+          assert audit['summary']['legacy_wiring_obligations'] > 0
+          assert audit['current']['ia64_files']
+          for key in ('machine_wired_percent',
+                      'machine_or_model_present_percent'):
+              assert 0.0 <= audit['summary'][key] <= 100.0
+          print('static-summary=' + json.dumps(audit['summary'], sort_keys=True))
+          print('legacy=' + json.dumps(audit['legacy'], sort_keys=True))
+          PY
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure and build IA-64
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run architecture and topology contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-interrupt --tap -k \
+            | tee /tmp/test-ia64-interrupt.tap
+          build/tests/unit/test-ia64-iosapic --tap -k \
+            | tee /tmp/test-ia64-iosapic.tap
+          QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
+            build/tests/qtest/ia64-ipf-test --tap -k \
+            | tee /tmp/ia64-ipf-test.tap
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('/tmp/ia64-empty.fd').write_bytes(b'\xff' * 4096)
+          PY
+          python3 scripts/ia64-machine-topology.py \
+            --qemu build/qemu-system-ia64 \
+            --machine ipf \
+            --firmware /tmp/ia64-empty.fd \
+            --output /tmp/ia64-topology.json
+          python3 scripts/ia64-ipf-runtime-audit.py \
+            --static /tmp/ia64-ipf-static.json \
+            --topology /tmp/ia64-topology.json \
+            --output /tmp/ia64-ipf-runtime.json
+
+      - name: Report migration frontier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          static = json.loads(Path('/tmp/ia64-ipf-static.json').read_text())
+          runtime = json.loads(Path('/tmp/ia64-ipf-runtime.json').read_text())
+          root = json.loads(Path('/tmp/ia64-root-cause.json').read_text())
+          topology = json.loads(Path('/tmp/ia64-topology.json').read_text())
+          assert runtime['schema'] == 1
+          assert runtime['summary']['obligations'] == \
+              static['summary']['legacy_wiring_obligations']
+          assert topology['schema'] == 1
+          summary = {
+              'static': static['summary'],
+              'runtime': runtime['summary'],
+              'root_cause_findings': root['finding_count'],
+          }
+          print('IA64_AUDIT_SUMMARY=' + json.dumps(summary, sort_keys=True))
+          print('IA64_UNRESOLVED_FRONTIER')
+          unresolved = [row for row in runtime['obligations']
+                        if row['runtime_status'] in ('unresolved', 'model-only')]
+          for row in unresolved[:40]:
+              print(json.dumps({
+                  'value': row['value'],
+                  'kind': row['kind'],
+                  'legacy_call': row['legacy_call'],
+                  'legacy_function': row['legacy_function'],
+                  'legacy_line': row['legacy_line'],
+                  'source_status': row['status'],
+                  'runtime_status': row['runtime_status'],
+                  'model_paths': row['model_paths'][:8],
+              }, sort_keys=True))
+          print('IA64_ROOT_CAUSE_FINDINGS')
+          for finding in root['findings'][:80]:
+              print(json.dumps(finding, sort_keys=True))
+          PY
+          build/qemu-system-ia64 --version
+          build/qemu-system-ia64 -machine help | grep -q '^ipf '
+
+      - name: Upload audit evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-ipf-ledger-${{ github.run_id }}
+          path: |
+            /tmp/ia64-ipf-static.json
+            /tmp/ia64-ipf-runtime.json
+            /tmp/ia64-root-cause.json
+            /tmp/ia64-topology.json
+            /tmp/test-ia64-interrupt.tap
+            /tmp/test-ia64-iosapic.tap
+            /tmp/ia64-ipf-test.tap
+          retention-days: 3
+          if-no-files-found: error
