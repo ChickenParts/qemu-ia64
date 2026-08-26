@@ -1,0 +1,160 @@
+From 21307d443082be63d41170e8dc44eaa0d6fcc887 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Wed, 26 Aug 2026 11:21:05 +0000
+Subject: [PATCH 2/2] hw/ia64: restore PCI storage interfaces
+
+Create current LSI53C895A controllers for every requested legacy SCSI bus, include IA-64 in the standard virtio PCI alias set, and test sparse SCSI numbering plus if=virtio enumeration without machine-specific device shims.
+
+diff --git a/docs/devel/ia64-ipf-port-status.rst b/docs/devel/ia64-ipf-port-status.rst
+index e22e2cd..78e65df 100644
+--- a/docs/devel/ia64-ipf-port-status.rst
++++ b/docs/devel/ia64-ipf-port-status.rst
+@@ -123,12 +123,13 @@ device paths from remaining partial platform behavior.
+      - INTx reaches the I/O SAPIC; validate firmware defaults and additional
+        supported NIC models.
+    * - SCSI
+-     - Available as generic PCI devices, not a machine default
+-     - Reintroduce the historical default only if firmware expectations and
+-       device enumeration justify it.
++     - Current LSI53C895A controllers for populated legacy buses
++     - Sparse bus numbering and PCI identity are tested; add command, data-path,
++       INTx, and firmware boot coverage.
+    * - Virtio block
+-     - Generic PCI device available
+-     - Validate firmware support and INTx without IPF-specific special cases.
++     - Standard virtio-blk-pci legacy alias
++     - ``if=virtio`` enumeration is tested without IPF-specific creation code;
++       add data-path, INTx, and firmware support coverage.
+    * - Audio
+      - Generic PCI devices available on request
+      - Optional after the boot-critical platform contract is complete.
+@@ -146,8 +147,9 @@ Current assessment
+ 
+ The boot-critical PC-derived topology is now represented by current QEMU device
+ models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
+-floppy, parallel, VGA, and generic PCI NIC attachment.  The I/O SAPIC and 460GX
+-facade are separate QOM devices rather than in-file register shims.
++floppy, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI buses, and the
++standard virtio PCI storage transport.  The I/O SAPIC and 460GX facade are
++separate QOM devices rather than in-file register shims.
+ 
+ That does not make the platform complete.  The largest remaining risks are CPU
+ and chipset architectural coverage, SMP/IPI support, migration completeness,
+diff --git a/hw/ia64/ipf.c b/hw/ia64/ipf.c
+index 0274c66..cc90207 100644
+--- a/hw/ia64/ipf.c
++++ b/hw/ia64/ipf.c
+@@ -4705,6 +4705,23 @@ static void ipf_init_pci(IPFMachineState *m)
+ #define IPF_PIIX4_PM_IO_BASE 0x0400
+ #define IPF_PIIX4_SMBUS_IO_BASE 0xb100
+ 
++static void ipf_init_scsi_storage(IPFMachineState *m)
++{
++    /*
++     * Preserve the legacy command-line contract: SCSI bus numbers are assigned
++     * monotonically, so a sparse highest bus still requires each intervening
++     * controller to exist before the matching drive is attached.
++     */
++    int max_bus = drive_get_max_bus(IF_SCSI);
++
++    for (int bus = 0; bus <= max_bus; bus++) {
++        DeviceState *dev;
++
++        dev = DEVICE(pci_create_simple(m->pcibus, -1, "lsi53c895a"));
++        lsi53c8xx_handle_legacy_cmdline(dev);
++    }
++}
++
+ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
+ {
+     DriveInfo *fd[MAX_FD] = { NULL };
+@@ -5043,6 +5060,7 @@ static void ipf_init(MachineState *machine)
+      */
+     ipf_init_pci(m);
+     ipf_init_southbridge(m, machine);
++    ipf_init_scsi_storage(m);
+     ipf_cmos_init(m, machine);
+     pci_vga_init(m->pcibus);
+ 
+diff --git a/system/qdev-monitor.c b/system/qdev-monitor.c
+index 2ac92d0..81b1636 100644
+--- a/system/qdev-monitor.c
++++ b/system/qdev-monitor.c
+@@ -60,6 +60,7 @@ typedef struct QDevAlias
+                               QEMU_ARCH_ARM | \
+                               QEMU_ARCH_HPPA | \
+                               QEMU_ARCH_I386 | \
++                              QEMU_ARCH_IA64 | \
+                               QEMU_ARCH_LOONGARCH | \
+                               QEMU_ARCH_MIPS | \
+                               QEMU_ARCH_OPENRISC | \
+diff --git a/tests/qtest/ia64-ipf-test.c b/tests/qtest/ia64-ipf-test.c
+index fb13910..8b9a21a 100644
+--- a/tests/qtest/ia64-ipf-test.c
++++ b/tests/qtest/ia64-ipf-test.c
+@@ -82,6 +82,7 @@
+ #define TEST_PM_IO_BASE             0x0400
+ #define TEST_PM_TIMER_OFFSET        0x08
+ #define TEST_PM_TIMER_MASK          0x00ffffffU
++#define TEST_STORAGE_SIZE           "16M"
+ #define TEST_E1000_MMIO_BASE        UINT64_C(0x10000000)
+ #define E1000_ICR                   0x00c0
+ #define E1000_ICS                   0x00c8
+@@ -190,6 +191,45 @@ static QTestState *ipf_qtest_start(void)
+     return ipf_qtest_start_args("");
+ }
+ 
++static unsigned int count_pci_devices(QTestState *qts, uint16_t vendor_id,
++                                      uint16_t device_id)
++{
++    unsigned int count = 0;
++
++    for (unsigned int dev = 0; dev < 32; dev++) {
++        uint32_t id = pci_config_readl(qts, dev, 0, PCI_VENDOR_ID);
++
++        if ((id & 0xffff) == vendor_id && (id >> 16) == device_id) {
++            count++;
++            g_assert_cmphex(pci_config_readb(qts, dev, 0,
++                                            PCI_INTERRUPT_PIN),
++                            ==, 1);
++        }
++    }
++    return count;
++}
++
++static void test_pci_storage_interfaces(void)
++{
++    QTestState *qts = ipf_qtest_start_args(
++        "-drive if=scsi,bus=1,unit=0,file=null-co://,"
++        "file.read-zeroes=on,format=raw,size=" TEST_STORAGE_SIZE " "
++        "-drive if=virtio,file=null-co://,file.read-zeroes=on,"
++        "format=raw,size=" TEST_STORAGE_SIZE);
++
++    /* Sparse bus 1 still requires controllers for legacy SCSI buses 0 and 1. */
++    g_assert_cmpuint(count_pci_devices(qts, PCI_VENDOR_ID_LSI_LOGIC,
++                                      PCI_DEVICE_ID_LSI_53C895A),
++                     ==, 2);
++
++    /* if=virtio must resolve to this PCI machine's standard transport. */
++    g_assert_cmpuint(count_pci_devices(qts, PCI_VENDOR_ID_REDHAT_QUMRANET,
++                                      PCI_DEVICE_ID_VIRTIO_BLOCK),
++                     ==, 1);
++
++    qtest_quit(qts);
++}
++
+ static void test_qmp_target(void)
+ {
+     QTestState *qts = ipf_qtest_start();
+@@ -730,6 +770,8 @@ int main(int argc, char **argv)
+     create_test_firmware();
+ 
+     qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
++    qtest_add_func("/ia64/ipf/pci-storage-interfaces",
++                   test_pci_storage_interfaces);
+     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
+     qtest_add_func("/ia64/ipf/isa-dma", test_isa_dma_contract);
+     qtest_add_func("/ia64/ipf/piix4-pm-reset",
+-- 
+2.47.3
