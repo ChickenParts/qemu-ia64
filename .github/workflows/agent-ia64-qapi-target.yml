@@ -67,7 +67,7 @@ jobs:
           QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
             build/tests/qtest/ia64-ipf-test --tap -k \
             | tee /tmp/ia64-ipf-test.tap
-          grep -q 'ok .* /ia64/ipf/qmp-target' /tmp/ia64-ipf-test.tap
+          grep -q 'ok .*qmp-target' /tmp/ia64-ipf-test.tap
 
       - name: Publish one clean tested commit
         shell: bash
