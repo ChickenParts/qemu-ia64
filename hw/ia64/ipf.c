@@ -5106,11 +5106,23 @@ static const TypeInfo ipf_pci_root_info = {
     },
 };
 
+static int ipf_pci_slot_get_pirq(PCIDevice *pci_dev, int pci_intx)
+{
+    /*
+     * PIIX PIRQ A corresponds to slot 1.  Rotate INTA-D by slot so each
+     * downstream device reaches one of the four programmable PIRQ inputs.
+     * The PIIX routing registers then select the architectural ISA/I/O SAPIC
+     * input; keeping these two stages separate preserves shared level state.
+     */
+    return (pci_intx + PCI_SLOT(pci_dev->devfn) - 1) & 3;
+}
+
 static void ipf_init_pci(IPFMachineState *m)
 {
     DeviceState *pcihost = qdev_new(TYPE_IPF_PCI_HOST);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pcihost), &error_fatal);
     m->pcibus = PCI_HOST_BRIDGE(pcihost)->bus;
+    pci_bus_map_irqs(m->pcibus, ipf_pci_slot_get_pirq);
 
     /*
      * Ensure 00:00.0 is a host bridge device so guest firmware enumeration

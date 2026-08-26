@@ -20,8 +20,17 @@
 #define IPF_IOSAPIC_TRIGGER_LEVEL   (1U << 15)
 
 #define IPF_PIIX_DEV                1
+#define IPF_PIIX_PIRQB              0x61
 #define IPF_PIIX4_SMBUS_IO_BASE     0xb100
+#define TEST_PCI_DEV                2
+#define TEST_PCI_IRQ                11
 #define TEST_PM_IO_BASE             0x0400
+#define TEST_E1000_MMIO_BASE        UINT64_C(0x10000000)
+#define E1000_ICR                   0x00c0
+#define E1000_ICS                   0x00c8
+#define E1000_IMS                   0x00d0
+#define E1000_IMC                   0x00d8
+#define E1000_TEST_CAUSE            (1U << 0)
 #define ACPI_POWER_BUTTON_STATUS    0x0100
 #define ACPI_POWER_BUTTON_ENABLE    0x0100
 
@@ -63,11 +72,16 @@ static void pci_config_writeb(QTestState *qts, unsigned int dev,
     qtest_outb(qts, 0xcfc + (offset & 3), value);
 }
 
-static QTestState *ipf_qtest_start(void)
+static QTestState *ipf_qtest_start_args(const char *args)
 {
     return qtest_initf("-machine ipf,usb=on -m 64M -bios %s "
-                       "-display none -nodefaults",
-                       firmware_path);
+                       "-display none -nodefaults %s",
+                       firmware_path, args);
+}
+
+static QTestState *ipf_qtest_start(void)
+{
+    return ipf_qtest_start_args("");
 }
 
 static void assert_pci_id(QTestState *qts, unsigned int function,
@@ -155,6 +169,62 @@ static void test_piix4_sci_reaches_iosapic(void)
     qtest_quit(qts);
 }
 
+static void test_pci_intx_reaches_iosapic(void)
+{
+    const unsigned int iosapic_pin = TEST_PCI_IRQ;
+    const uint8_t vector = 0x51;
+    const uint32_t rte_low = IPF_IOSAPIC_RTE_BASE + iosapic_pin * 2;
+    QTestState *qts = ipf_qtest_start_args("-device e1000,addr=2.0");
+    uint32_t id;
+    uint32_t low;
+
+    id = pci_config_readl(qts, TEST_PCI_DEV, 0, PCI_VENDOR_ID);
+    g_assert_cmphex(id & 0xffff, ==, PCI_VENDOR_ID_INTEL);
+    g_assert_cmphex(id >> 16, ==, 0x100e);
+
+    /* Slot 2 INTA swizzles to PIRQ B; route it to architectural IRQ11. */
+    pci_config_writeb(qts, IPF_PIIX_DEV, 0, IPF_PIIX_PIRQB, TEST_PCI_IRQ);
+    g_assert_cmphex(pci_config_readb(qts, IPF_PIIX_DEV, 0,
+                                    IPF_PIIX_PIRQB),
+                    ==, TEST_PCI_IRQ);
+
+    iosapic_select(qts, rte_low + 1);
+    iosapic_write_window(qts, 0);
+    iosapic_select(qts, rte_low);
+    iosapic_write_window(qts, vector | IPF_IOSAPIC_TRIGGER_LEVEL);
+
+    pci_config_writel(qts, TEST_PCI_DEV, 0, PCI_BASE_ADDRESS_0,
+                       TEST_E1000_MMIO_BASE);
+    pci_config_writel(qts, TEST_PCI_DEV, 0, PCI_COMMAND,
+                       PCI_COMMAND_MEMORY);
+    g_assert_cmphex(pci_config_readl(qts, TEST_PCI_DEV, 0,
+                                    PCI_BASE_ADDRESS_0) &
+                    PCI_BASE_ADDRESS_MEM_MASK,
+                    ==, TEST_E1000_MMIO_BASE);
+
+    /* Clear stale causes, enable one cause, and raise a real PCI INTx. */
+    qtest_writel(qts, TEST_E1000_MMIO_BASE + E1000_IMC, UINT32_MAX);
+    qtest_readl(qts, TEST_E1000_MMIO_BASE + E1000_ICR);
+    qtest_writel(qts, TEST_E1000_MMIO_BASE + E1000_IMS, E1000_TEST_CAUSE);
+    qtest_writel(qts, TEST_E1000_MMIO_BASE + E1000_ICS, E1000_TEST_CAUSE);
+
+    iosapic_select(qts, rte_low);
+    low = iosapic_read_window(qts);
+    g_assert_cmphex(low & IPF_IOSAPIC_REMOTE_IRR,
+                    ==, IPF_IOSAPIC_REMOTE_IRR);
+
+    /* Reading ICR deasserts INTx; EOI must then release Remote IRR. */
+    g_assert_cmphex(qtest_readl(qts, TEST_E1000_MMIO_BASE + E1000_ICR) &
+                    E1000_TEST_CAUSE,
+                    ==, E1000_TEST_CAUSE);
+    qtest_writel(qts, IPF_IOSAPIC_BASE + IPF_IOSAPIC_EOI, vector);
+    iosapic_select(qts, rte_low);
+    low = iosapic_read_window(qts);
+    g_assert_cmphex(low & IPF_IOSAPIC_REMOTE_IRR, ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void create_test_firmware(void)
 {
     g_autoptr(GError) error = NULL;
@@ -182,6 +252,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
     qtest_add_func("/ia64/ipf/piix4-sci-iosapic",
                    test_piix4_sci_reaches_iosapic);
+    qtest_add_func("/ia64/ipf/pci-intx-iosapic",
+                   test_pci_intx_reaches_iosapic);
     ret = g_test_run();
 
     unlink(firmware_path);
