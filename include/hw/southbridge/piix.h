@@ -61,6 +61,8 @@ struct PIIXState {
     PIIX4PMState pm;
 
     uint32_t smb_io_base;
+    uint32_t pm_io_base;
+    bool pm_io_enabled;
 
     /* Reset Control Register contents */
     uint8_t rcr;

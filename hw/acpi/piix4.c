@@ -97,6 +97,18 @@ static void pm_io_space_update(PIIX4PMState *s)
     memory_region_transaction_commit();
 }
 
+static void piix4_pm_apply_io_defaults(PIIX4PMState *s)
+{
+    PCIDevice *d = PCI_DEVICE(s);
+
+    /*
+     * Machine wiring defaults are separate from the guest-migrated PCI
+     * configuration.  Migration restores the latter and post-load remaps it.
+     */
+    pci_set_long(d->config + 0x40, s->reset_io_base | 1);
+    d->config[0x80] = s->reset_io_enabled;
+}
+
 static void smbus_io_space_update(PIIX4PMState *s)
 {
     PCIDevice *d = PCI_DEVICE(s);
@@ -287,8 +299,7 @@ static void piix4_pm_reset(DeviceState *dev)
     pci_conf[0x5a] = 0;
     pci_conf[0x5b] = 0;
 
-    pci_conf[0x40] = 0x01; /* PM io base read only bit */
-    pci_conf[0x80] = 0;
+    piix4_pm_apply_io_defaults(s);
 
     if (!s->smm_enabled) {
         /* Mark SMM as already inited (until KVM supports SMM). */
@@ -457,6 +468,15 @@ static void piix4_pm_realize(PCIDevice *dev, Error **errp)
     pci_conf[0x09] = 0x00;
     pci_conf[0x3d] = 0x01; // interrupt pin 1
 
+    if (s->reset_io_base & ~0xffc0U) {
+        error_setg(errp,
+                   "PIIX4 PM I/O base 0x%x must be 64-byte "
+                   "aligned within 16-bit I/O space",
+                   s->reset_io_base);
+        return;
+    }
+    piix4_pm_apply_io_defaults(s);
+
     /* APM */
     apm_init(dev, &s->apm, apm_ctrl_changed, s);
 
@@ -485,6 +505,7 @@ static void piix4_pm_realize(PCIDevice *dev, Error **errp)
     acpi_pm1_evt_init(&s->ar, pm_tmr_timer, &s->io);
     acpi_pm1_cnt_init(&s->ar, &s->io, s->disable_s3, s->disable_s4, s->s4_val,
                       !s->smm_compat && !s->smm_enabled);
+    pm_io_space_update(s);
     acpi_gpe_init(&s->ar, GPE_LEN);
 
     s->powerdown_notifier.notify = piix4_pm_powerdown_req;
@@ -604,6 +625,10 @@ static void piix4_send_gpe(AcpiDeviceIf *adev, AcpiEventStatusBits ev)
 }
 
 static const Property piix4_pm_properties[] = {
+    DEFINE_PROP_UINT32("reset-io-base", PIIX4PMState,
+                       reset_io_base, 0),
+    DEFINE_PROP_BOOL("reset-io-enabled", PIIX4PMState,
+                     reset_io_enabled, false),
     DEFINE_PROP_UINT32("smb_io_base", PIIX4PMState, smb_io_base, 0),
     DEFINE_PROP_UINT8(ACPI_PM_PROP_S3_DISABLED, PIIX4PMState, disable_s3, 0),
     DEFINE_PROP_UINT8(ACPI_PM_PROP_S4_DISABLED, PIIX4PMState, disable_s4, 0),

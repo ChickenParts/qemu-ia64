@@ -150,11 +150,6 @@ struct IPFMachineState {
     MemoryRegion bmapm2;
     MemoryRegion legacy_io_mmio;
     MemoryRegion legacy_io_mmio_hi;
-    MemoryRegion acpi_pm_mmio;
-    uint16_t acpi_pm1_evt_sts;
-    uint16_t acpi_pm1_evt_en;
-    uint16_t acpi_pm1_cnt;
-    uint64_t acpi_pm_timer_start_ns;
     IA64IOSAPICState *iosapic;
     qemu_irq isa_irqs[ISA_NUM_IRQS];
     IA64IPF460GXState *gx;
@@ -523,13 +518,6 @@ static void ipf_probe_percpu_segment(const char *kernel_filename, IA64CPU *cpu)
 
 /* IA-64 simulator-style UART base (see Linux drivers/tty/serial/8250/8250_early.c). */
 #define IPF_UART_BASE 0x00000000ff5e0000ULL
-
-/* ACPI PM1/PMTMR register block (I/O port encoded to segment 0xff). */
-/*
- * Keep below the loaded Flash.fd image (max 12MiB) and outside the region
- * used by the xenipf firmware for its early RSE backing store (0xff300000+).
- */
-#define IPF_ACPI_PM_BASE 0x00000000ff100000ULL
 
 /*
  * Legacy port-I/O space window.
@@ -4689,6 +4677,7 @@ static void ipf_init_pci(IPFMachineState *m)
     pci_create_simple(m->pcibus, PCI_DEVFN(0, 0), TYPE_IPF_PCI_ROOT_DEVICE);
 }
 
+#define IPF_PIIX4_PM_IO_BASE 0x0400
 #define IPF_PIIX4_SMBUS_IO_BASE 0xb100
 
 static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
@@ -4711,6 +4700,9 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
                              &error_abort);
     qdev_prop_set_uint32(DEVICE(piix), "smb_io_base",
                          IPF_PIIX4_SMBUS_IO_BASE);
+    qdev_prop_set_uint32(DEVICE(piix), "pm_io_base",
+                         IPF_PIIX4_PM_IO_BASE);
+    qdev_prop_set_bit(DEVICE(piix), "pm_io_enabled", true);
 
     for (i = 0; i < ISA_NUM_IRQS; i++) {
         m->isa_irqs[i] = ia64_iosapic_get_irq(m->iosapic, i);
@@ -4747,119 +4739,6 @@ static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
         exit(1);
     }
     smbus_eeprom_init(m->smbus, 8, NULL, 0);
-}
-
-static uint64_t ipf_acpi_pm_read(void *opaque, hwaddr addr, unsigned size)
-{
-    IPFMachineState *m = opaque;
-    uint64_t val = 0;
-
-    switch (addr) {
-    case 0x00:
-    case 0x01: {
-        uint16_t v = m->acpi_pm1_evt_sts;
-        val = (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
-        break;
-    }
-    case 0x02:
-    case 0x03: {
-        uint16_t v = m->acpi_pm1_evt_en;
-        val = (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
-        break;
-    }
-    case 0x04:
-    case 0x05: {
-        uint16_t v = m->acpi_pm1_cnt;
-        val = (v >> (8 * (addr & 1))) & ((1ULL << (size * 8)) - 1);
-        break;
-    }
-    case 0x08:
-    case 0x09:
-    case 0x0a:
-    case 0x0b: {
-        /*
-         * ACPI PM timer: 24-bit free-running counter at 3.579545 MHz.
-         * Return the low bits; higher bits are reserved.
-         */
-        uint64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - m->acpi_pm_timer_start_ns;
-        uint32_t ticks = (uint32_t)muldiv64(ns, 3579545, NANOSECONDS_PER_SECOND);
-        uint32_t v = ticks & 0x00ffffffU;
-        unsigned shift = (addr & 3) * 8;
-        val = (v >> shift) & ((1ULL << (size * 8)) - 1);
-        break;
-    }
-    default:
-        val = 0;
-        break;
-    }
-    ipf_trace_mmio("acpi-pm", IPF_ACPI_PM_BASE + addr, size, val, false);
-    return val;
-}
-
-static void ipf_acpi_pm_write(void *opaque, hwaddr addr, uint64_t data,
-                              unsigned size)
-{
-    IPFMachineState *m = opaque;
-    uint64_t mask = (size >= 8) ? UINT64_MAX : ((1ULL << (size * 8)) - 1);
-    uint64_t val = data & mask;
-
-    ipf_trace_mmio("acpi-pm", IPF_ACPI_PM_BASE + addr, size, data, true);
-    switch (addr) {
-    case 0x00:
-    case 0x01: {
-        unsigned shift = (addr & 1) * 8;
-        uint16_t v = (uint16_t)(val << shift);
-        /* Writing 1 clears status bits (ACPI). */
-        m->acpi_pm1_evt_sts &= ~v;
-        break;
-    }
-    case 0x02:
-    case 0x03: {
-        unsigned shift = (addr & 1) * 8;
-        uint16_t v = (uint16_t)(val << shift);
-        uint16_t cur = m->acpi_pm1_evt_en;
-        cur &= ~(0xffu << shift);
-        cur |= v;
-        m->acpi_pm1_evt_en = cur;
-        break;
-    }
-    case 0x04:
-    case 0x05: {
-        unsigned shift = (addr & 1) * 8;
-        uint16_t v = (uint16_t)(val << shift);
-        uint16_t cur = m->acpi_pm1_cnt;
-        cur &= ~(0xffu << shift);
-        cur |= v;
-        m->acpi_pm1_cnt = cur;
-        break;
-    }
-    default:
-        break;
-    }
-}
-
-static const MemoryRegionOps ipf_acpi_pm_ops = {
-    .read = ipf_acpi_pm_read,
-    .write = ipf_acpi_pm_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 4,
-    },
-};
-
-static void ipf_init_acpi_pm(IPFMachineState *m, MemoryRegion *sysmem)
-{
-    m->acpi_pm1_evt_sts = 0;
-    m->acpi_pm1_evt_en = 0;
-    m->acpi_pm1_cnt = 0;
-    m->acpi_pm_timer_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-
-    memory_region_init_io(&m->acpi_pm_mmio, OBJECT(m), &ipf_acpi_pm_ops, m,
-                          "ipf.acpi-pm", 0x1000);
-    memory_region_add_subregion_overlap(sysmem, IPF_ACPI_PM_BASE,
-                                        &m->acpi_pm_mmio, 1);
-    DPRINTF("ACPI-PM: mapped at 0x%016" PRIx64 "\n", (uint64_t)IPF_ACPI_PM_BASE);
 }
 
 static void ipf_init_460gx(IPFMachineState *m)
@@ -5010,15 +4889,6 @@ static void ipf_init(MachineState *machine)
     ipf_init_460gx(m);
     ipf_init_legacy_io(m, sysmem);
     ipf_init_iosapic(m);
-    /*
-     * Provide the ACPI PM1/PMTMR register block for both firmware and direct
-     * -kernel boots.
-     *
-     * xenipf/EDK uses the ACPI PM timer for delays very early; leaving it
-     * unmapped can stall firmware progress under TCG.
-     */
-    ipf_init_acpi_pm(m, sysmem);
-
     /* Optional firmware load if provided. */
     image_size = get_image_size(bios_name);
     if (image_size > 0) {
@@ -5651,33 +5521,36 @@ static void ipf_init(MachineState *machine)
             fadt.Xdsdt = cpu_to_le64(dsdt_addr);
             fadt.sci_interrupt = cpu_to_le16(9);
             /*
-             * Fixed-feature register blocks.
-             *
-             * On IA-64, Linux expects these blocks to be described via Generic
-             * Address Structures when they are MMIO.  The legacy 32-bit fields
-             * are defined as System I/O port addresses; avoid populating them
-             * with MMIO addresses above 64K.
+             * PIIX4 owns the PM1 event/control registers, PM timer, and SCI.
+             * Advertise that one I/O window through both legacy fields and
+             * Generic Address Structures.
              */
-            fadt.pm1a_event_block = 0;
+            fadt.pm1a_event_block =
+                cpu_to_le32(IPF_PIIX4_PM_IO_BASE);
             fadt.pm1_event_length = 4;
-            fadt.pm1a_control_block = 0;
+            fadt.pm1a_control_block =
+                cpu_to_le32(IPF_PIIX4_PM_IO_BASE + 0x04);
             fadt.pm1_control_length = 2;
-            fadt.pm_timer_block = 0;
+            fadt.pm_timer_block =
+                cpu_to_le32(IPF_PIIX4_PM_IO_BASE + 0x08);
             fadt.pm_timer_length = 4;
 
-            /* Extended (GAS) equivalents. */
-            fadt.xpm1a_event_block.space_id = 0; /* ACPI_ADR_SPACE_SYSTEM_MEMORY */
+            /* Extended (GAS) equivalents use System I/O space. */
+            fadt.xpm1a_event_block.space_id = 1;
             fadt.xpm1a_event_block.bit_width = 32;
             fadt.xpm1a_event_block.access_width = 0;
-            fadt.xpm1a_event_block.address = cpu_to_le64(IPF_ACPI_PM_BASE);
-            fadt.xpm1a_control_block.space_id = 0;
+            fadt.xpm1a_event_block.address =
+                cpu_to_le64(IPF_PIIX4_PM_IO_BASE);
+            fadt.xpm1a_control_block.space_id = 1;
             fadt.xpm1a_control_block.bit_width = 16;
             fadt.xpm1a_control_block.access_width = 0;
-            fadt.xpm1a_control_block.address = cpu_to_le64(IPF_ACPI_PM_BASE + 0x04);
-            fadt.xpm_timer_block.space_id = 0;
+            fadt.xpm1a_control_block.address =
+                cpu_to_le64(IPF_PIIX4_PM_IO_BASE + 0x04);
+            fadt.xpm_timer_block.space_id = 1;
             fadt.xpm_timer_block.bit_width = 32;
             fadt.xpm_timer_block.access_width = 0;
-            fadt.xpm_timer_block.address = cpu_to_le64(IPF_ACPI_PM_BASE + 0x08);
+            fadt.xpm_timer_block.address =
+                cpu_to_le64(IPF_PIIX4_PM_IO_BASE + 0x08);
             fadt.header.checksum = ipf_byte_checksum(&fadt, sizeof(fadt));
             address_space_write(&address_space_memory, fadt_addr,
                                 MEMTXATTRS_UNSPECIFIED,

@@ -47,6 +47,8 @@
 #define TEST_I8042_MODE_MOUSE_IRQ    0x02
 #define TEST_I8042_STATUS_AUX_OBF    0x20
 #define TEST_PM_IO_BASE             0x0400
+#define TEST_PM_TIMER_OFFSET        0x08
+#define TEST_PM_TIMER_MASK          0x00ffffffU
 #define TEST_E1000_MMIO_BASE        UINT64_C(0x10000000)
 #define E1000_ICR                   0x00c0
 #define E1000_ICS                   0x00c8
@@ -164,6 +166,14 @@ static void assert_pci_id(QTestState *qts, unsigned int function,
     g_assert_cmphex(id >> 16, ==, device_id);
 }
 
+static void assert_piix4_pm_defaults(QTestState *qts)
+{
+    g_assert_cmphex(pci_config_readl(qts, IPF_PIIX_DEV, 3, 0x40) & 0xffc1,
+                    ==, TEST_PM_IO_BASE | 1);
+    g_assert_cmphex(pci_config_readb(qts, IPF_PIIX_DEV, 3, 0x80) & 1,
+                    ==, 1);
+}
+
 static void test_piix4_functions(void)
 {
     QTestState *qts = ipf_qtest_start();
@@ -175,6 +185,36 @@ static void test_piix4_functions(void)
 
     g_assert_cmphex(pci_config_readl(qts, IPF_PIIX_DEV, 3, 0x90) & 0xffc1,
                     ==, IPF_PIIX4_SMBUS_IO_BASE | 1);
+    assert_piix4_pm_defaults(qts);
+
+    uint32_t before = qtest_inl(qts, TEST_PM_IO_BASE +
+                               TEST_PM_TIMER_OFFSET) &
+                      TEST_PM_TIMER_MASK;
+    qtest_clock_step(qts, 10 * 1000 * 1000);
+    uint32_t after = qtest_inl(qts, TEST_PM_IO_BASE +
+                              TEST_PM_TIMER_OFFSET) &
+                     TEST_PM_TIMER_MASK;
+    g_assert_cmpuint((after - before) & TEST_PM_TIMER_MASK, >, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_piix4_pm_reset(void)
+{
+    const uint32_t alternate_base = 0x0800;
+    QTestState *qts = ipf_qtest_start();
+
+    assert_piix4_pm_defaults(qts);
+    pci_config_writel(qts, IPF_PIIX_DEV, 3, 0x40,
+                       alternate_base | 1);
+    pci_config_writeb(qts, IPF_PIIX_DEV, 3, 0x80, 0);
+    g_assert_cmphex(pci_config_readl(qts, IPF_PIIX_DEV, 3, 0x40) &
+                    0xffc1, ==, alternate_base | 1);
+    g_assert_cmphex(pci_config_readb(qts, IPF_PIIX_DEV, 3, 0x80) &
+                    1, ==, 0);
+
+    qtest_system_reset(qts);
+    assert_piix4_pm_defaults(qts);
 
     qtest_quit(qts);
 }
@@ -202,12 +242,7 @@ static void test_piix4_sci_reaches_iosapic(void)
     QTestState *qts = ipf_qtest_start();
     uint32_t low;
 
-    /* Give the PIIX4 PM function a conventional PM I/O window and enable it. */
-    pci_config_writel(qts, IPF_PIIX_DEV, 3, 0x40, TEST_PM_IO_BASE | 1);
-    pci_config_writeb(qts, IPF_PIIX_DEV, 3, 0x80, 1);
-    g_assert_cmphex(pci_config_readl(qts, IPF_PIIX_DEV, 3, 0x40) & 0xffc1,
-                    ==, TEST_PM_IO_BASE | 1);
-    g_assert_cmphex(pci_config_readb(qts, IPF_PIIX_DEV, 3, 0x80) & 1, ==, 1);
+    assert_piix4_pm_defaults(qts);
 
     /* Program ISA IRQ9 as a level-triggered I/O SAPIC route. */
     iosapic_select(qts, rte_low + 1);
@@ -488,6 +523,8 @@ int main(int argc, char **argv)
     create_test_firmware();
 
     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
+    qtest_add_func("/ia64/ipf/piix4-pm-reset",
+                   test_piix4_pm_reset);
     qtest_add_func("/ia64/ipf/piix4-sci-iosapic",
                    test_piix4_sci_reaches_iosapic);
     qtest_add_func("/ia64/ipf/pci-intx-iosapic",
