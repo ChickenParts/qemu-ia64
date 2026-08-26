@@ -1,0 +1,144 @@
+name: Temporary IA-64 460GX QOM validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-460gx-qom
+    paths:
+      - scratch/ia64-ipf-460gx.c
+      - scratch/ia64-ipf-460gx.h
+      - scratch/apply-ia64-460gx-qom.py
+      - .github/workflows/agent-ia64-460gx-qom.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_COMMIT: 4332e87be3ef5371d901c56803dae8b1275c0a5c
+      OUTPUT_BRANCH: fix/ia64-460gx-qom
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply and review the exact source change
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scratch/ia64-ipf-460gx.c /tmp/ipf-460gx.c
+          cp scratch/ia64-ipf-460gx.h /tmp/ipf-460gx.h
+          cp scratch/apply-ia64-460gx-qom.py /tmp/apply-ia64-460gx-qom.py
+          sha256sum \
+            /tmp/ipf-460gx.c \
+            /tmp/ipf-460gx.h \
+            /tmp/apply-ia64-460gx-qom.py \
+            > /tmp/ia64-460gx-input-sha256.txt
+
+          git checkout --detach "$BASE_COMMIT"
+          cp /tmp/ipf-460gx.c hw/ia64/ipf-460gx.c
+          cp /tmp/ipf-460gx.h hw/ia64/ipf-460gx.h
+          python3 /tmp/apply-ia64-460gx-qom.py .
+
+          git add hw/ia64/ipf.c hw/ia64/ipf-460gx.c \
+            hw/ia64/ipf-460gx.h hw/ia64/meson.build \
+            tests/qtest/ia64-ipf-test.c
+          git diff --cached --check
+          if git grep -n -E \
+            'IPFPciFwConfig|ipf_init_pci_fw_cfg|gx_mmio_cb0|gx_mmio_cc0' \
+            -- hw/ia64/ipf.c; then
+            echo 'machine-local 460GX state survived extraction' >&2
+            exit 1
+          fi
+          git diff --cached > /tmp/ia64-460gx-qom-full.patch
+          perl scripts/checkpatch.pl --no-signoff \
+            /tmp/ia64-460gx-qom-full.patch
+
+      - name: Upload exact patch-applied source for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-460gx-qom-source-${{ github.run_id }}
+          path: |
+            /tmp/ia64-460gx-input-sha256.txt
+            /tmp/ia64-460gx-qom-full.patch
+            hw/ia64/ipf.c
+            hw/ia64/ipf-460gx.c
+            hw/ia64/ipf-460gx.h
+            hw/ia64/meson.build
+            tests/qtest/ia64-ipf-test.c
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+
+      - name: Build IA-64 and focused platform tests
+        run: |
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run architectural and 460GX contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-interrupt --tap -k \
+            | tee /tmp/test-ia64-interrupt.tap
+          build/tests/unit/test-ia64-iosapic --tap -k \
+            | tee /tmp/test-ia64-iosapic.tap
+          QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
+            build/tests/qtest/ia64-ipf-test --tap -k \
+            | tee /tmp/ia64-ipf-test.tap
+
+      - name: Basic executable smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/qemu-system-ia64 --version
+          build/qemu-system-ia64 -machine help | grep -q '^ipf '
+
+      - name: Publish one clean tested source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git diff --cached --check
+          git commit \
+            -m 'hw/ia64: extract the 460GX firmware device' \
+            -m 'Move the sparse firmware PCI configuration facade and CB0/CC0 control windows into one resettable, migratable SysBus/QOM device. Preserve real bus-0 forwarding and CSE-bus identities, keep the region-4 alias, and test mutable state, hardware defaults, and identity restoration across reset.'
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+          git rev-parse HEAD | tee /tmp/ia64-460gx-qom-commit.txt
+
+      - name: Upload tested commit identity and contract output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-460gx-qom-result
+          path: |
+            /tmp/ia64-460gx-qom-commit.txt
+            /tmp/test-ia64-interrupt.tap
+            /tmp/test-ia64-iosapic.tap
+            /tmp/ia64-ipf-test.tap
+          retention-days: 1
+          if-no-files-found: error
