@@ -4705,6 +4705,23 @@ static void ipf_init_pci(IPFMachineState *m)
 #define IPF_PIIX4_PM_IO_BASE 0x0400
 #define IPF_PIIX4_SMBUS_IO_BASE 0xb100
 
+static void ipf_init_scsi_storage(IPFMachineState *m)
+{
+    /*
+     * Preserve the legacy command-line contract: SCSI bus numbers are assigned
+     * monotonically, so a sparse highest bus still requires each intervening
+     * controller to exist before the matching drive is attached.
+     */
+    int max_bus = drive_get_max_bus(IF_SCSI);
+
+    for (int bus = 0; bus <= max_bus; bus++) {
+        DeviceState *dev;
+
+        dev = DEVICE(pci_create_simple(m->pcibus, -1, "lsi53c895a"));
+        lsi53c8xx_handle_legacy_cmdline(dev);
+    }
+}
+
 static void ipf_init_southbridge(IPFMachineState *m, MachineState *machine)
 {
     DriveInfo *fd[MAX_FD] = { NULL };
@@ -5043,6 +5060,7 @@ static void ipf_init(MachineState *machine)
      */
     ipf_init_pci(m);
     ipf_init_southbridge(m, machine);
+    ipf_init_scsi_storage(m);
     ipf_cmos_init(m, machine);
     pci_vga_init(m->pcibus);
 

@@ -82,6 +82,7 @@
 #define TEST_PM_IO_BASE             0x0400
 #define TEST_PM_TIMER_OFFSET        0x08
 #define TEST_PM_TIMER_MASK          0x00ffffffU
+#define TEST_STORAGE_SIZE           "16M"
 #define TEST_E1000_MMIO_BASE        UINT64_C(0x10000000)
 #define E1000_ICR                   0x00c0
 #define E1000_ICS                   0x00c8
@@ -188,6 +189,45 @@ static QTestState *ipf_qtest_start_args(const char *args)
 static QTestState *ipf_qtest_start(void)
 {
     return ipf_qtest_start_args("");
+}
+
+static unsigned int count_pci_devices(QTestState *qts, uint16_t vendor_id,
+                                      uint16_t device_id)
+{
+    unsigned int count = 0;
+
+    for (unsigned int dev = 0; dev < 32; dev++) {
+        uint32_t id = pci_config_readl(qts, dev, 0, PCI_VENDOR_ID);
+
+        if ((id & 0xffff) == vendor_id && (id >> 16) == device_id) {
+            count++;
+            g_assert_cmphex(pci_config_readb(qts, dev, 0,
+                                            PCI_INTERRUPT_PIN),
+                            ==, 1);
+        }
+    }
+    return count;
+}
+
+static void test_pci_storage_interfaces(void)
+{
+    QTestState *qts = ipf_qtest_start_args(
+        "-drive if=scsi,bus=1,unit=0,file=null-co://,"
+        "file.read-zeroes=on,format=raw,size=" TEST_STORAGE_SIZE " "
+        "-drive if=virtio,file=null-co://,file.read-zeroes=on,"
+        "format=raw,size=" TEST_STORAGE_SIZE);
+
+    /* Sparse bus 1 still requires controllers for legacy SCSI buses 0 and 1. */
+    g_assert_cmpuint(count_pci_devices(qts, PCI_VENDOR_ID_LSI_LOGIC,
+                                      PCI_DEVICE_ID_LSI_53C895A),
+                     ==, 2);
+
+    /* if=virtio must resolve to this PCI machine's standard transport. */
+    g_assert_cmpuint(count_pci_devices(qts, PCI_VENDOR_ID_REDHAT_QUMRANET,
+                                      PCI_DEVICE_ID_VIRTIO_BLOCK),
+                     ==, 1);
+
+    qtest_quit(qts);
 }
 
 static void test_qmp_target(void)
@@ -730,6 +770,8 @@ int main(int argc, char **argv)
     create_test_firmware();
 
     qtest_add_func("/ia64/ipf/qmp-target", test_qmp_target);
+    qtest_add_func("/ia64/ipf/pci-storage-interfaces",
+                   test_pci_storage_interfaces);
     qtest_add_func("/ia64/ipf/piix4-functions", test_piix4_functions);
     qtest_add_func("/ia64/ipf/isa-dma", test_isa_dma_contract);
     qtest_add_func("/ia64/ipf/piix4-pm-reset",

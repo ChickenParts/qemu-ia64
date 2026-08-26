@@ -123,12 +123,13 @@ device paths from remaining partial platform behavior.
      - INTx reaches the I/O SAPIC; validate firmware defaults and additional
        supported NIC models.
    * - SCSI
-     - Available as generic PCI devices, not a machine default
-     - Reintroduce the historical default only if firmware expectations and
-       device enumeration justify it.
+     - Current LSI53C895A controllers for populated legacy buses
+     - Sparse bus numbering and PCI identity are tested; add command, data-path,
+       INTx, and firmware boot coverage.
    * - Virtio block
-     - Generic PCI device available
-     - Validate firmware support and INTx without IPF-specific special cases.
+     - Standard virtio-blk-pci legacy alias
+     - ``if=virtio`` enumeration is tested without IPF-specific creation code;
+       add data-path, INTx, and firmware support coverage.
    * - Audio
      - Generic PCI devices available on request
      - Optional after the boot-critical platform contract is complete.
@@ -146,8 +147,9 @@ Current assessment
 
 The boot-critical PC-derived topology is now represented by current QEMU device
 models: PCI host/root, PIIX4, ISA, IDE, UHCI, PM/SMBus, RTC, i8257 DMA, i8042,
-floppy, parallel, VGA, and generic PCI NIC attachment.  The I/O SAPIC and 460GX
-facade are separate QOM devices rather than in-file register shims.
+floppy, parallel, VGA, generic PCI NIC attachment, legacy LSI SCSI buses, and the
+standard virtio PCI storage transport.  The I/O SAPIC and 460GX facade are
+separate QOM devices rather than in-file register shims.
 
 That does not make the platform complete.  The largest remaining risks are CPU
 and chipset architectural coverage, SMP/IPI support, migration completeness,
