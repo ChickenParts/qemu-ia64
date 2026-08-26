@@ -1,0 +1,94 @@
+name: Temporary IA-64 QAPI target validation
+
+on:
+  push:
+    branches:
+      - stage/ia64-qapi-target
+    paths:
+      - scratch/ia64-qapi-target-current.patch
+      - .github/workflows/agent-ia64-qapi-target.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_COMMIT: d2dddc4840919f999e460a3d5aa569875c8343da
+      OUTPUT_BRANCH: fix/ia64-qapi-target
+      PATCH_FILE: scratch/ia64-qapi-target-current.patch
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply the QAPI target fix to current metachicken
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$PATCH_FILE" /tmp/ia64-qapi-target.patch
+          git checkout --detach "$BASE_COMMIT"
+          git apply --check /tmp/ia64-qapi-target.patch
+          git apply /tmp/ia64-qapi-target.patch
+          git diff --check
+          perl scripts/checkpatch.pl --no-signoff --strict \
+            /tmp/ia64-qapi-target.patch
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Configure IA-64 system emulator
+        run: |
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl
+
+      - name: Build IA-64 and its platform qtest
+        run: |
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run QMP and platform contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          QTEST_QEMU_BINARY=./build/qemu-system-ia64 \
+            build/tests/qtest/ia64-ipf-test --tap -k \
+            | tee /tmp/ia64-ipf-test.tap
+          grep -q 'ok .* /ia64/ipf/qmp-target' /tmp/ia64-ipf-test.tap
+
+      - name: Publish one clean tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add qapi/machine.json tests/qtest/ia64-ipf-test.c
+          git diff --cached --check
+          git commit \
+            -m 'qapi: add ia64 to SysEmuTarget' \
+            -m 'Represent IA-64 in generic QMP target and CPU queries instead of aborting in qapi_enum_parse(), and cover query-target plus query-cpus-fast through the IPF qtest.'
+          git push --force origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+          git rev-parse HEAD | tee /tmp/ia64-qapi-target-commit.txt
+
+      - name: Upload validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-qapi-target-result
+          path: |
+            /tmp/ia64-qapi-target-commit.txt
+            /tmp/ia64-ipf-test.tap
+          retention-days: 1
+          if-no-files-found: error
