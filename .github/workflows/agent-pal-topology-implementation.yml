@@ -1,0 +1,613 @@
+name: Temporary IA-64 PAL topology implementation
+
+on:
+  push:
+    branches:
+      - fix/pal-topology-contracts
+    paths:
+      - .github/workflows/agent-pal-topology-implementation.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pal-topology-contracts
+          fetch-depth: 0
+
+      - name: Apply PAL topology implementation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          root = Path('.')
+
+          (root / 'target/ia64/pal.h').write_text(dedent(r'''
+          /*
+           * IA-64 Processor Abstraction Layer result helpers
+           *
+           * SPDX-License-Identifier: LGPL-2.0-or-later
+           */
+
+          #ifndef TARGET_IA64_PAL_H
+          #define TARGET_IA64_PAL_H
+
+          #define IA64_PAL_STATUS_SUCCESS        0
+          #define IA64_PAL_STATUS_UNIMPLEMENTED  (-1)
+          #define IA64_PAL_STATUS_EINVAL         (-2)
+
+          #define IA64_PAL_CACHE_TYPE_INSTRUCTION 1
+          #define IA64_PAL_CACHE_TYPE_DATA        2
+          #define IA64_PAL_CACHE_LEVELS           3
+          #define IA64_PAL_UNIQUE_CACHES          5
+
+          #define IA64_PAL_TC_LEVELS               1
+          #define IA64_PAL_UNIQUE_TCS              2
+          #define IA64_PAL_VM_PAGE_SIZES UINT64_C(0x115557000)
+
+          typedef enum IA64PALAction {
+              IA64_PAL_ACTION_RETURN = 0,
+              IA64_PAL_ACTION_HALT,
+          } IA64PALAction;
+
+          typedef struct IA64PALResult {
+              int64_t status;
+              uint64_t v0;
+              uint64_t v1;
+              uint64_t v2;
+              IA64PALAction action;
+          } IA64PALResult;
+
+          IA64PALResult ia64_pal_result_unimplemented(void);
+          IA64PALResult ia64_pal_result_halt(void);
+          IA64PALResult ia64_pal_result_cache_summary(void);
+          IA64PALResult ia64_pal_result_cache_info(uint64_t level,
+                                                   uint64_t type);
+          IA64PALResult ia64_pal_result_vm_summary(unsigned int pkr_count,
+                                                   unsigned int dtr_count,
+                                                   unsigned int itr_count);
+          IA64PALResult ia64_pal_result_vm_info(uint64_t level,
+                                                uint64_t type,
+                                                unsigned int entry_count);
+          IA64PALResult ia64_pal_result_proc_get_features(uint64_t feature_set);
+
+          #endif
+          ''').lstrip())
+
+          (root / 'target/ia64/pal.c').write_text(dedent(r'''
+          /*
+           * IA-64 Processor Abstraction Layer result helpers
+           *
+           * SPDX-License-Identifier: LGPL-2.0-or-later
+           */
+
+          #include "qemu/osdep.h"
+          #include "pal.h"
+
+          static IA64PALResult ia64_pal_result(int64_t status,
+                                               uint64_t v0,
+                                               uint64_t v1,
+                                               uint64_t v2)
+          {
+              return (IA64PALResult) {
+                  .status = status,
+                  .v0 = v0,
+                  .v1 = v1,
+                  .v2 = v2,
+                  .action = IA64_PAL_ACTION_RETURN,
+              };
+          }
+
+          IA64PALResult ia64_pal_result_unimplemented(void)
+          {
+              return ia64_pal_result(IA64_PAL_STATUS_UNIMPLEMENTED, 0, 0, 0);
+          }
+
+          IA64PALResult ia64_pal_result_halt(void)
+          {
+              IA64PALResult result = ia64_pal_result(
+                  IA64_PAL_STATUS_SUCCESS, 0, 0, 0);
+
+              result.action = IA64_PAL_ACTION_HALT;
+              return result;
+          }
+
+          IA64PALResult ia64_pal_result_cache_summary(void)
+          {
+              return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,
+                                     IA64_PAL_CACHE_LEVELS,
+                                     IA64_PAL_UNIQUE_CACHES, 0);
+          }
+
+          IA64PALResult ia64_pal_result_cache_info(uint64_t level,
+                                                   uint64_t type)
+          {
+              const uint8_t attr = 1;      /* PAL_CACHE_ATTR_WB */
+              const uint8_t assoc = 8;
+              const uint8_t line_size = 6; /* log2(64) */
+              const uint8_t stride = 6;    /* log2(64) */
+              bool unified;
+              uint32_t cache_size;
+              uint64_t info1 = 0;
+
+              if (level >= IA64_PAL_CACHE_LEVELS ||
+                  (type != IA64_PAL_CACHE_TYPE_INSTRUCTION &&
+                   type != IA64_PAL_CACHE_TYPE_DATA)) {
+                  return ia64_pal_result(IA64_PAL_STATUS_EINVAL, 0, 0, 0);
+              }
+
+              unified = level == IA64_PAL_CACHE_LEVELS - 1;
+              switch (level) {
+              case 0:
+                  cache_size = type == IA64_PAL_CACHE_TYPE_INSTRUCTION ?
+                      32 * KiB : 64 * KiB;
+                  break;
+              case 1:
+                  cache_size = 256 * KiB;
+                  break;
+              case 2:
+                  cache_size = 1 * MiB;
+                  break;
+              default:
+                  g_assert_not_reached();
+              }
+
+              /* pal_cache_config_info_1_t::pcci1_data */
+              info1 |= (uint64_t)unified;
+              info1 |= (uint64_t)attr << 1;
+              info1 |= (uint64_t)assoc << 8;
+              info1 |= (uint64_t)line_size << 16;
+              info1 |= (uint64_t)stride << 24;
+
+              return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,
+                                     info1, cache_size, 0);
+          }
+
+          IA64PALResult ia64_pal_result_vm_summary(unsigned int pkr_count,
+                                                   unsigned int dtr_count,
+                                                   unsigned int itr_count)
+          {
+              const uint8_t vw = 1;
+              const uint8_t phys_add_size = 44;
+              const uint8_t key_size = 18;
+              const uint8_t hash_tag_id = 0;
+              const uint8_t impl_va_msb = 60;
+              const uint8_t rid_size = 18;
+              const uint16_t max_purges = UINT16_MAX;
+              uint64_t info1 = 0;
+              uint64_t info2 = 0;
+
+              if (pkr_count == 0 || pkr_count > 256 ||
+                  dtr_count == 0 || dtr_count > 256 ||
+                  itr_count == 0 || itr_count > 256) {
+                  return ia64_pal_result(IA64_PAL_STATUS_EINVAL, 0, 0, 0);
+              }
+
+              info1 |= (uint64_t)vw;
+              info1 |= (uint64_t)phys_add_size << 1;
+              info1 |= (uint64_t)key_size << 8;
+              info1 |= (uint64_t)(pkr_count - 1) << 16;
+              info1 |= (uint64_t)hash_tag_id << 24;
+              info1 |= (uint64_t)(dtr_count - 1) << 32;
+              info1 |= (uint64_t)(itr_count - 1) << 40;
+              info1 |= (uint64_t)IA64_PAL_UNIQUE_TCS << 48;
+              info1 |= (uint64_t)IA64_PAL_TC_LEVELS << 56;
+
+              info2 |= (uint64_t)impl_va_msb;
+              info2 |= (uint64_t)rid_size << 8;
+              info2 |= (uint64_t)max_purges << 16;
+
+              return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,
+                                     info1, info2, 0);
+          }
+
+          IA64PALResult ia64_pal_result_vm_info(uint64_t level,
+                                                uint64_t type,
+                                                unsigned int entry_count)
+          {
+              uint64_t info = 0;
+
+              if (level >= IA64_PAL_TC_LEVELS ||
+                  (type != IA64_PAL_CACHE_TYPE_INSTRUCTION &&
+                   type != IA64_PAL_CACHE_TYPE_DATA) ||
+                  entry_count == 0 || entry_count > UINT8_MAX) {
+                  return ia64_pal_result(IA64_PAL_STATUS_EINVAL, 0, 0, 0);
+              }
+
+              /*
+               * The software model has one fully associative instruction TC
+               * and one fully associative data TC.  num_sets * associativity
+               * therefore equals num_entries for each non-unified TC.
+               */
+              info |= UINT64_C(1);              /* num_sets */
+              info |= (uint64_t)entry_count << 8;  /* associativity */
+              info |= (uint64_t)entry_count << 16; /* num_entries */
+
+              return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,
+                                     info, IA64_PAL_VM_PAGE_SIZES, 0);
+          }
+
+          IA64PALResult ia64_pal_result_proc_get_features(uint64_t feature_set)
+          {
+              /* No configurable processor feature sets are modeled. */
+              (void)feature_set;
+              return ia64_pal_result(IA64_PAL_STATUS_EINVAL, 0, 0, 0);
+          }
+          ''').lstrip())
+
+          (root / 'tests/unit/test-ia64-pal.c').write_text(dedent(r'''
+          /*
+           * IA-64 Processor Abstraction Layer contract tests
+           *
+           * SPDX-License-Identifier: GPL-2.0-or-later
+           */
+
+          #include "qemu/osdep.h"
+          #include "target/ia64/pal.h"
+
+          static uint64_t field(uint64_t value, unsigned int shift,
+                                uint64_t mask)
+          {
+              return (value >> shift) & mask;
+          }
+
+          static void assert_return_action(IA64PALResult result)
+          {
+              g_assert_cmpint(result.action, ==, IA64_PAL_ACTION_RETURN);
+          }
+
+          static void test_unimplemented_result(void)
+          {
+              IA64PALResult result = ia64_pal_result_unimplemented();
+
+              g_assert_cmpint(result.status, ==,
+                              IA64_PAL_STATUS_UNIMPLEMENTED);
+              g_assert_cmphex(result.v0, ==, 0);
+              g_assert_cmphex(result.v1, ==, 0);
+              g_assert_cmphex(result.v2, ==, 0);
+              assert_return_action(result);
+          }
+
+          static void test_halt_result(void)
+          {
+              IA64PALResult result = ia64_pal_result_halt();
+
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_SUCCESS);
+              g_assert_cmphex(result.v0, ==, 0);
+              g_assert_cmphex(result.v1, ==, 0);
+              g_assert_cmphex(result.v2, ==, 0);
+              g_assert_cmpint(result.action, ==, IA64_PAL_ACTION_HALT);
+          }
+
+          static void test_cache_summary(void)
+          {
+              IA64PALResult result = ia64_pal_result_cache_summary();
+
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_SUCCESS);
+              g_assert_cmpuint(result.v0, ==, IA64_PAL_CACHE_LEVELS);
+              g_assert_cmpuint(result.v1, ==, IA64_PAL_UNIQUE_CACHES);
+              g_assert_cmphex(result.v2, ==, 0);
+              assert_return_action(result);
+          }
+
+          static void assert_cache_info(uint64_t level, uint64_t type,
+                                        bool unified, uint64_t size)
+          {
+              IA64PALResult result = ia64_pal_result_cache_info(level, type);
+
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_SUCCESS);
+              g_assert_cmpuint(field(result.v0, 0, 0x1), ==, unified);
+              g_assert_cmpuint(field(result.v0, 1, 0x3), ==, 1);
+              g_assert_cmpuint(field(result.v0, 8, 0xff), ==, 8);
+              g_assert_cmpuint(field(result.v0, 16, 0xff), ==, 6);
+              g_assert_cmpuint(field(result.v0, 24, 0xff), ==, 6);
+              g_assert_cmpuint(result.v1, ==, size);
+              g_assert_cmphex(result.v2, ==, 0);
+              assert_return_action(result);
+          }
+
+          static void test_cache_info(void)
+          {
+              assert_cache_info(0, IA64_PAL_CACHE_TYPE_INSTRUCTION,
+                                false, 32 * KiB);
+              assert_cache_info(0, IA64_PAL_CACHE_TYPE_DATA,
+                                false, 64 * KiB);
+              assert_cache_info(1, IA64_PAL_CACHE_TYPE_INSTRUCTION,
+                                false, 256 * KiB);
+              assert_cache_info(1, IA64_PAL_CACHE_TYPE_DATA,
+                                false, 256 * KiB);
+              assert_cache_info(2, IA64_PAL_CACHE_TYPE_INSTRUCTION,
+                                true, 1 * MiB);
+              assert_cache_info(2, IA64_PAL_CACHE_TYPE_DATA,
+                                true, 1 * MiB);
+          }
+
+          static void test_cache_info_invalid(void)
+          {
+              IA64PALResult result;
+
+              result = ia64_pal_result_cache_info(
+                  IA64_PAL_CACHE_LEVELS, IA64_PAL_CACHE_TYPE_DATA);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_cache_info(0, 0);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_cache_info(0, 3);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+          }
+
+          static void test_vm_summary(void)
+          {
+              IA64PALResult result = ia64_pal_result_vm_summary(16, 16, 16);
+
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_SUCCESS);
+              g_assert_cmpuint(field(result.v0, 0, 0x1), ==, 1);
+              g_assert_cmpuint(field(result.v0, 1, 0x7f), ==, 44);
+              g_assert_cmpuint(field(result.v0, 8, 0xff), ==, 18);
+              g_assert_cmpuint(field(result.v0, 16, 0xff), ==, 15);
+              g_assert_cmpuint(field(result.v0, 24, 0xff), ==, 0);
+              g_assert_cmpuint(field(result.v0, 32, 0xff), ==, 15);
+              g_assert_cmpuint(field(result.v0, 40, 0xff), ==, 15);
+              g_assert_cmpuint(field(result.v0, 48, 0xff), ==,
+                               IA64_PAL_UNIQUE_TCS);
+              g_assert_cmpuint(field(result.v0, 56, 0xff), ==,
+                               IA64_PAL_TC_LEVELS);
+              g_assert_cmpuint(field(result.v1, 0, 0xff), ==, 60);
+              g_assert_cmpuint(field(result.v1, 8, 0xff), ==, 18);
+              g_assert_cmpuint(field(result.v1, 16, 0xffff), ==, UINT16_MAX);
+              g_assert_cmphex(result.v2, ==, 0);
+              assert_return_action(result);
+          }
+
+          static void test_vm_summary_invalid(void)
+          {
+              IA64PALResult result;
+
+              result = ia64_pal_result_vm_summary(0, 16, 16);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_vm_summary(16, 0, 16);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_vm_summary(16, 16, 0);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_vm_summary(257, 16, 16);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+          }
+
+          static void assert_vm_info(uint64_t type)
+          {
+              IA64PALResult result = ia64_pal_result_vm_info(0, type, 128);
+
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_SUCCESS);
+              g_assert_cmpuint(field(result.v0, 0, 0xff), ==, 1);
+              g_assert_cmpuint(field(result.v0, 8, 0xff), ==, 128);
+              g_assert_cmpuint(field(result.v0, 16, 0xffff), ==, 128);
+              g_assert_cmpuint(field(result.v0, 32, 0x1), ==, 0);
+              g_assert_cmpuint(field(result.v0, 33, 0x1), ==, 0);
+              g_assert_cmpuint(field(result.v0, 34, 0x1), ==, 0);
+              g_assert_cmphex(result.v1, ==, IA64_PAL_VM_PAGE_SIZES);
+              g_assert_cmphex(result.v2, ==, 0);
+              assert_return_action(result);
+          }
+
+          static void test_vm_info(void)
+          {
+              assert_vm_info(IA64_PAL_CACHE_TYPE_INSTRUCTION);
+              assert_vm_info(IA64_PAL_CACHE_TYPE_DATA);
+          }
+
+          static void test_vm_info_invalid(void)
+          {
+              IA64PALResult result;
+
+              result = ia64_pal_result_vm_info(1,
+                  IA64_PAL_CACHE_TYPE_DATA, 128);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_vm_info(0, 0, 128);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_vm_info(0,
+                  IA64_PAL_CACHE_TYPE_DATA, 0);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_vm_info(0,
+                  IA64_PAL_CACHE_TYPE_DATA, 256);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+          }
+
+          static void test_proc_get_features(void)
+          {
+              IA64PALResult result;
+
+              result = ia64_pal_result_proc_get_features(0);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+              result = ia64_pal_result_proc_get_features(16);
+              g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
+          }
+
+          int main(int argc, char **argv)
+          {
+              g_test_init(&argc, &argv, NULL);
+              g_test_add_func("/ia64/pal/unimplemented-result",
+                              test_unimplemented_result);
+              g_test_add_func("/ia64/pal/halt-result", test_halt_result);
+              g_test_add_func("/ia64/pal/cache-summary", test_cache_summary);
+              g_test_add_func("/ia64/pal/cache-info", test_cache_info);
+              g_test_add_func("/ia64/pal/cache-info-invalid",
+                              test_cache_info_invalid);
+              g_test_add_func("/ia64/pal/vm-summary", test_vm_summary);
+              g_test_add_func("/ia64/pal/vm-summary-invalid",
+                              test_vm_summary_invalid);
+              g_test_add_func("/ia64/pal/vm-info", test_vm_info);
+              g_test_add_func("/ia64/pal/vm-info-invalid",
+                              test_vm_info_invalid);
+              g_test_add_func("/ia64/pal/proc-get-features",
+                              test_proc_get_features);
+              return g_test_run();
+          }
+          ''').lstrip())
+
+          helper = root / 'target/ia64/helper.c'
+          source = helper.read_text()
+
+          def replace_once(old, new, label):
+              global source
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f'{label}: expected one match, found {count}')
+              source = source.replace(old, new, 1)
+
+          def replace_case(start_label, next_label, replacement):
+              global source
+              start = source.index(start_label)
+              end = source.index(next_label, start)
+              source = source[:start] + replacement + source[end:]
+
+          replace_once(
+              '#define IA64_PAL_PTCE_INFO       6\n'
+              '#define IA64_PAL_VM_SUMMARY      8\n',
+              '#define IA64_PAL_PTCE_INFO       6\n'
+              '#define IA64_PAL_VM_INFO         7\n'
+              '#define IA64_PAL_VM_SUMMARY      8\n',
+              'PAL_VM_INFO number')
+
+          replace_case(
+              '    case IA64_PAL_CACHE_SUMMARY:',
+              '    case IA64_PAL_MEM_ATTRIB:',
+              dedent(r'''
+                  case IA64_PAL_CACHE_SUMMARY: {
+                      IA64PALResult result = ia64_pal_result_cache_summary();
+
+                      status = result.status;
+                      v0 = result.v0;
+                      v1 = result.v1;
+                      v2 = result.v2;
+                      break;
+                  }
+                  case IA64_PAL_CACHE_INFO: {
+                      IA64PALResult result = ia64_pal_result_cache_info(a1, a2);
+
+                      status = result.status;
+                      v0 = result.v0;
+                      v1 = result.v1;
+                      v2 = result.v2;
+                      break;
+                  }
+              ''').lstrip())
+
+          replace_case(
+              '    case IA64_PAL_VM_SUMMARY:',
+              '    case IA64_PAL_BUS_GET_FEATURES:',
+              dedent(r'''
+                  case IA64_PAL_VM_INFO: {
+                      IA64PALResult result = ia64_pal_result_vm_info(
+                          a1, a2, ARRAY_SIZE(env->itcs));
+
+                      status = result.status;
+                      v0 = result.v0;
+                      v1 = result.v1;
+                      v2 = result.v2;
+                      break;
+                  }
+                  case IA64_PAL_VM_SUMMARY: {
+                      IA64PALResult result = ia64_pal_result_vm_summary(
+                          ARRAY_SIZE(env->pkr), ARRAY_SIZE(env->dtrs),
+                          ARRAY_SIZE(env->itrs));
+
+                      status = result.status;
+                      v0 = result.v0;
+                      v1 = result.v1;
+                      v2 = result.v2;
+                      break;
+                  }
+              ''').lstrip())
+
+          replace_case(
+              '    case IA64_PAL_VM_PAGE_SIZE:',
+              '    case IA64_PAL_FREQ_BASE:',
+              dedent(r'''
+                  case IA64_PAL_VM_PAGE_SIZE:
+                      v0 = IA64_PAL_VM_PAGE_SIZES;
+                      v1 = IA64_PAL_VM_PAGE_SIZES;
+                      break;
+              ''').lstrip())
+
+          replace_case(
+              '    case IA64_PAL_PROC_GET_FEATURES:',
+              '    case IA64_PAL_VERSION:',
+              dedent(r'''
+                  case IA64_PAL_PROC_GET_FEATURES: {
+                      IA64PALResult result =
+                          ia64_pal_result_proc_get_features(a2);
+
+                      status = result.status;
+                      v0 = result.v0;
+                      v1 = result.v1;
+                      v2 = result.v2;
+                      break;
+                  }
+              ''').lstrip())
+
+          helper.write_text(source)
+          PY
+
+      - name: Check source contract
+        shell: bash
+        run: |
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+
+          helper = Path('target/ia64/helper.c').read_text()
+          pal = Path('target/ia64/pal.c').read_text()
+          test = Path('tests/unit/test-ia64-pal.c').read_text()
+
+          assert '#define IA64_PAL_VM_INFO         7' in helper
+          assert 'uint8_t max_pkr = 16;' not in helper
+          assert 'uint8_t unified = (type == 2)' not in helper
+          assert 'ia64_pal_result_cache_info(a1, a2)' in helper
+          assert 'ARRAY_SIZE(env->pkr)' in helper
+          assert 'ARRAY_SIZE(env->dtrs)' in helper
+          assert 'ARRAY_SIZE(env->itrs)' in helper
+          assert 'ARRAY_SIZE(env->itcs)' in helper
+          assert 'ia64_pal_result_proc_get_features(a2)' in helper
+          assert 'IA64_PAL_VM_PAGE_SIZES' in helper
+          assert 'IA64_PAL_STATUS_EINVAL' in pal
+          assert '/ia64/pal/cache-info-invalid' in test
+          assert '/ia64/pal/vm-info-invalid' in test
+          PY
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev
+
+      - name: Configure, build, and test
+        shell: bash
+        run: |
+          ./configure --target-list=ia64-softmmu --disable-werror
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-pal \
+            tests/unit/test-ia64-interrupt
+          build/tests/unit/test-ia64-pal
+          build/tests/unit/test-ia64-interrupt
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            target/ia64/helper.c \
+            target/ia64/pal.c \
+            target/ia64/pal.h \
+            tests/unit/test-ia64-pal.c
+          git commit -m \
+            'target/ia64: make PAL topology results self-consistent'
+          git push origin HEAD:fix/pal-topology-contracts
