@@ -4,6 +4,7 @@ ia64_ss.add(files(
   'gdbstub.c',
   'helper.c',
   'interrupt.c',
+  'pal.c',
   'translate.c',
 ))
 

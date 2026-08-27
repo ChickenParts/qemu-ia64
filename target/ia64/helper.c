@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "interrupt.h"
+#include "pal.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
@@ -27431,9 +27432,6 @@ static void ia64_fw_trace_dump(void)
     }
 }
 
-#define IA64_PAL_STATUS_SUCCESS        0
-#define IA64_PAL_STATUS_UNIMPLEMENTED  (-1)
-
 #define IA64_PAL_CACHE_FLUSH     1
 #define IA64_PAL_CACHE_INFO      2
 #define IA64_PAL_CACHE_INIT      3
@@ -27460,7 +27458,6 @@ static void ia64_fw_trace_dump(void)
 
 void HELPER(fw_pal)(CPUIA64State *env)
 {
-    CPUState *cs = env_cpu(env);
     uint64_t idx = env->r[28];
     bool from_call = ((env->last_b0_write_kind & 0xff) == 1);
     uint64_t a1 = from_call ? env->r[33] : env->r[29];
@@ -27681,15 +27678,20 @@ void HELPER(fw_pal)(CPUIA64State *env)
         status = IA64_PAL_STATUS_UNIMPLEMENTED;
         break;
     }
-    default:
-        if (ia64_fw_log_enabled()) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "IA64: PAL idx=%" PRIu64 " a1=%" PRIu64 " a2=%" PRIu64
-                          " a3=%" PRIu64 " from_call=%d\n",
-                          idx, a1, a2, a3, from_call);
-        }
-        cpu_restore_state(cs, GETPC());
-        cpu_abort(cs, "IA64: PAL unhandled idx=%" PRIu64, idx);
+    default: {
+        IA64PALResult result = ia64_pal_result_unimplemented();
+
+        status = result.status;
+        v0 = result.v0;
+        v1 = result.v1;
+        v2 = result.v2;
+        qemu_log_mask(LOG_UNIMP,
+                      "IA64: PAL call %" PRIu64 " is not implemented"
+                      " (a1=%" PRIu64 " a2=%" PRIu64 " a3=%" PRIu64
+                      " from_call=%d)\n",
+                      idx, a1, a2, a3, from_call);
+        break;
+    }
     }
 
     if (ia64_fw_log_enabled()) {
