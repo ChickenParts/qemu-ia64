@@ -27464,6 +27464,8 @@ void HELPER(fw_pal)(CPUIA64State *env)
     uint64_t a2 = from_call ? env->r[34] : env->r[30];
     uint64_t a3 = from_call ? env->r[35] : env->r[31];
 
+    env->pal_halt_pending = 0;
+
     int64_t status = IA64_PAL_STATUS_SUCCESS;
     uint64_t v0 = 0, v1 = 0, v2 = 0;
 
@@ -27624,16 +27626,17 @@ void HELPER(fw_pal)(CPUIA64State *env)
         v1 = 0;
         break;
     case IA64_PAL_HALT:
-    case IA64_PAL_HALT_LIGHT:
-        /*
-         * Enter (light) halt state.
-         *
-         * For bringup under TCG we do not model low-power suspension here.
-         * Linux uses PAL_HALT_LIGHT in arch_safe_halt() when idling; returning
-         * success keeps the CPU running and avoids stalling boot if interrupt
-         * delivery is not yet fully modeled.
-         */
+    case IA64_PAL_HALT_LIGHT: {
+        IA64PALResult result = ia64_pal_result_halt();
+
+        status = result.status;
+        v0 = result.v0;
+        v1 = result.v1;
+        v2 = result.v2;
+        env->pal_halt_pending =
+            result.action == IA64_PAL_ACTION_HALT;
         break;
+    }
     case IA64_PAL_RSE_INFO:
         v0 = 96;
         v1 = 0;
@@ -27709,6 +27712,21 @@ void HELPER(fw_pal)(CPUIA64State *env)
     env->r[9] = v0;
     env->r[10] = v1;
     env->r[11] = v2;
+}
+
+
+void HELPER(fw_pal_halt)(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    if (!env->pal_halt_pending) {
+        return;
+    }
+
+    env->pal_halt_pending = 0;
+    cs->halted = 1;
+    cs->exception_index = EXCP_HLT;
+    cpu_loop_exit(cs);
 }
 
 #define IA64_SAL_SET_VECTORS          0x01000000ULL

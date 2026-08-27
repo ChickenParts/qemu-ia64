@@ -278,6 +278,9 @@ typedef struct CPUArchState {
     /* Firmware bringup: PAL platform address settings (type 0/1). */
     uint64_t pal_platform_addr[2];
 
+    /* PAL requested a post-return transition into the halted state. */
+    uint8_t pal_halt_pending;
+
     /* Cache flush throttle: last page invalidated by fc/fc.i. */
     uint64_t fc_last_page;
 } CPUIA64State;

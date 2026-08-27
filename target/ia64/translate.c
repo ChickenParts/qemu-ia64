@@ -1012,6 +1012,7 @@ typedef struct DisasContext {
     int ri;
     uint64_t extra_bits;
     int mem_idx;
+    bool pal_may_halt;
 } DisasContext;
 
 static TCGv_i64 gen_mem_addr(DisasContext *ctx, TCGv_i64 addr)
@@ -1371,6 +1372,8 @@ static void gen_break_common(DisasContext *ctx, uint64_t insn, uint64_t imm,
                 gen_helper_fw_sal_break(tcg_env);
             } else if (nr == 0x1000) {
                 gen_helper_fw_pal(tcg_env);
+                ctx->pal_may_halt = true;
+                ctx->base.is_jmp = DISAS_TOO_MANY;
             } else {
                 gen_unimpl(ctx, insn, unimpl_msg);
             }
@@ -1411,6 +1414,8 @@ static void gen_break_common(DisasContext *ctx, uint64_t insn, uint64_t imm,
             gen_helper_fw_sal_break(tcg_env);
         } else if (nr == 0x1000) {
             gen_helper_fw_pal(tcg_env);
+            ctx->pal_may_halt = true;
+            ctx->base.is_jmp = DISAS_TOO_MANY;
         } else {
             if (in_fw) {
                 gen_unimpl(ctx, insn, unimpl_msg);
@@ -1902,6 +1907,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->env = cpu_env(cs);
     ctx->ri = tb_flags & 3;
     ctx->extra_bits = 0;
+    ctx->pal_may_halt = false;
     /*
      * Select the data translation mode from TB flags.
      *
@@ -3438,6 +3444,7 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
             if (qp == 0) {
                 ctx->base.is_jmp = DISAS_NORETURN;
             }
+            gen_helper_fw_pal_halt(tcg_env);
             tcg_gen_exit_tb(NULL, 0);
             gen_set_label(no_pal);
         }
@@ -8110,6 +8117,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
             gen_set_ri_const(0);
 
             ctx->base.is_jmp = DISAS_NORETURN;
+            gen_helper_fw_pal_halt(tcg_env);
             tcg_gen_exit_tb(NULL, 0);
             return;
         }
@@ -8190,6 +8198,9 @@ static void ia64_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
         /* Commit next IP + RI. */
         tcg_gen_movi_i64(cpu_pc, next_ip);
         gen_set_ri_const(next_ri);
+        if (ctx->pal_may_halt) {
+            gen_helper_fw_pal_halt(tcg_env);
+        }
         tcg_gen_exit_tb(NULL, 0);
         break;
     case DISAS_NORETURN:
