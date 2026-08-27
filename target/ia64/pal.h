@@ -9,6 +9,18 @@
 
 #define IA64_PAL_STATUS_SUCCESS        0
 #define IA64_PAL_STATUS_UNIMPLEMENTED  (-1)
+#define IA64_PAL_STATUS_EINVAL         (-2)
+
+#define IA64_PAL_CACHE_TYPE_INSTRUCTION 1
+#define IA64_PAL_CACHE_TYPE_DATA        2
+#define IA64_PAL_CACHE_LEVELS           3
+#define IA64_PAL_UNIQUE_CACHES          5
+
+#define IA64_PAL_TC_TYPE_INSTRUCTION    1
+#define IA64_PAL_TC_TYPE_DATA           2
+#define IA64_PAL_TC_LEVELS              1
+#define IA64_PAL_UNIQUE_TCS             2
+#define IA64_PAL_VM_PAGE_SIZES UINT64_C(0x115557000)
 
 typedef enum IA64PALAction {
     IA64_PAL_ACTION_RETURN = 0,
@@ -25,5 +37,13 @@ typedef struct IA64PALResult {
 
 IA64PALResult ia64_pal_result_unimplemented(void);
 IA64PALResult ia64_pal_result_halt(void);
+IA64PALResult ia64_pal_result_cache_summary(void);
+IA64PALResult ia64_pal_result_cache_info(uint64_t level, uint64_t type);
+IA64PALResult ia64_pal_result_vm_summary(unsigned int pkr_count,
+                                         unsigned int dtr_count,
+                                         unsigned int itr_count);
+IA64PALResult ia64_pal_result_vm_info(uint64_t level, uint64_t type,
+                                      unsigned int entry_count);
+IA64PALResult ia64_pal_result_proc_get_features(uint64_t feature_set);
 
 #endif

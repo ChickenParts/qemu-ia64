@@ -27438,6 +27438,7 @@ static void ia64_fw_trace_dump(void)
 #define IA64_PAL_CACHE_SUMMARY   4
 #define IA64_PAL_MEM_ATTRIB      5
 #define IA64_PAL_PTCE_INFO       6
+#define IA64_PAL_VM_INFO         7
 #define IA64_PAL_VM_SUMMARY      8
 #define IA64_PAL_BUS_GET_FEATURES 9
 #define IA64_PAL_DEBUG_INFO      11
@@ -27474,53 +27475,24 @@ void HELPER(fw_pal)(CPUIA64State *env)
     case IA64_PAL_CACHE_INIT:
         /* Nothing to do for the software model. */
         break;
-    case IA64_PAL_CACHE_SUMMARY:
-        /* levels=3, unique_caches=5 (enough for Linux cache init). */
-        v0 = 3;
-        v1 = 5;
-        break;
-    case IA64_PAL_CACHE_INFO: {
-        /*
-         * Return basic cache geometry.
-         *
-         * Inputs:
-         *   a1: cache_level
-         *   a2: cache_type (1=instruction, 2=data_or_unified)
-         */
-        uint8_t level = (uint8_t)a1;
-        uint8_t type = (uint8_t)a2;
+case IA64_PAL_CACHE_SUMMARY: {
+    IA64PALResult result = ia64_pal_result_cache_summary();
 
-        uint8_t unified = (type == 2) ? 1 : 0;
-        uint8_t attr = 1;      /* PAL_CACHE_ATTR_WB */
-        uint8_t assoc = 8;
-        uint8_t line_size = 6; /* log2(64) */
-        uint8_t stride = 6;    /* 64-byte stride */
+    status = result.status;
+    v0 = result.v0;
+    v1 = result.v1;
+    v2 = result.v2;
+    break;
+}
+case IA64_PAL_CACHE_INFO: {
+    IA64PALResult result = ia64_pal_result_cache_info(a1, a2);
 
-        uint32_t cache_size = 0;
-        switch (level) {
-        case 0:
-            cache_size = unified ? (64 * 1024) : (32 * 1024);
-            break;
-        case 1:
-            cache_size = 256 * 1024;
-            break;
-        default:
-            cache_size = 1024 * 1024;
-            break;
-        }
-
-        /* pal_cache_config_info_1_t::pcci1_data */
-        v0 |= (uint64_t)(unified & 1) << 0;
-        v0 |= (uint64_t)(attr & 3) << 1;
-        v0 |= (uint64_t)assoc << 8;
-        v0 |= (uint64_t)line_size << 16;
-        v0 |= (uint64_t)stride << 24;
-
-        /* pal_cache_config_info_2_t::pcci2_data */
-        v1 = (uint64_t)cache_size;
-        v2 = 0;
-        break;
-    }
+    status = result.status;
+    v0 = result.v0;
+    v1 = result.v1;
+    v2 = result.v2;
+    break;
+}
     case IA64_PAL_MEM_ATTRIB:
         /* bitmask; Linux uses low byte. */
         v0 = 0xF1;
@@ -27535,37 +27507,30 @@ void HELPER(fw_pal)(CPUIA64State *env)
         v1 = (1ULL << 32) | 1ULL; /* count[0]=1,count[1]=1 */
         v2 = 0;                  /* stride[0]=0,stride[1]=0 */
         break;
-    case IA64_PAL_VM_SUMMARY: {
-        /* Provide sane VA/PA limits and TC parameters. */
-        uint8_t vw = 1;
-        uint8_t phys_add_size = 44;
-        uint8_t key_size = 18;
-        uint8_t max_pkr = 16;
-        uint8_t hash_tag_id = 0;
-        uint8_t max_dtr_entry = 7;
-        uint8_t max_itr_entry = 7;
-        uint8_t max_unique_tcs = 1;
-        uint8_t num_tc_levels = 1;
+case IA64_PAL_VM_INFO: {
+    unsigned int entries;
+    IA64PALResult result;
 
-        uint8_t impl_va_msb = 60;
-        uint8_t rid_size = 18;
-        uint16_t max_purges = 0xFFFF;
+    entries = a2 == IA64_PAL_TC_TYPE_INSTRUCTION ?
+        ARRAY_SIZE(env->itcs) : ARRAY_SIZE(env->dtcs);
+    result = ia64_pal_result_vm_info(a1, a2, entries);
+    status = result.status;
+    v0 = result.v0;
+    v1 = result.v1;
+    v2 = result.v2;
+    break;
+}
+case IA64_PAL_VM_SUMMARY: {
+    IA64PALResult result = ia64_pal_result_vm_summary(
+        ARRAY_SIZE(env->pkr), ARRAY_SIZE(env->dtrs),
+        ARRAY_SIZE(env->itrs));
 
-        v0 |= (uint64_t)(vw & 1) << 0;
-        v0 |= (uint64_t)(phys_add_size & 0x7F) << 1;
-        v0 |= (uint64_t)key_size << 8;
-        v0 |= (uint64_t)max_pkr << 16;
-        v0 |= (uint64_t)hash_tag_id << 24;
-        v0 |= (uint64_t)max_dtr_entry << 32;
-        v0 |= (uint64_t)max_itr_entry << 40;
-        v0 |= (uint64_t)max_unique_tcs << 48;
-        v0 |= (uint64_t)num_tc_levels << 56;
-
-        v1 |= (uint64_t)impl_va_msb << 0;
-        v1 |= (uint64_t)rid_size << 8;
-        v1 |= (uint64_t)max_purges << 16;
-        break;
-    }
+    status = result.status;
+    v0 = result.v0;
+    v1 = result.v1;
+    v2 = result.v2;
+    break;
+}
     case IA64_PAL_BUS_GET_FEATURES:
         /* Return all-zero feature sets (matches SKI). */
         v0 = 0;
@@ -27581,10 +27546,10 @@ void HELPER(fw_pal)(CPUIA64State *env)
         /* Unique address on the processor bus (not modeled). */
         v0 = 0;
         break;
-    case IA64_PAL_VM_PAGE_SIZE:
-        v0 = 0x115557000ULL;
-        v1 = 0x115557000ULL;
-        break;
+case IA64_PAL_VM_PAGE_SIZE:
+    v0 = IA64_PAL_VM_PAGE_SIZES;
+    v1 = IA64_PAL_VM_PAGE_SIZES;
+    break;
     case IA64_PAL_FREQ_BASE:
         v0 = 100000000ULL;
         break;
@@ -27616,11 +27581,16 @@ void HELPER(fw_pal)(CPUIA64State *env)
     case IA64_PAL_PERF_MON_INFO:
         v0 = 4;
         break;
-    case IA64_PAL_PROC_GET_FEATURES:
-        v0 = 0;
-        v1 = 0;
-        v2 = 0;
-        break;
+case IA64_PAL_PROC_GET_FEATURES: {
+    IA64PALResult result =
+        ia64_pal_result_proc_get_features(a2);
+
+    status = result.status;
+    v0 = result.v0;
+    v1 = result.v1;
+    v2 = result.v2;
+    break;
+}
     case IA64_PAL_VERSION:
         v0 = 0;
         v1 = 0;
