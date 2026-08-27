@@ -1,0 +1,109 @@
+name: Temporary IA-64 Merced PAL contract rerun
+
+on:
+  push:
+    branches:
+      - fix/pal-merced-contract-current
+    paths:
+      - .github/workflows/agent-pal-merced-rerun.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-build-test:
+    if: "github.event.head_commit.message == 'ci: rerun Merced PAL contract'"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pal-merced-contract-current
+          fetch-depth: 0
+
+      - name: Reapply reviewed transformation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          workflow = Path(
+              '.github/workflows/agent-pal-merced-contract.yml').read_text()
+          marker = "          python3 - <<'PY'\n"
+          start = workflow.index(marker) + len(marker)
+          end = workflow.index("\n          PY\n", start)
+          script = dedent(workflow[start:end])
+          exec(compile(script, '<merced-pal-transform>', 'exec'))
+          PY
+
+      - name: Check patch shape
+        shell: bash
+        run: |
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+
+          helper = Path('target/ia64/helper.c').read_text()
+          pal = Path('target/ia64/pal.c').read_text()
+          test = Path('tests/unit/test-ia64-pal.c').read_text()
+
+          assert '#define IA64_PAL_VM_INFO         7' in helper
+          assert 'levels=3, unique_caches=5' not in helper
+          assert 'uint8_t unified = (type == 2)' not in helper
+          assert 'ia64_pal_result_cache_info(a1, a2)' in helper
+          assert 'ARRAY_SIZE(env->pkr)' in helper
+          assert 'ARRAY_SIZE(env->dtrs)' in helper
+          assert 'ARRAY_SIZE(env->itrs)' in helper
+          assert 'ARRAY_SIZE(env->itcs)' in helper
+          assert 'ARRAY_SIZE(env->dtcs)' in helper
+          assert 'ia64_pal_result_freq_ratios()' in helper
+          assert 'IA64_PAL_MERCED_L3_SIZE' in pal
+          assert '96 * KiB' in pal
+          assert '/ia64/pal/merced-cache-info' in test
+          assert '/ia64/pal/frequency-contract' in test
+          PY
+          git diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ | \
+            ./scripts/checkpatch.pl --strict --no-tree --no-signoff -
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          ./configure --target-list=ia64-softmmu --disable-werror
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-pal \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+
+      - name: Run focused tests
+        shell: bash
+        run: |
+          build/tests/unit/test-ia64-pal
+          build/tests/unit/test-ia64-interrupt
+          build/tests/unit/test-ia64-iosapic
+          QTEST_QEMU_BINARY="$PWD/build/qemu-system-ia64" \
+            build/tests/qtest/ia64-ipf-test
+
+      - name: Commit tested implementation
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            target/ia64/helper.c \
+            target/ia64/pal.c \
+            target/ia64/pal.h \
+            tests/unit/test-ia64-pal.c \
+            docs/devel/ia64-pal-model.rst
+          git commit -m \
+            'target/ia64: model a coherent Merced PAL contract'
+          git push origin HEAD:fix/pal-merced-contract-current
