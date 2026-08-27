@@ -1,4 +1,4 @@
-name: Temporary IA-64 PAL topology implementation
+name: Temporary IA-64 PAL timing implementation
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
           ref: fix/ia64-pal-model-contracts
           fetch-depth: 0
 
-      - name: Apply reviewed PAL topology changes
+      - name: Align PAL frequency contract with virtual time
         shell: bash
         run: |
           set -euo pipefail
@@ -29,11 +29,11 @@ jobs:
           import gzip
           from pathlib import Path
 
-          payload = '''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'''
+          payload = '''H4sIAMwukGoC/9Uc/VPbuPL3/BW63Ewb04TYJlCOHH2T0lzLPKAchHv30Y7H2Arx1LFzthPKa/nf30ryh+SvyCnQexnuCtJ+abW7Wu3a+fGH/jIM+teO18feCi3uopnv7bSmgT9HCzOauc41cuYLP4jQOfzJJiL8OboNzEUyY2Mbe1GrFfh+hA4pYKe93VZaHTrSR+3IDG5w1HfMvUF/Ybrbs7ayfRs4ETYIrc7z/tYHD22h41Fvb4DOA9/CYegHaHQdRoFpRY7voRPzDgcowOHSjdAMuwschASJIl6ev/m9d+JY2Atx75hI40wdHBygk7fnJz19W+35Qc81IxwQ8P4H74P3ozP1bDxFk9HF2/HEOB7tDYzz0YnxDqZg3PFw2VQ2mY5eTkaTq0vj8uroaHx5ieKPWg15dXZ8en4yPh2fTcZvEOr0NKUaeHx89tvoJKEKwLpSKsXR6Ojd2Jj8cT42js8uJxdXR5Pj92dIqwd9M5qMEtJ6JejJ+LfxSboy+OyUgMKqfr0aMwwOdrdU2slRUVT4aDWgvKgV0gJoQdQKqrG0kyMRtozqb6fwz9uxcXn8Jyzs6vhsAhNHHfWzpu3u7r5UVbV8R365GP9qvB5djo13f2Zomhp/yvb8/OL9kXExAnUYZ1enaOeqHubNGDa4DOY1GE5GZh0MIVMOczw5Euio9UD1hKg+SlXBFBjdLTBxSOwt5xQTEEfM97+A18InJTeiFmNcjCdXF2cQcdRuOcC70ckEpu5FckOeGwSYpRUlABcsvMT8HC8CehHAmNEyHLLBZTK6UgsjWmFEH2aSZesxEznuRcZUMlEUEjINCJkGi3zG0oOg6+I5hDhsd1a+YyvDdTgz040kQS3TmmEjXM7nZnDXCMfxpn4nXbiLV9jtZoog6l5PaTVPWS+90LnxsE02AS0+BYblL70o3mepj0DBjr6VgpNQkFrGem1ICyJIAdse3MnKsYCD1IBz15hiMGAYzCSKR4wQS9CZBvhv49oMsaRBUPjABBsPUwwICtiznekH73kXVmH5tuPdHLaX0bS3X5cpWP+ETMGz3KWNUftvPF/2/dDGC8hgChPgmlGYm2DJDqFCgohjoVrNdcSI0+WDjay9cNGIxydpQxzWAgxb76GOIIqSBD3y2Wb8IbLGgnBTKxWGBXG2VxoZ0oQhnQzp/FC8O4cVYTwGvSdRkdNXuoJUVQvT+sSZGLXpHR0g4NzAMOQHjXw8wQZT8OeOR/CLqkqkUDgo9BV1somUOfr5Z7SjK8kyGkfzPO+8idRmk104CumPJP/sZEjZigixFx0WxMhUXJEIC6IkKyKo1YZAjuuhsPggORYl1lJydDXVZSJ6rf2UJseSKEKSLL9N0idsumDLBweik/swZ0ZRAPrWhkyc/hbK5B9NJhfGf17TWFeCCdHVAtT9YdmsC0meETr/xQCxNyR0Xf9G7+wNetd3EabTSgVhCNeOHeMxkQRUNp0hX/u+CychidU2l2RRz403HsTIp19EYyQ2qakJOlPUoZpDrw4rrjlfv2Z72SFaRT8crr1nPXvGGUAdErnGKEKwlbRNdhEUvIrGy2RlsXJgtWx9h1Xr66EkTQ1vnciaxQpJZbLgoEfqQSZgpl8gTtd2uF4h/xIdYkeHs/ffzmt0gODcpr8OM4jrAJufhhx7rYq9vru3HluvwtYA97QSF64DJmieQ74xwP5xEBmeH8G+EFJ2p6B5sF2yb4wTWPnUuaG+amhGdHCwsCxHM2wzMlNjZmb59ZA7V0TTLgGgLgxHi1YDQn0VYParYTKPJbT2qgFj/wQofcAF8IcLo5Rnl9sf+XD4/3FNqIjFq1saicumFrO70DBtOzHXwaAU7BO+Sw26PC7PzHBmRCaYoR1HvyIMSTyMlWnMw2sShcuBwAZqWGl7ADI3PxuLJSTtJF0kd3sYPR39XheKCxN6IUanW0lijQoxOdtc9IpGAT5Mp9uWQmcjRWinAO2I0I8RnktcbHVb7X6iKdT7fWoP9a7P6RSOAGVdAOBtKIkCVZQzbSeUd/QacKcAPlCrwctqdgRlXwIlqwgCxu7ekN8NXcTh/GFYCZT6Q07VOTDOJxItbxRAkyBJWTSKj09Rf0gDnODLEulWtiv1uVZZlbg+0eKLxYpAnRM8dXt+7BWNXfskdD2G+9OyBflsoTGceCj0p9GtGWA0OUJOiKZL171jybYDl9oVPkC+B1kwjrr0l1vzDi1wwCTupqRMz0aen6Z+jseqmXC76tOEI4T7KN5OwLnsg5hrVodVhoVNh5wGbrSkPBQWEDM75xVIPYIiZstwojt5bI3dIAhbMuPgMK6/PEbm0a2o78s7mWRxLXUSWNqZj1h6uAzMaxejRVq+ijEQ1Tcxi7lvYxfb26n62IWWozxspJgS+5RYY67w97jXab5f0lxKvty4Ts71tQsuWagqO1U0bWTCakUvR2nEVujxNOIqdH6aMRUaQo2YCl0iJd7ZNaVgHEYhrar2ya89Il7vm2rC4H10BFHS62vCj1ISLvbCy8qdIIBrZyFlZbpLuCEJZ3E4c6YRd6rPzfBTsXRJMdGrVwxcQc8oXEmVldZS6H4boIIc6wJdOlpPBSK5FBUiHM0XeVrEkVF8+2bABtvKTlmBMiOcXtmt+QJ4d4SaYxeO/m5F/VkpE4DYiVikTWLIJkXTXLk3K4xWCJ10AUDoclerrQUnOQhPfIY/J8RXKtOGug5Ok4TTc3ClmxdvV6WuSUH6m1RMK9pNNFt1Bnxv9W1gyKR+Xq3auvq4pHJFEo+l5SVHIlFzaSlzLbKWQxbK749tzwlVydr92tOUL4FzuOQ6uuFGUqFiWZIG/aNtKDvQuG0lP581hVGL1yWPrRHsnRhbk8fbJ3jTaYy434DhnoC5J4+pDyQxc2ZLd/Ypgi5nDWJYKJqw2l1X+a+046nphpDCJJ2AnMTreZA7/TriSW+hmrj2zQtIWxCNmcisQIK6vvkSooBkkXEbpDGHWvkLpNfZGvwP0j/HljiKch3k+oBWcrsTOrXVbbnhxsGPXa+VobyU6vqj/sEZ7jwIw/J95XoyG6UWHD6JtOy/73ggaQ2PopdJeB8MNj2MtM1PI2134+NIlcfc0TdmOlA3RxW0VBF+SpoE8hx295pwSKvXkgy02LKyBECVx9zQQrTMQlLkrDf3JElF5tAPGui5OKHyYeJx42guOqnfhSvl/KRc9d2XD6rjqjtSoWElPswkf4QkJx29UCFN3/8OJ0jmrRsfBPoGJ8Fm2CykaxucBTubIg7WIpaUT8q7NU8VyKqvRslkXc8yx70SJclBa8V46GBauK/w0lQa04NHnDQnfnqWFStX/wlCkIdRHi9nL7YwH8KoilSfQJVFptpjao70xpbYs0j7mrWUalVHWqglQmftVWVYqnHa06xCjDueSv6BKjydYos8Q2A4kVV5/BG233T4UQKF8izfxK2KzgxzXV2cQUlFcAJac9BTPX1bMTrtZ8XEVqrcXUHsDa+hT7pum9MnbVV5+TU5+kKTuYH4jck3k16XIy90qxtI35g8J315ikEJZyYquCj4d+xLaAuVrRX1yyUpE7xqkQLHnBNwL2emEY/0l+em45E3kpAZ3ACONTMDtLUFf6z4diuNh47nRJ1nDI78s+qis6uTk0wcCkWeZ5wuPavTTrvffaEl2mPxrV2h+spurAQf0hdMyRd6jRIEaCmtF9+MEhJCQ0yaCDn0RQpkpBF6L04Da1VVrLVK8FjN84vMLoSN0KVELFYJ5HjwKozTKHnETLLS1FqCEEk3epBu9JJ0o3aRheREgkOaYfSSDKOWRTEhUcQHxGJWwdLr1D1802LvS0JMKnshk01uW+1W6C8Di+Q08VCATZs9jVOkCScvRCLXvCZvpaB2+ppGMWk4aLc8oFEHe34ymvzy/uLUGL15cwHwlDh5UZEKtO14NuQOHEelhT07P58x6SIKq7QCvHBNi4YVgGbfaNEJ2u12q05e9KXFHwsSRQo+52ulyOn7lkJuOkzn6UuX6SWaG9e4cY0b17lxPRtnr7vQP++rFkaPtMtNl5Zmpd95cbBzyrZL3mJZdJTMXNkvfx3QXf+IXiB+318k02AyBx9jV+CfNGPTpX5zM73lnGZ2yxwGRgVvIX/XuUqLfCVBLJLhexZOWfqu3UUevu0iZtYHbPvY88yJddM/OwCqtOKnrxnAD4dIO2hleYMDm355F0Z4Pv4MB/e0/YUSvT9A+PMC8gRs06eO52ZkzbpoCjRs9IWSum8z0nFUifnGEncyITVYS7pqYUEUPV4V/f257MN0OAj8AM5w8p0zdP55QwLX4a3JJp6XIlYxaJPNpcgoRmgrG6yON4py8fMQ9Q8N8tKBezaXLY5ySZBLfBVuuvE7PsnThjT1i99sIw6fBrG/9j8ClyxS0K9bUX/qIl37ibQr4Pqm7aRPHcNPCnmfCxCSTFl4+UsflPDVWCuO/rx8Cf8lf2icBPzvg65AIB1/WSou1TUfVSqV2N/K6G6hN+QBG39BI8zUCeb0sX+y1uUch+z9N5vuHwtpIYpmgb+8maF371+H2zylc3+xJM+hovS0BxzLD+wQse9lmmEUmvP46XG4iiDbAYCIUrdM1xXI9fP6TysIpTutfRxKI8S7tPOxUmvUaLNlLMw71zftUN5227kvcIH7CNsAmjPM/GuDAMSthKEwyeyMFnO2yGsS4mz6EGv8QnE8dU9pXpOIaJAiWFvY/aDEhygDekbCWuGMhNWGs1RHLFkDmnHRLcUWjbpxHakGW7Kc1BJIJDdJvmAkvP+bL6GUYwtFmHp8gUCpKarE+a3F0oh8w8V7g6QWlWNeYZUF7KzmIoWvVeFrcvh6Fb7O4d9nasgbusAjb+h5AURDb5V+8wU19IyzYOiS/htbdwP3jZ2Elhfg+kOUBHw7TFgqwXKqpN4nevfUD1CHSE1eOaPvm8E/P6PRxcXoD9oY6qRLUGDqxQv6Rlf7ATjLuDMr8zyYuKWKptEctE0SBan89H+DY/XZ6E8AAA=='''
           script = gzip.decompress(base64.b64decode(payload))
-          Path('/tmp/apply-pal-topology.py').write_bytes(script)
+          Path('/tmp/apply-pal-timing.py').write_bytes(script)
           PY
-          python3 /tmp/apply-pal-topology.py
+          python3 /tmp/apply-pal-timing.py
 
       - name: Check source contract
         shell: bash
@@ -46,31 +46,19 @@ jobs:
           helper = Path('target/ia64/helper.c').read_text()
           pal_h = Path('target/ia64/pal.h').read_text()
           pal = Path('target/ia64/pal.c').read_text()
+          gfw = Path('hw/ia64/gfw.c').read_text()
           test = Path('tests/unit/test-ia64-pal.c').read_text()
 
-          for needle in (
-              '#define IA64_PAL_VM_INFO         7',
-              'ia64_pal_result_cache_info(a1, a2)',
-              'ARRAY_SIZE(env->pkr)',
-              'ARRAY_SIZE(env->dtrs)',
-              'ARRAY_SIZE(env->itrs)',
-              'ARRAY_SIZE(env->itcs)',
-              'ARRAY_SIZE(env->dtcs)',
-              'ia64_pal_result_proc_get_features(a2)',
-              'IA64_PAL_VM_PAGE_SIZES',
-          ):
-              assert needle in helper, needle
-
-          for needle in (
-              'uint8_t max_pkr = 16;',
-              'uint8_t unified = (type == 2)',
-          ):
-              assert needle not in helper, needle
-
-          assert '#include "qemu/units.h"' in pal
-          assert 'IA64_PAL_STATUS_EINVAL' in pal_h
-          assert '/ia64/pal/cache-info-invalid' in test
-          assert '/ia64/pal/vm-info-invalid' in test
+          assert 'ia64_pal_result_freq_base()' in helper
+          assert 'ia64_pal_result_freq_ratios()' in helper
+          assert 'uint32_t num = 3;' not in helper
+          assert 'IA64_PAL_ITC_RATIO_NUM  10U' in pal_h
+          assert 'IA64_PAL_ITC_FREQ_HZ UINT64_C(1000000000)' in pal_h
+          assert 'IA64_PAL_ITC_RATIO_NUM' in pal
+          assert 'ia64_gfw_refresh_pal_frequency_hobs' in gfw
+          assert 'cpu_to_le64(base.v0)' in gfw
+          assert '109, 219, 182, 13' not in gfw
+          assert '/ia64/pal/frequency-contract' in test
           PY
 
       - name: Install build dependencies
@@ -99,10 +87,11 @@ jobs:
           git config user.email \
             '41898282+github-actions[bot]@users.noreply.github.com'
           git add \
+            hw/ia64/gfw.c \
             target/ia64/helper.c \
             target/ia64/pal.c \
             target/ia64/pal.h \
             tests/unit/test-ia64-pal.c
           git commit -m \
-            'target/ia64: make PAL topology results self-consistent'
+            'target/ia64: align advertised ITC frequency with virtual time'
           git push origin HEAD:fix/ia64-pal-model-contracts
