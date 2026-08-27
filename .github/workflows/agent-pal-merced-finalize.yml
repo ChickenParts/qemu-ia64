@@ -1,0 +1,233 @@
+name: Temporary IA-64 Merced PAL contract finalization
+
+on:
+  push:
+    branches:
+      - fix/pal-merced-contract-current
+    paths:
+      - .github/workflows/agent-pal-merced-finalize.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: "github.event.head_commit.message == 'ci: finalize Merced PAL contract'"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pal-merced-contract-current
+          fetch-depth: 0
+
+      - name: Correct cache tags and unify firmware frequency data
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          pal = Path('target/ia64/pal.c')
+          source = pal.read_text()
+          old = '''static uint64_t ia64_pal_freq_ratio(uint32_t numerator,
+                                              uint32_t denominator)
+          {
+              return (uint64_t)denominator | ((uint64_t)numerator << 32);
+          }
+          '''.replace('          ', '')
+          new = old + '''
+static uint8_t ia64_pal_exact_log2(uint32_t value)
+{
+    uint8_t result = 0;
+
+    g_assert(value != 0 && (value & (value - 1)) == 0);
+    while (value > 1) {
+        value >>= 1;
+        result++;
+    }
+    return result;
+}
+'''
+          if source.count(old) != 1:
+              raise SystemExit('frequency helper insertion did not match')
+          source = source.replace(old, new, 1)
+          old = '''    info2 |= desc.size;
+    info2 |= (uint64_t)desc.line_size << 40;
+    info2 |= UINT64_C(43) << 48;
+'''
+          new = '''    info2 |= desc.size;
+    info2 |= (uint64_t)ia64_pal_exact_log2(
+        desc.size / desc.associativity) << 40;
+    info2 |= UINT64_C(43) << 48;
+'''
+          if source.count(old) != 1:
+              raise SystemExit('cache tag encoding did not match')
+          pal.write_text(source.replace(old, new, 1))
+
+          test = Path('tests/unit/test-ia64-pal.c')
+          source = test.read_text()
+          old = '''                              uint64_t line_size,
+                              uint64_t load_latency)
+'''
+          new = '''                              uint64_t line_size,
+                              uint64_t tag_lsb,
+                              uint64_t load_latency)
+'''
+          if source.count(old) != 1:
+              raise SystemExit('test signature did not match')
+          source = source.replace(old, new, 1)
+          source = source.replace(
+              'field(result.v1, 40, 0xff), ==, line_size',
+              'field(result.v1, 40, 0xff), ==, tag_lsb')
+          replacements = {
+              '4, 5, 1);': '4, 5, 12, 1);',
+              '4, 5, 2);': '4, 5, 12, 2);',
+              '6, 6, 6);': '6, 6, 14, 6);',
+              'IA64_PAL_CACHE_ATTR_WB, 4, 6, 21);':
+                  'IA64_PAL_CACHE_ATTR_WB, 4, 6, 20, 21);',
+          }
+          for old, new in replacements.items():
+              if source.count(old) != 1:
+                  raise SystemExit(f'test value did not match: {old}')
+              source = source.replace(old, new, 1)
+          test.write_text(source)
+
+          gfw = Path('hw/ia64/gfw.c')
+          source = gfw.read_text()
+          old = '''#include "qemu/osdep.h"
+#include "qemu/error-report.h"
+'''
+          new = '''#include "qemu/osdep.h"
+#include "qemu/bswap.h"
+#include "qemu/error-report.h"
+'''
+          if source.count(old) != 1:
+              raise SystemExit('GFW bswap include did not match')
+          source = source.replace(old, new, 1)
+          old = '#include "hw/ia64/gfw.h"\n'
+          new = old + '#include "target/ia64/pal.h"\n'
+          if source.count(old) != 1:
+              raise SystemExit('GFW PAL include did not match')
+          source = source.replace(old, new, 1)
+          old = '''static const unsigned char config_pal_freq_base[8] = {
+    109, 219, 182, 13, 0, 0, 0, 0
+};
+
+static const unsigned char config_pal_freq_ratios[24] = {
+    11, 1, 0, 0, 77, 7, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 4,
+    0, 0, 0, 7, 0, 0, 0
+};
+'''
+          new = '''/* Development firmware consumes cached PAL results through HOBs. */
+static uint64_t config_pal_freq_base[1];
+static uint64_t config_pal_freq_ratios[3];
+'''
+          if source.count(old) != 1:
+              raise SystemExit('GFW frequency payloads did not match')
+          source = source.replace(old, new, 1)
+          marker = '''typedef struct {
+    hob_type_t type;
+    const void *data;
+    uint32_t size;
+} hob_batch_t;
+'''
+          refresh = '''static void ia64_gfw_refresh_pal_frequency_hobs(void)
+{
+    IA64PALResult base = ia64_pal_result_freq_base();
+    IA64PALResult ratios = ia64_pal_result_freq_ratios();
+
+    g_assert(base.status == IA64_PAL_STATUS_SUCCESS);
+    g_assert(ratios.status == IA64_PAL_STATUS_SUCCESS);
+    config_pal_freq_base[0] = cpu_to_le64(base.v0);
+    config_pal_freq_ratios[0] = cpu_to_le64(ratios.v0);
+    config_pal_freq_ratios[1] = cpu_to_le64(ratios.v1);
+    config_pal_freq_ratios[2] = cpu_to_le64(ratios.v2);
+}
+
+'''
+          if source.count(marker) != 1:
+              raise SystemExit('GFW HOB type marker did not match')
+          source = source.replace(marker, refresh + marker, 1)
+          old = '''static int add_pal_hob(void *hob_buf)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(hob_batch); i++) {
+'''
+          new = '''static int add_pal_hob(void *hob_buf)
+{
+    ia64_gfw_refresh_pal_frequency_hobs();
+
+    for (size_t i = 0; i < ARRAY_SIZE(hob_batch); i++) {
+'''
+          if source.count(old) != 1:
+              raise SystemExit('GFW add_pal_hob did not match')
+          gfw.write_text(source.replace(old, new, 1))
+
+          docs = Path('docs/devel/ia64-pal-model.rst')
+          source = docs.read_text()
+          old = '''values are nevertheless a guest ABI and must describe one coherent
+processor rather than a collection of firmware-enabling constants.
+Translation-cache and translation-register counts are therefore
+'''
+          new = '''values are nevertheless a guest ABI and must describe one coherent
+processor rather than a collection of firmware-enabling constants.  The GFW
+frequency HOBs are generated from this same model instead of carrying a second
+set of literal values.  Translation-cache and translation-register counts are
+therefore
+'''
+          if source.count(old) != 1:
+              raise SystemExit('documentation insertion did not match')
+          docs.write_text(source.replace(old, new, 1))
+          PY
+
+      - name: Check source
+        shell: bash
+        run: |
+          git diff --check
+          git diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ | \
+            ./scripts/checkpatch.pl --strict --no-tree --no-signoff -
+          python3 - <<'PY'
+          from pathlib import Path
+          pal = Path('target/ia64/pal.c').read_text()
+          gfw = Path('hw/ia64/gfw.c').read_text()
+          test = Path('tests/unit/test-ia64-pal.c').read_text()
+          assert 'desc.size / desc.associativity' in pal
+          assert '4, 5, 12, 1);' in test
+          assert '6, 6, 14, 6);' in test
+          assert '4, 6, 20, 21);' in test
+          assert 'ia64_gfw_refresh_pal_frequency_hobs();' in gfw
+          assert 'cpu_to_le64(ratios.v2)' in gfw
+          PY
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev
+
+      - name: Build and test
+        shell: bash
+        run: |
+          ./configure --target-list=ia64-softmmu --disable-werror
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-pal \
+            tests/unit/test-ia64-interrupt \
+            tests/unit/test-ia64-iosapic \
+            tests/qtest/ia64-ipf-test
+          build/tests/unit/test-ia64-pal
+          build/tests/unit/test-ia64-interrupt
+          build/tests/unit/test-ia64-iosapic
+          QTEST_QEMU_BINARY="$PWD/build/qemu-system-ia64" \
+            build/tests/qtest/ia64-ipf-test
+
+      - name: Commit tested corrections
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git add target/ia64/pal.c tests/unit/test-ia64-pal.c \
+            hw/ia64/gfw.c docs/devel/ia64-pal-model.rst
+          git commit -m \
+            'hw/ia64: keep firmware PAL data aligned with the CPU model'
+          git push origin HEAD:fix/pal-merced-contract-current
