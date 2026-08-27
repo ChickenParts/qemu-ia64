@@ -1,0 +1,297 @@
+#define IA64_PAL_CACHE_FLUSH     1
+#define IA64_PAL_CACHE_INFO      2
+#define IA64_PAL_CACHE_INIT      3
+#define IA64_PAL_CACHE_SUMMARY   4
+#define IA64_PAL_MEM_ATTRIB      5
+#define IA64_PAL_PTCE_INFO       6
+#define IA64_PAL_VM_SUMMARY      8
+#define IA64_PAL_BUS_GET_FEATURES 9
+#define IA64_PAL_DEBUG_INFO      11
+#define IA64_PAL_FIXED_ADDR      12
+#define IA64_PAL_FREQ_BASE       13
+#define IA64_PAL_FREQ_RATIOS     14
+#define IA64_PAL_PERF_MON_INFO   15
+#define IA64_PAL_PLATFORM_ADDR   16
+#define IA64_PAL_PROC_GET_FEATURES 17
+#define IA64_PAL_VERSION         20
+#define IA64_PAL_RSE_INFO        19
+#define IA64_PAL_VM_PAGE_SIZE    34
+#define IA64_PAL_HALT            28
+#define IA64_PAL_HALT_LIGHT      29
+#define IA64_PAL_LOGICAL_TO_PHYSICAL 42
+#define IA64_PAL_CACHE_SHARED_INFO   43
+#define IA64_PAL_BRAND_INFO          274
+
+void HELPER(fw_pal)(CPUIA64State *env)
+{
+    uint64_t idx = env->r[28];
+    bool from_call = ((env->last_b0_write_kind & 0xff) == 1);
+    uint64_t a1 = from_call ? env->r[33] : env->r[29];
+    uint64_t a2 = from_call ? env->r[34] : env->r[30];
+    uint64_t a3 = from_call ? env->r[35] : env->r[31];
+
+    env->pal_halt_pending = 0;
+
+    int64_t status = IA64_PAL_STATUS_SUCCESS;
+    uint64_t v0 = 0, v1 = 0, v2 = 0;
+
+    switch (idx) {
+    case IA64_PAL_CACHE_FLUSH:
+    case IA64_PAL_CACHE_INIT:
+        /* Nothing to do for the software model. */
+        break;
+    case IA64_PAL_CACHE_SUMMARY:
+        /* levels=3, unique_caches=5 (enough for Linux cache init). */
+        v0 = 3;
+        v1 = 5;
+        break;
+    case IA64_PAL_CACHE_INFO: {
+        /*
+         * Return basic cache geometry.
+         *
+         * Inputs:
+         *   a1: cache_level
+         *   a2: cache_type (1=instruction, 2=data_or_unified)
+         */
+        uint8_t level = (uint8_t)a1;
+        uint8_t type = (uint8_t)a2;
+
+        uint8_t unified = (type == 2) ? 1 : 0;
+        uint8_t attr = 1;      /* PAL_CACHE_ATTR_WB */
+        uint8_t assoc = 8;
+        uint8_t line_size = 6; /* log2(64) */
+        uint8_t stride = 6;    /* 64-byte stride */
+
+        uint32_t cache_size = 0;
+        switch (level) {
+        case 0:
+            cache_size = unified ? (64 * 1024) : (32 * 1024);
+            break;
+        case 1:
+            cache_size = 256 * 1024;
+            break;
+        default:
+            cache_size = 1024 * 1024;
+            break;
+        }
+
+        /* pal_cache_config_info_1_t::pcci1_data */
+        v0 |= (uint64_t)(unified & 1) << 0;
+        v0 |= (uint64_t)(attr & 3) << 1;
+        v0 |= (uint64_t)assoc << 8;
+        v0 |= (uint64_t)line_size << 16;
+        v0 |= (uint64_t)stride << 24;
+
+        /* pal_cache_config_info_2_t::pcci2_data */
+        v1 = (uint64_t)cache_size;
+        v2 = 0;
+        break;
+    }
+    case IA64_PAL_MEM_ATTRIB:
+        /* bitmask; Linux uses low byte. */
+        v0 = 0xF1;
+        break;
+    case IA64_PAL_PTCE_INFO:
+        /*
+         * local_flush_tlb_all() uses ptc.e in a PAL-driven loop. Our ptc.e
+         * helper overpurges and flushes all translation caches, so the loop
+         * bounds are not important as long as they execute at least once.
+         */
+        v0 = 0;                  /* base */
+        v1 = (1ULL << 32) | 1ULL; /* count[0]=1,count[1]=1 */
+        v2 = 0;                  /* stride[0]=0,stride[1]=0 */
+        break;
+    case IA64_PAL_VM_SUMMARY: {
+        /* Provide sane VA/PA limits and TC parameters. */
+        uint8_t vw = 1;
+        uint8_t phys_add_size = 44;
+        uint8_t key_size = 18;
+        uint8_t max_pkr = 16;
+        uint8_t hash_tag_id = 0;
+        uint8_t max_dtr_entry = 7;
+        uint8_t max_itr_entry = 7;
+        uint8_t max_unique_tcs = 1;
+        uint8_t num_tc_levels = 1;
+
+        uint8_t impl_va_msb = 60;
+        uint8_t rid_size = 18;
+        uint16_t max_purges = 0xFFFF;
+
+        v0 |= (uint64_t)(vw & 1) << 0;
+        v0 |= (uint64_t)(phys_add_size & 0x7F) << 1;
+        v0 |= (uint64_t)key_size << 8;
+        v0 |= (uint64_t)max_pkr << 16;
+        v0 |= (uint64_t)hash_tag_id << 24;
+        v0 |= (uint64_t)max_dtr_entry << 32;
+        v0 |= (uint64_t)max_itr_entry << 40;
+        v0 |= (uint64_t)max_unique_tcs << 48;
+        v0 |= (uint64_t)num_tc_levels << 56;
+
+        v1 |= (uint64_t)impl_va_msb << 0;
+        v1 |= (uint64_t)rid_size << 8;
+        v1 |= (uint64_t)max_purges << 16;
+        break;
+    }
+    case IA64_PAL_BUS_GET_FEATURES:
+        /* Return all-zero feature sets (matches SKI). */
+        v0 = 0;
+        v1 = 0;
+        v2 = 0;
+        break;
+    case IA64_PAL_DEBUG_INFO:
+        /* SKI returns 4/4 for PAL_DEBUG_INFO. */
+        v0 = 4;
+        v1 = 4;
+        break;
+    case IA64_PAL_FIXED_ADDR:
+        /* Unique address on the processor bus (not modeled). */
+        v0 = 0;
+        break;
+    case IA64_PAL_VM_PAGE_SIZE:
+        v0 = 0x115557000ULL;
+        v1 = 0x115557000ULL;
+        break;
+    case IA64_PAL_FREQ_BASE:
+        v0 = 100000000ULL;
+        break;
+    case IA64_PAL_FREQ_RATIOS: {
+        /* u64 packing of struct pal_freq_ratio { u32 den, num; } */
+        uint32_t den = 1;
+        uint32_t num = 3;
+        v0 = (uint64_t)den | ((uint64_t)num << 32); /* proc ratio */
+        v1 = (uint64_t)den | ((uint64_t)1 << 32);   /* bus ratio */
+        v2 = (uint64_t)den | ((uint64_t)num << 32); /* itc ratio */
+        break;
+    }
+    case IA64_PAL_PLATFORM_ADDR: {
+        /*
+         * Set platform addresses (interrupt block or I/O port space).
+         *
+         * PAL spec: a1 = type, a2 = physical address.
+         */
+        uint64_t type = a1;
+        uint64_t phys = ia64_phys_mode_addr(a2);
+        if (type < ARRAY_SIZE(env->pal_platform_addr)) {
+            env->pal_platform_addr[type] = phys;
+            status = IA64_PAL_STATUS_SUCCESS;
+        } else {
+            status = IA64_PAL_STATUS_UNIMPLEMENTED;
+        }
+        break;
+    }
+    case IA64_PAL_PERF_MON_INFO:
+        v0 = 4;
+        break;
+    case IA64_PAL_PROC_GET_FEATURES:
+        v0 = 0;
+        v1 = 0;
+        v2 = 0;
+        break;
+    case IA64_PAL_VERSION:
+        v0 = 0;
+        v1 = 0;
+        break;
+    case IA64_PAL_HALT:
+    case IA64_PAL_HALT_LIGHT: {
+        IA64PALResult result = ia64_pal_result_halt();
+
+        status = result.status;
+        v0 = result.v0;
+        v1 = result.v1;
+        v2 = result.v2;
+        env->pal_halt_pending =
+            result.action == IA64_PAL_ACTION_HALT;
+        break;
+    }
+    case IA64_PAL_RSE_INFO:
+        v0 = 96;
+        v1 = 0;
+        break;
+    case IA64_PAL_LOGICAL_TO_PHYSICAL: {
+        /*
+         * Logical-to-physical mapping query.
+         *
+         * Linux calls this with proc_number=-1 during early CPU topology init.
+         * Provide a simple single-core/single-thread topology.
+         */
+        uint16_t la = (a1 == UINT64_MAX) ? 0 : (uint16_t)a1;
+        uint16_t num_log = 1;
+        uint8_t tpc = 1;
+        uint8_t cpp = 1;
+        uint8_t ppid = 0;
+
+        v0 = 0;
+        v0 |= (uint64_t)num_log;
+        v0 |= (uint64_t)tpc << 16;
+        v0 |= (uint64_t)cpp << 32;
+        v0 |= (uint64_t)ppid << 48;
+
+        v1 = 0; /* tid=0,cid=0 */
+        v2 = (uint64_t)la;
+        break;
+    }
+    case IA64_PAL_CACHE_SHARED_INFO:
+        /* Report cache not shared beyond this logical processor. */
+        v0 = 1; /* num_shared */
+        v1 = 0; /* tid=0,cid=0 */
+        v2 = 0; /* la=0 */
+        break;
+    case IA64_PAL_BRAND_INFO: {
+        /*
+         * Processor branding string.
+         *
+         * Kernel passes a pointer to a 128-byte buffer (on the stack) in a2.
+         * For bringup, report this call as unimplemented so Linux falls back
+         * to family/model-based naming without requiring buffer writes.
+         */
+        status = IA64_PAL_STATUS_UNIMPLEMENTED;
+        break;
+    }
+    default: {
+        IA64PALResult result = ia64_pal_result_unimplemented();
+
+        status = result.status;
+        v0 = result.v0;
+        v1 = result.v1;
+        v2 = result.v2;
+        qemu_log_mask(LOG_UNIMP,
+                      "IA64: PAL call %" PRIu64 " is not implemented"
+                      " (a1=%" PRIu64 " a2=%" PRIu64 " a3=%" PRIu64
+                      " from_call=%d)\n",
+                      idx, a1, a2, a3, from_call);
+        break;
+    }
+    }
+
+    if (ia64_fw_log_enabled()) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: PAL idx=%" PRIu64 " -> status=%" PRId64
+                      " v0=%016" PRIx64 " v1=%016" PRIx64 " v2=%016" PRIx64 "\n",
+                      idx, status, v0, v1, v2);
+    }
+
+    uint64_t args_trace[4] = { a1, a2, a3, 0 };
+    ia64_fw_trace_record(IA64_FW_TRACE_PAL, env->ip, idx, idx,
+                         args_trace, status, v0, v1, v2, from_call);
+
+    env->r[8] = (uint64_t)status;
+    env->r[9] = v0;
+    env->r[10] = v1;
+    env->r[11] = v2;
+}
+
+
+void HELPER(fw_pal_halt)(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    if (!env->pal_halt_pending) {
+        return;
+    }
+
+    env->pal_halt_pending = 0;
+    cs->halted = 1;
+    cs->exception_index = EXCP_HLT;
+    cpu_loop_exit(cs);
+}
+
