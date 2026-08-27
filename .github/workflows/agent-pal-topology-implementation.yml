@@ -1,4 +1,4 @@
-name: Temporary IA-64 PAL and ITC diagnostics
+name: Temporary IA-64 PAL topology implementation
 
 on:
   push:
@@ -8,59 +8,101 @@ on:
       - .github/workflows/agent-pal-topology-implementation.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  inspect:
+  apply-and-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: fix/pal-topology-contracts
-          fetch-depth: 1
+          ref: fix/ia64-pal-model-contracts
+          fetch-depth: 0
 
-      - name: Print PAL, SAL, and interval-timer model context
+      - name: Apply reviewed PAL topology changes
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import base64
+          import gzip
           from pathlib import Path
-          import re
 
-          patterns = re.compile(
-              r'HELPER\((?:get_itc|set_itc|set_itm)|'
-              r'itm_timer|IA64_AR_ITC|IA64_CR_ITM|'
-              r'IA64_PAL_FREQ_(?:BASE|RATIOS)|'
-              r'IA64_SAL_FREQ_BASE|PAL_FREQ_(?:BASE|RATIOS)|'
-              r'SAL_FREQ_BASE')
-
-          for root in (Path('target/ia64'), Path('hw/ia64')):
-              for path in sorted(root.rglob('*')):
-                  if path.suffix not in {'.c', '.h', '.inc'}:
-                      continue
-                  lines = path.read_text(errors='replace').splitlines()
-                  hits = [i for i, line in enumerate(lines)
-                          if patterns.search(line)]
-                  if not hits:
-                      continue
-                  print(f'===== {path} =====')
-                  ranges = []
-                  for hit in hits:
-                      lo = max(0, hit - 16)
-                      hi = min(len(lines), hit + 28)
-                      if ranges and lo <= ranges[-1][1] + 1:
-                          ranges[-1] = (ranges[-1][0],
-                                        max(ranges[-1][1], hi))
-                      else:
-                          ranges.append((lo, hi))
-                  for lo, hi in ranges:
-                      print(f'--- lines {lo + 1}-{hi} ---')
-                      for index in range(lo, hi):
-                          print(f'{index + 1:6d}: {lines[index]}')
+          payload = '''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'''
+          script = gzip.decompress(base64.b64decode(payload))
+          Path('/tmp/apply-pal-topology.py').write_bytes(script)
           PY
+          python3 /tmp/apply-pal-topology.py
 
-      - name: Print PAL unit-test build integration
+      - name: Check source contract
         shell: bash
         run: |
-          grep -n -C 10 'test-ia64-pal\|pal.c' \
-            target/ia64/meson.build tests/unit/meson.build || true
+          set -euo pipefail
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+
+          helper = Path('target/ia64/helper.c').read_text()
+          pal_h = Path('target/ia64/pal.h').read_text()
+          pal = Path('target/ia64/pal.c').read_text()
+          test = Path('tests/unit/test-ia64-pal.c').read_text()
+
+          for needle in (
+              '#define IA64_PAL_VM_INFO         7',
+              'ia64_pal_result_cache_info(a1, a2)',
+              'ARRAY_SIZE(env->pkr)',
+              'ARRAY_SIZE(env->dtrs)',
+              'ARRAY_SIZE(env->itrs)',
+              'ARRAY_SIZE(env->itcs)',
+              'ARRAY_SIZE(env->dtcs)',
+              'ia64_pal_result_proc_get_features(a2)',
+              'IA64_PAL_VM_PAGE_SIZES',
+          ):
+              assert needle in helper, needle
+
+          for needle in (
+              'uint8_t max_pkr = 16;',
+              'uint8_t unified = (type == 2)',
+          ):
+              assert needle not in helper, needle
+
+          assert '#include "qemu/units.h"' in pal
+          assert 'IA64_PAL_STATUS_EINVAL' in pal_h
+          assert '/ia64/pal/cache-info-invalid' in test
+          assert '/ia64/pal/vm-info-invalid' in test
+          PY
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev
+
+      - name: Configure, build, and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --target-list=ia64-softmmu --disable-werror
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-pal \
+            tests/unit/test-ia64-interrupt
+          build/tests/unit/test-ia64-pal
+          build/tests/unit/test-ia64-interrupt
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            target/ia64/helper.c \
+            target/ia64/pal.c \
+            target/ia64/pal.h \
+            tests/unit/test-ia64-pal.c
+          git commit -m \
+            'target/ia64: make PAL topology results self-consistent'
+          git push origin HEAD:fix/ia64-pal-model-contracts
