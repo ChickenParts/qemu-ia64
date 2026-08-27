@@ -1,0 +1,64 @@
+name: Temporary IA-64 PAL topology diagnostics
+
+on:
+  push:
+    branches:
+      - fix/pal-topology-contracts
+    paths:
+      - .github/workflows/agent-pal-topology-diagnostics.yml
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pal-topology-contracts
+          fetch-depth: 0
+
+      - name: Extract QEMU PAL implementation
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('target/ia64/helper.c').read_text()
+          start = source.index('#define IA64_PAL_CACHE_FLUSH')
+          end = source.index('\n#define IA64_SAL_SET_VECTORS', start)
+          Path('diagnostics/pal-contracts-qemu.txt').write_text(
+              source[start:end] + '\n')
+          PY
+
+      - name: Inspect Linux v6.6 PAL consumers
+        shell: bash
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            --branch v6.6 https://github.com/torvalds/linux.git linux-v6.6
+          git -C linux-v6.6 sparse-checkout set arch/ia64
+          {
+            echo '===== PAL wrapper definitions ====='
+            grep -n -A18 -B4 -E \
+              'ia64_pal_(cache_summary|cache_config_info|vm_summary|vm_info|proc_get_features|perf_mon_info|fixed_addr|freq_ratios)' \
+              linux-v6.6/arch/ia64/include/asm/pal.h
+            echo
+            echo '===== PAL consumers ====='
+            grep -RIn -E \
+              'ia64_pal_(cache_summary|cache_config_info|vm_summary|vm_info|proc_get_features|perf_mon_info|fixed_addr|freq_ratios)' \
+              linux-v6.6/arch/ia64 \
+              --exclude=pal.h
+          } > diagnostics/pal-contracts-linux.txt
+
+      - name: Commit diagnostics
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/pal-contracts-qemu.txt \
+                  diagnostics/pal-contracts-linux.txt
+          git commit -m 'diagnostics: capture PAL topology contracts'
+          git push origin HEAD:fix/pal-topology-contracts
