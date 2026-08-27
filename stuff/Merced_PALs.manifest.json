@@ -1,0 +1,183 @@
+{
+  "schema": 1,
+  "format": "ia64-pal-reference-image-catalog",
+  "archives": [
+    {
+      "name": "Merced_PALs.zip",
+      "role": "supplied source archive",
+      "committed": false,
+      "size": 1085582,
+      "sha1": "0664a2171044e19739d77106e49f18ba03540186",
+      "sha256": "2428a7d409e4fb0b1d1673fccc289357945249f32bdb57c925c808f352d5b3cb"
+    },
+    {
+      "name": "Merced_PALs.tar.xz",
+      "role": "deterministic repository repack",
+      "committed": false,
+      "size": 266932,
+      "sha1": "381d8c2f8e825f8508e3ce6f576fea4bd9c16dcf",
+      "sha256": "9145e5ac8b1bdbc7c4dfe40b254eabcc20dd30aa6f1ddd194bb5a5656234642b"
+    }
+  ],
+  "images": [
+    {
+      "name": "PAL_A_2216.bin",
+      "size": 40896,
+      "crc32": "1620697f",
+      "sha1": "521ae170a70d657c3b240331085b17c9bb307027",
+      "sha256": "064f67d9fdec3f8f9beecc50374303e109de673baec14caa92ea79fa8ad169bc",
+      "bundle_aligned": true,
+      "bundle_count": 2556
+    },
+    {
+      "name": "PAL_A_6623.bin",
+      "size": 40896,
+      "crc32": "5262b938",
+      "sha1": "0faba4c6b91d02e570c8ebeed6d126ce45a01f9e",
+      "sha256": "13fd9524880f2fb4ffa0df904ac26c00f2704d2d89454b0c4fc04ef02ed0e3b4",
+      "bundle_aligned": true,
+      "bundle_count": 2556
+    },
+    {
+      "name": "PAL_B_2216.bin",
+      "size": 515712,
+      "crc32": "a5be9541",
+      "sha1": "9ee85bb96a45d6e4c7de7e8cce7489cbd076e7d5",
+      "sha256": "e809a32f0bc56aa816ef239c7764d9f364c960ab27a2004f73bc225055ca7d67",
+      "bundle_aligned": true,
+      "bundle_count": 32232
+    },
+    {
+      "name": "PAL_B_6625.bin",
+      "size": 524064,
+      "crc32": "0a81e6ee",
+      "sha1": "ca81a6676dc595ea29447b945634bbc550249d2b",
+      "sha256": "91af90b158f3e70061776110eb212e99b014ca067e22fc1dffb33da7b20e7ff1",
+      "bundle_aligned": true,
+      "bundle_count": 32754
+    },
+    {
+      "name": "PAL_B_7727.bin",
+      "size": 525760,
+      "crc32": "447a3c37",
+      "sha1": "05ccdffe4430a574e2340201e9982b3843218519",
+      "sha256": "e6c1b8ca69760c932a7c81b544ab8b2492c08885b474d4d92745cab9a40fcba1",
+      "bundle_aligned": true,
+      "bundle_count": 32860
+    },
+    {
+      "name": "PAL_B_7728.bin",
+      "size": 525760,
+      "crc32": "406468f7",
+      "sha1": "b00733bb9413b7f6fd6c3bd12453cebb211b11db",
+      "sha256": "59288963f5fd9a16c01f3087e766f2024a20063c89a93e7e30ff07c0ccdbb0a3",
+      "bundle_aligned": true,
+      "bundle_count": 32860
+    },
+    {
+      "name": "PAL_B_8830.bin",
+      "size": 527424,
+      "crc32": "d5cd3dec",
+      "sha1": "b00f0eece73dd68a88873a0c4da7fedc79420395",
+      "sha256": "c8a9c1d40cfa667e43cc2b9e2a63e942e4e00a9c3fc8f1eded3a25e72b8373cf",
+      "bundle_aligned": true,
+      "bundle_count": 32964
+    }
+  ],
+  "same_family_comparisons": [
+    {
+      "left": "PAL_A_2216.bin",
+      "right": "PAL_A_6623.bin",
+      "equal_ratio": 0.356611894,
+      "common_prefix_bytes": 0,
+      "common_suffix_bytes": 19,
+      "length_delta": 0
+    },
+    {
+      "left": "PAL_B_2216.bin",
+      "right": "PAL_B_6625.bin",
+      "equal_ratio": 0.380974265,
+      "common_prefix_bytes": 28748,
+      "common_suffix_bytes": 4,
+      "length_delta": 8352
+    },
+    {
+      "left": "PAL_B_2216.bin",
+      "right": "PAL_B_7727.bin",
+      "equal_ratio": 0.378391428,
+      "common_prefix_bytes": 28748,
+      "common_suffix_bytes": 4,
+      "length_delta": 10048
+    },
+    {
+      "left": "PAL_B_2216.bin",
+      "right": "PAL_B_7728.bin",
+      "equal_ratio": 0.378273145,
+      "common_prefix_bytes": 28748,
+      "common_suffix_bytes": 4,
+      "length_delta": 10048
+    },
+    {
+      "left": "PAL_B_2216.bin",
+      "right": "PAL_B_8830.bin",
+      "equal_ratio": 0.377472310,
+      "common_prefix_bytes": 28748,
+      "common_suffix_bytes": 4,
+      "length_delta": 11712
+    },
+    {
+      "left": "PAL_B_6625.bin",
+      "right": "PAL_B_7727.bin",
+      "equal_ratio": 0.857267433,
+      "common_prefix_bytes": 56333,
+      "common_suffix_bytes": 4,
+      "length_delta": 1696
+    },
+    {
+      "left": "PAL_B_6625.bin",
+      "right": "PAL_B_7728.bin",
+      "equal_ratio": 0.856983117,
+      "common_prefix_bytes": 56333,
+      "common_suffix_bytes": 4,
+      "length_delta": 1696
+    },
+    {
+      "left": "PAL_B_6625.bin",
+      "right": "PAL_B_8830.bin",
+      "equal_ratio": 0.856053841,
+      "common_prefix_bytes": 56333,
+      "common_suffix_bytes": 4,
+      "length_delta": 3360
+    },
+    {
+      "left": "PAL_B_7727.bin",
+      "right": "PAL_B_7728.bin",
+      "equal_ratio": 0.992873174,
+      "common_prefix_bytes": 145616,
+      "common_suffix_bytes": 4,
+      "length_delta": 0
+    },
+    {
+      "left": "PAL_B_7727.bin",
+      "right": "PAL_B_8830.bin",
+      "equal_ratio": 0.950287203,
+      "common_prefix_bytes": 131180,
+      "common_suffix_bytes": 4,
+      "length_delta": 1664
+    },
+    {
+      "left": "PAL_B_7728.bin",
+      "right": "PAL_B_8830.bin",
+      "equal_ratio": 0.953655660,
+      "common_prefix_bytes": 131180,
+      "common_suffix_bytes": 4,
+      "length_delta": 1664
+    }
+  ],
+  "focused_delta": "stuff/Merced_PALs.delta.json",
+  "notes": [
+    "PAL_A, PAL_B, and decimal build identifiers are filename labels only.",
+    "No provenance, authenticity, licensing, or version semantics are asserted.",
+    "The images are reference evidence and are not QEMU runtime dependencies."
+  ]
+}

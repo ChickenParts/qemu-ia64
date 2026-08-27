@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "format": "ia64-pal-byte-delta",
+  "left": {
+    "name": "PAL_B_7727.bin",
+    "size": 525760,
+    "sha256": "e6c1b8ca69760c932a7c81b544ab8b2492c08885b474d4d92745cab9a40fcba1"
+  },
+  "right": {
+    "name": "PAL_B_7728.bin",
+    "size": 525760,
+    "sha256": "59288963f5fd9a16c01f3087e766f2024a20063c89a93e7e30ff07c0ccdbb0a3"
+  },
+  "method": {
+    "comparison": "byte-for-byte at identical file offsets",
+    "bundle_size": 16,
+    "page_size": 4096,
+    "caveat": "Offsets do not assert a PAL symbol, entry point, code/data classification, or semantic mapping."
+  },
+  "summary": {
+    "common_prefix_bytes": 145616,
+    "common_suffix_bytes": 4,
+    "changed_bytes": 3747,
+    "changed_byte_ratio": 0.007126826,
+    "changed_bits": 9640,
+    "changed_bit_ratio": 0.002291920,
+    "average_changed_bits_per_changed_byte": 2.572724847,
+    "first_changed_offset": 145616,
+    "last_changed_offset": 525755,
+    "changed_bundles": 397,
+    "changed_bundle_ratio": 0.012081558,
+    "changed_bundle_clusters": 11,
+    "changed_pages": 5,
+    "bundles_with_template_change": 314,
+    "distinct_template_transitions": 149
+  },
+  "changed_pages": [
+    {
+      "page_offset": 143360,
+      "changed_bytes": 3,
+      "changed_bundles": 1,
+      "bundles_with_template_change": 0
+    },
+    {
+      "page_offset": 151552,
+      "changed_bytes": 1546,
+      "changed_bundles": 138,
+      "bundles_with_template_change": 119
+    },
+    {
+      "page_offset": 278528,
+      "changed_bytes": 720,
+      "changed_bundles": 68,
+      "bundles_with_template_change": 53
+    },
+    {
+      "page_offset": 282624,
+      "changed_bytes": 1458,
+      "changed_bundles": 188,
+      "bundles_with_template_change": 141
+    },
+    {
+      "page_offset": 524288,
+      "changed_bytes": 20,
+      "changed_bundles": 2,
+      "bundles_with_template_change": 1
+    }
+  ],
+  "bundle_clusters": [
+    {
+      "first_offset": 145616,
+      "last_offset_exclusive": 145632,
+      "bundle_count": 1
+    },
+    {
+      "first_offset": 151760,
+      "last_offset_exclusive": 151776,
+      "bundle_count": 1
+    },
+    {
+      "first_offset": 152256,
+      "last_offset_exclusive": 154304,
+      "bundle_count": 128
+    },
+    {
+      "first_offset": 154320,
+      "last_offset_exclusive": 154336,
+      "bundle_count": 1
+    },
+    {
+      "first_offset": 154432,
+      "last_offset_exclusive": 154560,
+      "bundle_count": 8
+    },
+    {
+      "first_offset": 279776,
+      "last_offset_exclusive": 279792,
+      "bundle_count": 1
+    },
+    {
+      "first_offset": 280832,
+      "last_offset_exclusive": 280848,
+      "bundle_count": 1
+    },
+    {
+      "first_offset": 280960,
+      "last_offset_exclusive": 281008,
+      "bundle_count": 3
+    },
+    {
+      "first_offset": 281024,
+      "last_offset_exclusive": 281072,
+      "bundle_count": 3
+    },
+    {
+      "first_offset": 281664,
+      "last_offset_exclusive": 285632,
+      "bundle_count": 248
+    },
+    {
+      "first_offset": 525728,
+      "last_offset_exclusive": 525760,
+      "bundle_count": 2
+    }
+  ]
+}
