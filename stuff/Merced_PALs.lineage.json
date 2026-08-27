@@ -1,0 +1,294 @@
+{
+  "adjacent_transitions": [
+    {
+      "changed_bundle_ratio": 0.7715624224373293,
+      "changed_bundles": 24869,
+      "equal_bundles": 7363,
+      "left": "PAL_B_2216.bin",
+      "left_bundles": 32232,
+      "overlap_bundles": 32232,
+      "right": "PAL_B_6625.bin",
+      "right_bundles": 32754,
+      "tail_bundles_left": 0,
+      "tail_bundles_right": 522
+    },
+    {
+      "changed_bundle_ratio": 0.2133479880319961,
+      "changed_bundles": 6988,
+      "equal_bundles": 25766,
+      "left": "PAL_B_6625.bin",
+      "left_bundles": 32754,
+      "overlap_bundles": 32754,
+      "right": "PAL_B_7727.bin",
+      "right_bundles": 32860,
+      "tail_bundles_left": 0,
+      "tail_bundles_right": 106
+    },
+    {
+      "changed_bundle_ratio": 0.012081558125380401,
+      "changed_bundles": 397,
+      "equal_bundles": 32463,
+      "left": "PAL_B_7727.bin",
+      "left_bundles": 32860,
+      "overlap_bundles": 32860,
+      "right": "PAL_B_7728.bin",
+      "right_bundles": 32860,
+      "tail_bundles_left": 0,
+      "tail_bundles_right": 0
+    },
+    {
+      "changed_bundle_ratio": 0.06250760803408399,
+      "changed_bundles": 2054,
+      "equal_bundles": 30806,
+      "left": "PAL_B_7728.bin",
+      "left_bundles": 32860,
+      "overlap_bundles": 32860,
+      "right": "PAL_B_8830.bin",
+      "right_bundles": 32964,
+      "tail_bundles_left": 0,
+      "tail_bundles_right": 104
+    }
+  ],
+  "focus": {
+    "changed_bundle_ratio": 0.012081558125380401,
+    "changed_bundles": 397,
+    "clusters": [
+      {
+        "bundle_count": 1,
+        "first_bundle": 9101,
+        "first_offset": 145616,
+        "first_offset_hex": "0x238d0",
+        "last_bundle_exclusive": 9102,
+        "last_offset_exclusive": 145632,
+        "last_offset_exclusive_hex": "0x238e0",
+        "next_relationships": {
+          "right_persists": 1
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 1
+        }
+      },
+      {
+        "bundle_count": 1,
+        "first_bundle": 9485,
+        "first_offset": 151760,
+        "first_offset_hex": "0x250d0",
+        "last_bundle_exclusive": 9486,
+        "last_offset_exclusive": 151776,
+        "last_offset_exclusive_hex": "0x250e0",
+        "next_relationships": {
+          "right_persists": 1
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 1
+        }
+      },
+      {
+        "bundle_count": 128,
+        "first_bundle": 9516,
+        "first_offset": 152256,
+        "first_offset_hex": "0x252c0",
+        "last_bundle_exclusive": 9644,
+        "last_offset_exclusive": 154304,
+        "last_offset_exclusive_hex": "0x25ac0",
+        "next_relationships": {
+          "right_persists": 128
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 127,
+          "right_matches_previous": 1
+        }
+      },
+      {
+        "bundle_count": 1,
+        "first_bundle": 9645,
+        "first_offset": 154320,
+        "first_offset_hex": "0x25ad0",
+        "last_bundle_exclusive": 9646,
+        "last_offset_exclusive": 154336,
+        "last_offset_exclusive_hex": "0x25ae0",
+        "next_relationships": {
+          "right_persists": 1
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 1
+        }
+      },
+      {
+        "bundle_count": 8,
+        "first_bundle": 9652,
+        "first_offset": 154432,
+        "first_offset_hex": "0x25b40",
+        "last_bundle_exclusive": 9660,
+        "last_offset_exclusive": 154560,
+        "last_offset_exclusive_hex": "0x25bc0",
+        "next_relationships": {
+          "right_persists": 8
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 8
+        }
+      },
+      {
+        "bundle_count": 1,
+        "first_bundle": 17486,
+        "first_offset": 279776,
+        "first_offset_hex": "0x444e0",
+        "last_bundle_exclusive": 17487,
+        "last_offset_exclusive": 279792,
+        "last_offset_exclusive_hex": "0x444f0",
+        "next_relationships": {
+          "next_changes_again": 1
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 1
+        }
+      },
+      {
+        "bundle_count": 1,
+        "first_bundle": 17552,
+        "first_offset": 280832,
+        "first_offset_hex": "0x44900",
+        "last_bundle_exclusive": 17553,
+        "last_offset_exclusive": 280848,
+        "last_offset_exclusive_hex": "0x44910",
+        "next_relationships": {
+          "next_changes_again": 1
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 1
+        }
+      },
+      {
+        "bundle_count": 3,
+        "first_bundle": 17560,
+        "first_offset": 280960,
+        "first_offset_hex": "0x44980",
+        "last_bundle_exclusive": 17563,
+        "last_offset_exclusive": 281008,
+        "last_offset_exclusive_hex": "0x449b0",
+        "next_relationships": {
+          "next_changes_again": 3
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 3
+        }
+      },
+      {
+        "bundle_count": 3,
+        "first_bundle": 17564,
+        "first_offset": 281024,
+        "first_offset_hex": "0x449c0",
+        "last_bundle_exclusive": 17567,
+        "last_offset_exclusive": 281072,
+        "last_offset_exclusive_hex": "0x449f0",
+        "next_relationships": {
+          "next_changes_again": 3
+        },
+        "previous_relationships": {
+          "neither_matches_previous": 3
+        }
+      },
+      {
+        "bundle_count": 248,
+        "first_bundle": 17604,
+        "first_offset": 281664,
+        "first_offset_hex": "0x44c40",
+        "last_bundle_exclusive": 17852,
+        "last_offset_exclusive": 285632,
+        "last_offset_exclusive_hex": "0x45bc0",
+        "next_relationships": {
+          "next_changes_again": 243,
+          "next_reverts_to_left": 5
+        },
+        "previous_relationships": {
+          "left_matches_previous": 5,
+          "neither_matches_previous": 243
+        }
+      },
+      {
+        "bundle_count": 2,
+        "first_bundle": 32858,
+        "first_offset": 525728,
+        "first_offset_hex": "0x805a0",
+        "last_bundle_exclusive": 32860,
+        "last_offset_exclusive": 525760,
+        "last_offset_exclusive_hex": "0x805c0",
+        "next_relationships": {
+          "next_changes_again": 2
+        },
+        "previous_relationships": {
+          "previous_has_no_bundle": 2
+        }
+      }
+    ],
+    "first_changed_bundle": 9101,
+    "last_changed_bundle": 32859,
+    "left": "PAL_B_7727.bin",
+    "next": "PAL_B_8830.bin",
+    "next_relationship_definitions": {
+      "next_changes_again": "The next image matches neither focused image.",
+      "next_reverts_to_left": "The next image exactly matches the left image.",
+      "right_persists": "The next image exactly matches the right image."
+    },
+    "next_relationships": {
+      "next_changes_again": 253,
+      "next_reverts_to_left": 5,
+      "right_persists": 139
+    },
+    "previous": "PAL_B_6625.bin",
+    "previous_relationship_definitions": {
+      "left_matches_previous": "The left image exactly matches the previous image.",
+      "neither_matches_previous": "Neither focused image matches the previous image.",
+      "previous_has_no_bundle": "The focused offset is beyond the previous image.",
+      "right_matches_previous": "The right image exactly matches the previous image."
+    },
+    "previous_relationships": {
+      "left_matches_previous": 5,
+      "neither_matches_previous": 389,
+      "previous_has_no_bundle": 2,
+      "right_matches_previous": 1
+    },
+    "right": "PAL_B_7728.bin"
+  },
+  "format": "ia64-pal-bundle-lineage",
+  "method": {
+    "bundle_size": 16,
+    "caveat": "The report does not assert chronological order, provenance, code/data boundaries, symbols, entry points, or architectural semantics.",
+    "comparison": "exact 16-byte bundle equality at identical file offsets",
+    "scope": "PAL_B filename series only"
+  },
+  "schema": 1,
+  "series": [
+    {
+      "bundle_count": 32232,
+      "name": "PAL_B_2216.bin",
+      "sha256": "e809a32f0bc56aa816ef239c7764d9f364c960ab27a2004f73bc225055ca7d67",
+      "size": 515712
+    },
+    {
+      "bundle_count": 32754,
+      "name": "PAL_B_6625.bin",
+      "sha256": "91af90b158f3e70061776110eb212e99b014ca067e22fc1dffb33da7b20e7ff1",
+      "size": 524064
+    },
+    {
+      "bundle_count": 32860,
+      "name": "PAL_B_7727.bin",
+      "sha256": "e6c1b8ca69760c932a7c81b544ab8b2492c08885b474d4d92745cab9a40fcba1",
+      "size": 525760
+    },
+    {
+      "bundle_count": 32860,
+      "name": "PAL_B_7728.bin",
+      "sha256": "59288963f5fd9a16c01f3087e766f2024a20063c89a93e7e30ff07c0ccdbb0a3",
+      "size": 525760
+    },
+    {
+      "bundle_count": 32964,
+      "name": "PAL_B_8830.bin",
+      "sha256": "c8a9c1d40cfa667e43cc2b9e2a63e942e4e00a9c3fc8f1eded3a25e72b8373cf",
+      "size": 527424
+    }
+  ]
+}

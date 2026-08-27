@@ -39,6 +39,19 @@ Do not fix firmware progress by matching a blob hash, patching guest bytes,
 checking the current instruction pointer against a known image address, or
 returning a value solely because one archived revision happened to do so.
 
+Bundle-lineage reports
+----------------------
+
+``scripts/ia64-pal-library.py --lineage-output`` compares exact 16-byte bundles
+at identical file offsets across the PAL-B filename series.  It records each
+adjacent transition and classifies the bundles changed from 7727 to 7728 by
+whether 8830 preserves, reverts, or changes those bytes again.  It also checks
+whether either focused image matches 6625 at the same offset.
+
+This is intentionally a byte-lineage report.  Filename order is not asserted
+to be chronology, and bundle equality does not establish code/data boundaries,
+symbols, entry points, or architectural meaning.
+
 Repository material
 -------------------
 
@@ -49,6 +62,10 @@ Repository material
   A byte-level comparison of the closely related PAL-B 7727 and 7728 images.
   All locations are file offsets; no symbol or semantic mapping is asserted.
 
+``stuff/Merced_PALs.lineage.json``
+  Reproducible same-offset bundle transitions for the PAL-B filename series,
+  including the focused 6625/7727/7728/8830 relationship.
+
 ``scripts/ia64-pal-library.py``
-  A fail-closed verifier and deterministic repacker for the supplied ZIP and
-  the cataloged tar.xz representation.
+  A fail-closed verifier, deterministic repacker, and bundle-lineage generator
+  for the supplied ZIP and the cataloged tar.xz representation.

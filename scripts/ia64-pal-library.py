@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify and deterministically repack IA-64 PAL reference images."""
+"""Verify, repack, and compare IA-64 PAL reference images."""
 
 from __future__ import annotations
 
@@ -10,11 +10,25 @@ import json
 import sys
 import tarfile
 import zlib
+from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
 BUNDLE_SIZE = 16
+PAL_B_SERIES = (
+    "PAL_B_2216.bin",
+    "PAL_B_6625.bin",
+    "PAL_B_7727.bin",
+    "PAL_B_7728.bin",
+    "PAL_B_8830.bin",
+)
+PAL_B_FOCUS = {
+    "previous": "PAL_B_6625.bin",
+    "left": "PAL_B_7727.bin",
+    "right": "PAL_B_7728.bin",
+    "next": "PAL_B_8830.bin",
+}
 
 
 class PalLibraryError(RuntimeError):
@@ -160,6 +174,199 @@ def write_deterministic_tar(path: Path,
         raise PalLibraryError(f"cannot write {path}: {exc}") from exc
 
 
+def image_bundles(name: str, data: bytes) -> tuple[bytes, ...]:
+    if len(data) % BUNDLE_SIZE:
+        raise PalLibraryError(
+            f"PAL image is not bundle aligned: {name}")
+    return tuple(data[offset:offset + BUNDLE_SIZE]
+                 for offset in range(0, len(data), BUNDLE_SIZE))
+
+
+def contiguous_ranges(indices: list[int]) -> list[tuple[int, int]]:
+    if not indices:
+        return []
+
+    ranges = []
+    first = previous = indices[0]
+    for index in indices[1:]:
+        if index != previous + 1:
+            ranges.append((first, previous + 1))
+            first = index
+        previous = index
+    ranges.append((first, previous + 1))
+    return ranges
+
+
+def bundle_transition(left_name: str, right_name: str,
+                      bundles: dict[str, tuple[bytes, ...]]) -> dict[str, Any]:
+    left = bundles[left_name]
+    right = bundles[right_name]
+    overlap = min(len(left), len(right))
+    equal = sum(left[index] == right[index]
+                for index in range(overlap))
+    changed = overlap - equal
+    return {
+        "left": left_name,
+        "right": right_name,
+        "left_bundles": len(left),
+        "right_bundles": len(right),
+        "overlap_bundles": overlap,
+        "equal_bundles": equal,
+        "changed_bundles": changed,
+        "changed_bundle_ratio": changed / overlap,
+        "tail_bundles_left": len(left) - overlap,
+        "tail_bundles_right": len(right) - overlap,
+    }
+
+
+def counter_dict(counter: Counter[str]) -> dict[str, int]:
+    return {name: counter[name] for name in sorted(counter)}
+
+
+def build_pal_b_lineage(images: dict[str, bytes]) -> dict[str, Any]:
+    missing = [name for name in PAL_B_SERIES if name not in images]
+    if missing:
+        raise PalLibraryError(
+            f"PAL-B lineage images are missing: {missing}")
+
+    bundles = {
+        name: image_bundles(name, images[name])
+        for name in PAL_B_SERIES
+    }
+    series = []
+    for name in PAL_B_SERIES:
+        identity = digest(images[name])
+        series.append({
+            "name": name,
+            "size": identity["size"],
+            "bundle_count": identity["bundle_count"],
+            "sha256": identity["sha256"],
+        })
+
+    transitions = [
+        bundle_transition(left, right, bundles)
+        for left, right in zip(PAL_B_SERIES, PAL_B_SERIES[1:])
+    ]
+
+    previous_name = PAL_B_FOCUS["previous"]
+    left_name = PAL_B_FOCUS["left"]
+    right_name = PAL_B_FOCUS["right"]
+    next_name = PAL_B_FOCUS["next"]
+    previous = bundles[previous_name]
+    left = bundles[left_name]
+    right = bundles[right_name]
+    next_image = bundles[next_name]
+
+    if len(left) != len(right):
+        raise PalLibraryError(
+            "focused PAL-B images do not contain the same bundle count")
+
+    changed_indices = [
+        index for index in range(len(left))
+        if left[index] != right[index]
+    ]
+    next_relationships: Counter[str] = Counter()
+    previous_relationships: Counter[str] = Counter()
+    relationships: dict[int, tuple[str, str]] = {}
+
+    for index in changed_indices:
+        if next_image[index] == right[index]:
+            next_relationship = "right_persists"
+        elif next_image[index] == left[index]:
+            next_relationship = "next_reverts_to_left"
+        else:
+            next_relationship = "next_changes_again"
+        next_relationships[next_relationship] += 1
+
+        if index >= len(previous):
+            previous_relationship = "previous_has_no_bundle"
+        elif previous[index] == left[index]:
+            previous_relationship = "left_matches_previous"
+        elif previous[index] == right[index]:
+            previous_relationship = "right_matches_previous"
+        else:
+            previous_relationship = "neither_matches_previous"
+        previous_relationships[previous_relationship] += 1
+        relationships[index] = (next_relationship,
+                                previous_relationship)
+
+    clusters = []
+    for first, last_exclusive in contiguous_ranges(changed_indices):
+        next_counts: Counter[str] = Counter()
+        previous_counts: Counter[str] = Counter()
+        for index in range(first, last_exclusive):
+            next_relationship, previous_relationship = relationships[index]
+            next_counts[next_relationship] += 1
+            previous_counts[previous_relationship] += 1
+        clusters.append({
+            "first_bundle": first,
+            "last_bundle_exclusive": last_exclusive,
+            "first_offset": first * BUNDLE_SIZE,
+            "last_offset_exclusive": last_exclusive * BUNDLE_SIZE,
+            "first_offset_hex": f"0x{first * BUNDLE_SIZE:x}",
+            "last_offset_exclusive_hex":
+                f"0x{last_exclusive * BUNDLE_SIZE:x}",
+            "bundle_count": last_exclusive - first,
+            "next_relationships": counter_dict(next_counts),
+            "previous_relationships": counter_dict(previous_counts),
+        })
+
+    return {
+        "schema": 1,
+        "format": "ia64-pal-bundle-lineage",
+        "method": {
+            "bundle_size": BUNDLE_SIZE,
+            "comparison": (
+                "exact 16-byte bundle equality at identical file offsets"),
+            "scope": "PAL_B filename series only",
+            "caveat": (
+                "The report does not assert chronological order, provenance, "
+                "code/data boundaries, symbols, entry points, or "
+                "architectural semantics."),
+        },
+        "series": series,
+        "adjacent_transitions": transitions,
+        "focus": {
+            **PAL_B_FOCUS,
+            "changed_bundles": len(changed_indices),
+            "changed_bundle_ratio": len(changed_indices) / len(left),
+            "first_changed_bundle": changed_indices[0],
+            "last_changed_bundle": changed_indices[-1],
+            "next_relationship_definitions": {
+                "right_persists": (
+                    "The next image exactly matches the right image."),
+                "next_reverts_to_left": (
+                    "The next image exactly matches the left image."),
+                "next_changes_again": (
+                    "The next image matches neither focused image."),
+            },
+            "previous_relationship_definitions": {
+                "left_matches_previous": (
+                    "The left image exactly matches the previous image."),
+                "right_matches_previous": (
+                    "The right image exactly matches the previous image."),
+                "neither_matches_previous": (
+                    "Neither focused image matches the previous image."),
+                "previous_has_no_bundle": (
+                    "The focused offset is beyond the previous image."),
+            },
+            "next_relationships": counter_dict(next_relationships),
+            "previous_relationships":
+                counter_dict(previous_relationships),
+            "clusters": clusters,
+        },
+    }
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+    except OSError as exc:
+        raise PalLibraryError(f"cannot write {path}: {exc}") from exc
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path,
@@ -171,6 +378,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repack-output", type=Path,
         help="write the deterministic tar.xz after successful verification")
+    parser.add_argument(
+        "--lineage-output", type=Path,
+        help="write the exact PAL-B bundle-lineage report")
     parser.add_argument("--json", action="store_true",
                         help="print the verified member report as JSON")
     return parser.parse_args()
@@ -186,6 +396,8 @@ def main() -> int:
         if args.repack_output is not None:
             write_deterministic_tar(args.repack_output, images)
             verify_archive_identity(args.repack_output, catalog)
+        if args.lineage_output is not None:
+            write_json(args.lineage_output, build_pal_b_lineage(images))
         if args.json:
             print(json.dumps(report, indent=2, sort_keys=True))
         else:
@@ -195,6 +407,8 @@ def main() -> int:
                       f"sha256={item['sha256']}")
             if args.repack_output is not None:
                 print(f"wrote verified repack: {args.repack_output}")
+            if args.lineage_output is not None:
+                print(f"wrote PAL-B lineage: {args.lineage_output}")
     except PalLibraryError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

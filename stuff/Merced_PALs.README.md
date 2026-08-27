@@ -40,10 +40,32 @@ The expected repack is 266,932 bytes with SHA-256
 The seven filenames and every member byte are unchanged. The verifier fails
 closed on archive, member, size, checksum, hash, or bundle-alignment changes.
 
-`Merced_PALs.delta.json` records a byte-offset comparison of
-`PAL_B_7727.bin` and `PAL_B_7728.bin`, the closest pair in the supplied set.
-Its offsets are forensic leads, not permission to add image hashes, magic
-addresses, or revision-specific execution paths to QEMU.
+## Reproducible PAL-B lineage
+
+Generate the exact same-offset, 16-byte bundle comparison with:
+
+```sh
+scripts/ia64-pal-library.py \
+  --manifest stuff/Merced_PALs.manifest.json \
+  --lineage-output /tmp/Merced_PALs.lineage.json \
+  /path/to/Merced_PALs.zip
+```
+
+`Merced_PALs.lineage.json` covers the filename series `2216`, `6625`, `7727`,
+`7728`, and `8830`. The focused 7727-to-7728 transition changes 397 of 32,860
+bundles. Of those changes, 139 remain byte-identical in 8830, five revert to
+the 7727 bytes, and 253 change again.
+
+The durable changes form the first five clusters, from offset `0x238d0`
+through `0x25bc0`. The later region is substantially more volatile: the
+248-bundle cluster at `0x44c40` through `0x45bc0` contains all five exact
+reversions and 243 bundles that change again in 8830. These are file-offset
+relationships only, not code/data, symbol, entry-point, or semantic claims.
+
+`Merced_PALs.delta.json` retains the finer byte-level comparison of
+`PAL_B_7727.bin` and `PAL_B_7728.bin`. Its offsets are forensic leads, not
+permission to add image hashes, magic addresses, or revision-specific
+execution paths to QEMU.
 
 ## Architectural use policy
 
