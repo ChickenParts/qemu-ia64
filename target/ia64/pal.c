@@ -20,6 +20,12 @@ static IA64PALResult ia64_pal_result(int64_t status, uint64_t v0,
     };
 }
 
+static uint64_t ia64_pal_pack_freq_ratio(uint32_t numerator,
+                                         uint32_t denominator)
+{
+    return (uint64_t)denominator | ((uint64_t)numerator << 32);
+}
+
 IA64PALResult ia64_pal_result_unimplemented(void)
 {
     return ia64_pal_result(IA64_PAL_STATUS_UNIMPLEMENTED, 0, 0, 0);
@@ -150,4 +156,22 @@ IA64PALResult ia64_pal_result_proc_get_features(uint64_t feature_set)
     /* No configurable processor feature sets are modeled. */
     (void)feature_set;
     return ia64_pal_result(IA64_PAL_STATUS_EINVAL, 0, 0, 0);
+}
+
+IA64PALResult ia64_pal_result_freq_base(void)
+{
+    return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,
+                           IA64_PAL_FREQ_BASE_HZ, 0, 0);
+}
+
+IA64PALResult ia64_pal_result_freq_ratios(void)
+{
+    return ia64_pal_result(
+        IA64_PAL_STATUS_SUCCESS,
+        ia64_pal_pack_freq_ratio(IA64_PAL_PROC_RATIO_NUM,
+                                 IA64_PAL_PROC_RATIO_DEN),
+        ia64_pal_pack_freq_ratio(IA64_PAL_BUS_RATIO_NUM,
+                                 IA64_PAL_BUS_RATIO_DEN),
+        ia64_pal_pack_freq_ratio(IA64_PAL_ITC_RATIO_NUM,
+                                 IA64_PAL_ITC_RATIO_DEN));
 }

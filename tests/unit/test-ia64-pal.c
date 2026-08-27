@@ -13,6 +13,16 @@ static uint64_t field(uint64_t value, unsigned int shift, uint64_t mask)
     return (value >> shift) & mask;
 }
 
+static uint32_t ratio_den(uint64_t value)
+{
+    return value;
+}
+
+static uint32_t ratio_num(uint64_t value)
+{
+    return value >> 32;
+}
+
 static void assert_return_action(IA64PALResult result)
 {
     g_assert_cmpint(result.action, ==, IA64_PAL_ACTION_RETURN);
@@ -180,6 +190,38 @@ static void test_proc_get_features(void)
     g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_EINVAL);
 }
 
+static void test_frequency_contract(void)
+{
+    IA64PALResult base = ia64_pal_result_freq_base();
+    IA64PALResult ratios = ia64_pal_result_freq_ratios();
+    uint64_t effective_itc;
+
+    g_assert_cmpint(base.status, ==, IA64_PAL_STATUS_SUCCESS);
+    g_assert_cmpuint(base.v0, ==, IA64_PAL_FREQ_BASE_HZ);
+    g_assert_cmphex(base.v1, ==, 0);
+    g_assert_cmphex(base.v2, ==, 0);
+    assert_return_action(base);
+
+    g_assert_cmpint(ratios.status, ==, IA64_PAL_STATUS_SUCCESS);
+    g_assert_cmpuint(ratio_num(ratios.v0), ==,
+                     IA64_PAL_PROC_RATIO_NUM);
+    g_assert_cmpuint(ratio_den(ratios.v0), ==,
+                     IA64_PAL_PROC_RATIO_DEN);
+    g_assert_cmpuint(ratio_num(ratios.v1), ==,
+                     IA64_PAL_BUS_RATIO_NUM);
+    g_assert_cmpuint(ratio_den(ratios.v1), ==,
+                     IA64_PAL_BUS_RATIO_DEN);
+    g_assert_cmpuint(ratio_num(ratios.v2), ==,
+                     IA64_PAL_ITC_RATIO_NUM);
+    g_assert_cmpuint(ratio_den(ratios.v2), ==,
+                     IA64_PAL_ITC_RATIO_DEN);
+    assert_return_action(ratios);
+
+    effective_itc = base.v0 * ratio_num(ratios.v2) /
+                    ratio_den(ratios.v2);
+    g_assert_cmpuint(effective_itc, ==, IA64_PAL_ITC_FREQ_HZ);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -197,5 +239,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ia64/pal/vm-info-invalid", test_vm_info_invalid);
     g_test_add_func("/ia64/pal/proc-get-features",
                     test_proc_get_features);
+    g_test_add_func("/ia64/pal/frequency-contract",
+                    test_frequency_contract);
     return g_test_run();
 }

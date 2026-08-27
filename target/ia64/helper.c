@@ -27550,18 +27550,24 @@ case IA64_PAL_VM_PAGE_SIZE:
     v0 = IA64_PAL_VM_PAGE_SIZES;
     v1 = IA64_PAL_VM_PAGE_SIZES;
     break;
-    case IA64_PAL_FREQ_BASE:
-        v0 = 100000000ULL;
-        break;
-    case IA64_PAL_FREQ_RATIOS: {
-        /* u64 packing of struct pal_freq_ratio { u32 den, num; } */
-        uint32_t den = 1;
-        uint32_t num = 3;
-        v0 = (uint64_t)den | ((uint64_t)num << 32); /* proc ratio */
-        v1 = (uint64_t)den | ((uint64_t)1 << 32);   /* bus ratio */
-        v2 = (uint64_t)den | ((uint64_t)num << 32); /* itc ratio */
-        break;
-    }
+case IA64_PAL_FREQ_BASE: {
+    IA64PALResult result = ia64_pal_result_freq_base();
+
+    status = result.status;
+    v0 = result.v0;
+    v1 = result.v1;
+    v2 = result.v2;
+    break;
+}
+case IA64_PAL_FREQ_RATIOS: {
+    IA64PALResult result = ia64_pal_result_freq_ratios();
+
+    status = result.status;
+    v0 = result.v0;
+    v1 = result.v1;
+    v2 = result.v2;
+    break;
+}
     case IA64_PAL_PLATFORM_ADDR: {
         /*
          * Set platform addresses (interrupt block or I/O port space).

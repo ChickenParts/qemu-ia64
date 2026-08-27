@@ -22,6 +22,15 @@
 #define IA64_PAL_UNIQUE_TCS             2
 #define IA64_PAL_VM_PAGE_SIZES UINT64_C(0x115557000)
 
+#define IA64_PAL_FREQ_BASE_HZ UINT64_C(100000000)
+#define IA64_PAL_PROC_RATIO_NUM 3U
+#define IA64_PAL_PROC_RATIO_DEN 1U
+#define IA64_PAL_BUS_RATIO_NUM  1U
+#define IA64_PAL_BUS_RATIO_DEN  1U
+#define IA64_PAL_ITC_RATIO_NUM  10U
+#define IA64_PAL_ITC_RATIO_DEN  1U
+#define IA64_PAL_ITC_FREQ_HZ UINT64_C(1000000000)
+
 typedef enum IA64PALAction {
     IA64_PAL_ACTION_RETURN = 0,
     IA64_PAL_ACTION_HALT,
@@ -45,5 +54,7 @@ IA64PALResult ia64_pal_result_vm_summary(unsigned int pkr_count,
 IA64PALResult ia64_pal_result_vm_info(uint64_t level, uint64_t type,
                                       unsigned int entry_count);
 IA64PALResult ia64_pal_result_proc_get_features(uint64_t feature_set);
+IA64PALResult ia64_pal_result_freq_base(void);
+IA64PALResult ia64_pal_result_freq_ratios(void);
 
 #endif
