@@ -20,8 +20,10 @@ PAL reports the processor-visible topology of that profile:
 
 TCG does not simulate cache contents or processor cycles.  These
 values are nevertheless a guest ABI and must describe one coherent
-processor rather than a collection of firmware-enabling constants.
-Translation-cache and translation-register counts are therefore
+processor rather than a collection of firmware-enabling constants.  The GFW
+frequency HOBs are generated from this same model instead of carrying a second
+set of literal values.  Translation-cache and translation-register counts are
+therefore
 derived from the implemented CPU state arrays.
 
 Future processor variants should be explicit CPU models or

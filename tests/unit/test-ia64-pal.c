@@ -61,6 +61,7 @@ static void assert_cache_info(uint64_t level, uint64_t type,
                               bool unified, uint64_t size,
                               uint64_t attr, uint64_t assoc,
                               uint64_t line_size,
+                              uint64_t tag_lsb,
                               uint64_t load_latency)
 {
     IA64PALResult result = ia64_pal_result_cache_info(level, type);
@@ -73,7 +74,7 @@ static void assert_cache_info(uint64_t level, uint64_t type,
     g_assert_cmpuint(field(result.v0, 24, 0xff), ==, line_size);
     g_assert_cmpuint(field(result.v0, 40, 0xff), ==, load_latency);
     g_assert_cmpuint(field(result.v1, 0, UINT32_MAX), ==, size);
-    g_assert_cmpuint(field(result.v1, 40, 0xff), ==, line_size);
+    g_assert_cmpuint(field(result.v1, 40, 0xff), ==, tag_lsb);
     g_assert_cmpuint(field(result.v1, 48, 0xff), ==, 43);
     g_assert_cmphex(result.v2, ==, 0);
     assert_return_action(result);
@@ -83,16 +84,16 @@ static void test_merced_cache_info(void)
 {
     assert_cache_info(0, IA64_PAL_CACHE_TYPE_INSTRUCTION,
                       false, 16 * KiB, IA64_PAL_CACHE_ATTR_WT,
-                      4, 5, 1);
+                      4, 5, 12, 1);
     assert_cache_info(0, IA64_PAL_CACHE_TYPE_DATA,
                       false, 16 * KiB, IA64_PAL_CACHE_ATTR_WT,
-                      4, 5, 2);
+                      4, 5, 12, 2);
     assert_cache_info(1, IA64_PAL_CACHE_TYPE_DATA,
                       true, 96 * KiB, IA64_PAL_CACHE_ATTR_WB,
-                      6, 6, 6);
+                      6, 6, 14, 6);
     assert_cache_info(2, IA64_PAL_CACHE_TYPE_DATA,
                       true, IA64_PAL_MERCED_L3_SIZE,
-                      IA64_PAL_CACHE_ATTR_WB, 4, 6, 21);
+                      IA64_PAL_CACHE_ATTR_WB, 4, 6, 20, 21);
 }
 
 static void test_cache_info_invalid(void)

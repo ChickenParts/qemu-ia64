@@ -39,6 +39,18 @@ static uint64_t ia64_pal_freq_ratio(uint32_t numerator,
     return (uint64_t)denominator | ((uint64_t)numerator << 32);
 }
 
+static uint8_t ia64_pal_exact_log2(uint32_t value)
+{
+    uint8_t result = 0;
+
+    g_assert(value != 0 && (value & (value - 1)) == 0);
+    while (value > 1) {
+        value >>= 1;
+        result++;
+    }
+    return result;
+}
+
 static bool ia64_pal_cache_desc(uint64_t level, uint64_t type,
                                 IA64PALCacheDesc *desc)
 {
@@ -142,7 +154,8 @@ IA64PALResult ia64_pal_result_cache_info(uint64_t level,
      * cacheless execution model has no such performance constraint.
      */
     info2 |= desc.size;
-    info2 |= (uint64_t)desc.line_size << 40;
+    info2 |= (uint64_t)ia64_pal_exact_log2(
+        desc.size / desc.associativity) << 40;
     info2 |= UINT64_C(43) << 48;
 
     return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,

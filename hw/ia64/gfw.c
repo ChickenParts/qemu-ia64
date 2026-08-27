@@ -7,10 +7,12 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "exec/cpu-common.h" /* cpu_physical_memory_write */
 
 #include "hw/ia64/gfw.h"
+#include "target/ia64/pal.h"
 
 typedef struct {
     uint64_t signature;
@@ -229,14 +231,9 @@ static const unsigned char config_pal_fixed_addr[8] = {
     0, 0, 0, 0, 0, 0, 0, 0
 };
 
-static const unsigned char config_pal_freq_base[8] = {
-    109, 219, 182, 13, 0, 0, 0, 0
-};
-
-static const unsigned char config_pal_freq_ratios[24] = {
-    11, 1, 0, 0, 77, 7, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 4,
-    0, 0, 0, 7, 0, 0, 0
-};
+/* Development firmware consumes cached PAL results through HOBs. */
+static uint64_t config_pal_freq_base[1];
+static uint64_t config_pal_freq_ratios[3];
 
 static const unsigned char config_pal_halt_info[64] = {
     0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -301,6 +298,19 @@ static const unsigned char config_pal_vm_page_size[16] = {
     0, 112, 85, 21, 0, 0, 0, 0, 0, 112, 85, 21, 0, 0, 0, 0
 };
 
+static void ia64_gfw_refresh_pal_frequency_hobs(void)
+{
+    IA64PALResult base = ia64_pal_result_freq_base();
+    IA64PALResult ratios = ia64_pal_result_freq_ratios();
+
+    g_assert(base.status == IA64_PAL_STATUS_SUCCESS);
+    g_assert(ratios.status == IA64_PAL_STATUS_SUCCESS);
+    config_pal_freq_base[0] = cpu_to_le64(base.v0);
+    config_pal_freq_ratios[0] = cpu_to_le64(ratios.v0);
+    config_pal_freq_ratios[1] = cpu_to_le64(ratios.v1);
+    config_pal_freq_ratios[2] = cpu_to_le64(ratios.v2);
+}
+
 typedef struct {
     hob_type_t type;
     const void *data;
@@ -331,6 +341,8 @@ static const hob_batch_t hob_batch[] = {
 
 static int add_pal_hob(void *hob_buf)
 {
+    ia64_gfw_refresh_pal_frequency_hobs();
+
     for (size_t i = 0; i < ARRAY_SIZE(hob_batch); i++) {
         if (hob_add(hob_buf, hob_batch[i].type, hob_batch[i].data, hob_batch[i].size) < 0) {
             return -1;
