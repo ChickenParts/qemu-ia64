@@ -1,0 +1,72 @@
+name: IA-64 Xen call-target frontier
+
+on:
+  push:
+    branches:
+      - diag/ia64-xen-call-target-20260828
+    paths:
+      - .github/workflows/ia64-xen-call-target-frontier.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: diag/ia64-xen-call-target-20260828
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build pkg-config \
+            mercurial libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev
+
+      - name: Build IA-64 QEMU
+        run: |
+          ./configure --target-list=ia64-softmmu --disable-werror \
+            --disable-docs --disable-gtk --disable-sdl
+          ninja -C build qemu-system-ia64
+
+      - name: Fetch canonical Xen firmware
+        run: |
+          mkdir -p scratch/xen-frontier
+          scripts/fetch-ia64-xen-firmware.sh scratch/xen-frontier/firmware
+          sha256sum scratch/xen-frontier/firmware/Flash.fd \
+            | tee scratch/xen-frontier/firmware.sha256
+
+      - name: Trace the known indirect-call boundary
+        shell: bash
+        run: |
+          set +e
+          QEMU_IA64_DBG_CALL_PC=0x1ff4f520 \
+          QEMU_IA64_BCALL_LOG_MIN_PC=0x1ff4f000 \
+          QEMU_IA64_BCALL_LOG_MAX_PC=0x1ff50000 \
+          QEMU_IA64_BCALL_LOG_LIMIT=2048 \
+          QEMU_IA64_MOVB_LOG_B=7 \
+          QEMU_IA64_MOVB_LOG_LIMIT=2048 \
+          QEMU_IA64_MOVB_LOG_DUMP=1 \
+          QEMU_IA64_RSE_STRICT_TRACE=1 \
+          QEMU_IA64_RSE_STRICT_TRACE_LIMIT=4096 \
+          IA64_BIOS=scratch/xen-frontier/firmware/Flash.fd \
+          IA64_LOGDIR=scratch/xen-frontier/logs \
+          IA64_GUEST_ERRORS=1 \
+          IA64_CALL_NULL_FIX=0 \
+          IA64_PEI_SYSMEM_HOB_FIX=1 \
+          timeout --signal=TERM --kill-after=5s 55s \
+            scripts/run-ia64-firmware.sh
+          echo "qemu_rc=$?" | tee scratch/xen-frontier/result.txt
+          set -e
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-call-target-${{ github.run_id }}
+          path: scratch/xen-frontier/
+          retention-days: 7
+          if-no-files-found: error
