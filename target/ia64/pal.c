@@ -172,7 +172,7 @@ IA64PALResult ia64_pal_result_proc_get_features(
 IA64PALResult ia64_pal_result_freq_base(void)
 {
     return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,
-                           IA64_PAL_PLATFORM_BASE_HZ, 0, 0);
+                           IA64_PLATFORM_BASE_HZ, 0, 0);
 }
 
 IA64PALResult ia64_pal_result_freq_ratios(void)

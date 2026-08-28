@@ -7,6 +7,8 @@
 #ifndef TARGET_IA64_PAL_H
 #define TARGET_IA64_PAL_H
 
+#include "clock.h"
+
 #define IA64_PAL_STATUS_SUCCESS        0
 #define IA64_PAL_STATUS_UNIMPLEMENTED  (-1)
 #define IA64_PAL_STATUS_EINVAL         (-2)
@@ -19,9 +21,6 @@
 #define IA64_PAL_TC_LEVELS              1
 #define IA64_PAL_UNIQUE_TCS             2
 #define IA64_PAL_VM_PAGE_SIZES UINT64_C(0x115557000)
-
-#define IA64_PAL_PLATFORM_BASE_HZ UINT64_C(100000000)
-#define IA64_PAL_ITC_HZ           UINT64_C(1000000000)
 
 typedef enum IA64PALAction {
     IA64_PAL_ACTION_RETURN = 0,

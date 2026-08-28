@@ -8,6 +8,7 @@
 #include "cpu.h"
 #include "interrupt.h"
 #include "pal.h"
+#include "sal.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
@@ -28700,12 +28701,16 @@ fvb_range_log:
     case IA64_SAL_MC_RENDEZ:
         status = 0;
         break;
-    case IA64_SAL_FREQ_BASE:
-        status = 0;
-        v0 = 100000000ULL; /* ticks per second */
-        v1 = ~0ULL;        /* drift info: -1 */
-        v2 = 0;
+    case IA64_SAL_FREQ_BASE: {
+        IA64SALResult result =
+            ia64_sal_result_freq_base(args_trace[0]);
+
+        status = result.status;
+        v0 = result.v0;
+        v1 = result.v1;
+        v2 = result.v2;
         break;
+    }
     case IA64_SAL_PCI_CONFIG_READ: {
         /*
          * SAL-based PCI config space access (see Linux arch/ia64/pci/pci.c).

@@ -5,6 +5,7 @@ ia64_ss.add(files(
   'helper.c',
   'interrupt.c',
   'pal.c',
+  'sal.c',
   'translate.c',
 ))
 

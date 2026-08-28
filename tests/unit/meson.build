@@ -51,6 +51,7 @@ tests = {
   'test-ia64-interrupt': [meson.project_source_root() / 'target/ia64/interrupt.c'],
   'test-ia64-iosapic': [meson.project_source_root() / 'hw/ia64/iosapic-core.c'],
   'test-ia64-pal': [meson.project_source_root() / 'target/ia64/pal.c'],
+  'test-ia64-sal': [meson.project_source_root() / 'target/ia64/sal.c'],
 }
 
 if have_system or have_tools

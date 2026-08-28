@@ -200,7 +200,7 @@ static void test_freq_base(void)
     IA64PALResult result = ia64_pal_result_freq_base();
 
     g_assert_cmpint(result.status, ==, IA64_PAL_STATUS_SUCCESS);
-    g_assert_cmpuint(result.v0, ==, IA64_PAL_PLATFORM_BASE_HZ);
+    g_assert_cmpuint(result.v0, ==, IA64_PLATFORM_BASE_HZ);
     g_assert_cmphex(result.v1, ==, 0);
     g_assert_cmphex(result.v2, ==, 0);
     assert_return_action(result);
@@ -218,10 +218,10 @@ static void test_freq_ratios(void)
     g_assert_cmpuint(ratio_numerator(result.v1), ==, 1);
     g_assert_cmpuint(ratio_denominator(result.v2), ==, 1);
     g_assert_cmpuint(ratio_numerator(result.v2), ==, 10);
-    itc_hz = IA64_PAL_PLATFORM_BASE_HZ *
+    itc_hz = IA64_PLATFORM_BASE_HZ *
         ratio_numerator(result.v2) /
         ratio_denominator(result.v2);
-    g_assert_cmpuint(itc_hz, ==, IA64_PAL_ITC_HZ);
+    g_assert_cmpuint(itc_hz, ==, IA64_ITC_HZ);
     assert_return_action(result);
 }
 
