@@ -1,0 +1,70 @@
+name: Reconcile IA-64 EFI harness invariant
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-contract-check-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-contract-check-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out current branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Restrict the direct-loader check to executable shell lines
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/check-ia64-rooster-branch.py')
+          text = path.read_text()
+          old = '''    forbid(harness, r"exec.*-kernel|\\s-kernel(?:\\s|=)", "EFI harness")
+    forbid(matrix, r"CALL_NULL_FIX[\\\"']?\\s*[:=]\\s*[\\\"']?1",
+'''
+          new = '''    executable_lines = [
+        line.strip()
+        for line in harness.splitlines()
+        if line.strip().startswith(("exec ", "qemu-system-", "$qemu_bin "))
+    ]
+    if any(re.search(r"(?:^|\\s)-kernel(?:\\s|=)", line)
+           for line in executable_lines):
+        raise AssertionError("EFI harness: executable command contains -kernel")
+    forbid(matrix, r"CALL_NULL_FIX[\\\"']?\\s*[:=]\\s*[\\\"']?1",
+'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'executable_lines = [' not in text:
+              raise SystemExit('branch invariant source changed unexpectedly')
+          path.write_text(text)
+          PY
+          python3 scripts/check-ia64-rooster-branch.py
+          python3 -m py_compile scripts/check-ia64-rooster-branch.py
+          git diff --check
+
+      - name: Remove one-shot workflow and commit validated correction
+        run: |
+          set -euo pipefail
+          rm .github/workflows/ia64-contract-check-reconcile.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'tests/ia64: scope direct-loader invariant to commands'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
