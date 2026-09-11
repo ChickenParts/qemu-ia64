@@ -1,0 +1,50 @@
+name: IA-64 dual HOB write trace tools
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - contrib/plugins/ia64-hob-dual-write-trace.c
+      - scripts/build-ia64-hob-dual-plugin.sh
+      - scripts/analyze-ia64-hob-dual-trace.py
+      - tests/unit/test-ia64-hob-dual-trace.py
+      - .github/workflows/ia64-hob-dual-trace.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-and-analyzer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Install plugin build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 libglib2.0-dev
+
+      - name: Build dual-region observational plugin
+        run: |
+          set -euo pipefail
+          bash scripts/build-ia64-hob-dual-plugin.sh \
+            "$PWD/libia64-hob-dual-write-trace.so"
+          file libia64-hob-dual-write-trace.so
+
+      - name: Exercise migration classification
+        run: |
+          set -euo pipefail
+          python3 tests/unit/test-ia64-hob-dual-trace.py
+          python3 -m py_compile \
+            scripts/analyze-ia64-hob-dual-trace.py \
+            tests/unit/test-ia64-hob-dual-trace.py
+          git diff --check
