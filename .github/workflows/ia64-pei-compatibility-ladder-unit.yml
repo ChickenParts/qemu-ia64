@@ -1,0 +1,34 @@
+name: IA-64 PEI compatibility ladder unit tests
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - scripts/run-ia64-pei-compatibility-ladder.py
+      - tests/unit/test-ia64-pei-compatibility-ladder.py
+      - .github/workflows/ia64-pei-compatibility-ladder-unit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-ladder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Exercise cumulative switch isolation
+        run: |
+          set -euo pipefail
+          python3 tests/unit/test-ia64-pei-compatibility-ladder.py
+          python3 -m py_compile \
+            scripts/run-ia64-pei-compatibility-ladder.py \
+            tests/unit/test-ia64-pei-compatibility-ladder.py
+          git diff --check
