@@ -142,17 +142,17 @@ _start:
 .align 0x1000
 .global _start_plabel
 _start_plabel:
-  .data8 _start
-  .data8 __gp
+  data8 _start
+  data8 __gp
 
 #define IMAGE_REL_BASED_DIR64 10
 .section .dummy_reloc,"a"
 .align 4
 pe_reloc:
-  .long _start_plabel - fbase
-  .long 12
-  .short (IMAGE_REL_BASED_DIR64 << 12) + 0
-  .short (IMAGE_REL_BASED_DIR64 << 12) + 8
+  data4 _start_plabel
+  data4 12
+  data2 (IMAGE_REL_BASED_DIR64 << 12) + 0
+  data2 (IMAGE_REL_BASED_DIR64 << 12) + 8
 
 #if defined(__ELF__) && defined(__linux__)
 .section .note.GNU-stack,"",%progbits
