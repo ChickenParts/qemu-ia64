@@ -1,0 +1,116 @@
+name: IA-64 Rooster branch validation
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - docs/ia64-rooster-efi.md
+      - docs/ia64-hob-migration-frontier.md
+      - scripts/check-ia64-rooster-branch.py
+      - scripts/run-ia64-efi-app.sh
+      - scripts/run-ia64-rooster-firmware-matrix.py
+      - scripts/build-ia64-hob-write-plugin.sh
+      - scripts/build-ia64-hob-register-plugin.sh
+      - contrib/plugins/ia64-hob-write-trace.c
+      - contrib/plugins/ia64-hob-write-regs.c
+      - hw/ia64/hob-migration-causality.c
+      - hw/ia64/meson.build
+      - target/ia64/**
+      - tests/ia64/rooster-efi-smoke/**
+      - tests/unit/test-ia64-hob-*.py
+      - .github/workflows/ia64-rooster-branch-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-and-host-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Enforce the EFI-only Rooster contract
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ia64-rooster-branch.py
+          python3 tests/unit/test-ia64-hob-migration.py
+          python3 tests/unit/test-ia64-hob-write-trace.py
+          python3 tests/unit/test-ia64-hob-register-trace.py
+          python3 tests/unit/test-ia64-rooster-firmware-matrix.py
+          python3 -m py_compile \
+            scripts/check-ia64-rooster-branch.py \
+            scripts/analyze-ia64-hob-migration.py \
+            scripts/analyze-ia64-hob-write-trace.py \
+            scripts/analyze-ia64-hob-register-trace.py \
+            scripts/run-ia64-rooster-firmware-matrix.py
+          git diff --check
+
+      - name: Build normal qemu-system-ia64
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --enable-plugins \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build qemu-system-ia64
+          build/qemu-system-ia64 --version
+
+      - name: Build both observational plugins
+        run: |
+          set -euo pipefail
+          bash scripts/build-ia64-hob-write-plugin.sh \
+            "$PWD/build/libia64-hob-write-trace.so"
+          bash scripts/build-ia64-hob-register-plugin.sh \
+            "$PWD/build/libia64-hob-write-regs.so"
+          test -s build/libia64-hob-write-trace.so
+          test -s build/libia64-hob-write-regs.so
+
+  ia64-payload:
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    timeout-minutes: 20
+    steps:
+      - name: Install IA-64 cross tools
+        run: |
+          set -euo pipefail
+          dnf --assumeyes --setopt=install_weak_deps=False install \
+            binutils-ia64-linux-gnu coreutils file \
+            gcc-ia64-linux-gnu git python3
+
+      - name: Check out exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Cross-build and validate BOOTIA64.EFI
+        run: |
+          set -euo pipefail
+          bash tests/ia64/rooster-efi-smoke/build.sh \
+            "$PWD/build/rooster-efi-smoke"
+          file build/rooster-efi-smoke/BOOTIA64.EFI
+          test -s build/rooster-efi-smoke/BOOTIA64.EFI
+
+      - name: Upload payload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rooster-ia64-efi-validation-${{ github.run_id }}
+          path: build/rooster-efi-smoke/
+          retention-days: 14
+          if-no-files-found: error
