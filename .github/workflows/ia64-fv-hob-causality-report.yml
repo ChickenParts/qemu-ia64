@@ -1,0 +1,78 @@
+name: Preserve IA-64 FV HOB causality result
+
+on:
+  workflow_run:
+    workflows:
+      - IA-64 FV HOB migration causality
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  preserve:
+    if: github.event.workflow_run.head_branch == 'ia64-rooster-bringup'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the tested branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Download causality evidence
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ia64-fv-hob-causality-${{ github.event.workflow_run.id }}
+          path: scratch/causality-result
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Construct durable report
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p docs/generated
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          candidates = list(Path('scratch/causality-result').rglob('comparison.json'))
+          comparison = None
+          if candidates:
+              comparison = json.loads(candidates[0].read_text())
+          report = {
+              'schema': 1,
+              'workflow_run_id': int(os.environ['RUN_ID']),
+              'tested_head_sha': os.environ['RUN_SHA'],
+              'conclusion': os.environ['RUN_CONCLUSION'],
+              'workflow_url': os.environ['RUN_URL'],
+              'comparison': comparison,
+              'firmware_embedded': False,
+          }
+          Path('docs/generated/ia64-fv-hob-causality.json').write_text(
+              json.dumps(report, indent=2, sort_keys=True) + '\n'
+          )
+          PY
+
+      - name: Commit report when changed
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/generated/ia64-fv-hob-causality.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'docs/ia64: preserve FV HOB causality result'
+          git push origin HEAD:ia64-rooster-bringup
