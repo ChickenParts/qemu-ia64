@@ -1,0 +1,63 @@
+name: IA-64 Rooster EFI smoke payload
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-rooster-efi-smoke.yml
+      - tests/ia64/rooster-efi-smoke/**
+      - scripts/run-ia64-efi-app.sh
+      - docs/ia64-rooster-efi.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-payload:
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    timeout-minutes: 30
+    steps:
+      - name: Install IA-64 cross tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf --assumeyes --setopt=install_weak_deps=False install \
+            binutils-ia64-linux-gnu \
+            coreutils \
+            file \
+            gcc-ia64-linux-gnu \
+            git \
+            grep \
+            python3
+          test -f "$(ia64-linux-gnu-gcc -print-libgcc-file-name)"
+
+      - name: Check out the exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Build and validate BOOTIA64.EFI
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/ia64/rooster-efi-smoke/build.sh \
+            "$PWD/build/rooster-efi-smoke"
+          file build/rooster-efi-smoke/BOOTIA64.EFI \
+            | tee build/rooster-efi-smoke/file.txt
+          ia64-linux-gnu-objdump -f -h \
+            build/rooster-efi-smoke/rooster-ia64-efi.elf \
+            | tee build/rooster-efi-smoke/objdump.txt
+
+      - name: Upload EFI payload and link evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rooster-ia64-efi-${{ github.run_id }}
+          path: build/rooster-efi-smoke/
+          retention-days: 14
+          if-no-files-found: error
