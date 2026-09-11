@@ -1,0 +1,141 @@
+name: IA-64 temporary/permanent HOB timeline
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-hob-dual-frontier.yml
+      - contrib/plugins/ia64-hob-dual-write-trace.c
+      - scripts/build-ia64-hob-dual-plugin.sh
+      - scripts/analyze-ia64-hob-dual-trace.py
+      - scripts/fetch-ia64-xen-firmware.sh
+      - scripts/run-ia64-firmware.sh
+      - tests/ia64/rooster-efi-smoke/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  timeline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential mercurial ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Build QEMU with plugins
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --enable-plugins \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build qemu-system-ia64
+          bash scripts/build-ia64-hob-dual-plugin.sh \
+            "$PWD/build/libia64-hob-dual-write-trace.so"
+
+      - name: Build Rooster payload and canonical Xen firmware
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/hob-dual-frontier"
+          mkdir -p "$root/firmware"
+          docker run --rm \
+            -v "$PWD:/work" -w /work fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf --assumeyes --setopt=install_weak_deps=False install \
+                binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
+              bash tests/ia64/rooster-efi-smoke/build.sh \
+                /work/scratch/hob-dual-frontier/payload
+            '
+          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
+            scripts/fetch-ia64-xen-firmware.sh "$root/firmware"
+          expected=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+          actual="$(sha256sum "$root/firmware/Flash.fd" | awk '{print $1}')"
+          test "$actual" = "$expected"
+          printf '%s  Flash.fd\n' "$actual" > "$root/firmware.sha256"
+
+      - name: Capture the global temporary/permanent write timeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/hob-dual-frontier"
+          esp="$root/esp"
+          logs="$root/logs"
+          mkdir -p "$esp/EFI/BOOT" "$logs"
+          cp "$root/payload/BOOTIA64.EFI" "$esp/EFI/BOOT/BOOTIA64.EFI"
+          printf 'fs0:\\EFI\\BOOT\\BOOTIA64.EFI\r\n' > "$esp/startup.nsh"
+          printf '{}\n' > "$esp/rooster_config.json"
+
+          set +e
+          QEMU_BIN="$PWD/build/qemu-system-ia64" \
+          IA64_BIOS="$root/firmware/Flash.fd" IA64_LOGDIR="$logs" \
+          IA64_MEM=512M IA64_SMP=1 IA64_DISPLAY=none IA64_GUEST_ERRORS=1 \
+          IA64_CALL_NULL_FIX=0 IA64_PEI_SYSMEM_HOB_FIX=1 \
+          IA64_PEI_22560_STATUS_FIX=1 IA64_PEI_279D0_STATUS_FIX=1 \
+          IA64_PEI_279D0_SAFE_MODE=0 \
+          timeout --signal=TERM --kill-after=5s 180s \
+            scripts/run-ia64-firmware.sh -- \
+              -drive "file=fat:rw:$esp,format=raw,media=disk,if=ide" \
+              -plugin "$PWD/build/libia64-hob-dual-write-trace.so,temporary-base=0xffff0000,temporary-size=0x10000,permanent-base=0x040e0000,permanent-size=0x20000,limit=65536" \
+            > "$root/runner.log" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$root/return-code.txt"
+          cat "$root/runner.log" "$logs"/*.log > "$root/combined.log" 2>/dev/null || true
+
+      - name: Classify migration timeline
+        run: |
+          set -euo pipefail
+          root=scratch/hob-dual-frontier
+          python3 scripts/analyze-ia64-hob-dual-trace.py \
+            "$root/combined.log" \
+            --json "$root/timeline.json" \
+            --markdown "$root/timeline.md" \
+            > "$root/analyzer.stdout"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('scratch/hob-dual-frontier')
+          report = json.loads((root / 'timeline.json').read_text())
+          lines = [
+              '## IA-64 temporary/permanent HOB timeline', '',
+              f"- Classification: `{report['classification']}`",
+              f"- Temporary writes: `{report['temporary_event_count']}`",
+              f"- Permanent writes: `{report['permanent_event_count']}`",
+              f"- Temporary writes after permanent activation: "
+              f"`{report['temporary_events_after_permanent_activation']}`",
+              f"- Cross-region writer PCs: `{report['cross_region_writer_pcs']}`",
+          ]
+          with Path('/home/runner/work/_temp/_runner_file_commands/step_summary').open('a') as out:
+              out.write('\n'.join(lines) + '\n')
+          PY
+
+      - name: Upload timeline evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-hob-dual-frontier-${{ github.run_id }}
+          path: |
+            scratch/hob-dual-frontier/firmware.sha256
+            scratch/hob-dual-frontier/return-code.txt
+            scratch/hob-dual-frontier/combined.log
+            scratch/hob-dual-frontier/timeline.json
+            scratch/hob-dual-frontier/timeline.md
+            scratch/hob-dual-frontier/analyzer.stdout
+          retention-days: 7
+          if-no-files-found: warn
