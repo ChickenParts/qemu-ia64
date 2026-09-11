@@ -1,0 +1,86 @@
+name: Preserve IA-64 PHIT-based HOB transition
+
+on:
+  workflow_run:
+    workflows:
+      - IA-64 temporary/permanent HOB timeline
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  classify-and-preserve:
+    if: github.event.workflow_run.head_branch == 'ia64-rooster-bringup'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out tested branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Download dual-region evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ia64-hob-dual-frontier-${{ github.event.workflow_run.id }}
+          path: scratch/hob-transition-result
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Reclassify from permanent-PHIT activation
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p docs/generated
+          combined="$(find scratch/hob-transition-result -name combined.log -type f | head -n1 || true)"
+          if [[ -n "$combined" ]]; then
+            python3 scripts/analyze-ia64-hob-transition.py \
+              "$combined" \
+              --temporary-hob-list 0xffff7000 \
+              --permanent-hob-list 0x040ef000 \
+              --json scratch/hob-transition.json \
+              --markdown scratch/hob-transition.md
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = Path('scratch/hob-transition.json')
+          transition = json.loads(result.read_text()) if result.exists() else None
+          report = {
+              'schema': 1,
+              'workflow_run_id': int(os.environ['RUN_ID']),
+              'tested_head_sha': os.environ['RUN_SHA'],
+              'conclusion': os.environ['RUN_CONCLUSION'],
+              'workflow_url': os.environ['RUN_URL'],
+              'transition': transition,
+              'firmware_embedded': False,
+          }
+          Path('docs/generated/ia64-hob-transition.json').write_text(
+              json.dumps(report, indent=2, sort_keys=True) + '\n'
+          )
+          PY
+
+      - name: Commit report when changed
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/generated/ia64-hob-transition.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'docs/ia64: preserve PHIT-based HOB transition'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
