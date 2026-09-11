@@ -1,0 +1,146 @@
+name: IA-64 permanent-HOB writer frontier
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-hob-writer-frontier.yml
+      - contrib/plugins/ia64-hob-write-trace.c
+      - scripts/build-ia64-hob-write-plugin.sh
+      - scripts/analyze-ia64-hob-write-trace.py
+      - scripts/fetch-ia64-xen-firmware.sh
+      - scripts/run-ia64-firmware.sh
+      - tests/ia64/rooster-efi-smoke/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trace-writers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential mercurial ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Build QEMU with plugin support and the observational plugin
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --enable-plugins \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build qemu-system-ia64
+          bash scripts/build-ia64-hob-write-plugin.sh \
+            "$PWD/build/libia64-hob-write-trace.so"
+
+      - name: Build the Rooster IA-64 EFI payload
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf --assumeyes --setopt=install_weak_deps=False install \
+                binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
+              bash tests/ia64/rooster-efi-smoke/build.sh \
+                /work/scratch/hob-writer-frontier/payload
+            '
+
+      - name: Rebuild canonical Xen/IPF firmware
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/hob-writer-frontier/firmware
+          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
+            scripts/fetch-ia64-xen-firmware.sh \
+              scratch/hob-writer-frontier/firmware
+          expected=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+          actual="$(sha256sum scratch/hob-writer-frontier/firmware/Flash.fd | awk '{print $1}')"
+          test "$actual" = "$expected"
+          printf '%s  Flash.fd\n' "$actual" \
+            > scratch/hob-writer-frontier/firmware.sha256
+
+      - name: Trace stores into the permanent-HOB arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/hob-writer-frontier"
+          esp="$root/esp"
+          logs="$root/logs"
+          mkdir -p "$esp/EFI/BOOT" "$logs"
+          cp "$root/payload/BOOTIA64.EFI" "$esp/EFI/BOOT/BOOTIA64.EFI"
+          printf 'fs0:\\EFI\\BOOT\\BOOTIA64.EFI\r\n' > "$esp/startup.nsh"
+          printf '{}\n' > "$esp/rooster_config.json"
+
+          set +e
+          QEMU_BIN="$PWD/build/qemu-system-ia64" \
+          IA64_BIOS="$root/firmware/Flash.fd" \
+          IA64_LOGDIR="$logs" \
+          IA64_MEM=512M IA64_SMP=1 IA64_DISPLAY=none IA64_GUEST_ERRORS=1 \
+          IA64_CALL_NULL_FIX=0 IA64_PEI_SYSMEM_HOB_FIX=1 \
+          IA64_PEI_HOB_FLOW_TRACE=1 IA64_PEI_HOB_FLOW_TRACE_LIMIT=4096 \
+          timeout --signal=TERM --kill-after=5s 180s \
+            scripts/run-ia64-firmware.sh -- \
+              -drive "file=fat:rw:$esp,format=raw,media=disk,if=ide" \
+              -plugin "$PWD/build/libia64-hob-write-trace.so,base=0x040e0000,size=0x20000,limit=32768" \
+            > "$root/runner.log" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$root/return-code.txt"
+          cat "$root/runner.log" "$logs"/*.log > "$root/combined.log" 2>/dev/null || true
+
+      - name: Identify writer PCs and PHIT-field mutations
+        run: |
+          set -euo pipefail
+          python3 scripts/analyze-ia64-hob-write-trace.py \
+            scratch/hob-writer-frontier/combined.log \
+            --hob-list 0x040ef000 \
+            --json scratch/hob-writer-frontier/writers.json \
+            --markdown scratch/hob-writer-frontier/writers.md \
+            --top 64 \
+            > scratch/hob-writer-frontier/analyzer.stdout
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('scratch/hob-writer-frontier')
+          report = json.loads((root / 'writers.json').read_text())
+          first = report['first_write']
+          lines = [
+              '## IA-64 permanent-HOB writer frontier', '',
+              f"- Store events: `{report['write_count']}`",
+              f"- First writer PC: `{hex(first['pc'])}`",
+              f"- First destination: `{hex(first['address'])}`",
+              f"- Distinct top writers: `{len(report['writer_pcs'])}`",
+          ]
+          with Path('/home/runner/work/_temp/_runner_file_commands/step_summary').open('a') as out:
+              out.write('\n'.join(lines) + '\n')
+          PY
+
+      - name: Upload writer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-hob-writer-frontier-${{ github.run_id }}
+          path: |
+            scratch/hob-writer-frontier/firmware.sha256
+            scratch/hob-writer-frontier/return-code.txt
+            scratch/hob-writer-frontier/combined.log
+            scratch/hob-writer-frontier/writers.json
+            scratch/hob-writer-frontier/writers.md
+            scratch/hob-writer-frontier/analyzer.stdout
+          retention-days: 7
+          if-no-files-found: warn
