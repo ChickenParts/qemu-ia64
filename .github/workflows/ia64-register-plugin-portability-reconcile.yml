@@ -1,0 +1,136 @@
+name: Reconcile IA-64 register plugin portability
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-register-plugin-portability-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-register-plugin-portability
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out current branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Replace automatic-pointer assumptions with explicit ownership
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('contrib/plugins/ia64-hob-write-regs.c')
+          text = path.read_text()
+          old = '''static void append_register(GString *line, const char *name,
+                            struct qemu_plugin_register *handle)
+{
+    g_autoptr(GByteArray) value = g_byte_array_new();
+    unsigned int index;
+
+    if (handle == NULL || qemu_plugin_read_register(handle, value) <= 0) {
+        return;
+    }
+    g_string_append_printf(line, " %s=", name);
+    for (index = 0; index < value->len; index++) {
+        g_string_append_printf(line, "%02x", value->data[index]);
+    }
+}
+'''
+          new = '''static void append_register(GString *line, const char *name,
+                            struct qemu_plugin_register *handle)
+{
+    GByteArray *value;
+    unsigned int index;
+
+    if (handle == NULL) {
+        return;
+    }
+    value = g_byte_array_new();
+    if (qemu_plugin_read_register(handle, value) <= 0) {
+        g_byte_array_unref(value);
+        return;
+    }
+    g_string_append_printf(line, " %s=", name);
+    for (index = 0; index < value->len; index++) {
+        g_string_append_printf(line, "%02x", value->data[index]);
+    }
+    g_byte_array_unref(value);
+}
+'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'g_autoptr(GByteArray)' in text:
+              raise SystemExit('append_register shape changed unexpectedly')
+
+          text = text.replace(
+              '    g_autoptr(GString) line = NULL;\n',
+              '    GString *line;\n',
+          )
+          text = text.replace(
+              '    qemu_plugin_outs(line->str);\n}\n\nstatic void translate_block',
+              '    qemu_plugin_outs(line->str);\n'
+              '    g_string_free(line, TRUE);\n'
+              '}\n\nstatic void translate_block',
+              1,
+          )
+          text = text.replace(
+              '    g_autoptr(GArray) descriptors = qemu_plugin_get_registers();\n',
+              '    GArray *descriptors = qemu_plugin_get_registers();\n',
+          )
+          needle = '''        }
+    }
+}
+
+static void plugin_exit'''
+          replacement = '''        }
+    }
+    g_array_unref(descriptors);
+}
+
+static void plugin_exit'''
+          if needle in text and 'g_array_unref(descriptors);' not in text:
+              text = text.replace(needle, replacement, 1)
+          if 'g_autoptr(' in text:
+              raise SystemExit('automatic-pointer use remains in plugin')
+          path.write_text(text)
+          PY
+          git diff --check
+
+      - name: Install plugin dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libglib2.0-dev
+
+      - name: Compile the register sampler
+        run: |
+          set -euo pipefail
+          bash scripts/build-ia64-hob-register-plugin.sh \
+            "$PWD/libia64-hob-write-regs.so"
+          test -s libia64-hob-write-regs.so
+
+      - name: Remove one-shot workflow and commit validated portability fix
+        run: |
+          set -euo pipefail
+          rm .github/workflows/ia64-register-plugin-portability-reconcile.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'contrib/plugins: make IA-64 register sampler ownership explicit'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
