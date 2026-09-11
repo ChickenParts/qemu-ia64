@@ -1,0 +1,71 @@
+name: Reconcile adaptive HOB register trigger
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-adaptive-transition-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-adaptive-transition-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out current branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Use the permanent-PHIT transition report
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ia64-hob-adaptive-register-frontier.yml')
+          text = path.read_text()
+          text = text.replace(
+              'docs/generated/ia64-hob-dual-timeline.json',
+              'docs/generated/ia64-hob-transition.json',
+          )
+          text = text.replace(
+              "Path('docs/generated/ia64-hob-dual-timeline.json').read_text()",
+              "Path('docs/generated/ia64-hob-transition.json').read_text()",
+          )
+          text = text.replace(
+              "timeline = report.get('timeline') or {}\n          classification = timeline.get('classification', '')",
+              "transition = report.get('transition') or {}\n          classification = transition.get('classification', '')",
+          )
+          text = text.replace(
+              "classification == 'temporary-writes-continue-after-permanent-activation'",
+              "classification == 'temporary-hob-writes-continue-after-permanent-phit'",
+          )
+          if 'ia64-hob-dual-timeline.json' in text:
+              raise SystemExit('old dual-timeline trigger remains')
+          if 'temporary-writes-continue-after-permanent-activation' in text:
+              raise SystemExit('old activation classification remains')
+          path.write_text(text)
+          PY
+          git diff --check
+
+      - name: Remove one-shot workflow and commit reconciliation
+        run: |
+          set -euo pipefail
+          rm .github/workflows/ia64-adaptive-transition-reconcile.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'ci/ia64: select HOB register arena from permanent PHIT'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
