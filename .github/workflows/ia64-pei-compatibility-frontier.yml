@@ -1,0 +1,168 @@
+name: IA-64 PEI compatibility frontier
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-pei-compatibility-frontier.yml
+      - scripts/run-ia64-pei-compatibility-ladder.py
+      - scripts/fetch-ia64-xen-firmware.sh
+      - scripts/run-ia64-firmware.sh
+      - hw/ia64/hob-migration-causality.c
+      - tests/ia64/rooster-efi-smoke/**
+      - target/ia64/**
+      - hw/ia64/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ladder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Install emulator dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential mercurial ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Build normal QEMU
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build qemu-system-ia64
+          cp build/qemu-system-ia64 build/qemu-system-ia64-normal
+
+      - name: Build QEMU with the semantic causality probe
+        run: |
+          set -euo pipefail
+          cp hw/ia64/meson.build /tmp/ia64-meson.build
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('hw/ia64/meson.build')
+          text = path.read_text()
+          if 'hob-migration-causality.c' not in text:
+              text, count = re.subn(
+                  r"'ipf\.c'\s*,",
+                  "'ipf.c', 'hob-migration-causality.c',",
+                  text,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit('could not include HOB causality probe')
+              path.write_text(text)
+          PY
+          ninja -C build qemu-system-ia64
+          cp build/qemu-system-ia64 build/qemu-system-ia64-probe
+          mv /tmp/ia64-meson.build hw/ia64/meson.build
+          git diff --check
+
+      - name: Build Rooster IA-64 EFI payload
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf --assumeyes --setopt=install_weak_deps=False install \
+                binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
+              bash tests/ia64/rooster-efi-smoke/build.sh \
+                /work/scratch/pei-compatibility/payload
+            '
+
+      - name: Rebuild canonical Xen firmware
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/pei-compatibility/firmware
+          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
+            scripts/fetch-ia64-xen-firmware.sh \
+              scratch/pei-compatibility/firmware
+          expected=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+          actual="$(sha256sum scratch/pei-compatibility/firmware/Flash.fd | awk '{print $1}')"
+          test "$actual" = "$expected"
+          printf '%s  Flash.fd\n' "$actual" \
+            > scratch/pei-compatibility/firmware.sha256
+
+      - name: Run the cumulative compatibility ladder
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-pei-compatibility-ladder.py \
+            --qemu build/qemu-system-ia64-normal \
+            --probe-qemu build/qemu-system-ia64-probe \
+            --firmware scratch/pei-compatibility/firmware/Flash.fd \
+            --payload scratch/pei-compatibility/payload/BOOTIA64.EFI \
+            --runner scripts/run-ia64-firmware.sh \
+            --out scratch/pei-compatibility/ladder \
+            --timeout 150
+
+      - name: Summarize the first stage gained by each switch
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('scratch/pei-compatibility')
+          report = json.loads((root / 'ladder/ladder.json').read_text())
+          order = [
+              'pal-sal', 'fit', 'pei', 'permanent-hob',
+              'dxe-ipl', 'dxe-core', 'bds-shell', 'rooster',
+          ]
+          def rank(case):
+              stages = set(case.get('stages', []))
+              return max((i for i, name in enumerate(order) if name in stages),
+                         default=-1)
+
+          previous = -1
+          transitions = []
+          for case in report['cases']:
+              current = rank(case)
+              transitions.append({
+                  'case': case['case'],
+                  'rank': current,
+                  'advance': current - previous,
+                  'stages': case.get('stages', []),
+                  'fv_restore_observed': case.get('fv_restore_observed', False),
+              })
+              previous = max(previous, current)
+          (root / 'transitions.json').write_text(
+              json.dumps(transitions, indent=2) + '\n'
+          )
+          lines = ['## IA-64 PEI compatibility frontier', '']
+          for item in transitions:
+              lines.append(
+                  f"- `{item['case']}`: rank `{item['rank']}`, "
+                  f"stages `{', '.join(item['stages'])}`, "
+                  f"advance `{item['advance']}`"
+              )
+          with Path('/home/runner/work/_temp/_runner_file_commands/step_summary').open('a') as out:
+              out.write('\n'.join(lines) + '\n')
+          PY
+
+      - name: Upload ladder evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-pei-compatibility-${{ github.run_id }}
+          path: |
+            scratch/pei-compatibility/firmware.sha256
+            scratch/pei-compatibility/payload/BOOTIA64.EFI
+            scratch/pei-compatibility/ladder/
+            scratch/pei-compatibility/transitions.json
+          retention-days: 7
+          if-no-files-found: warn
