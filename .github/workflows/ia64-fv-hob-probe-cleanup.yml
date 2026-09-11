@@ -1,0 +1,100 @@
+name: Consolidate IA-64 FV HOB causality probe
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-fv-hob-probe-cleanup.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Consolidate the diagnostic source and workflow
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('hw/ia64/hob-migration-causality.c')
+          text = source.read_text()
+          old = 'sizeof(struct Ia64HobFvRecord::raw)'
+          new = 'sizeof(((struct Ia64HobFvRecord *)0)->raw)'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one invalid member-size expression, found {text.count(old)}')
+          source.write_text(text.replace(old, new, 1))
+
+          workflow = Path('.github/workflows/ia64-fv-hob-causality.yml')
+          text = workflow.read_text()
+          text = text.replace('hw/ia64/hob-migration-probe.c',
+                              'hw/ia64/hob-migration-causality.c')
+          text = text.replace("'hob-migration-probe.c'",
+                              "'hob-migration-causality.c'")
+          if 'hob-migration-probe.c' in text:
+              raise SystemExit('superseded probe name remains in workflow')
+          workflow.write_text(text)
+
+          obsolete = Path('hw/ia64/hob-migration-probe.c')
+          if obsolete.exists():
+              obsolete.unlink()
+          PY
+          git diff --check
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Compile the consolidated probe transiently
+        run: |
+          set -euo pipefail
+          cp hw/ia64/meson.build /tmp/ia64-meson.build
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('hw/ia64/meson.build')
+          text = path.read_text()
+          text, count = re.subn(
+              r"'ipf\.c'\s*,",
+              "'ipf.c', 'hob-migration-causality.c',",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('could not include causality probe in IA-64 build')
+          path.write_text(text)
+          PY
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build qemu-system-ia64
+          mv /tmp/ia64-meson.build hw/ia64/meson.build
+          git diff --check
+
+      - name: Commit the validated consolidation
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            hw/ia64/hob-migration-causality.c \
+            hw/ia64/hob-migration-probe.c \
+            .github/workflows/ia64-fv-hob-causality.yml
+          git commit -m 'hw/ia64: consolidate FV HOB causality probe'
+          git push origin HEAD:ia64-rooster-bringup
