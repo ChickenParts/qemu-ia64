@@ -1,0 +1,191 @@
+name: Reconcile IA-64 HOB diagnostics
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-bringup-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-bringup-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out current branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Apply idempotent source repairs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('hw/ia64/hob-migration-causality.c')
+          text = source.read_text()
+          text = text.replace(
+              'sizeof(struct Ia64HobFvRecord::raw)',
+              'sizeof(((struct Ia64HobFvRecord *)0)->raw)',
+          )
+          text = text.replace(
+              '#define IA64_HOB_TARGET_BASE UINT64_C(0x04000000)',
+              '#define IA64_HOB_TARGET_BASE UINT64_C(0x040e0000)',
+          )
+          text = text.replace(
+              '#define IA64_HOB_TARGET_SIZE UINT64_C(0x00200000)',
+              '#define IA64_HOB_TARGET_SIZE UINT64_C(0x00020000)',
+          )
+          text = text.replace(
+              '#define IA64_HOB_POLL_NS UINT64_C(100000)',
+              '#define IA64_HOB_POLL_NS UINT64_C(1000000)',
+          )
+          text = text.replace(
+              '#define IA64_HOB_POLL_LIMIT 200000',
+              '#define IA64_HOB_POLL_LIMIT 20000',
+          )
+          if '::raw' in text:
+              raise SystemExit('C++ member syntax remains in the C probe')
+          source.write_text(text)
+
+          workflow = Path('.github/workflows/ia64-fv-hob-causality.yml')
+          text = workflow.read_text()
+          text = text.replace('hw/ia64/hob-migration-probe.c',
+                              'hw/ia64/hob-migration-causality.c')
+          text = text.replace("'hob-migration-probe.c'",
+                              "'hob-migration-causality.c'")
+          if 'hob-migration-probe.c' in text:
+              raise SystemExit('superseded probe remains in causality workflow')
+          workflow.write_text(text)
+
+          obsolete = Path('hw/ia64/hob-migration-probe.c')
+          if obsolete.exists():
+              obsolete.unlink()
+
+          for path in (
+              Path('tests/unit/test-ia64-hob-migration.py'),
+              Path('tests/unit/test-ia64-hob-write-trace.py'),
+          ):
+              text = path.read_text()
+              if '\nimport sys\n' not in text:
+                  text = text.replace('import pathlib\n',
+                                      'import pathlib\nimport sys\n', 1)
+              needle = 'MODULE = importlib.util.module_from_spec(SPEC)\nSPEC.loader.exec_module(MODULE)'
+              replacement = (
+                  'MODULE = importlib.util.module_from_spec(SPEC)\n'
+                  'sys.modules[SPEC.name] = MODULE\n'
+                  'SPEC.loader.exec_module(MODULE)'
+              )
+              if needle in text:
+                  text = text.replace(needle, replacement, 1)
+              if 'sys.modules[SPEC.name] = MODULE' not in text:
+                  raise SystemExit(f'{path}: module registration missing')
+              path.write_text(text)
+
+          plugin = Path('contrib/plugins/ia64-hob-write-trace.c')
+          text = plugin.read_text()
+          text = text.replace(
+              'static void translate_block(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)\n{\n',
+              'static void translate_block(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)\n{\n    (void)id;\n',
+          )
+          text = text.replace(
+              'static void plugin_exit(qemu_plugin_id_t id, void *userdata)\n{\n',
+              'static void plugin_exit(qemu_plugin_id_t id, void *userdata)\n{\n    (void)id;\n    (void)userdata;\n',
+          )
+          text = text.replace(
+              'QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,\n                                           const qemu_info_t *info,\n                                           int argc, char **argv)\n{\n',
+              'QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,\n                                           const qemu_info_t *info,\n                                           int argc, char **argv)\n{\n    (void)info;\n',
+          )
+          plugin.write_text(text)
+
+          for temporary in (
+              '.github/workflows/ia64-fv-hob-probe-cleanup.yml',
+              '.github/workflows/ia64-diagnostic-test-harness-fix.yml',
+              '.github/workflows/ia64-bringup-reconcile.yml',
+          ):
+              path = Path(temporary)
+              if path.exists():
+                  path.unlink()
+          PY
+          git diff --check
+
+      - name: Run Python diagnostics
+        run: |
+          set -euo pipefail
+          python3 tests/unit/test-ia64-hob-migration.py
+          python3 tests/unit/test-ia64-hob-write-trace.py
+          python3 tests/unit/test-ia64-rooster-firmware-matrix.py
+          python3 -m py_compile \
+            scripts/analyze-ia64-hob-migration.py \
+            scripts/analyze-ia64-hob-write-trace.py \
+            scripts/run-ia64-rooster-firmware-matrix.py \
+            tests/unit/test-ia64-hob-migration.py \
+            tests/unit/test-ia64-hob-write-trace.py \
+            tests/unit/test-ia64-rooster-firmware-matrix.py
+
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Build the observational plugin
+        run: |
+          set -euo pipefail
+          bash scripts/build-ia64-hob-write-plugin.sh \
+            "$PWD/libia64-hob-write-trace.so"
+
+      - name: Compile the causality probe in QEMU
+        run: |
+          set -euo pipefail
+          cp hw/ia64/meson.build /tmp/ia64-meson.build
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('hw/ia64/meson.build')
+          text = path.read_text()
+          if 'hob-migration-causality.c' not in text:
+              text, count = re.subn(
+                  r"'ipf\.c'\s*,",
+                  "'ipf.c', 'hob-migration-causality.c',",
+                  text,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit('could not include causality source')
+              path.write_text(text)
+          PY
+          ./configure \
+            --target-list=ia64-softmmu \
+            --enable-plugins \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build qemu-system-ia64
+          mv /tmp/ia64-meson.build hw/ia64/meson.build
+          git diff --check
+
+      - name: Commit, rebase, and push the validated state
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'target/ia64: build-gate HOB migration diagnostics'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
