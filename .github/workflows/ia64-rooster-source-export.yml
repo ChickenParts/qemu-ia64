@@ -1,0 +1,48 @@
+name: IA-64 Rooster source export
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-rooster-source-export.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Package source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=source-export
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/SOURCE_HEAD"
+          git status --short > "$out/GIT_STATUS"
+          tar \
+            --exclude=.git \
+            --exclude=source-export \
+            --exclude=build \
+            --exclude=build-rooster \
+            --exclude=scratch \
+            -czf "$out/qemu-ia64-source.tar.gz" .
+          sha256sum "$out/qemu-ia64-source.tar.gz" > "$out/SHA256SUMS"
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-ia64-source-${{ github.run_id }}
+          path: source-export/
+          retention-days: 3
+          if-no-files-found: error
