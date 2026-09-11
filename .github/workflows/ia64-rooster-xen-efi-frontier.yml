@@ -1,0 +1,146 @@
+name: IA-64 Rooster Xen EFI frontier
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-rooster-xen-efi-frontier.yml
+      - scripts/run-ia64-rooster-firmware-matrix.py
+      - scripts/run-ia64-efi-app.sh
+      - scripts/run-ia64-firmware.sh
+      - scripts/fetch-ia64-xen-firmware.sh
+      - tests/ia64/rooster-efi-smoke/**
+      - target/ia64/**
+      - hw/ia64/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontier:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Install emulator dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            mercurial \
+            ninja-build \
+            pkg-config \
+            python3 \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            libslirp-dev \
+            zlib1g-dev
+
+      - name: Configure and build qemu-system-ia64
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
+            --disable-werror
+          ninja -C build qemu-system-ia64
+          build/qemu-system-ia64 --version
+
+      - name: Build the Rooster IA-64 EFI payload
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf --assumeyes --setopt=install_weak_deps=False install \
+                binutils-ia64-linux-gnu \
+                coreutils \
+                gcc-ia64-linux-gnu \
+                git \
+                python3
+              bash tests/ia64/rooster-efi-smoke/build.sh \
+                /work/scratch/rooster-xen-frontier/payload
+            '
+          test -s scratch/rooster-xen-frontier/payload/BOOTIA64.EFI
+
+      - name: Rebuild canonical Xen/IPF firmware
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/rooster-xen-frontier/firmware
+          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
+            scripts/fetch-ia64-xen-firmware.sh \
+              scratch/rooster-xen-frontier/firmware
+          expected=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+          actual="$(sha256sum scratch/rooster-xen-frontier/firmware/Flash.fd | awk '{print $1}')"
+          printf 'expected=%s\nactual=%s\n' "$expected" "$actual" \
+            | tee scratch/rooster-xen-frontier/firmware-identity.txt
+          test "$actual" = "$expected"
+
+      - name: Replay the real EFI path
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-rooster-firmware-matrix.py \
+            --qemu build/qemu-system-ia64 \
+            --payload scratch/rooster-xen-frontier/payload/BOOTIA64.EFI \
+            --runner scripts/run-ia64-firmware.sh \
+            --out scratch/rooster-xen-frontier/matrix \
+            --timeout 180 \
+            scratch/rooster-xen-frontier/firmware/Flash.fd
+
+      - name: Classify the frontier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('scratch/rooster-xen-frontier/matrix/matrix.json')
+          records = json.loads(path.read_text())
+          assert len(records) == 1
+          record = records[0]
+          stages = record.get('stages', [])
+          summary = [
+              '## IA-64 Rooster Xen EFI frontier',
+              '',
+              f"- Firmware SHA-256: `{record.get('sha256', '')}`",
+              f"- QEMU return code: `{record.get('return_code', '')}`",
+              f"- Observed stages: `{', '.join(stages)}`",
+              f"- Serial bytes: `{record.get('serial_bytes', 0)}`",
+              f"- QEMU log bytes: `{record.get('qemu_log_bytes', 0)}`",
+          ]
+          Path('scratch/rooster-xen-frontier/summary.md').write_text(
+              '\n'.join(summary) + '\n'
+          )
+          with Path('/home/runner/work/_temp/_runner_file_commands/step_summary').open('a') as out:
+              out.write('\n'.join(summary) + '\n')
+          if 'rooster' not in stages:
+              raise SystemExit('firmware did not reach the Rooster EFI entry marker')
+          PY
+
+      - name: Upload frontier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-rooster-xen-frontier-${{ github.run_id }}
+          path: |
+            scratch/rooster-xen-frontier/firmware-identity.txt
+            scratch/rooster-xen-frontier/payload/BOOTIA64.EFI
+            scratch/rooster-xen-frontier/payload/readelf.txt
+            scratch/rooster-xen-frontier/matrix/
+            scratch/rooster-xen-frontier/summary.md
+          retention-days: 7
+          if-no-files-found: warn
