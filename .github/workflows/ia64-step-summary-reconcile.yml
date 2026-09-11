@@ -1,0 +1,121 @@
+name: Reconcile IA-64 workflow step summaries
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-step-summary-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-step-summary-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out current branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Replace runner-internal summary paths
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          old = "Path('/home/runner/work/_temp/_runner_file_commands/step_summary')"
+          new = "Path(os.environ['GITHUB_STEP_SUMMARY'])"
+          changed = []
+          for path in sorted(Path('.github/workflows').glob('*.yml')):
+              if path.name == 'ia64-step-summary-reconcile.yml':
+                  continue
+              text = path.read_text()
+              if old not in text:
+                  continue
+              text = text.replace(old, new)
+              # Add the import only to heredoc blocks that now reference os.
+              lines = text.splitlines()
+              output = []
+              index = 0
+              while index < len(lines):
+                  output.append(lines[index])
+                  if lines[index].strip() == "python3 - <<'PY'":
+                      start = index + 1
+                      end = start
+                      while end < len(lines) and lines[end].strip() != 'PY':
+                          end += 1
+                      block = lines[start:end]
+                      if any("GITHUB_STEP_SUMMARY" in line for line in block) and not any(
+                          line.strip() in ('import os', 'from os import environ')
+                          for line in block
+                      ):
+                          insert_at = 0
+                          while insert_at < len(block) and (
+                              not block[insert_at].strip() or
+                              block[insert_at].lstrip().startswith('#')
+                          ):
+                              insert_at += 1
+                          block.insert(insert_at, '          import os')
+                      output.extend(block)
+                      if end < len(lines):
+                          output.append(lines[end])
+                      index = end + 1
+                      continue
+                  index += 1
+              path.write_text('\n'.join(output) + '\n')
+              changed.append(str(path))
+
+          if not changed:
+              print('No runner-internal summary paths remained')
+          else:
+              print('Updated:')
+              print('\n'.join(changed))
+
+          for path in Path('.github/workflows').glob('*.yml'):
+              text = path.read_text()
+              if '_runner_file_commands/step_summary' in text:
+                  raise SystemExit(f'{path}: runner-internal summary path remains')
+          PY
+          git diff --check
+
+      - name: Sanity-check edited workflow YAML
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+
+          try:
+              import yaml
+          except ImportError:
+              raise SystemExit('PyYAML is unavailable on the hosted runner')
+
+          for path in sorted(Path('.github/workflows').glob('*.yml')):
+              with path.open() as source:
+                  yaml.safe_load(source)
+              print(path)
+          PY
+
+      - name: Remove one-shot workflow and commit validated corrections
+        run: |
+          set -euo pipefail
+          rm .github/workflows/ia64-step-summary-reconcile.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'ci/ia64: use GITHUB_STEP_SUMMARY'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
