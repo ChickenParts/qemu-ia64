@@ -1,0 +1,149 @@
+name: IA-64 HOB writer disassembly
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - docs/generated/ia64-hob-writers.json
+      - .github/workflows/ia64-hob-writer-disassembly.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Select the PHIT writer PC
+        id: writer
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path('docs/generated/ia64-hob-writers.json').read_text())
+          writers = report.get('writers')
+          if not writers:
+              raise SystemExit('writer report has no captured writes')
+          fields = writers.get('field_writers', {})
+          candidates = (
+              fields.get('end-of-hob-list', []) +
+              fields.get('free-memory-bottom', []) +
+              fields.get('handoff-header', [])
+          )
+          if candidates:
+              pc = int(candidates[0]['pc'], 0)
+          else:
+              pc = int(writers['first_write']['pc'])
+          minimum = pc & ~0xfff
+          maximum = minimum + 0x2000
+          output = Path(os.environ['GITHUB_OUTPUT'])
+          with output.open('a') as stream:
+              stream.write(f'pc=0x{pc:x}\n')
+              stream.write(f'minimum=0x{minimum:x}\n')
+              stream.write(f'maximum=0x{maximum:x}\n')
+          Path('writer-selection.json').write_text(json.dumps({
+              'pc': hex(pc),
+              'minimum': hex(minimum),
+              'maximum': hex(maximum),
+          }, indent=2) + '\n')
+          PY
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential mercurial ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Build qemu-system-ia64
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build qemu-system-ia64
+
+      - name: Build Rooster payload and canonical Xen firmware
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/hob-writer-disassembly"
+          mkdir -p "$root/firmware"
+          docker run --rm \
+            -v "$PWD:/work" -w /work fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf --assumeyes --setopt=install_weak_deps=False install \
+                binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
+              bash tests/ia64/rooster-efi-smoke/build.sh \
+                /work/scratch/hob-writer-disassembly/payload
+            '
+          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
+            scripts/fetch-ia64-xen-firmware.sh "$root/firmware"
+          expected=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
+          actual="$(sha256sum "$root/firmware/Flash.fd" | awk '{print $1}')"
+          test "$actual" = "$expected"
+
+      - name: Replay with focused bundle and TB tracing
+        env:
+          WRITER_PC: ${{ steps.writer.outputs.pc }}
+          WRITER_MIN: ${{ steps.writer.outputs.minimum }}
+          WRITER_MAX: ${{ steps.writer.outputs.maximum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/hob-writer-disassembly"
+          esp="$root/esp"
+          logs="$root/logs"
+          mkdir -p "$esp/EFI/BOOT" "$logs"
+          cp "$root/payload/BOOTIA64.EFI" "$esp/EFI/BOOT/BOOTIA64.EFI"
+          printf 'fs0:\\EFI\\BOOT\\BOOTIA64.EFI\r\n' > "$esp/startup.nsh"
+          printf '{}\n' > "$esp/rooster_config.json"
+
+          set +e
+          QEMU_BIN="$PWD/build/qemu-system-ia64" \
+          IA64_BIOS="$root/firmware/Flash.fd" IA64_LOGDIR="$logs" \
+          IA64_MEM=512M IA64_SMP=1 IA64_DISPLAY=none IA64_GUEST_ERRORS=1 \
+          IA64_CALL_NULL_FIX=0 IA64_PEI_SYSMEM_HOB_FIX=1 \
+          QEMU_IA64_FW_DUMP_PC="$WRITER_PC" \
+          QEMU_IA64_FW_DUMP_BUNDLES=64 \
+          QEMU_IA64_TB_LOG_MIN_PC="$WRITER_MIN" \
+          QEMU_IA64_TB_LOG_MAX_PC="$WRITER_MAX" \
+          QEMU_IA64_TB_LOG_LIMIT=16384 \
+          timeout --signal=TERM --kill-after=5s 180s \
+            scripts/run-ia64-firmware.sh -- \
+              -drive "file=fat:rw:$esp,format=raw,media=disk,if=ide" \
+            > "$root/runner.log" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$root/return-code.txt"
+          cat "$root/runner.log" "$logs"/*.log > "$root/combined.log" 2>/dev/null || true
+          grep -aEi \
+            'FW_DUMP|TB_LOG|IN:|st[1248]|ld[1248]|mov|add|sub|alloc|br|HOB|Dxe' \
+            "$root/combined.log" > "$root/focused.log" || true
+          test -s "$root/focused.log"
+
+      - name: Upload focused writer trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-hob-writer-disassembly-${{ github.run_id }}
+          path: |
+            writer-selection.json
+            scratch/hob-writer-disassembly/return-code.txt
+            scratch/hob-writer-disassembly/focused.log
+            scratch/hob-writer-disassembly/combined.log
+          retention-days: 7
+          if-no-files-found: warn
