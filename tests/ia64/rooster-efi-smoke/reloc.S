@@ -105,6 +105,7 @@ __relocate:
   cmp.eq p7,p0=R_IA64_REL64LSB,r_type
   cmp.eq p8,p0=R_IA64_FPTR64LSB,r_type
 (p7) br.cond.sptk.few .apply_REL64
+  ;;
   cmp.eq p7,p0=R_IA64_DIR64LSB,r_type
 (p6) br.cond.sptk.few .apply_relocs
 (p7) br.cond.sptk.few .apply_REL64
