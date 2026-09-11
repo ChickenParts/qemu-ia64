@@ -1,0 +1,34 @@
+name: IA-64 Rooster firmware matrix unit tests
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - scripts/run-ia64-rooster-firmware-matrix.py
+      - tests/unit/test-ia64-rooster-firmware-matrix.py
+      - .github/workflows/ia64-rooster-firmware-matrix-unit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Exercise classification and duplicate handling
+        run: |
+          set -euo pipefail
+          python3 tests/unit/test-ia64-rooster-firmware-matrix.py
+          python3 -m py_compile \
+            scripts/run-ia64-rooster-firmware-matrix.py \
+            tests/unit/test-ia64-rooster-firmware-matrix.py
+          git diff --check
