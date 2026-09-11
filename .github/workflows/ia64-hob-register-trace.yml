@@ -1,0 +1,50 @@
+name: IA-64 HOB writer register trace tools
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - contrib/plugins/ia64-hob-write-regs.c
+      - scripts/build-ia64-hob-register-plugin.sh
+      - scripts/analyze-ia64-hob-register-trace.py
+      - tests/unit/test-ia64-hob-register-trace.py
+      - .github/workflows/ia64-hob-register-trace.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-and-analyzer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 1
+
+      - name: Install plugin build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 libglib2.0-dev
+
+      - name: Build register-sampling plugin
+        run: |
+          set -euo pipefail
+          bash scripts/build-ia64-hob-register-plugin.sh \
+            "$PWD/libia64-hob-write-regs.so"
+          file libia64-hob-write-regs.so
+
+      - name: Exercise role inference and source hygiene
+        run: |
+          set -euo pipefail
+          python3 tests/unit/test-ia64-hob-register-trace.py
+          python3 -m py_compile \
+            scripts/analyze-ia64-hob-register-trace.py \
+            tests/unit/test-ia64-hob-register-trace.py
+          git diff --check
