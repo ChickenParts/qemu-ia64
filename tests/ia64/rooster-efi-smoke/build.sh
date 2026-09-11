@@ -83,5 +83,4 @@ truncate -s "$(( (($(wc -c < "$out/BOOTIA64.EFI") + 4095) / 4096) * 4096 ))" \
     > "$out/readelf.txt"
 python3 "$src/verify.py" "$out/BOOTIA64.EFI"
 
-grep -aF 'Rooster IA-64 EFI entry reached' "$out/BOOTIA64.EFI" >/dev/null
 printf 'built %s\n' "$out/BOOTIA64.EFI"

@@ -11,6 +11,7 @@ MACHINE_IA64 = 0x0200
 PE32_PLUS = 0x020B
 EFI_APPLICATION = 0x000A
 BASE_RELOCATION_DIRECTORY = 5
+EXPECTED_BANNER = "Rooster IA-64 EFI entry reached\r\n".encode("utf-16le") + b"\0\0"
 
 
 def unpack(fmt: str, image: bytes, offset: int) -> tuple[int, ...]:
@@ -108,11 +109,14 @@ def verify(path: pathlib.Path) -> None:
         raise ValueError("base-relocation directory does not point into .reloc")
     if size_of_headers == 0 or size_of_headers > len(image):
         raise ValueError("invalid SizeOfHeaders")
+    if EXPECTED_BANNER not in image:
+        raise ValueError("UTF-16 Rooster EFI smoke banner is absent")
 
     print(
         f"verified {path}: IA-64 PE32+ EFI application; "
         f"entry PLABEL RVA=0x{entry_rva:x}, "
-        f"reloc RVA=0x{reloc_rva:x}, size=0x{reloc_size:x}"
+        f"reloc RVA=0x{reloc_rva:x}, size=0x{reloc_size:x}; "
+        "UTF-16 smoke banner present"
     )
 
 
