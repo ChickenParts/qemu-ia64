@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Static invariants for the coordinated IA-64 Rooster bring-up branch."""
+
+from __future__ import annotations
+
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def read(path: str) -> str:
+    source = ROOT / path
+    if not source.is_file():
+        raise AssertionError(f"required branch file is missing: {path}")
+    return source.read_text(errors="replace")
+
+
+def require(text: str, needle: str, owner: str) -> None:
+    if needle not in text:
+        raise AssertionError(f"{owner}: missing required contract text: {needle!r}")
+
+
+def forbid(text: str, pattern: str, owner: str) -> None:
+    if re.search(pattern, text, re.I | re.M):
+        raise AssertionError(f"{owner}: forbidden dependency matched: {pattern!r}")
+
+
+def main() -> int:
+    documentation = read("docs/ia64-rooster-efi.md")
+    harness = read("scripts/run-ia64-efi-app.sh")
+    matrix = read("scripts/run-ia64-rooster-firmware-matrix.py")
+    frontier = read("docs/ia64-hob-migration-frontier.md")
+    causality = read("hw/ia64/hob-migration-causality.c")
+    causality_workflow = read(".github/workflows/ia64-fv-hob-causality.yml")
+
+    require(documentation, "EFI/BOOT/BOOTIA64.EFI", "EFI contract")
+    require(documentation, "not part of the Rooster boot contract", "EFI contract")
+    require(harness, "-kernel is deliberately unsupported", "EFI harness")
+    require(harness, "EFI/BOOT/BOOTIA64.EFI", "EFI harness")
+    require(matrix, "IA64_CALL_NULL_FIX", "firmware matrix")
+    require(matrix, '"0"', "firmware matrix")
+    require(frontier, "permanent HOB list", "HOB frontier")
+    require(frontier, "EFI_HOB_TYPE_FV", "HOB frontier")
+    require(causality, "QEMU_IA64_PEI_FV_HOB_RESTORE", "causality probe")
+    require(causality_workflow, 'IA64_CALL_NULL_FIX: "0"', "causality workflow")
+
+    # The causality experiment may restore records that already exist in guest
+    # memory, but it may never manufacture a DXE target or key off a firmware
+    # instruction address.
+    forbid(causality, r"CALL_NULL|call.null|DXE_CORE_(?:IP|GP|TARGET)",
+           "causality probe")
+    forbid(causality, r"0x1ff[0-9a-f]{5,}", "causality probe")
+    forbid(causality, r"cpu_set_pc|env->ip|br\.call", "causality probe")
+
+    # The normal build must not include the semantic repair experiment.  Its
+    # dedicated workflow inserts the source transiently for an A/B run.
+    meson = read("hw/ia64/meson.build")
+    forbid(meson, r"hob-migration-causality\.c", "normal IA-64 build")
+
+    # Firmware and payload identity belong in test evidence, not as hidden
+    # QEMU behavior selected by a filename or byte signature.
+    forbid(harness, r"exec.*-kernel|\s-kernel(?:\s|=)", "EFI harness")
+    forbid(matrix, r"CALL_NULL_FIX[\"']?\s*[:=]\s*[\"']?1",
+           "firmware matrix")
+
+    print("IA-64 Rooster EFI branch invariants: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except AssertionError as exc:
+        print(f"check-ia64-rooster-branch.py: {exc}", file=sys.stderr)
+        raise SystemExit(1)
