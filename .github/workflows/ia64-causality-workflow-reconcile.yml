@@ -1,0 +1,98 @@
+name: Reconcile IA-64 causality workflow inclusion
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-causality-workflow-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-causality-workflow-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out current branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Replace guessed Meson edits with the tested helper
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow_paths = (
+              Path('.github/workflows/ia64-fv-hob-causality.yml'),
+              Path('.github/workflows/ia64-pei-compatibility-frontier.yml'),
+          )
+          for path in workflow_paths:
+              if not path.exists():
+                  continue
+              lines = path.read_text().splitlines()
+              output = []
+              index = 0
+              replacements = 0
+              while index < len(lines):
+                  line = lines[index]
+                  if line.strip() == "python3 - <<'PY'":
+                      indent = line[: len(line) - len(line.lstrip())]
+                      end = index + 1
+                      while end < len(lines) and lines[end].strip() != 'PY':
+                          end += 1
+                      if end >= len(lines):
+                          raise SystemExit(f'{path}: unterminated Python heredoc')
+                      block = '\n'.join(lines[index : end + 1])
+                      if ('hob-migration-causality.c' in block or
+                              'hob-migration-probe.c' in block) and (
+                              'meson.build' in block):
+                          output.append(
+                              indent + 'python3 scripts/include-ia64-hob-causality.py'
+                          )
+                          replacements += 1
+                          index = end + 1
+                          continue
+                  output.append(line)
+                  index += 1
+
+              text = '\n'.join(output) + '\n'
+              if 'include-ia64-hob-causality.py' not in text:
+                  raise SystemExit(f'{path}: helper invocation is absent')
+              trigger = '      - scripts/include-ia64-hob-causality.py\n'
+              if trigger not in text:
+                  marker = '    paths:\n'
+                  if marker in text:
+                      text = text.replace(marker, marker + trigger, 1)
+              path.write_text(text)
+              print(f'{path}: replaced {replacements} transient edit block(s)')
+          PY
+          python3 tests/unit/test-ia64-causality-meson.py
+          python3 -m py_compile \
+            scripts/include-ia64-hob-causality.py \
+            tests/unit/test-ia64-causality-meson.py
+          git diff --check
+
+      - name: Remove one-shot workflow and commit the validated reconciliation
+        run: |
+          set -euo pipefail
+          rm .github/workflows/ia64-causality-workflow-reconcile.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'ci/ia64: use structural Meson probe inclusion'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
