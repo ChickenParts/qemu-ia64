@@ -1,0 +1,79 @@
+name: Repair IA-64 diagnostic test import harnesses
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-diagnostic-test-harness-fix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Register dynamically loaded modules
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          paths = (
+              Path('tests/unit/test-ia64-hob-migration.py'),
+              Path('tests/unit/test-ia64-hob-write-trace.py'),
+          )
+          for path in paths:
+              text = path.read_text()
+              if '\nimport sys\n' not in text:
+                  text = text.replace('import pathlib\n', 'import pathlib\nimport sys\n', 1)
+              needle = 'MODULE = importlib.util.module_from_spec(SPEC)\nSPEC.loader.exec_module(MODULE)'
+              replacement = (
+                  'MODULE = importlib.util.module_from_spec(SPEC)\n'
+                  'sys.modules[SPEC.name] = MODULE\n'
+                  'SPEC.loader.exec_module(MODULE)'
+              )
+              if needle in text:
+                  text = text.replace(needle, replacement, 1)
+              elif 'sys.modules[SPEC.name] = MODULE' not in text:
+                  raise SystemExit(f'{path}: dynamic import shape changed')
+              path.write_text(text)
+          PY
+          git diff --check
+
+      - name: Run every synthetic diagnostic test
+        run: |
+          set -euo pipefail
+          python3 tests/unit/test-ia64-hob-migration.py
+          python3 tests/unit/test-ia64-hob-write-trace.py
+          python3 tests/unit/test-ia64-rooster-firmware-matrix.py
+          python3 -m py_compile \
+            scripts/analyze-ia64-hob-migration.py \
+            scripts/analyze-ia64-hob-write-trace.py \
+            scripts/run-ia64-rooster-firmware-matrix.py \
+            tests/unit/test-ia64-hob-migration.py \
+            tests/unit/test-ia64-hob-write-trace.py \
+            tests/unit/test-ia64-rooster-firmware-matrix.py
+
+      - name: Commit validated harness repair
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            tests/unit/test-ia64-hob-migration.py \
+            tests/unit/test-ia64-hob-write-trace.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'tests/ia64: register dynamically imported diagnostic modules'
+          git push origin HEAD:ia64-rooster-bringup
