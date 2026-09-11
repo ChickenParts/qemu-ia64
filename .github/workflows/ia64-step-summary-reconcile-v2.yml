@@ -1,0 +1,115 @@
+name: Reconcile IA-64 workflow summaries dependency-free
+
+on:
+  push:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - .github/workflows/ia64-step-summary-reconcile-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-step-summary-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out current branch
+        uses: actions/checkout@v4
+        with:
+          ref: ia64-rooster-bringup
+          fetch-depth: 0
+
+      - name: Use only the documented summary pathname
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          old = "Path('/home/runner/work/_temp/_runner_file_commands/step_summary')"
+          new = "Path(os.environ['GITHUB_STEP_SUMMARY'])"
+
+          for path in sorted(Path('.github/workflows').glob('*.yml')):
+              if path.name in {
+                  'ia64-step-summary-reconcile.yml',
+                  'ia64-step-summary-reconcile-v2.yml',
+              }:
+                  continue
+              lines = path.read_text().splitlines()
+              output = []
+              index = 0
+              changed = False
+              while index < len(lines):
+                  line = lines[index]
+                  output.append(line)
+                  if line.strip() != "python3 - <<'PY'":
+                      index += 1
+                      continue
+
+                  end = index + 1
+                  while end < len(lines) and lines[end].strip() != 'PY':
+                      end += 1
+                  if end >= len(lines):
+                      raise SystemExit(f'{path}: unterminated Python heredoc')
+                  block = lines[index + 1:end]
+                  block_text = '\n'.join(block)
+                  if old in block_text:
+                      block = [item.replace(old, new) for item in block]
+                      changed = True
+                  if any('GITHUB_STEP_SUMMARY' in item for item in block) and not any(
+                      item.strip() in {'import os', 'from os import environ'}
+                      for item in block
+                  ):
+                      # The branch workflows use ten-space Python indentation
+                      # inside shell heredocs.  Match the first import line when
+                      # possible instead of assuming a global YAML indentation.
+                      import_indent = '          '
+                      for item in block:
+                          if item.lstrip().startswith(('import ', 'from ')):
+                              import_indent = item[:len(item) - len(item.lstrip())]
+                              break
+                      insertion = 0
+                      while insertion < len(block) and (
+                          not block[insertion].strip() or
+                          block[insertion].lstrip().startswith('#')
+                      ):
+                          insertion += 1
+                      block.insert(insertion, import_indent + 'import os')
+                      changed = True
+                  output.extend(block)
+                  output.append(lines[end])
+                  index = end + 1
+
+              if changed:
+                  path.write_text('\n'.join(output) + '\n')
+                  print(f'updated {path}')
+
+          for path in Path('.github/workflows').glob('*.yml'):
+              text = path.read_text()
+              if '_runner_file_commands/step_summary' in text:
+                  raise SystemExit(f'{path}: runner-internal pathname remains')
+          PY
+          git diff --check
+
+      - name: Remove both one-shot summary workflows
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/ia64-step-summary-reconcile.yml \
+            .github/workflows/ia64-step-summary-reconcile-v2.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'ci/ia64: use documented workflow summary file'
+          git fetch origin ia64-rooster-bringup
+          git rebase origin/ia64-rooster-bringup
+          git push origin HEAD:ia64-rooster-bringup
