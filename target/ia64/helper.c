@@ -14370,9 +14370,14 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
         }
 
         if (trace_call_status) {
-            if (call_a4) {
+            /*
+             * EFI_REPORT_STATUS_CODE uses five arguments: type, value,
+             * instance, caller ID, and data.  Keep this diagnostic aligned
+             * with that ABI so assertion records are decoded correctly.
+             */
+            if (call_a3 && call_a3 != UINT64_MAX) {
                 IA64EfiGuid caller;
-                if (ia64_fw_read_guid(env, call_a4, &caller)) {
+                if (ia64_fw_read_guid(env, call_a3, &caller)) {
                     qemu_log_mask(LOG_GUEST_ERROR,
                                   "IA64: trace_call caller=%08x-%04x-%04x"
                                   "-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
@@ -14383,12 +14388,12 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                                   caller.data4[6], caller.data4[7]);
                 } else {
                     qemu_log_mask(LOG_GUEST_ERROR,
-                                  "IA64: trace_call caller_read_fail ptr=%016" PRIx64 "\n",
-                                  call_a4);
+                                  "IA64: trace_call caller_read_fail ptr=%016"
+                                  PRIx64 "\n", call_a3);
                 }
             }
-            if (call_a5) {
-                ia64_fw_statuscode_dump(env, call_a5, call_a1, call_a2);
+            if (call_a4) {
+                ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);
             }
         }
 
