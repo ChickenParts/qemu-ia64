@@ -13426,6 +13426,111 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
                       env->r[37], env->r[38]);
     }
 
+
+/*
+ * Observe firmware-to-RAM control transfers without changing guest
+ * state.  IA-64 firmware enters loaded images through a two-word
+ * procedure label, so scan static-register pointer candidates for a
+ * descriptor whose entry matches the call target.  This is gated and
+ * bounded because helper_call() is otherwise a very hot path.
+ */
+static int fw_handoff_trace = -1;
+static int fw_handoff_limit = -1;
+static int fw_handoff_count;
+if (fw_handoff_trace == -1) {
+    const char *s = getenv("QEMU_IA64_TRACE_FW_HANDOFF");
+    fw_handoff_trace =
+        s && *s && strcmp(s, "0") && strcmp(s, "off") &&
+        strcmp(s, "false") && strcmp(s, "no");
+}
+if (fw_handoff_limit == -1) {
+    const char *s = getenv("QEMU_IA64_TRACE_FW_HANDOFF_LIMIT");
+    fw_handoff_limit = s && *s ? atoi(s) : 16;
+    if (fw_handoff_limit < 0) {
+        fw_handoff_limit = 0;
+    }
+}
+if (fw_handoff_trace &&
+    (fw_handoff_limit == 0 ||
+     fw_handoff_count < fw_handoff_limit)) {
+    uint64_t pc_phys = ia64_phys_mode_addr(pc);
+    uint64_t tgt_phys = ia64_phys_mode_addr(tgt);
+    bool from_firmware =
+        pc_phys >= UINT64_C(0xff000000) &&
+        pc_phys <= UINT64_C(0xffffffff);
+    bool to_ram =
+        tgt_phys >= UINT64_C(0x00100000) &&
+        tgt_phys < UINT64_C(0xff000000);
+
+    if (from_firmware && to_ram) {
+        CPUState *cs = env_cpu(env);
+        bool found_descriptor = false;
+
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "IA64: fw_handoff_call pc=%016" PRIx64
+                      " tgt=%016" PRIx64
+                      " pc_phys=%016" PRIx64
+                      " tgt_phys=%016" PRIx64
+                      " gp=%016" PRIx64
+                      " sp=%016" PRIx64
+                      " r13=%016" PRIx64
+                      " bsp=%016" PRIx64 "\n",
+                      pc, tgt, pc_phys, tgt_phys,
+                      env->r[1], env->r[12], env->r[13],
+                      env->ar[IA64_AR_BSP]);
+
+        for (unsigned int reg = 2; reg < 32; reg++) {
+            uint64_t raw = env->r[reg];
+            for (unsigned int back = 0; back <= 8; back += 8) {
+                uint64_t candidate;
+                uint8_t descriptor[16];
+                uint64_t entry;
+                uint64_t gp;
+                uint64_t entry_phys;
+
+                if (raw < back) {
+                    continue;
+                }
+                candidate = raw - back;
+                if (candidate < UINT64_C(0x1000)) {
+                    continue;
+                }
+                if (cpu_memory_rw_debug(
+                        cs, ia64_phys_mode_addr(candidate),
+                        descriptor, sizeof(descriptor), false) != 0) {
+                    continue;
+                }
+                memcpy(&entry, descriptor, sizeof(entry));
+                memcpy(&gp, descriptor + 8, sizeof(gp));
+                entry_phys = ia64_phys_mode_addr(entry);
+                if (((entry_phys ^ tgt_phys) & ~UINT64_C(0xf)) != 0) {
+                    continue;
+                }
+
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "IA64: fw_handoff_plabel r%u=%016"
+                              PRIx64 " back=%u fd=%016" PRIx64
+                              " entry=%016" PRIx64
+                              " entry_phys=%016" PRIx64
+                              " gp=%016" PRIx64
+                              " active_gp=%016" PRIx64 "\n",
+                              reg, raw, back, candidate,
+                              entry, entry_phys, gp, env->r[1]);
+                found_descriptor = true;
+            }
+        }
+        if (!found_descriptor) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IA64: fw_handoff_plabel_not_found"
+                          " pc=%016" PRIx64
+                          " tgt=%016" PRIx64 "\n",
+                          pc, tgt);
+        }
+        fw_handoff_count++;
+    }
+}
+
+
     /*
      * Heuristic call tracing to catch mis-mapped argument registers during
      * bringup (e.g. pool allocators being called with a pointer-sized "Size").
