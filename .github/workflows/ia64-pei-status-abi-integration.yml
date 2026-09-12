@@ -88,14 +88,15 @@ jobs:
           )
           if source.count(args_marker) != 1:
               raise SystemExit('argument dump block changed unexpectedly')
-          args_replacement = dedent('''
-                      uint64_t args[] = {
-                          call_a0, call_a1, call_a2,
-                          call_a3, call_a4, call_a5
-                      };
-                      const char *names[] = {
-                          "a0", "a1", "a2", "a3", "a4", "a5"
-                      };''').strip('\n')
+          args_replacement = (
+              '            uint64_t args[] = {\n'
+              '                call_a0, call_a1, call_a2,\n'
+              '                call_a3, call_a4, call_a5\n'
+              '            };\n'
+              '            const char *names[] = {\n'
+              '                "a0", "a1", "a2", "a3", "a4", "a5"\n'
+              '            };'
+          )
           source = source.replace(args_marker, args_replacement, 1)
 
           assert 'Framework PEI ReportStatusCode has six arguments' in source
