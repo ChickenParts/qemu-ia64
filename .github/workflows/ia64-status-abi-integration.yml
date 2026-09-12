@@ -29,6 +29,7 @@ jobs:
           mkdir -p validation
           python3 - <<'PY'
           from pathlib import Path
+          from textwrap import dedent, indent
 
           path = Path('target/ia64/helper.c')
           source = path.read_text()
@@ -37,36 +38,50 @@ jobs:
           start = source.index(start_marker)
           end = source.index(end_marker, start)
           old = source[start:end]
-          new = '''        if (trace_call_status) {
-              /*
-               * EFI_REPORT_STATUS_CODE uses five arguments: type, value,
-               * instance, caller ID, and data.  Keep this diagnostic aligned
-               * with that ABI so assertion records are decoded correctly.
-               */
-              if (call_a3 && call_a3 != UINT64_MAX) {
-                  IA64EfiGuid caller;
-                  if (ia64_fw_read_guid(env, call_a3, &caller)) {
-                      qemu_log_mask(LOG_GUEST_ERROR,
-                                    "IA64: trace_call caller=%08x-%04x-%04x"
-                                    "-%02x%02x-%02x%02x%02x%02x%02x%02x\\n",
-                                    caller.data1, caller.data2, caller.data3,
-                                    caller.data4[0], caller.data4[1],
-                                    caller.data4[2], caller.data4[3],
-                                    caller.data4[4], caller.data4[5],
-                                    caller.data4[6], caller.data4[7]);
-                  } else {
-                      qemu_log_mask(LOG_GUEST_ERROR,
-                                    "IA64: trace_call caller_read_fail ptr=%016"
-                                    PRIx64 "\\n", call_a3);
-                  }
+
+          body = dedent(r'''
+          /*
+           * EFI_REPORT_STATUS_CODE uses five arguments: type, value,
+           * instance, caller ID, and data.  Keep this diagnostic aligned
+           * with that ABI so assertion records are decoded correctly.
+           */
+          if (call_a3 && call_a3 != UINT64_MAX) {
+              IA64EfiGuid caller;
+              if (ia64_fw_read_guid(env, call_a3, &caller)) {
+                  qemu_log_mask(LOG_GUEST_ERROR,
+                                "IA64: trace_call caller=%08x-%04x-%04x"
+                                "-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                caller.data1, caller.data2, caller.data3,
+                                caller.data4[0], caller.data4[1],
+                                caller.data4[2], caller.data4[3],
+                                caller.data4[4], caller.data4[5],
+                                caller.data4[6], caller.data4[7]);
+              } else {
+                  qemu_log_mask(LOG_GUEST_ERROR,
+                                "IA64: trace_call caller_read_fail ptr=%016"
+                                PRIx64 "\n", call_a3);
               }
-              if (call_a4) {
-                  ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);
-              }
-          }'''
+          }
+          if (call_a4) {
+              ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);
+          }
+          ''').strip('\n')
+          new = (
+              '        if (trace_call_status) {\n'
+              + indent(body, '            ')
+              + '\n        }'
+          )
+
           if 'ia64_fw_statuscode_dump(env, call_a5, call_a1, call_a2);' not in old:
               raise SystemExit('status-code ABI block changed unexpectedly')
-          path.write_text(source[:start] + new + source[end:])
+          if source.count(start_marker) != 1:
+              raise SystemExit('status-code trace block is not unique')
+
+          updated = source[:start] + new + source[end:]
+          assert '            /*\n             * EFI_REPORT_STATUS_CODE' in updated
+          assert 'ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);' in updated
+          assert 'ia64_fw_statuscode_dump(env, call_a5, call_a1, call_a2);' not in updated
+          path.write_text(updated)
           PY
 
           git diff --check
