@@ -1,6 +1,7 @@
 name: IA-64 Rooster QEMU export
 
-# Rebuild this bundle after IA-64 emulator, ABI-trace, or EFI-harness changes.
+# Rebuild after IA-64 emulator, ABI-trace, or EFI-harness changes; this run
+# captures the six-argument Framework PEI ReportStatusCode decoder.
 on:
   push:
     branches:
