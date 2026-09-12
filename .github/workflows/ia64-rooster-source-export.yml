@@ -1,5 +1,6 @@
 name: IA-64 Rooster source export
 
+# This workflow is intentionally retained as the reproducible source handoff.
 on:
   push:
     branches:
