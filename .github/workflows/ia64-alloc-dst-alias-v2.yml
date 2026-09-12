@@ -1,0 +1,174 @@
+name: IA-64 alloc destination alias experiment v2
+
+on:
+  push:
+    branches:
+      - diag/ia64-alloc-dst-alias-20260912
+    paths:
+      - .github/workflows/ia64-alloc-dst-alias-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [helper-trace, atomic-destination]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: diag/ia64-alloc-dst-alias-20260912
+          fetch-depth: 1
+
+      - name: Apply experiment
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          variant = os.environ['VARIANT']
+          helper = Path('target/ia64/helper.c')
+          source = helper.read_text()
+          start = source.index('uint64_t HELPER(alloc)(')
+          end = source.index('\n}\n\nvoid HELPER(rotate_grs)', start) + 2
+          alloc = source[start:end]
+          signature = ('uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, '
+                       'uint64_t sol, uint64_t sor)\n{')
+          if not alloc.startswith(signature):
+              raise SystemExit('unexpected alloc signature')
+
+          prologue = '''
+              static int trace_enabled = -1;
+              static uint64_t trace_pc;
+              static unsigned int trace_count;
+              uint64_t gp_before = env->r[1];
+              uint64_t r36_before = env->r[36];
+              bool trace;
+
+              if (trace_enabled == -1) {
+                  const char *value = getenv("QEMU_IA64_ALLOC_TRACE_PC");
+                  trace_enabled = value && *value ? 1 : 0;
+                  if (trace_enabled) {
+                      trace_pc = strtoull(value, NULL, 0) & ((1ULL << 61) - 1);
+                  }
+              }
+              trace = trace_enabled && trace_count < 64 &&
+                      ((env->ip & ((1ULL << 61) - 1)) == trace_pc);
+          '''
+          prologue = '\n'.join(line[4:] if line.startswith('    ') else line
+                               for line in prologue.splitlines()).strip('\n')
+          alloc = alloc.replace(signature, signature + '\n' + prologue, 1)
+
+          common_log = '''
+              if (trace) {
+                  qemu_log_mask(LOG_GUEST_ERROR,
+                                "alloc_trace ip=%016" PRIx64
+                                " variant=%s dst=%u"
+                                " gp_before=%016" PRIx64
+                                " gp_after=%016" PRIx64
+                                " r36_before=%016" PRIx64
+                                " r36_after=%016" PRIx64
+                                " old_pfs=%016" PRIx64
+                                " old_cfm=%016" PRIx64
+                                " new_cfm=%016" PRIx64 "\\n",
+                                env->ip, "%s", %s, gp_before, env->r[1],
+                                r36_before, env->r[36], old_pfs,
+                                old_cfm, env->cfm);
+                  trace_count++;
+              }
+          '''
+
+          if variant == 'atomic-destination':
+              alloc = alloc.replace(
+                  'uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, '
+                  'uint64_t sol, uint64_t sor)',
+                  'void HELPER(alloc)(CPUIA64State *env, uint32_t dst, '
+                  'uint64_t sof, uint64_t sol, uint64_t sor)', 1)
+              log = common_log % ('atomic', 'atomic', 'dst')
+              tail = '    return old_pfs;\n}'
+              repl = '''    if (dst != 0 && dst < ARRAY_SIZE(env->r)) {
+                  env->r[dst] = old_pfs;
+                  env->nat[dst] = 0;
+              }
+          ''' + log + '}'
+              alloc = alloc.replace(tail, repl, 1)
+          else:
+              log = common_log % ('helper-return', 'helper-return', '0u')
+              alloc = alloc.replace('    return old_pfs;\n}',
+                                    log + '\n    return old_pfs;\n}', 1)
+
+          helper.write_text(source[:start] + alloc + source[end:])
+
+          if variant == 'atomic-destination':
+              header = Path('target/ia64/helper.h')
+              text = header.read_text()
+              text = text.replace(
+                  'DEF_HELPER_4(alloc, i64, env, i64, i64, i64)',
+                  'DEF_HELPER_5(alloc, void, env, i32, i64, i64, i64)', 1)
+              header.write_text(text)
+
+              translator = Path('target/ia64/translate.c')
+              text = translator.read_text()
+              old = '''                TCGv_i64 old_pfs = tcg_temp_new_i64();
+          gen_helper_alloc(old_pfs, tcg_env,
+                           tcg_constant_i64(sof),
+                           tcg_constant_i64(sol),
+                           tcg_constant_i64(sor));
+          if (r1 != 0) {
+              tcg_gen_mov_i64(cpu_r[r1], old_pfs);
+          }
+          '''
+              new = '''                gen_helper_alloc(tcg_env,
+                           tcg_constant_i32(r1),
+                           tcg_constant_i64(sof),
+                           tcg_constant_i64(sol),
+                           tcg_constant_i64(sor));
+          '''
+              if text.count(old) != 1:
+                  raise SystemExit('unexpected alloc translator block')
+              translator.write_text(text.replace(old, new, 1))
+          PY
+          git diff --check
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libglib2.0-dev libpixman-1-dev ninja-build \
+            pkg-config python3 python3-venv zlib1g-dev
+
+      - name: Build
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          build="build-${VARIANT}"
+          mkdir "$build"
+          (cd "$build" && ../configure \
+            --target-list=ia64-softmmu --disable-docs --disable-gtk \
+            --disable-sdl --disable-vnc --disable-werror)
+          ninja -C "$build" -j"$(nproc)" qemu-system-ia64
+          out="experiment-${VARIANT}"
+          mkdir -p "$out/scripts"
+          install -m 0755 "$build/qemu-system-ia64" "$out/"
+          install -m 0755 scripts/run-ia64-firmware.sh "$out/scripts/"
+          printf '%s\n' "$VARIANT" > "$out/VARIANT"
+          git diff --binary > "$out/${VARIANT}.patch"
+          sha256sum "$out/qemu-system-ia64" > "$out/SHA256SUMS"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ia64-alloc-${{ matrix.variant }}-${{ github.run_id }}
+          path: experiment-${{ matrix.variant }}/
+          retention-days: 7
+          if-no-files-found: error
