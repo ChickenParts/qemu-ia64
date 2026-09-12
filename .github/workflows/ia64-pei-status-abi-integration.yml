@@ -29,90 +29,80 @@ jobs:
           mkdir -p validation
           python3 - <<'PY'
           from pathlib import Path
+          from textwrap import dedent, indent
 
           path = Path('target/ia64/helper.c')
           source = path.read_text()
 
-          old_status = '''        if (trace_call_status) {
-              /*
-               * EFI_REPORT_STATUS_CODE uses five arguments: type, value,
-               * instance, caller ID, and data.  Keep this diagnostic aligned
-               * with that ABI so assertion records are decoded correctly.
-               */
-              if (call_a3 && call_a3 != UINT64_MAX) {
-                  IA64EfiGuid caller;
-                  if (ia64_fw_read_guid(env, call_a3, &caller)) {
-                      qemu_log_mask(LOG_GUEST_ERROR,
-                                    "IA64: trace_call caller=%08x-%04x-%04x"
-                                    "-%02x%02x-%02x%02x%02x%02x%02x%02x\\n",
-                                    caller.data1, caller.data2, caller.data3,
-                                    caller.data4[0], caller.data4[1],
-                                    caller.data4[2], caller.data4[3],
-                                    caller.data4[4], caller.data4[5],
-                                    caller.data4[6], caller.data4[7]);
-                  } else {
-                      qemu_log_mask(LOG_GUEST_ERROR,
-                                    "IA64: trace_call caller_read_fail ptr=%016"
-                                    PRIx64 "\\n", call_a3);
-                  }
-              }
-              if (call_a4) {
-                  ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);
-              }
-          }
-          '''
-          new_status = '''        if (trace_call_status) {
-              /*
-               * Framework PEI ReportStatusCode has six arguments:
-               * PeiServices, CodeType, Value, Instance, CallerId, and Data.
-               * This callsite is the PEI service, not the five-argument DXE
-               * runtime service.  Decode the actual assertion record in a5.
-               */
-              if (call_a4 && call_a4 != UINT64_MAX) {
-                  IA64EfiGuid caller;
-                  if (ia64_fw_read_guid(env, call_a4, &caller)) {
-                      qemu_log_mask(LOG_GUEST_ERROR,
-                                    "IA64: trace_call caller=%08x-%04x-%04x"
-                                    "-%02x%02x-%02x%02x%02x%02x%02x%02x\\n",
-                                    caller.data1, caller.data2, caller.data3,
-                                    caller.data4[0], caller.data4[1],
-                                    caller.data4[2], caller.data4[3],
-                                    caller.data4[4], caller.data4[5],
-                                    caller.data4[6], caller.data4[7]);
-                  } else {
-                      qemu_log_mask(LOG_GUEST_ERROR,
-                                    "IA64: trace_call caller_read_fail ptr=%016"
-                                    PRIx64 "\\n", call_a4);
-                  }
-              }
-              if (call_a5) {
-                  ia64_fw_statuscode_dump(env, call_a5, call_a1, call_a2);
-              }
-          }
-          '''
-
-          old_args = '''            uint64_t args[] = { call_a0, call_a1, call_a2, call_a3, call_a4 };
-              const char *names[] = { "a0", "a1", "a2", "a3", "a4" };
-          '''
-          new_args = '''            uint64_t args[] = {
-                  call_a0, call_a1, call_a2, call_a3, call_a4, call_a5
-              };
-              const char *names[] = {
-                  "a0", "a1", "a2", "a3", "a4", "a5"
-              };
-          '''
-
-          if source.count(old_status) != 1:
+          start_marker = '        if (trace_call_status) {\n'
+          end_marker = '\n\n        /*\n         * ABI note:'
+          start = source.index(start_marker)
+          end = source.index(end_marker, start)
+          old_status = source[start:end]
+          if 'EFI_REPORT_STATUS_CODE uses five arguments' not in old_status:
               raise SystemExit('five-argument status block changed unexpectedly')
-          if source.count(old_args) != 1:
-              raise SystemExit('argument dump block changed unexpectedly')
+          if 'ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);' \
+                  not in old_status:
+              raise SystemExit('five-argument status decoder is absent')
 
-          source = source.replace(old_status, new_status, 1)
-          source = source.replace(old_args, new_args, 1)
+          body = dedent(r'''
+          /*
+           * Framework PEI ReportStatusCode has six arguments:
+           * PeiServices, CodeType, Value, Instance, CallerId, and Data.
+           * This callsite is the PEI service, not the five-argument DXE
+           * runtime service. Decode the actual assertion record in a5.
+           */
+          if (call_a4 && call_a4 != UINT64_MAX) {
+              IA64EfiGuid caller;
+              if (ia64_fw_read_guid(env, call_a4, &caller)) {
+                  qemu_log_mask(LOG_GUEST_ERROR,
+                                "IA64: trace_call caller=%08x-%04x-%04x"
+                                "-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                                caller.data1, caller.data2, caller.data3,
+                                caller.data4[0], caller.data4[1],
+                                caller.data4[2], caller.data4[3],
+                                caller.data4[4], caller.data4[5],
+                                caller.data4[6], caller.data4[7]);
+              } else {
+                  qemu_log_mask(LOG_GUEST_ERROR,
+                                "IA64: trace_call caller_read_fail ptr=%016"
+                                PRIx64 "\n", call_a4);
+              }
+          }
+          if (call_a5) {
+              ia64_fw_statuscode_dump(env, call_a5, call_a1, call_a2);
+          }
+          ''').strip('\n')
+          new_status = (
+              start_marker
+              + indent(body, '            ')
+              + '\n        }'
+          )
+          source = source[:start] + new_status + source[end:]
+
+          args_marker = (
+              '            uint64_t args[] = { call_a0, call_a1, call_a2, '
+              'call_a3, call_a4 };\n'
+              '            const char *names[] = { "a0", "a1", "a2", '
+              '"a3", "a4" };'
+          )
+          if source.count(args_marker) != 1:
+              raise SystemExit('argument dump block changed unexpectedly')
+          args_replacement = dedent('''
+                      uint64_t args[] = {
+                          call_a0, call_a1, call_a2,
+                          call_a3, call_a4, call_a5
+                      };
+                      const char *names[] = {
+                          "a0", "a1", "a2", "a3", "a4", "a5"
+                      };''').strip('\n')
+          source = source.replace(args_marker, args_replacement, 1)
 
           assert 'Framework PEI ReportStatusCode has six arguments' in source
-          assert 'ia64_fw_statuscode_dump(env, call_a5, call_a1, call_a2);' in source
-          assert 'ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);' not in source
+          assert 'ia64_fw_statuscode_dump(env, call_a5, call_a1, call_a2);' \
+              in source
+          assert 'ia64_fw_statuscode_dump(env, call_a4, call_a0, call_a1);' \
+              not in source
           assert '"a0", "a1", "a2", "a3", "a4", "a5"' in source
           path.write_text(source)
           PY
