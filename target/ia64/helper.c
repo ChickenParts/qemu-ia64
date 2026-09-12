@@ -1707,6 +1707,20 @@ void HELPER(rfi)(CPUIA64State *env)
 
 static uint64_t ia64_dbg_next_call_pc;
 
+void HELPER(dbg_gr_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                          uint32_t reg, uint64_t insn)
+{
+    if (reg >= ARRAY_SIZE(env->r)) {
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "gr_watch pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                  " r%u=%016" PRIx64 " b7=%016" PRIx64
+                  " cfm=%016" PRIx64 " bsp=%016" PRIx64 "\n",
+                  pc, ri, insn, reg, env->r[reg], env->b[7],
+                  env->cfm, env->ar[IA64_AR_BSP]);
+}
+
 void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
 {
     static int log_count;
@@ -1753,6 +1767,27 @@ void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)
                           " s2=%011" PRIx64 "\n",
                           base, low, high, tmpl, s0, s1, s2);
         }
+    }
+
+    if (ia64_phys_mode_addr(pc & ~0xFULL) ==
+        0x000000001ff4f520ULL) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "dbg_call_b7 pc=%016" PRIx64
+                      " b7=%016" PRIx64 " r30=%016" PRIx64
+                      " r31=%016" PRIx64 " r14=%016" PRIx64
+                      " last={pc=%016" PRIx64 " kind=%s aux=%" PRIu64
+                      " old=%016" PRIx64 " val=%016" PRIx64 "}"
+                      " prev={pc=%016" PRIx64 " kind=%s aux=%" PRIu64
+                      " old=%016" PRIx64 " val=%016" PRIx64 "}\n",
+                      pc, env->b[7], env->r[30], env->r[31], env->r[14],
+                      env->last_b7_write_pc,
+                      ia64_fw_b7_kind_name(env->last_b7_write_kind),
+                      env->last_b7_write_aux,
+                      env->last_b7_write_old, env->last_b7_write_val,
+                      env->prev_b7_write_pc,
+                      ia64_fw_b7_kind_name(env->prev_b7_write_kind),
+                      env->prev_b7_write_aux,
+                      env->prev_b7_write_old, env->prev_b7_write_val);
     }
 
     if (pc == 0xa0000001000665c0ULL) {

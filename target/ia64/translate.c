@@ -15,6 +15,7 @@
 #include "exec/translation-block.h"
 #include "exec/memop.h"
 #include "qemu/log.h"
+#include "qemu/cutils.h"
 #include <ctype.h>
 #include <inttypes.h>
 #define HELPER_H "helper.h"
@@ -124,6 +125,64 @@ static bool ia64_load_watch_range_inited;
 static bool ia64_load_watch_range_enabled;
 static uint64_t ia64_load_watch_range_lo;
 static uint64_t ia64_load_watch_range_hi;
+
+/*
+ * Narrow general-register provenance tracing for firmware bring-up.
+ *
+ * This is intentionally translation-time gated: unless
+ * QEMU_IA64_GR_WATCH is set, no helper calls are emitted. PC limits
+ * use physical/low-61-bit addresses so one setting covers raw and
+ * region-encoded firmware PCs.
+ */
+static bool ia64_gr_watch_inited;
+static int ia64_gr_watch_reg = -1;
+static uint64_t ia64_gr_watch_min_pc;
+static uint64_t ia64_gr_watch_max_pc = UINT64_MAX;
+
+static void ia64_init_gr_watch(void)
+{
+    const char *s;
+    const char *endp = NULL;
+    long reg;
+    uint64_t value;
+
+    if (ia64_gr_watch_inited) {
+        return;
+    }
+    ia64_gr_watch_inited = true;
+
+    s = getenv("QEMU_IA64_GR_WATCH");
+    if (!s || !*s) {
+        return;
+    }
+    if (qemu_strtol(s, &endp, 0, &reg) < 0 || endp == s || *endp ||
+        reg < 0 || reg >= 128) {
+        return;
+    }
+    ia64_gr_watch_reg = reg;
+
+    s = getenv("QEMU_IA64_GR_WATCH_MIN_PC");
+    if (s && *s && qemu_strtou64(s, NULL, 0, &value) == 0) {
+        ia64_gr_watch_min_pc = value & ((1ULL << 61) - 1);
+    }
+    s = getenv("QEMU_IA64_GR_WATCH_MAX_PC");
+    if (s && *s && qemu_strtou64(s, NULL, 0, &value) == 0) {
+        ia64_gr_watch_max_pc = value & ((1ULL << 61) - 1);
+    }
+}
+
+static bool ia64_gr_watch_match(uint64_t pc)
+{
+    uint64_t low_pc;
+
+    ia64_init_gr_watch();
+    if (ia64_gr_watch_reg < 0) {
+        return false;
+    }
+    low_pc = pc & ((1ULL << 61) - 1);
+    return low_pc >= ia64_gr_watch_min_pc &&
+           low_pc <= ia64_gr_watch_max_pc;
+}
 
 static bool ia64_fw_fastpath_inited;
 static bool ia64_fw_fastpath_enabled;
@@ -8154,6 +8213,15 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     decode_insn(ctx, insn, type);
+
+    if (ctx->base.is_jmp == DISAS_NEXT &&
+        ia64_gr_watch_match(ctx->base.pc_next)) {
+        gen_helper_dbg_gr_watch(tcg_env,
+                                tcg_constant_i64(ctx->base.pc_next),
+                                tcg_constant_i32(ctx->ri),
+                                tcg_constant_i32(ia64_gr_watch_reg),
+                                tcg_constant_i64(insn));
+    }
 
     if (ctx->base.is_jmp == DISAS_NEXT &&
         ia64_pc_in_fw(ctx->base.pc_next) &&
