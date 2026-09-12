@@ -1,5 +1,6 @@
 name: IA-64 Rooster QEMU export
 
+# Rebuild this bundle whenever the IA-64 emulator or EFI harness changes.
 on:
   push:
     branches:
