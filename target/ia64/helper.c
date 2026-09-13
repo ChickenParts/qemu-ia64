@@ -18,6 +18,7 @@
 #include "exec/tb-flush.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "qemu/bswap.h"
+#include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "exec/cpu-common.h"
@@ -1719,6 +1720,59 @@ void HELPER(dbg_gr_watch)(CPUIA64State *env, uint64_t pc, uint32_t ri,
                   " cfm=%016" PRIx64 " bsp=%016" PRIx64 "\n",
                   pc, ri, insn, reg, env->r[reg], env->b[7],
                   env->cfm, env->ar[IA64_AR_BSP]);
+}
+
+void HELPER(dbg_gp_write)(CPUIA64State *env, uint64_t pc, uint32_t ri,
+                          uint64_t insn, uint64_t old_gp)
+{
+    static bool initialized;
+    static bool zero_abort;
+    static unsigned int log_limit = 256;
+    static unsigned int log_count;
+    uint64_t new_gp = env->r[1];
+
+    if (old_gp == new_gp) {
+        return;
+    }
+
+    if (!initialized) {
+        const char *s;
+
+        initialized = true;
+        s = getenv("QEMU_IA64_TRACE_GP_WRITES_LIMIT");
+        if (s && *s) {
+            const char *endp = NULL;
+            unsigned long value;
+
+            if (qemu_strtoul(s, &endp, 0, &value) == 0 &&
+                endp != s && *endp == '\0') {
+                log_limit = MIN(value, UINT_MAX);
+            }
+        }
+        s = getenv("QEMU_IA64_TRACE_GP_ZERO_ABORT");
+        zero_abort = s && *s && strcmp(s, "0") && strcmp(s, "off") &&
+                     strcmp(s, "false") && strcmp(s, "no");
+    }
+
+    if (log_count < log_limit) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "gp_write pc=%016" PRIx64 " ri=%u insn=%011" PRIx64
+                      " old=%016" PRIx64 " new=%016" PRIx64
+                      " sp=%016" PRIx64 " b0=%016" PRIx64
+                      " b6=%016" PRIx64 " b7=%016" PRIx64
+                      " cfm=%016" PRIx64 " bsp=%016" PRIx64 "\n",
+                      pc, ri, insn, old_gp, new_gp, env->r[12], env->b[0],
+                      env->b[6], env->b[7], env->cfm,
+                      env->ar[IA64_AR_BSP]);
+        log_count++;
+    }
+
+    if (zero_abort && old_gp != 0 && new_gp == 0) {
+        cpu_abort(env_cpu(env),
+                  "IA64: gp transitioned to zero at pc=%016" PRIx64
+                  " ri=%u insn=%011" PRIx64,
+                  pc, ri, insn);
+    }
 }
 
 void HELPER(dbg_call)(CPUIA64State *env, uint64_t pc)

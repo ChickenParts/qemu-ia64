@@ -187,6 +187,11 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_DBG_R12` | Debug R12 (stack pointer) changes |
 | `QEMU_IA64_DBG_R12_DUMP` | Dump bundle on R12 change |
 | `QEMU_IA64_DBG_R12_LIMIT` | Limit R12 debug entries |
+| `QEMU_IA64_TRACE_GP_WRITES` | Emit exact r1/global-pointer value transitions in translated IA-64 code |
+| `QEMU_IA64_TRACE_GP_WRITES_MIN_PC` | Low-61-bit inclusive lower PC bound for GP transition instrumentation |
+| `QEMU_IA64_TRACE_GP_WRITES_MAX_PC` | Low-61-bit inclusive upper PC bound for GP transition instrumentation |
+| `QEMU_IA64_TRACE_GP_WRITES_LIMIT` | Maximum number of GP transition records (default 256) |
+| `QEMU_IA64_TRACE_GP_ZERO_ABORT` | Abort immediately after logging a nonzero-to-zero GP transition |
 | `QEMU_IA64_DBG_PEIMAGE` | Debug PE image loading |
 | `QEMU_IA64_DBG_PEIMAGE_DUMP` | Dump PE image details |
 

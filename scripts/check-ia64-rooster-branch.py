@@ -34,6 +34,10 @@ def main() -> int:
     frontier = read("docs/ia64-hob-migration-frontier.md")
     causality = read("hw/ia64/hob-migration-causality.c")
     causality_workflow = read(".github/workflows/ia64-fv-hob-causality.yml")
+    helper_h = read("target/ia64/helper.h")
+    helper_c = read("target/ia64/helper.c")
+    translate = read("target/ia64/translate.c")
+    environment = read("docs/ia64-environment-variables.md")
 
     require(documentation, "EFI/BOOT/BOOTIA64.EFI", "EFI contract")
     require(documentation, "not part of the Rooster boot contract", "EFI contract")
@@ -45,6 +49,19 @@ def main() -> int:
     require(frontier, "EFI_HOB_TYPE_FV", "HOB frontier")
     require(causality, "QEMU_IA64_PEI_FV_HOB_RESTORE", "causality probe")
     require(causality_workflow, 'IA64_CALL_NULL_FIX: "0"', "causality workflow")
+    require(helper_h, "DEF_HELPER_5(dbg_gp_write", "GP provenance helper")
+    require(helper_c, 'getenv("QEMU_IA64_TRACE_GP_ZERO_ABORT")',
+            "GP provenance helper")
+    require(helper_c, '"gp_write pc=%016"', "GP provenance helper")
+    require(translate, 'getenv("QEMU_IA64_TRACE_GP_WRITES")',
+            "GP provenance translator")
+    require(translate, "tcg_gen_mov_i64(old_gp, cpu_r[1])",
+            "GP provenance translator")
+    require(translate, "gen_helper_dbg_gp_write", "GP provenance translator")
+    require(environment, "QEMU_IA64_TRACE_GP_WRITES_MIN_PC",
+            "GP provenance documentation")
+    require(environment, "QEMU_IA64_TRACE_GP_ZERO_ABORT",
+            "GP provenance documentation")
 
     # The causality experiment may restore records that already exist in guest
     # memory, but it may never manufacture a DXE target or key off a firmware
@@ -60,8 +77,11 @@ def main() -> int:
     forbid(meson, r"hob-migration-causality\.c", "normal IA-64 build")
 
     # Firmware and payload identity belong in test evidence, not as hidden
-    # QEMU behavior selected by a filename or byte signature.
-    forbid(harness, r"exec.*-kernel|\s-kernel(?:\s|=)", "EFI harness")
+    # QEMU behavior selected by a filename or byte signature.  The harness
+    # must recognize and reject -kernel, so inspect only its execution stanza.
+    execution = harness[harness.index("exec scripts/run-ia64-firmware.sh"):]
+    forbid(execution, r"(?:^|\s)-kernel(?:\s|=)",
+           "EFI harness execution")
     forbid(matrix, r"CALL_NULL_FIX[\"']?\s*[:=]\s*[\"']?1",
            "firmware matrix")
 

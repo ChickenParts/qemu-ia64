@@ -184,6 +184,59 @@ static bool ia64_gr_watch_match(uint64_t pc)
            low_pc <= ia64_gr_watch_max_pc;
 }
 
+/*
+ * Exact global-pointer provenance tracing.
+ *
+ * Unlike QEMU_IA64_GR_WATCH=1, this snapshots r1 before each translated
+ * instruction and calls the runtime helper only in the requested PC range.
+ * The helper emits a record only when the value actually changes, which keeps
+ * predicated-off writes and ordinary instructions out of the trace.
+ */
+static bool ia64_gp_write_trace_inited;
+static bool ia64_gp_write_trace_enabled;
+static uint64_t ia64_gp_write_trace_min_pc;
+static uint64_t ia64_gp_write_trace_max_pc = UINT64_MAX;
+
+static void ia64_init_gp_write_trace(void)
+{
+    const char *s;
+    uint64_t value;
+
+    if (ia64_gp_write_trace_inited) {
+        return;
+    }
+    ia64_gp_write_trace_inited = true;
+
+    s = getenv("QEMU_IA64_TRACE_GP_WRITES");
+    if (!s || !*s || !strcmp(s, "0") || !strcmp(s, "off") ||
+        !strcmp(s, "false") || !strcmp(s, "no")) {
+        return;
+    }
+    ia64_gp_write_trace_enabled = true;
+
+    s = getenv("QEMU_IA64_TRACE_GP_WRITES_MIN_PC");
+    if (s && *s && qemu_strtou64(s, NULL, 0, &value) == 0) {
+        ia64_gp_write_trace_min_pc = value & ((1ULL << 61) - 1);
+    }
+    s = getenv("QEMU_IA64_TRACE_GP_WRITES_MAX_PC");
+    if (s && *s && qemu_strtou64(s, NULL, 0, &value) == 0) {
+        ia64_gp_write_trace_max_pc = value & ((1ULL << 61) - 1);
+    }
+}
+
+static bool ia64_gp_write_trace_match(uint64_t pc)
+{
+    uint64_t low_pc;
+
+    ia64_init_gp_write_trace();
+    if (!ia64_gp_write_trace_enabled) {
+        return false;
+    }
+    low_pc = pc & ((1ULL << 61) - 1);
+    return low_pc >= ia64_gp_write_trace_min_pc &&
+           low_pc <= ia64_gp_write_trace_max_pc;
+}
+
 static bool ia64_fw_fastpath_inited;
 static bool ia64_fw_fastpath_enabled;
 static bool ia64_fw_r8_trace_inited;
@@ -8206,6 +8259,13 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
                            ctx->base.pc_next, ctx->ri, template, type, insn);
 
     uint8_t cur_ri = ctx->ri;
+    bool trace_gp_write = ia64_gp_write_trace_match(ctx->base.pc_next);
+    TCGv_i64 old_gp = NULL;
+
+    if (trace_gp_write) {
+        old_gp = tcg_temp_new_i64();
+        tcg_gen_mov_i64(old_gp, cpu_r[1]);
+    }
     if (ia64_dbg_probe_match(ctx->base.pc_next, ctx->ri)) {
         gen_helper_dbg_probe(tcg_env,
                              tcg_constant_i64(ctx->base.pc_next),
@@ -8213,6 +8273,14 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     }
 
     decode_insn(ctx, insn, type);
+
+    if (trace_gp_write && ctx->base.is_jmp == DISAS_NEXT) {
+        gen_helper_dbg_gp_write(tcg_env,
+                                tcg_constant_i64(ctx->base.pc_next),
+                                tcg_constant_i32(ctx->ri),
+                                tcg_constant_i64(insn),
+                                old_gp);
+    }
 
     if (ctx->base.is_jmp == DISAS_NEXT &&
         ia64_gr_watch_match(ctx->base.pc_next)) {
