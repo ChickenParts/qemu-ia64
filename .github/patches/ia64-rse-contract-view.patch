@@ -1,0 +1,19 @@
+diff --git a/scripts/check-ia64-rooster-branch.py b/scripts/check-ia64-rooster-branch.py
+--- a/scripts/check-ia64-rooster-branch.py
++++ b/scripts/check-ia64-rooster-branch.py
+@@ -64,8 +64,14 @@ def main() -> int:
+             "GP provenance documentation")
+     require(environment, "QEMU_IA64_TRACE_GP_ZERO_ABORT",
+             "GP provenance documentation")
+-    require(helper_c, "ia64_rse_find_return_frame(env, b0, pfs_cfm)",
++    require(helper_c, "struct IA64RSEReturnFrameView view",
++            "architectural return reconciliation")
++    require(helper_c, "ia64_rse_find_return_frame(&view, b0, pfs_cfm)",
+             "architectural return reconciliation")
++    require(rse, "view->cfm_offset", "architectural return frame view")
++    require(rse, "view->ret_addr_offset", "architectural return frame view")
++    forbid(rse, r'#include\s+"cpu\.h"',
++           "target-independent return frame selector")
+     require(rse, "The return address is the strongest identity",
+             "architectural return reconciliation")
+     require(rse_test, "/ia64/rse/nonlocal-return-address-wins",
