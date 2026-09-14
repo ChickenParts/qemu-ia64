@@ -96,6 +96,8 @@ jobs:
               log = common_log.replace('__VARIANT__', 'atomic')
               log = log.replace('__DST__', 'dst')
               tail = '    return old_pfs;\n}'
+              if alloc.count(tail) != 1:
+                  raise SystemExit('unexpected alloc return tail')
               repl = '''    if (dst != 0 && dst < ARRAY_SIZE(env->r)) {
                   env->r[dst] = old_pfs;
                   env->nat[dst] = 0;
@@ -105,39 +107,48 @@ jobs:
           else:
               log = common_log.replace('__VARIANT__', 'helper-return')
               log = log.replace('__DST__', '0u')
-              alloc = alloc.replace('    return old_pfs;\n}',
-                                    log + '\n    return old_pfs;\n}', 1)
+              tail = '    return old_pfs;\n}'
+              if alloc.count(tail) != 1:
+                  raise SystemExit('unexpected alloc return tail')
+              alloc = alloc.replace(tail, log + '\n    return old_pfs;\n}', 1)
 
           helper.write_text(source[:start] + alloc + source[end:])
 
           if variant == 'atomic-destination':
               header = Path('target/ia64/helper.h')
               text = header.read_text()
-              text = text.replace(
-                  'DEF_HELPER_4(alloc, i64, env, i64, i64, i64)',
-                  'DEF_HELPER_5(alloc, void, env, i32, i64, i64, i64)', 1)
-              header.write_text(text)
+              old_decl = 'DEF_HELPER_4(alloc, i64, env, i64, i64, i64)'
+              new_decl = 'DEF_HELPER_5(alloc, void, env, i32, i64, i64, i64)'
+              if text.count(old_decl) != 1:
+                  raise SystemExit('unexpected alloc helper declaration')
+              header.write_text(text.replace(old_decl, new_decl, 1))
 
               translator = Path('target/ia64/translate.c')
               text = translator.read_text()
-              old = '''                TCGv_i64 old_pfs = tcg_temp_new_i64();
-          gen_helper_alloc(old_pfs, tcg_env,
-                           tcg_constant_i64(sof),
-                           tcg_constant_i64(sol),
-                           tcg_constant_i64(sor));
-          if (r1 != 0) {
-              tcg_gen_mov_i64(cpu_r[r1], old_pfs);
-          }
-          '''
-              new = '''                gen_helper_alloc(tcg_env,
-                           tcg_constant_i32(r1),
-                           tcg_constant_i64(sof),
-                           tcg_constant_i64(sol),
-                           tcg_constant_i64(sor));
-          '''
-              if text.count(old) != 1:
-                  raise SystemExit('unexpected alloc translator block')
-              translator.write_text(text.replace(old, new, 1))
+              needle = 'TCGv_i64 old_pfs = tcg_temp_new_i64();'
+              if text.count(needle) != 1:
+                  raise SystemExit('unexpected alloc destination declaration')
+              needle_pos = text.index(needle)
+              block_start = text.rfind('\n', 0, needle_pos) + 1
+              block_end_marker = '                if (skip_label) {\n'
+              block_end = text.index(block_end_marker, needle_pos)
+              old_block = text[block_start:block_end]
+              required = (
+                  'gen_helper_alloc(old_pfs, tcg_env,',
+                  'tcg_gen_mov_i64(cpu_r[r1], old_pfs);',
+              )
+              if not all(fragment in old_block for fragment in required):
+                  raise SystemExit('unexpected alloc translator semantics')
+              indent = text[block_start:needle_pos]
+              new_block = (
+                  f'{indent}gen_helper_alloc(tcg_env,\n'
+                  f'{indent}                 tcg_constant_i32(r1),\n'
+                  f'{indent}                 tcg_constant_i64(sof),\n'
+                  f'{indent}                 tcg_constant_i64(sol),\n'
+                  f'{indent}                 tcg_constant_i64(sor));\n'
+              )
+              translator.write_text(text[:block_start] + new_block +
+                                    text[block_end:])
           PY
           git diff --check
 
