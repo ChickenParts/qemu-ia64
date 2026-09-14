@@ -39,6 +39,11 @@ jobs:
           git apply \
             .github/patches/ia64-rse-return-exact-match.patch
 
+          git apply --check \
+            .github/patches/ia64-rse-maintainers.patch
+          git apply \
+            .github/patches/ia64-rse-maintainers.patch
+
           git add -N \
             target/ia64/rse.c \
             target/ia64/rse.h \
@@ -109,9 +114,11 @@ jobs:
           git rm \
             .github/workflows/ia64-rse-return-integration.yml \
             .github/patches/ia64-rse-return-reconcile.patch \
-            .github/patches/ia64-rse-return-exact-match.patch
+            .github/patches/ia64-rse-return-exact-match.patch \
+            .github/patches/ia64-rse-maintainers.patch
 
           git add \
+            MAINTAINERS \
             .github/workflows/ia64-rooster-branch-validation.yml \
             docs/ia64-environment-variables.md \
             scripts/check-ia64-rooster-branch.py \
