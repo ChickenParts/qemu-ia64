@@ -1,0 +1,12 @@
+diff --git a/MAINTAINERS b/MAINTAINERS
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -1286,7 +1286,8 @@ S: Maintained
+ F: configs/devices/ia64-softmmu/
+ F: configs/targets/ia64-softmmu.mak
+ F: docs/devel/ia64-*
++F: docs/ia64-*
+ F: hw/ia64/
+ F: target/ia64/
+ F: tests/unit/test-ia64-*
+ F: tests/qtest/ia64-ipf-test.c
