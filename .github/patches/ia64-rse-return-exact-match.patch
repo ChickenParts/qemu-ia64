@@ -1,0 +1,188 @@
+diff --git a/target/ia64/rse.c b/target/ia64/rse.c
+--- a/target/ia64/rse.c
++++ b/target/ia64/rse.c
+@@ -14,37 +14,29 @@ int ia64_rse_find_return_frame(const CPUIA64State *env,
+     uint64_t caller_cfm = pfs_cfm & IA64_RSE_CFM_MASK;
+     int index;
+ 
+-    if (!env->rse_frames || env->rse_depth == 0) {
++    if (!env->rse_frames || env->rse_depth == 0 || target == 0) {
+         return -1;
+     }
+ 
+     /*
+-     * The return address is the strongest identity.  Search it first so an
+-     * intervening frame with the same CFM cannot capture a non-local return.
++     * The return address is the strongest identity component, but it is not
++     * unique: recursive calls can share a return site, and unrelated callers
++     * commonly share a CFM shape.  Only the exact architectural pair may
++     * justify discarding intervening shadow frames.
++     *
++     * Search newest-to-oldest so indistinguishable recursive activations keep
++     * the ordinary single-pop behavior instead of skipping an inner frame.
+      */
+-    if (target != 0) {
+-        for (index = (int)env->rse_depth - 1; index >= 0; index--) {
+-            const struct IA64RSEFrame *frame = &env->rse_frames[index];
+-
+-            if (frame->ret_addr != 0 &&
+-                (frame->ret_addr & ~UINT64_C(0xf)) == target) {
+-                return index;
+-            }
+-        }
+-    }
+-
+-    /*
+-     * ar.pfs supplies the caller CFM even when a return branch register was
+-     * not tracked precisely.  It is a safe fallback, but is less selective
+-     * because unrelated procedures often use identical frame shapes.
+-     */
+     for (index = (int)env->rse_depth - 1; index >= 0; index--) {
+         const struct IA64RSEFrame *frame = &env->rse_frames[index];
+ 
+-        if ((frame->cfm & IA64_RSE_CFM_MASK) == caller_cfm) {
++        if (frame->ret_addr != 0 &&
++            (frame->ret_addr & ~UINT64_C(0xf)) == target &&
++            (frame->cfm & IA64_RSE_CFM_MASK) == caller_cfm) {
+             return index;
+         }
+     }
+-
+     return -1;
+ }
+diff --git a/target/ia64/rse.h b/target/ia64/rse.h
+--- a/target/ia64/rse.h
++++ b/target/ia64/rse.h
+@@ -10,11 +10,10 @@
+ /*
+  * Locate the shadow call frame selected by a br.ret.
+  *
+- * The architectural return state is carried by the branch target and ar.pfs;
+- * it is not necessarily the newest shadow frame.  Stack-switch and
+- * continuation paths can deliberately discard one or more intervening calls.
+- * Return the selected frame index, or -1 when no shadow frame matches.
++ * A non-local return may discard intervening calls only when both the
++ * normalized branch target and ar.pfs.pfm identify the same saved frame.
++ * Either component alone is ambiguous.  Return the newest exact match, or -1
++ * when the caller must retain the ordinary single-pop behavior.
+  */
+ int ia64_rse_find_return_frame(const CPUIA64State *env,
+                                uint64_t ret_addr, uint64_t pfs_cfm);
+diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
+--- a/tests/unit/test-ia64-rse.c
++++ b/tests/unit/test-ia64-rse.c
+@@ -25,7 +25,7 @@ static void test_empty(void)
+     g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x1000, 0x301), ==, -1);
+ }
+ 
+-static void test_top_return_address(void)
++static void test_top_exact_match(void)
+ {
+     CPUIA64State env;
+     struct IA64RSEFrame frames[2];
+@@ -51,31 +51,98 @@ static void test_nonlocal_return_address_wins(void)
+     frames[2].cfm = 0x30a;
+ 
+     /*
+-     * The newest frame deliberately has the same CFM.  The older exact return
+-     * address must win for a non-local return or continuation transfer.
++     * The newest frame deliberately has the same CFM.  Only the older frame
++     * matches both architectural identity components.
+      */
+     g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x3001, 0x30a), ==, 1);
+ }
+ 
+-static void test_pfs_fallback(void)
++static void test_conflicting_components_do_not_match(void)
+ {
+     CPUIA64State env;
+     struct IA64RSEFrame frames[3];
+@@ -87,7 +154,56 @@ static void test_pfs_fallback(void)
+     frames[2].ret_addr = 0x3000;
+     frames[2].cfm = 0x38a;
+ 
+-    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x9000, 0x30a), ==, 1);
++    /*
++     * The return address and PFS each match a frame, but not the same frame.
++     * Discarding either frame would turn inconsistent state into corruption.
++     */
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x2001, 0x38a), ==, -1);
++}
++
++static void test_return_address_only_does_not_match(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[2];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0x1000;
++    frames[0].cfm = 0x201;
++    frames[1].ret_addr = 0x2000;
++    frames[1].cfm = 0x302;
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x2002, 0x777), ==, -1);
++}
++
++static void test_pfs_only_does_not_match(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[2];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0x1000;
++    frames[0].cfm = 0x201;
++    frames[1].ret_addr = 0x2000;
++    frames[1].cfm = 0x302;
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x9000, 0x302), ==, -1);
++}
++
++static void test_duplicate_exact_match_prefers_newest(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[3];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0x1000;
++    frames[0].cfm = 0x201;
++    frames[1].ret_addr = 0x2000;
++    frames[1].cfm = 0x30a;
++    frames[2].ret_addr = 0x2000;
++    frames[2].cfm = 0x30a;
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x2001, 0x30a), ==, 2);
++}
++
++static void test_zero_target_does_not_match(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[1];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0;
++    frames[0].cfm = 0x201;
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0, 0x201), ==, -1);
+ }
+ 
+ static void test_no_match(void)
+@@ -107,11 +223,18 @@ int main(int argc, char **argv)
+ {
+     g_test_init(&argc, &argv, NULL);
+     g_test_add_func("/ia64/rse/empty", test_empty);
+-    g_test_add_func("/ia64/rse/top-return-address", test_top_return_address);
++    g_test_add_func("/ia64/rse/top-exact-match", test_top_exact_match);
+     g_test_add_func("/ia64/rse/nonlocal-return-address-wins",
+                     test_nonlocal_return_address_wins);
+-    g_test_add_func("/ia64/rse/pfs-fallback", test_pfs_fallback);
++    g_test_add_func("/ia64/rse/conflicting-components",
++                    test_conflicting_components_do_not_match);
++    g_test_add_func("/ia64/rse/return-address-only",
++                    test_return_address_only_does_not_match);
++    g_test_add_func("/ia64/rse/pfs-only", test_pfs_only_does_not_match);
++    g_test_add_func("/ia64/rse/duplicate-exact-prefers-newest",
++                    test_duplicate_exact_match_prefers_newest);
++    g_test_add_func("/ia64/rse/zero-target", test_zero_target_does_not_match);
+     g_test_add_func("/ia64/rse/no-match", test_no_match);
+     return g_test_run();
+ }
