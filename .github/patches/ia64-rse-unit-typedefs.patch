@@ -1,0 +1,11 @@
+diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
+--- a/tests/unit/test-ia64-rse.c
++++ b/tests/unit/test-ia64-rse.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/typedefs.h"
+ #include "target/ia64/rse.h"
+ 
+ static void init_frames(CPUIA64State *env,
