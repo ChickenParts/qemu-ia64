@@ -44,6 +44,11 @@ jobs:
           git apply \
             .github/patches/ia64-rse-maintainers.patch
 
+          git apply --check \
+            .github/patches/ia64-python-loader.patch
+          git apply \
+            .github/patches/ia64-python-loader.patch
+
           git add -N \
             target/ia64/rse.c \
             target/ia64/rse.h \
@@ -111,11 +116,22 @@ jobs:
           git config user.email \
             '41898282+github-actions[bot]@users.noreply.github.com'
 
+          git add \
+            tests/unit/test-ia64-hob-migration.py \
+            tests/unit/test-ia64-hob-write-trace.py \
+            tests/unit/test-ia64-hob-register-trace.py \
+            tests/unit/test-ia64-rooster-firmware-matrix.py
+          git diff --cached --check
+          git commit \
+            -m 'tests/ia64: register dynamically loaded analyzers' \
+            -m 'Insert importlib-created modules into sys.modules before execution so dataclass and annotation resolution work on Python 3.12.'
+
           git rm \
             .github/workflows/ia64-rse-return-integration.yml \
             .github/patches/ia64-rse-return-reconcile.patch \
             .github/patches/ia64-rse-return-exact-match.patch \
-            .github/patches/ia64-rse-maintainers.patch
+            .github/patches/ia64-rse-maintainers.patch \
+            .github/patches/ia64-python-loader.patch
 
           git add \
             MAINTAINERS \
@@ -138,7 +154,7 @@ jobs:
           test "$(git rev-parse origin/fix/ia64-rse-return-identity)" = \
             "$BASE_SHA"
           git push origin HEAD:fix/ia64-rse-return-identity
-          git format-patch -1 --stdout > validation/commit.patch
+          git format-patch -2 --stdout > validation/commits.patch
           git rev-parse HEAD > validation/HEAD
 
       - name: Upload validation evidence
