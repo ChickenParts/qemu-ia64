@@ -1,0 +1,144 @@
+name: Temporary IA-64 RSE return integration
+
+on:
+  push:
+    branches:
+      - fix/ia64-rse-return-identity
+    paths:
+      - .github/workflows/ia64-rse-return-integration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-rse-return-identity
+          fetch-depth: 0
+
+      - name: Apply architectural return reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          mkdir -p validation
+
+          git apply --check \
+            .github/patches/ia64-rse-return-reconcile.patch
+          git apply \
+            .github/patches/ia64-rse-return-reconcile.patch
+
+          git apply --check \
+            .github/patches/ia64-rse-return-exact-match.patch
+          git apply \
+            .github/patches/ia64-rse-return-exact-match.patch
+
+          git add -N \
+            target/ia64/rse.c \
+            target/ia64/rse.h \
+            tests/unit/test-ia64-rse.c
+          git diff --check
+          git diff --binary > validation/ia64-rse-return.patch
+          ./scripts/checkpatch.pl --strict --no-signoff --color=never \
+            validation/ia64-rse-return.patch \
+            2>&1 | tee validation/checkpatch.txt
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Validate static contract
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ia64-rooster-branch.py
+          python3 tests/unit/test-ia64-hob-migration.py
+          python3 tests/unit/test-ia64-hob-write-trace.py
+          python3 tests/unit/test-ia64-hob-register-trace.py
+          python3 tests/unit/test-ia64-rooster-firmware-matrix.py
+          python3 -m py_compile \
+            scripts/check-ia64-rooster-branch.py \
+            scripts/analyze-ia64-hob-migration.py \
+            scripts/analyze-ia64-hob-write-trace.py \
+            scripts/analyze-ia64-hob-register-trace.py \
+            scripts/run-ia64-rooster-firmware-matrix.py
+
+      - name: Build emulator and focused unit test
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build-rse-return
+          mkdir build-rse-return
+          (
+            cd build-rse-return
+            ../configure \
+              --target-list=ia64-softmmu \
+              --enable-plugins \
+              --disable-docs \
+              --disable-gtk \
+              --disable-sdl \
+              --disable-vnc \
+              --disable-werror
+          ) 2>&1 | tee validation/configure.txt
+          ninja -C build-rse-return -j"$(nproc)" \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-rse \
+            2>&1 | tee validation/build.txt
+          build-rse-return/qemu-system-ia64 --version \
+            | tee validation/version.txt
+          build-rse-return/tests/unit/test-ia64-rse \
+            2>&1 | tee validation/test-ia64-rse.txt
+
+      - name: Commit validated source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git rm \
+            .github/workflows/ia64-rse-return-integration.yml \
+            .github/patches/ia64-rse-return-reconcile.patch \
+            .github/patches/ia64-rse-return-exact-match.patch
+
+          git add \
+            .github/workflows/ia64-rooster-branch-validation.yml \
+            docs/ia64-environment-variables.md \
+            scripts/check-ia64-rooster-branch.py \
+            target/ia64/helper.c \
+            target/ia64/meson.build \
+            target/ia64/rse.c \
+            target/ia64/rse.h \
+            tests/unit/meson.build \
+            tests/unit/test-ia64-rse.c
+
+          git diff --cached --check
+          git commit \
+            -m 'target/ia64: reconcile return frames by exact identity' \
+            -m 'Use the normalized return target together with ar.pfs.pfm before discarding intervening shadow frames. Fail closed to the ordinary single-pop path when either identity component disagrees.'
+
+          git fetch origin fix/ia64-rse-return-identity
+          test "$(git rev-parse origin/fix/ia64-rse-return-identity)" = \
+            "$BASE_SHA"
+          git push origin HEAD:fix/ia64-rse-return-identity
+          git format-patch -1 --stdout > validation/commit.patch
+          git rev-parse HEAD > validation/HEAD
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-rse-return-integration-${{ github.run_id }}
+          path: validation/
+          retention-days: 14
+          if-no-files-found: error
