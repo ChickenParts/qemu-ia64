@@ -1,7 +1,7 @@
 diff --git a/target/ia64/rse.c b/target/ia64/rse.c
 --- a/target/ia64/rse.c
 +++ b/target/ia64/rse.c
-@@ -14,37 +14,29 @@ int ia64_rse_find_return_frame(const CPUIA64State *env,
+@@ -16,34 +16,25 @@
      uint64_t caller_cfm = pfs_cfm & IA64_RSE_CFM_MASK;
      int index;
  
@@ -13,14 +13,7 @@ diff --git a/target/ia64/rse.c b/target/ia64/rse.c
      /*
 -     * The return address is the strongest identity.  Search it first so an
 -     * intervening frame with the same CFM cannot capture a non-local return.
-+     * The return address is the strongest identity component, but it is not
-+     * unique: recursive calls can share a return site, and unrelated callers
-+     * commonly share a CFM shape.  Only the exact architectural pair may
-+     * justify discarding intervening shadow frames.
-+     *
-+     * Search newest-to-oldest so indistinguishable recursive activations keep
-+     * the ordinary single-pop behavior instead of skipping an inner frame.
-      */
+-     */
 -    if (target != 0) {
 -        for (index = (int)env->rse_depth - 1; index >= 0; index--) {
 -            const struct IA64RSEFrame *frame = &env->rse_frames[index];
@@ -36,7 +29,14 @@ diff --git a/target/ia64/rse.c b/target/ia64/rse.c
 -     * ar.pfs supplies the caller CFM even when a return branch register was
 -     * not tracked precisely.  It is a safe fallback, but is less selective
 -     * because unrelated procedures often use identical frame shapes.
--     */
++     * The return address is the strongest identity component, but it is not
++     * unique: recursive calls can share a return site, and unrelated callers
++     * commonly share a CFM shape.  Only the exact architectural pair may
++     * justify discarding intervening shadow frames.
++     *
++     * Search newest-to-oldest so indistinguishable recursive activations keep
++     * the ordinary single-pop behavior instead of skipping an inner frame.
+      */
      for (index = (int)env->rse_depth - 1; index >= 0; index--) {
          const struct IA64RSEFrame *frame = &env->rse_frames[index];
  
@@ -47,13 +47,10 @@ diff --git a/target/ia64/rse.c b/target/ia64/rse.c
              return index;
          }
      }
--
-     return -1;
- }
 diff --git a/target/ia64/rse.h b/target/ia64/rse.h
 --- a/target/ia64/rse.h
 +++ b/target/ia64/rse.h
-@@ -10,11 +10,10 @@
+@@ -11,10 +11,10 @@
  /*
   * Locate the shadow call frame selected by a br.ret.
   *
@@ -71,7 +68,7 @@ diff --git a/target/ia64/rse.h b/target/ia64/rse.h
 diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
 --- a/tests/unit/test-ia64-rse.c
 +++ b/tests/unit/test-ia64-rse.c
-@@ -25,7 +25,7 @@ static void test_empty(void)
+@@ -24,7 +24,7 @@
      g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x1000, 0x301), ==, -1);
  }
  
@@ -80,7 +77,7 @@ diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
  {
      CPUIA64State env;
      struct IA64RSEFrame frames[2];
-@@ -51,31 +51,98 @@ static void test_nonlocal_return_address_wins(void)
+@@ -52,13 +52,13 @@
      frames[2].cfm = 0x30a;
  
      /*
@@ -97,7 +94,7 @@ diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
  {
      CPUIA64State env;
      struct IA64RSEFrame frames[3];
-@@ -87,7 +154,56 @@ static void test_pfs_fallback(void)
+@@ -71,7 +71,67 @@
      frames[2].ret_addr = 0x3000;
      frames[2].cfm = 0x38a;
  
@@ -166,7 +163,7 @@ diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
  }
  
  static void test_no_match(void)
-@@ -107,11 +223,18 @@ int main(int argc, char **argv)
+@@ -92,10 +152,17 @@
  {
      g_test_init(&argc, &argv, NULL);
      g_test_add_func("/ia64/rse/empty", test_empty);
