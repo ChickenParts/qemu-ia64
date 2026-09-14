@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: fix/ia64-rse-return-identity
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Apply architectural return reconciliation
         shell: bash
