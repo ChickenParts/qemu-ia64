@@ -1,7 +1,7 @@
 name: IA-64 Rooster source export
 
-# Retained as the reproducible source handoff; refreshed after PLABEL tracing
-# isolated the later DXE global-pointer corruption frontier.
+# Retained as the reproducible source handoff; refreshed after the GP
+# provenance tracer landed at the current firmware frontier.
 on:
   push:
     branches:
