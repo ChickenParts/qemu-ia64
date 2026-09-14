@@ -80,8 +80,8 @@ jobs:
                                 " old_pfs=%016" PRIx64
                                 " old_cfm=%016" PRIx64
                                 " new_cfm=%016" PRIx64 "\\n",
-                                env->ip, "%s", %s, gp_before, env->r[1],
-                                r36_before, env->r[36], old_pfs,
+                                env->ip, "__VARIANT__", __DST__, gp_before,
+                                env->r[1], r36_before, env->r[36], old_pfs,
                                 old_cfm, env->cfm);
                   trace_count++;
               }
@@ -93,7 +93,8 @@ jobs:
                   'uint64_t sol, uint64_t sor)',
                   'void HELPER(alloc)(CPUIA64State *env, uint32_t dst, '
                   'uint64_t sof, uint64_t sol, uint64_t sor)', 1)
-              log = common_log % ('atomic', 'atomic', 'dst')
+              log = common_log.replace('__VARIANT__', 'atomic')
+              log = log.replace('__DST__', 'dst')
               tail = '    return old_pfs;\n}'
               repl = '''    if (dst != 0 && dst < ARRAY_SIZE(env->r)) {
                   env->r[dst] = old_pfs;
@@ -102,7 +103,8 @@ jobs:
           ''' + log + '}'
               alloc = alloc.replace(tail, repl, 1)
           else:
-              log = common_log % ('helper-return', 'helper-return', '0u')
+              log = common_log.replace('__VARIANT__', 'helper-return')
+              log = log.replace('__DST__', '0u')
               alloc = alloc.replace('    return old_pfs;\n}',
                                     log + '\n    return old_pfs;\n}', 1)
 
