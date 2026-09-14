@@ -268,7 +268,7 @@ index dfe4115..d59dd3f 100644
 diff --git a/target/ia64/helper.c b/target/ia64/helper.c
 --- a/target/ia64/helper.c
 +++ b/target/ia64/helper.c
-@@ -17634,7 +17634,15 @@ void HELPER(ret_restore)(CPUIA64State *env)
+@@ -17634,7 +17634,14 @@ void HELPER(ret_restore)(CPUIA64State *env)
       * window and can corrupt gp before the branch is taken.
       */
      if (env->rse_depth > 0) {
