@@ -46,33 +46,57 @@ jobs:
           if not alloc.startswith(signature):
               raise SystemExit('unexpected alloc signature')
 
+          return_type = 'void' if variant == 'atomic-destination' else 'uint64_t'
+          new_signature = (
+              f'{return_type} HELPER(alloc)(CPUIA64State *env, uint32_t dst, '
+              'uint64_t sof, uint64_t sol, uint64_t sor)\n{'
+          )
+          alloc = alloc.replace(signature, new_signature, 1)
+
           prologue = '''
               static int trace_enabled = -1;
+              static bool trace_all;
               static uint64_t trace_pc;
               static unsigned int trace_count;
               uint64_t gp_before = env->r[1];
               uint64_t r36_before = env->r[36];
+              uint64_t dst_before = dst < ARRAY_SIZE(env->r) ? env->r[dst] : 0;
               bool trace;
 
               if (trace_enabled == -1) {
                   const char *value = getenv("QEMU_IA64_ALLOC_TRACE_PC");
                   trace_enabled = value && *value ? 1 : 0;
                   if (trace_enabled) {
-                      trace_pc = strtoull(value, NULL, 0) & ((1ULL << 61) - 1);
+                      if (!strcmp(value, "all") || !strcmp(value, "*")) {
+                          trace_all = true;
+                      } else {
+                          char *endp = NULL;
+                          trace_pc = strtoull(value, &endp, 0) &
+                                     ((1ULL << 61) - 1);
+                          if (endp == value || *endp) {
+                              trace_enabled = 0;
+                          }
+                      }
                   }
               }
-              trace = trace_enabled && trace_count < 64 &&
-                      ((env->ip & ((1ULL << 61) - 1)) == trace_pc);
+              trace = trace_enabled && trace_count < 256 &&
+                      (trace_all ||
+                       ((env->ip & ((1ULL << 61) - 1)) == trace_pc));
           '''
           prologue = '\n'.join(line[4:] if line.startswith('    ') else line
                                for line in prologue.splitlines()).strip('\n')
-          alloc = alloc.replace(signature, signature + '\n' + prologue, 1)
+          alloc = alloc.replace(new_signature,
+                                new_signature + '\n' + prologue, 1)
 
           common_log = '''
               if (trace) {
+                  uint64_t dst_after =
+                      dst < ARRAY_SIZE(env->r) ? env->r[dst] : 0;
                   qemu_log_mask(LOG_GUEST_ERROR,
                                 "alloc_trace ip=%016" PRIx64
                                 " variant=%s dst=%u"
+                                " dst_before=%016" PRIx64
+                                " dst_after=%016" PRIx64
                                 " gp_before=%016" PRIx64
                                 " gp_after=%016" PRIx64
                                 " r36_before=%016" PRIx64
@@ -80,7 +104,8 @@ jobs:
                                 " old_pfs=%016" PRIx64
                                 " old_cfm=%016" PRIx64
                                 " new_cfm=%016" PRIx64 "\\n",
-                                env->ip, "__VARIANT__", __DST__, gp_before,
+                                env->ip, "__VARIANT__", dst,
+                                dst_before, dst_after, gp_before,
                                 env->r[1], r36_before, env->r[36], old_pfs,
                                 old_cfm, env->cfm);
                   trace_count++;
@@ -88,13 +113,7 @@ jobs:
           '''
 
           if variant == 'atomic-destination':
-              alloc = alloc.replace(
-                  'uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, '
-                  'uint64_t sol, uint64_t sor)',
-                  'void HELPER(alloc)(CPUIA64State *env, uint32_t dst, '
-                  'uint64_t sof, uint64_t sol, uint64_t sor)', 1)
               log = common_log.replace('__VARIANT__', 'atomic')
-              log = log.replace('__DST__', 'dst')
               tail = '    return old_pfs;\n}'
               if alloc.count(tail) != 1:
                   raise SystemExit('unexpected alloc return tail')
@@ -106,7 +125,6 @@ jobs:
               alloc = alloc.replace(tail, repl, 1)
           else:
               log = common_log.replace('__VARIANT__', 'helper-return')
-              log = log.replace('__DST__', '0u')
               tail = '    return old_pfs;\n}'
               if alloc.count(tail) != 1:
                   raise SystemExit('unexpected alloc return tail')
@@ -114,32 +132,35 @@ jobs:
 
           helper.write_text(source[:start] + alloc + source[end:])
 
-          if variant == 'atomic-destination':
-              header = Path('target/ia64/helper.h')
-              text = header.read_text()
-              old_decl = 'DEF_HELPER_4(alloc, i64, env, i64, i64, i64)'
-              new_decl = 'DEF_HELPER_5(alloc, void, env, i32, i64, i64, i64)'
-              if text.count(old_decl) != 1:
-                  raise SystemExit('unexpected alloc helper declaration')
-              header.write_text(text.replace(old_decl, new_decl, 1))
+          header = Path('target/ia64/helper.h')
+          text = header.read_text()
+          old_decl = 'DEF_HELPER_4(alloc, i64, env, i64, i64, i64)'
+          new_ret = 'void' if variant == 'atomic-destination' else 'i64'
+          new_decl = (
+              f'DEF_HELPER_5(alloc, {new_ret}, env, i32, i64, i64, i64)'
+          )
+          if text.count(old_decl) != 1:
+              raise SystemExit('unexpected alloc helper declaration')
+          header.write_text(text.replace(old_decl, new_decl, 1))
 
-              translator = Path('target/ia64/translate.c')
-              text = translator.read_text()
-              needle = 'TCGv_i64 old_pfs = tcg_temp_new_i64();'
-              if text.count(needle) != 1:
-                  raise SystemExit('unexpected alloc destination declaration')
-              needle_pos = text.index(needle)
-              block_start = text.rfind('\n', 0, needle_pos) + 1
-              block_end_marker = '                if (skip_label) {\n'
-              block_end = text.index(block_end_marker, needle_pos)
-              old_block = text[block_start:block_end]
-              required = (
-                  'gen_helper_alloc(old_pfs, tcg_env,',
-                  'tcg_gen_mov_i64(cpu_r[r1], old_pfs);',
-              )
-              if not all(fragment in old_block for fragment in required):
-                  raise SystemExit('unexpected alloc translator semantics')
-              indent = text[block_start:needle_pos]
+          translator = Path('target/ia64/translate.c')
+          text = translator.read_text()
+          needle = 'TCGv_i64 old_pfs = tcg_temp_new_i64();'
+          if text.count(needle) != 1:
+              raise SystemExit('unexpected alloc destination declaration')
+          needle_pos = text.index(needle)
+          block_start = text.rfind('\n', 0, needle_pos) + 1
+          block_end_marker = '                if (skip_label) {\n'
+          block_end = text.index(block_end_marker, needle_pos)
+          old_block = text[block_start:block_end]
+          required = (
+              'gen_helper_alloc(old_pfs, tcg_env,',
+              'tcg_gen_mov_i64(cpu_r[r1], old_pfs);',
+          )
+          if not all(fragment in old_block for fragment in required):
+              raise SystemExit('unexpected alloc translator semantics')
+          indent = text[block_start:needle_pos]
+          if variant == 'atomic-destination':
               new_block = (
                   f'{indent}gen_helper_alloc(tcg_env,\n'
                   f'{indent}                 tcg_constant_i32(r1),\n'
@@ -147,8 +168,20 @@ jobs:
                   f'{indent}                 tcg_constant_i64(sol),\n'
                   f'{indent}                 tcg_constant_i64(sor));\n'
               )
-              translator.write_text(text[:block_start] + new_block +
-                                    text[block_end:])
+          else:
+              call = 'gen_helper_alloc(old_pfs, tcg_env,\n'
+              if old_block.count(call) != 1:
+                  raise SystemExit('unexpected alloc helper call')
+              sof_pos = old_block.index('tcg_constant_i64(sof)')
+              sof_start = old_block.rfind('\n', 0, sof_pos) + 1
+              continuation = old_block[sof_start:sof_pos]
+              new_block = old_block.replace(
+                  call,
+                  call + continuation + 'tcg_constant_i32(r1),\n',
+                  1,
+              )
+          translator.write_text(text[:block_start] + new_block +
+                                text[block_end:])
           PY
           git diff --check
 
@@ -179,7 +212,98 @@ jobs:
           git diff --binary > "$out/${VARIANT}.patch"
           sha256sum "$out/qemu-system-ia64" > "$out/SHA256SUMS"
 
+      - name: Replay SDV debug firmware
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          build="build-${VARIANT}"
+          out="experiment-${VARIANT}"
+          evidence="$out/sdv-debug"
+          firmware="$PWD/stuff/EFI 0.99 Debug SDV.bin"
+          test -s "$firmware"
+          mkdir -p "$evidence"
+          sha256sum "$firmware" > "$evidence/firmware.sha256"
+
+          set +e
+          QEMU_BIN="$PWD/$build/qemu-system-ia64" \
+          IA64_BIOS="$firmware" \
+          IA64_LOGDIR="$PWD/$evidence" \
+          IA64_MEM=512M \
+          IA64_SMP=1 \
+          IA64_DISPLAY=none \
+          IA64_GUEST_ERRORS=1 \
+          QEMU_IA64_ALLOC_TRACE_PC=all \
+          timeout --signal=TERM --kill-after=5s 90s \
+            scripts/run-ia64-firmware.sh \
+            > "$evidence/runner.log" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$evidence/return-code.txt"
+
+          qemu_log="$evidence/qemu.fw.log"
+          serial_log="$(find "$evidence" -maxdepth 1 -name 'serial.fw.*.log' \
+            -type f -print -quit)"
+          test -f "$qemu_log"
+          test -n "$serial_log"
+          grep -aF 'alloc_trace ' "$qemu_log" \
+            > "$evidence/alloc-trace.log" || true
+          {
+            grep -aEi \
+              'alloc_trace|PAL|SAL|FIT|PEI|Dxe|DXE|HOB|BDS|Shell|assert|exception|unimplemented|unsupported' \
+              "$serial_log" "$qemu_log" || true
+          } | tail -n 4000 > "$evidence/frontier.log"
+
+          VARIANT="$VARIANT" RETURN_CODE="$rc" \
+          QEMU_LOG="$qemu_log" SERIAL_LOG="$serial_log" \
+          ALLOC_LOG="$evidence/alloc-trace.log" \
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+
+          def digest(path: pathlib.Path) -> str:
+              value = hashlib.sha256()
+              with path.open('rb') as source:
+                  for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                      value.update(chunk)
+              return value.hexdigest()
+
+          qemu_log = pathlib.Path(os.environ['QEMU_LOG'])
+          serial_log = pathlib.Path(os.environ['SERIAL_LOG'])
+          alloc_log = pathlib.Path(os.environ['ALLOC_LOG'])
+          lines = alloc_log.read_text(errors='replace').splitlines()
+          ips = []
+          destinations = []
+          for line in lines:
+              match = re.search(r'\bip=([0-9a-fA-F]+)', line)
+              if match:
+                  ips.append(match.group(1).lower())
+              match = re.search(r'\bdst=(\d+)', line)
+              if match:
+                  destinations.append(int(match.group(1)))
+          summary = {
+              'variant': os.environ['VARIANT'],
+              'return_code': int(os.environ['RETURN_CODE']),
+              'qemu_log_bytes': qemu_log.stat().st_size,
+              'serial_log_bytes': serial_log.stat().st_size,
+              'serial_sha256': digest(serial_log),
+              'alloc_trace_count': len(lines),
+              'alloc_unique_ips': list(dict.fromkeys(ips)),
+              'alloc_destinations': destinations,
+              'first_alloc': lines[0] if lines else None,
+              'last_alloc': lines[-1] if lines else None,
+          }
+          target = alloc_log.parent / 'summary.json'
+          target.write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ia64-alloc-${{ matrix.variant }}-${{ github.run_id }}
           path: experiment-${{ matrix.variant }}/
