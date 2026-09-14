@@ -1,0 +1,376 @@
+diff --git a/.github/workflows/ia64-rooster-branch-validation.yml b/.github/workflows/ia64-rooster-branch-validation.yml
+index 3fba7ad..9f80715 100644
+--- a/.github/workflows/ia64-rooster-branch-validation.yml
++++ b/.github/workflows/ia64-rooster-branch-validation.yml
+@@ -7,6 +7,7 @@ on:
+     paths:
+       - docs/ia64-rooster-efi.md
+       - docs/ia64-hob-migration-frontier.md
++      - docs/ia64-environment-variables.md
+       - scripts/check-ia64-rooster-branch.py
+       - scripts/run-ia64-efi-app.sh
+       - scripts/run-ia64-rooster-firmware-matrix.py
+@@ -18,7 +19,9 @@ on:
+       - hw/ia64/meson.build
+       - target/ia64/**
+       - tests/ia64/rooster-efi-smoke/**
++      - tests/unit/meson.build
+       - tests/unit/test-ia64-hob-*.py
++      - tests/unit/test-ia64-rse.c
+       - .github/workflows/ia64-rooster-branch-validation.yml
+   workflow_dispatch:
+ 
+@@ -67,8 +70,11 @@ jobs:
+             --target-list=ia64-softmmu \
+             --enable-plugins \
+             --disable-docs --disable-gtk --disable-sdl --disable-werror
+-          ninja -C build qemu-system-ia64
++          ninja -C build \
++            qemu-system-ia64 \
++            tests/unit/test-ia64-rse
+           build/qemu-system-ia64 --version
++          build/tests/unit/test-ia64-rse
+ 
+       - name: Build both observational plugins
+         run: |
+diff --git a/docs/ia64-environment-variables.md b/docs/ia64-environment-variables.md
+index 8c85784..ac35a2c 100644
+--- a/docs/ia64-environment-variables.md
++++ b/docs/ia64-environment-variables.md
+@@ -407,11 +407,15 @@ Environment variables are organized into the following categories:
+ | `QEMU_IA64_LOG_BSPSTORE` | Log BSP store operations |
+ | `QEMU_IA64_DIVHELP_LOG` | Log division helper calls |
+ | `QEMU_IA64_MANUAL_CALL_LOG` | Log manual call linkage |
+-| `QEMU_IA64_RET_UNWIND_PFS` | Enable return PFS unwinding |
+ | `QEMU_IA64_RET_WATCH_B0` | Watch B0 on returns |
+ | `QEMU_IA64_RET_TRACE_RANGE` | Trace ret_restore/b0 in a PC range (start-end or start+len) |
+ | `QEMU_IA64_RET_TRACE_LIMIT` | Limit return trace entries |
+ 
++`br.ret` always reconciles the modeled shadow call stack against the
++architectural return target in `b0` and the caller frame state in `ar.pfs`.
++This is required for non-local returns and stack-switch continuations and is
++not controlled by a firmware compatibility switch.
++
+ ## Assert and Debug Buffer
+ 
+ | Variable | Description |
+diff --git a/scripts/check-ia64-rooster-branch.py b/scripts/check-ia64-rooster-branch.py
+index ce54fde..70afc1f 100644
+--- a/scripts/check-ia64-rooster-branch.py
++++ b/scripts/check-ia64-rooster-branch.py
+@@ -36,6 +36,8 @@ def main() -> int:
+     causality_workflow = read(".github/workflows/ia64-fv-hob-causality.yml")
+     helper_h = read("target/ia64/helper.h")
+     helper_c = read("target/ia64/helper.c")
++    rse = read("target/ia64/rse.c")
++    rse_test = read("tests/unit/test-ia64-rse.c")
+     translate = read("target/ia64/translate.c")
+     environment = read("docs/ia64-environment-variables.md")
+ 
+@@ -62,6 +64,20 @@ def main() -> int:
+             "GP provenance documentation")
+     require(environment, "QEMU_IA64_TRACE_GP_ZERO_ABORT",
+             "GP provenance documentation")
++    require(helper_c, "ia64_rse_find_return_frame(env, b0, pfs_cfm)",
++            "architectural return reconciliation")
++    require(rse, "The return address is the strongest identity",
++            "architectural return reconciliation")
++    require(rse_test, "/ia64/rse/nonlocal-return-address-wins",
++            "architectural return reconciliation test")
++    require(environment, "br.ret` always reconciles",
++            "architectural return reconciliation documentation")
++    forbid(helper_c, r'getenv\("QEMU_IA64_RET_UNWIND_PFS"\)',
++           "architectural return reconciliation")
++    forbid(environment, r"QEMU_IA64_RET_UNWIND_PFS",
++           "architectural return reconciliation documentation")
++    forbid(rse, r"0x1ff[0-9a-f]{5,}",
++           "architectural return reconciliation")
+ 
+     # The causality experiment may restore records that already exist in guest
+     # memory, but it may never manufacture a DXE target or key off a firmware
+diff --git a/target/ia64/helper.c b/target/ia64/helper.c
+index 7f28088..249fd83 100644
+--- a/target/ia64/helper.c
++++ b/target/ia64/helper.c
+@@ -9,6 +9,7 @@
+ #include "interrupt.h"
+ #include "pal.h"
+ #include "sal.h"
++#include "rse.h"
+ #include "exec/helper-proto.h"
+ #include "exec/cpu-common.h"
+ #include "exec/cputlb.h"
+@@ -17429,10 +17430,6 @@ static void ia64_fw_pei_maybe_handle_hob_flow_ret(CPUIA64State *env)
+ void HELPER(ret_restore)(CPUIA64State *env)
+ {
+     static int log_count;
+-    static int unwind_enabled = -1;
+-    if (unwind_enabled == -1) {
+-        unwind_enabled = getenv("QEMU_IA64_RET_UNWIND_PFS") ? 1 : 0;
+-    }
+     static uint64_t watch_b0;
+     static bool watch_b0_inited;
+     if (!watch_b0_inited) {
+@@ -17627,23 +17624,33 @@ void HELPER(ret_restore)(CPUIA64State *env)
+         ia64_rse_store_frame(env, bsp, sof);
+     }
+     uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 46) - 1);
+     uint64_t b0 = env->b[0] & ~0xFULL;
+-    if (unwind_enabled && env->rse_depth > 0) {
+-        int unwind = 0;
+-        while (env->rse_depth > 0) {
+-            const struct IA64RSEFrame *frame =
+-                &env->rse_frames[env->rse_depth - 1];
+-            if (frame->ret_addr == b0 || frame->cfm == pfs_cfm) {
+-                break;
++
++    /*
++     * The architectural return target and ar.pfs select the caller.  A
++     * stack-switch continuation can bypass intervening br.call frames, so
++     * blindly popping the newest shadow frame restores the wrong register
++     * window and can corrupt gp before the branch is taken.
++     */
++    if (env->rse_depth > 0) {
++        int selected = ia64_rse_find_return_frame(env, b0, pfs_cfm);
++        int dropped = 0;
++
++        if (selected >= 0) {
++            int drop_count = (int)env->rse_depth - selected - 1;
++
++            while (dropped < drop_count && env->rse_depth > 0) {
++                ia64_rse_pop_window(env);
++                dropped++;
+             }
+-            ia64_rse_pop_window(env);
+-            unwind++;
+         }
+-        if (unwind && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
++
++        if (dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+             qemu_log_mask(LOG_GUEST_ERROR,
+-                          "ret_unwind pfs_cfm=%016" PRIx64 " b0=%016" PRIx64
++                          "ret_reconcile pfs_cfm=%016" PRIx64
++                          " b0=%016" PRIx64 " selected=%d"
+                           " dropped=%d depth=%u\n",
+-                          pfs_cfm, b0, unwind, env->rse_depth);
++                          pfs_cfm, b0, selected, dropped, env->rse_depth);
+         }
+     }
+     if (ia64_rse_pop_window(env)) {
+diff --git a/target/ia64/meson.build b/target/ia64/meson.build
+index aff236b..80f1403 100644
+--- a/target/ia64/meson.build
++++ b/target/ia64/meson.build
+@@ -5,6 +5,7 @@ ia64_ss.add(files(
+   'helper.c',
+   'interrupt.c',
+   'pal.c',
++  'rse.c',
+   'sal.c',
+   'translate.c',
+ ))
+diff --git a/target/ia64/rse.c b/target/ia64/rse.c
+new file mode 100644
+index 0000000..ae41a71
+--- /dev/null
++++ b/target/ia64/rse.c
+@@ -0,0 +1,52 @@
++/*
++ * IA-64 register stack engine helpers
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "rse.h"
++
++#define IA64_RSE_CFM_MASK ((UINT64_C(1) << 46) - 1)
++
++int ia64_rse_find_return_frame(const CPUIA64State *env,
++                               uint64_t ret_addr, uint64_t pfs_cfm)
++{
++    uint64_t target = ret_addr & ~UINT64_C(0xf);
++    uint64_t caller_cfm = pfs_cfm & IA64_RSE_CFM_MASK;
++    int index;
++
++    if (!env->rse_frames || env->rse_depth == 0) {
++        return -1;
++    }
++
++    /*
++     * The return address is the strongest identity.  Search it first so an
++     * intervening frame with the same CFM cannot capture a non-local return.
++     */
++    if (target != 0) {
++        for (index = (int)env->rse_depth - 1; index >= 0; index--) {
++            const struct IA64RSEFrame *frame = &env->rse_frames[index];
++
++            if (frame->ret_addr != 0 &&
++                (frame->ret_addr & ~UINT64_C(0xf)) == target) {
++                return index;
++            }
++        }
++    }
++
++    /*
++     * ar.pfs supplies the caller CFM even when a return branch register was
++     * not tracked precisely.  It is a safe fallback, but is less selective
++     * because unrelated procedures often use identical frame shapes.
++     */
++    for (index = (int)env->rse_depth - 1; index >= 0; index--) {
++        const struct IA64RSEFrame *frame = &env->rse_frames[index];
++
++        if ((frame->cfm & IA64_RSE_CFM_MASK) == caller_cfm) {
++            return index;
++        }
++    }
++
++    return -1;
++}
+diff --git a/target/ia64/rse.h b/target/ia64/rse.h
+new file mode 100644
+index 0000000..9bd24d5
+--- /dev/null
++++ b/target/ia64/rse.h
+@@ -0,0 +1,22 @@
++/*
++ * IA-64 register stack engine helpers
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef TARGET_IA64_RSE_H
++#define TARGET_IA64_RSE_H
++
++#include "cpu.h"
++
++/*
++ * Locate the shadow call frame selected by a br.ret.
++ *
++ * The architectural return state is carried by the branch target and ar.pfs;
++ * it is not necessarily the newest shadow frame.  Stack-switch and
++ * continuation paths can deliberately discard one or more intervening calls.
++ * Return the selected frame index, or -1 when no shadow frame matches.
++ */
++int ia64_rse_find_return_frame(const CPUIA64State *env,
++                               uint64_t ret_addr, uint64_t pfs_cfm);
++
++#endif /* TARGET_IA64_RSE_H */
+diff --git a/tests/unit/meson.build b/tests/unit/meson.build
+index 3d8e841..79008ad 100644
+--- a/tests/unit/meson.build
++++ b/tests/unit/meson.build
+@@ -51,6 +51,7 @@ tests = {
+   'test-ia64-interrupt': [meson.project_source_root() / 'target/ia64/interrupt.c'],
+   'test-ia64-iosapic': [meson.project_source_root() / 'hw/ia64/iosapic-core.c'],
+   'test-ia64-pal': [meson.project_source_root() / 'target/ia64/pal.c'],
++  'test-ia64-rse': [meson.project_source_root() / 'target/ia64/rse.c'],
+   'test-ia64-sal': [meson.project_source_root() / 'target/ia64/sal.c'],
+ }
+ 
+diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
+new file mode 100644
+index 0000000..80ff296
+--- /dev/null
++++ b/tests/unit/test-ia64-rse.c
+@@ -0,0 +1,101 @@
++/*
++ * IA-64 register stack return-frame tests
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "target/ia64/rse.h"
++
++static void init_frames(CPUIA64State *env,
++                        struct IA64RSEFrame *frames,
++                        size_t count)
++{
++    memset(env, 0, sizeof(*env));
++    memset(frames, 0, sizeof(*frames) * count);
++    env->rse_frames = frames;
++    env->rse_depth = count;
++}
++
++static void test_empty(void)
++{
++    CPUIA64State env = { 0 };
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x1000, 0x301), ==, -1);
++}
++
++static void test_top_return_address(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[2];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0x1000;
++    frames[0].cfm = 0x201;
++    frames[1].ret_addr = 0x2000;
++    frames[1].cfm = 0x302;
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x2002, 0x302), ==, 1);
++}
++
++static void test_nonlocal_return_address_wins(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[3];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0x1000;
++    frames[0].cfm = 0x201;
++    frames[1].ret_addr = 0x3000;
++    frames[1].cfm = 0x30a;
++    frames[2].ret_addr = 0x4000;
++    frames[2].cfm = 0x30a;
++
++    /*
++     * The newest frame deliberately has the same CFM.  The older exact return
++     * address must win for a non-local return or continuation transfer.
++     */
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x3001, 0x30a), ==, 1);
++}
++
++static void test_pfs_fallback(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[3];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0x1000;
++    frames[0].cfm = 0x201;
++    frames[1].ret_addr = 0x2000;
++    frames[1].cfm = 0x30a;
++    frames[2].ret_addr = 0x3000;
++    frames[2].cfm = 0x38a;
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x9000, 0x30a), ==, 1);
++}
++
++static void test_no_match(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[2];
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    frames[0].ret_addr = 0x1000;
++    frames[0].cfm = 0x201;
++    frames[1].ret_addr = 0x2000;
++    frames[1].cfm = 0x302;
++
++    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x9000, 0x777), ==, -1);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    g_test_add_func("/ia64/rse/empty", test_empty);
++    g_test_add_func("/ia64/rse/top-return-address", test_top_return_address);
++    g_test_add_func("/ia64/rse/nonlocal-return-address-wins",
++                    test_nonlocal_return_address_wins);
++    g_test_add_func("/ia64/rse/pfs-fallback", test_pfs_fallback);
++    g_test_add_func("/ia64/rse/no-match", test_no_match);
++    return g_test_run();
++}
