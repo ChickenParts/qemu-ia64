@@ -40,6 +40,11 @@ jobs:
             .github/patches/ia64-rse-return-exact-match.patch
 
           git apply --check \
+            .github/patches/ia64-rse-unit-typedefs.patch
+          git apply \
+            .github/patches/ia64-rse-unit-typedefs.patch
+
+          git apply --check \
             .github/patches/ia64-rse-maintainers.patch
           git apply \
             .github/patches/ia64-rse-maintainers.patch
@@ -130,6 +135,7 @@ jobs:
             .github/workflows/ia64-rse-return-integration.yml \
             .github/patches/ia64-rse-return-reconcile.patch \
             .github/patches/ia64-rse-return-exact-match.patch \
+            .github/patches/ia64-rse-return-unit-typedefs.patch \
             .github/patches/ia64-rse-maintainers.patch \
             .github/patches/ia64-python-loader.patch
 
