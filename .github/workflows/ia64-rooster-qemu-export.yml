@@ -1,7 +1,7 @@
 name: IA-64 Rooster QEMU export
 
-# Rebuild after IA-64 emulator, ABI-trace, EFI-harness, or firmware-to-RAM
-# PLABEL handoff trace changes.
+# Rebuild after IA-64 emulator, ABI-trace, EFI-harness, firmware-to-RAM
+# PLABEL handoff, or GP-provenance changes.
 on:
   push:
     branches:
