@@ -1,0 +1,43 @@
+diff --git a/target/ia64/helper.c b/target/ia64/helper.c
+--- a/target/ia64/helper.c
++++ b/target/ia64/helper.c
+@@ -17632,28 +17632,19 @@
+      * blindly popping the newest shadow frame restores the wrong register
+      * window and can corrupt gp before the branch is taken.
+      */
+-    if (env->rse_depth > 0) {
+-        int selected = ia64_rse_find_return_frame(env, b0, pfs_cfm);
+-        int dropped = 0;
++    IA64RSEReturnState reconcile =
++        ia64_rse_reconcile_return(env, b0, pfs_cfm,
++                                  ia64_rse_pop_window);
+ 
+-        if (selected >= 0) {
+-            int drop_count = (int)env->rse_depth - selected - 1;
+-
+-            while (dropped < drop_count && env->rse_depth > 0) {
+-                ia64_rse_pop_window(env);
+-                dropped++;
+-            }
+-        }
+-
+-        if (dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+-            qemu_log_mask(LOG_GUEST_ERROR,
+-                          "ret_reconcile pfs_cfm=%016" PRIx64
+-                          " b0=%016" PRIx64 " selected=%d"
+-                          " dropped=%d depth=%u\n",
+-                          pfs_cfm, b0, selected, dropped, env->rse_depth);
+-        }
++    if (reconcile.dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "ret_reconcile pfs_cfm=%016" PRIx64
++                      " b0=%016" PRIx64 " selected=%d"
++                      " dropped=%u depth=%u\n",
++                      pfs_cfm, b0, reconcile.selected,
++                      reconcile.dropped, env->rse_depth);
+     }
+-    if (ia64_rse_pop_window(env)) {
++    if (reconcile.restored) {
+         ia64_restore_ec_from_pfs(env);
+     }
+     if (watch_hit) {
