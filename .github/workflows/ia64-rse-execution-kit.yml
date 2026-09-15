@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   emulator:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -68,7 +69,7 @@ jobs:
             execution-kit/bin/qemu-system-ia64 \
             execution-kit/plugins/*.so \
             > execution-kit/SHA256SUMS
-          git rev-parse HEAD > execution-kit/SOURCE_HEAD
+          printf '%s\n' "$GITHUB_SHA" > execution-kit/SOURCE_HEAD
 
       - name: Upload emulator kit
         uses: actions/upload-artifact@v4
@@ -104,7 +105,7 @@ jobs:
             "$PWD/payload"
           file payload/BOOTIA64.EFI | tee payload/file.txt
           sha256sum payload/BOOTIA64.EFI > payload/SHA256SUMS
-          git rev-parse HEAD > payload/SOURCE_HEAD
+          printf '%s\n' "$GITHUB_SHA" > payload/SOURCE_HEAD
 
       - name: Upload payload
         uses: actions/upload-artifact@v4
