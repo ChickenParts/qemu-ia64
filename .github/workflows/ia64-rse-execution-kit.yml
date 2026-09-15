@@ -75,14 +75,17 @@ jobs:
       - name: Smoke-test packaged runtime layout
         run: |
           set -euo pipefail
-          execution-kit/bin/qemu-system-ia64 \
-            -machine none \
-            -display none \
-            -nodefaults \
-            -S \
-            -qmp stdio \
-            <<<'{"execute":"qmp_capabilities"}' \
-            > execution-kit/package-smoke.txt
+          printf '%s\n' \
+            '{"execute":"qmp_capabilities"}' \
+            '{"execute":"quit"}' \
+            | timeout 10s execution-kit/bin/qemu-system-ia64 \
+                -machine none \
+                -display none \
+                -nodefaults \
+                -S \
+                -qmp stdio \
+                > execution-kit/package-smoke.txt
+          grep -q '"return"' execution-kit/package-smoke.txt
 
       - name: Upload emulator kit
         uses: actions/upload-artifact@v4
