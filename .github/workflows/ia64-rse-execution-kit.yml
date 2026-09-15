@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   emulator:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -31,7 +31,7 @@ jobs:
             build-essential ninja-build pkg-config python3 \
             libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
 
-      - name: Build emulator and observational plugins
+      - name: Build emulator and focused RSE test
         run: |
           set -euo pipefail
           ./configure \
@@ -46,28 +46,20 @@ jobs:
             qemu-system-ia64 \
             tests/unit/test-ia64-rse
           build/tests/unit/test-ia64-rse
-          bash scripts/build-ia64-hob-write-plugin.sh \
-            "$PWD/build/libia64-hob-write-trace.so"
-          bash scripts/build-ia64-hob-register-plugin.sh \
-            "$PWD/build/libia64-hob-write-regs.so"
 
       - name: Package execution kit
         run: |
           set -euo pipefail
-          mkdir -p execution-kit/bin execution-kit/scripts execution-kit/plugins
+          mkdir -p execution-kit/bin execution-kit/scripts
           cp build/qemu-system-ia64 execution-kit/bin/
           cp scripts/run-ia64-firmware.sh execution-kit/scripts/
           cp scripts/run-ia64-rooster-firmware-matrix.py execution-kit/scripts/
           cp scripts/analyze-ia64-hob-migration.py execution-kit/scripts/
           cp scripts/analyze-ia64-hob-write-trace.py execution-kit/scripts/
           cp scripts/analyze-ia64-hob-register-trace.py execution-kit/scripts/
-          cp build/libia64-hob-write-trace.so execution-kit/plugins/
-          cp build/libia64-hob-write-regs.so execution-kit/plugins/
           chmod +x execution-kit/bin/qemu-system-ia64 execution-kit/scripts/*.sh
           ldd execution-kit/bin/qemu-system-ia64 > execution-kit/ldd.txt
-          sha256sum \
-            execution-kit/bin/qemu-system-ia64 \
-            execution-kit/plugins/*.so \
+          sha256sum execution-kit/bin/qemu-system-ia64 \
             > execution-kit/SHA256SUMS
           printf '%s\n' "$GITHUB_SHA" > execution-kit/SOURCE_HEAD
 
@@ -80,6 +72,7 @@ jobs:
           if-no-files-found: error
 
   payload:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     container:
       image: fedora:44
