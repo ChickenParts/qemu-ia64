@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import stat
+import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -15,6 +16,7 @@ SCRIPT = ROOT / "scripts" / "run-ia64-rooster-firmware-matrix.py"
 SPEC = importlib.util.spec_from_file_location("ia64_rooster_matrix", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
