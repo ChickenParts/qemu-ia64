@@ -9,6 +9,7 @@ on:
       - .github/patches/ia64-rse-return-reconcile-v2.patch
       - .github/patches/ia64-rse-return-reconcile-helper-v3.patch
       - .github/patches/ia64-rse-return-reconcile-contract-v4.patch
+      - .github/patches/ia64-rse-unit-target-context-v5.patch
       - .github/workflows/ia64-rse-return-reconcile.yml
   workflow_dispatch:
 
@@ -45,6 +46,10 @@ jobs:
             .github/patches/ia64-rse-return-reconcile-helper-v3.patch
           git apply \
             .github/patches/ia64-rse-return-reconcile-helper-v3.patch
+          git apply --check \
+            .github/patches/ia64-rse-unit-target-context-v5.patch
+          git apply \
+            .github/patches/ia64-rse-unit-target-context-v5.patch
           git diff --check
           mkdir -p scratch/rse-return-reconcile
           git diff --binary > scratch/rse-return-reconcile/applied.patch
