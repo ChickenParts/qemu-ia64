@@ -1,0 +1,78 @@
+name: IA-64 architectural return reconciliation
+
+on:
+  push:
+    branches:
+      - diag/ia64-rse-return-reconcile-20260915
+    paths:
+      - .github/patches/ia64-rse-return-reconcile.patch
+      - .github/patches/ia64-rse-return-reconcile-v2.patch
+      - .github/workflows/ia64-rse-return-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@v4
+        with:
+          ref: diag/ia64-rse-return-reconcile-20260915
+          fetch-depth: 1
+
+      - name: Apply the architectural return series
+        run: |
+          set -euo pipefail
+          git apply --check .github/patches/ia64-rse-return-reconcile.patch
+          git apply .github/patches/ia64-rse-return-reconcile.patch
+          git apply --check .github/patches/ia64-rse-return-reconcile-v2.patch
+          git apply .github/patches/ia64-rse-return-reconcile-v2.patch
+          git diff --check
+          mkdir -p scratch/rse-return-reconcile
+          git diff --binary > scratch/rse-return-reconcile/applied.patch
+          git diff --stat | tee scratch/rse-return-reconcile/diffstat.txt
+
+      - name: Enforce the IA-64 branch contract
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ia64-rooster-branch.py | \
+            tee scratch/rse-return-reconcile/contract.log
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Build QEMU and integrated RSE test
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --enable-plugins \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-rse 2>&1 | \
+            tee scratch/rse-return-reconcile/build.log
+
+      - name: Exercise local and non-local returns
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-rse 2>&1 | \
+            tee scratch/rse-return-reconcile/test.log
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-rse-return-reconcile-${{ github.run_id }}
+          path: scratch/rse-return-reconcile
+          retention-days: 14
+          if-no-files-found: warn
