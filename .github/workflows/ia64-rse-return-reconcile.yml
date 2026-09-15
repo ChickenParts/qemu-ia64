@@ -7,6 +7,7 @@ on:
     paths:
       - .github/patches/ia64-rse-return-reconcile.patch
       - .github/patches/ia64-rse-return-reconcile-v2.patch
+      - .github/patches/ia64-rse-return-reconcile-helper-v3.patch
       - .github/workflows/ia64-rse-return-reconcile.yml
   workflow_dispatch:
 
@@ -29,8 +30,16 @@ jobs:
           set -euo pipefail
           git apply --check .github/patches/ia64-rse-return-reconcile.patch
           git apply .github/patches/ia64-rse-return-reconcile.patch
-          git apply --check .github/patches/ia64-rse-return-reconcile-v2.patch
-          git apply .github/patches/ia64-rse-return-reconcile-v2.patch
+          git apply --check \
+            --exclude=target/ia64/helper.c \
+            .github/patches/ia64-rse-return-reconcile-v2.patch
+          git apply \
+            --exclude=target/ia64/helper.c \
+            .github/patches/ia64-rse-return-reconcile-v2.patch
+          git apply --check \
+            .github/patches/ia64-rse-return-reconcile-helper-v3.patch
+          git apply \
+            .github/patches/ia64-rse-return-reconcile-helper-v3.patch
           git diff --check
           mkdir -p scratch/rse-return-reconcile
           git diff --binary > scratch/rse-return-reconcile/applied.patch
