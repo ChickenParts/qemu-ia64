@@ -141,8 +141,14 @@ jobs:
             -m 'tests/ia64: register dynamically loaded analyzers' \
             -m 'Insert importlib-created modules into sys.modules before execution so dataclass and annotation resolution work on Python 3.12.'
 
+          # The job token intentionally lacks workflows permission.  Keep both
+          # workflow files out of this push; the connected GitHub client will
+          # update the permanent validator and remove this temporary launcher
+          # after the validated source commits reach the branch.
+          git restore \
+            .github/workflows/ia64-rooster-branch-validation.yml
+
           git rm \
-            .github/workflows/ia64-rse-return-integration.yml \
             .github/patches/ia64-rse-return-reconcile.patch \
             .github/patches/ia64-rse-return-exact-match.patch \
             .github/patches/ia64-rse-unit-typedefs.patch \
@@ -153,7 +159,6 @@ jobs:
 
           git add \
             MAINTAINERS \
-            .github/workflows/ia64-rooster-branch-validation.yml \
             docs/ia64-environment-variables.md \
             scripts/check-ia64-rooster-branch.py \
             target/ia64/helper.c \
