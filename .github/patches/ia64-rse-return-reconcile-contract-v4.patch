@@ -1,0 +1,15 @@
+diff --git a/target/ia64/rse.c b/target/ia64/rse.c
+--- a/target/ia64/rse.c
++++ b/target/ia64/rse.c
+@@ -68,6 +68,11 @@ IA64RSEReturnState ia64_rse_reconcile_return(
+     }
+ 
+     result.selected = ia64_rse_find_return_frame(env, ret_addr, pfs_cfm);
++
++    /*
++     * With no match, preserve the legacy local-return behavior: leave the
++     * drop count at zero and pop only the newest frame below.
++     */
+     if (result.selected >= 0) {
+         drop_count = env->rse_depth - (unsigned int)result.selected - 1;
+     }
