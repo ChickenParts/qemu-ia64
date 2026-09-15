@@ -7,6 +7,7 @@ on:
     paths:
       - docs/ia64-rooster-efi.md
       - docs/ia64-hob-migration-frontier.md
+      - docs/ia64-environment-variables.md
       - scripts/check-ia64-rooster-branch.py
       - scripts/run-ia64-efi-app.sh
       - scripts/run-ia64-rooster-firmware-matrix.py
@@ -18,6 +19,8 @@ on:
       - hw/ia64/meson.build
       - target/ia64/**
       - tests/ia64/rooster-efi-smoke/**
+      - tests/unit/meson.build
+      - tests/unit/test-ia64-rse.c
       - tests/unit/test-ia64-hob-*.py
       - .github/workflows/ia64-rooster-branch-validation.yml
   workflow_dispatch:
@@ -67,8 +70,9 @@ jobs:
             --target-list=ia64-softmmu \
             --enable-plugins \
             --disable-docs --disable-gtk --disable-sdl --disable-werror
-          ninja -C build qemu-system-ia64
+          ninja -C build qemu-system-ia64 tests/unit/test-ia64-rse
           build/qemu-system-ia64 --version
+          build/tests/unit/test-ia64-rse
 
       - name: Build both observational plugins
         run: |
