@@ -51,13 +51,17 @@ jobs:
       - name: Package execution kit
         run: |
           set -euo pipefail
-          mkdir -p execution-kit/bin execution-kit/scripts
+          mkdir -p \
+            execution-kit/bin \
+            execution-kit/scripts \
+            execution-kit/share/qemu
           cp build/qemu-system-ia64 execution-kit/bin/
           cp scripts/run-ia64-firmware.sh execution-kit/scripts/
           cp scripts/run-ia64-rooster-firmware-matrix.py execution-kit/scripts/
           cp scripts/analyze-ia64-hob-migration.py execution-kit/scripts/
           cp scripts/analyze-ia64-hob-write-trace.py execution-kit/scripts/
           cp scripts/analyze-ia64-hob-register-trace.py execution-kit/scripts/
+          cp -a pc-bios/. execution-kit/share/qemu/
           chmod +x execution-kit/bin/qemu-system-ia64 execution-kit/scripts/*.sh
           ldd execution-kit/bin/qemu-system-ia64 > execution-kit/ldd.txt
           if grep -q 'not found' execution-kit/ldd.txt; then
@@ -67,6 +71,18 @@ jobs:
           sha256sum execution-kit/bin/qemu-system-ia64 \
             > execution-kit/SHA256SUMS
           printf '%s\n' "$GITHUB_SHA" > execution-kit/SOURCE_HEAD
+
+      - name: Smoke-test packaged runtime layout
+        run: |
+          set -euo pipefail
+          execution-kit/bin/qemu-system-ia64 \
+            -machine none \
+            -display none \
+            -nodefaults \
+            -S \
+            -qmp stdio \
+            <<<'{"execute":"qmp_capabilities"}' \
+            > execution-kit/package-smoke.txt
 
       - name: Upload emulator kit
         uses: actions/upload-artifact@v4
