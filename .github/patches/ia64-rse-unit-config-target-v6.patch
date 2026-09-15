@@ -1,0 +1,15 @@
+diff --git a/tests/unit/meson.build b/tests/unit/meson.build
+--- a/tests/unit/meson.build
++++ b/tests/unit/meson.build
+@@ -191,7 +191,10 @@ foreach test_name, extra: tests
+     # This test intentionally instantiates CPUIA64State.  Keep the target
+     # context local to this executable rather than making common unit tests
+     # appear to be per-target code.
+-    test_c_args += ['-DCOMPILING_PER_TARGET', '-DTARGET_LONG_BITS=64']
++    test_c_args += [
++      '-DCOMPILING_PER_TARGET',
++      '-DCONFIG_TARGET=\"ia64-softmmu-config-target.h\"',
++    ]
+     test_include_directories += include_directories('../../target/ia64')
+   endif
+ 
