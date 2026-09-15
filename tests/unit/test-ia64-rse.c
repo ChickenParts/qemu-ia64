@@ -1,0 +1,193 @@
+/*
+ * IA-64 register stack return-frame tests
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+#include "target/ia64/rse.h"
+
+struct IA64RSEFrame {
+    uint64_t padding;
+    uint64_t cfm;
+    uint64_t ret_addr;
+};
+
+typedef struct TestIA64RSEState {
+    struct IA64RSEFrame *rse_frames;
+    size_t rse_depth;
+} TestIA64RSEState;
+
+static void init_frames(TestIA64RSEState *env,
+                        struct IA64RSEFrame *frames,
+                        size_t count)
+{
+    memset(env, 0, sizeof(*env));
+    memset(frames, 0, sizeof(*frames) * count);
+    env->rse_frames = frames;
+    env->rse_depth = count;
+}
+
+static int find_return_frame(const TestIA64RSEState *env,
+                             uint64_t ret_addr, uint64_t pfs_cfm)
+{
+    const struct IA64RSEReturnFrameView view = {
+        .base = env->rse_frames,
+        .count = env->rse_depth,
+        .stride = sizeof(*env->rse_frames),
+        .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+        .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+    };
+
+    return ia64_rse_find_return_frame(&view, ret_addr, pfs_cfm);
+}
+
+static void test_empty(void)
+{
+    TestIA64RSEState env = { 0 };
+
+    g_assert_cmpint(find_return_frame(&env, 0x1000, 0x301), ==, -1);
+}
+
+static void test_top_exact_match(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[2];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].ret_addr = 0x2000;
+    frames[1].cfm = 0x302;
+
+    g_assert_cmpint(find_return_frame(&env, 0x2002, 0x302), ==, 1);
+}
+
+static void test_nonlocal_return_address_wins(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[3];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].ret_addr = 0x3000;
+    frames[1].cfm = 0x30a;
+    frames[2].ret_addr = 0x4000;
+    frames[2].cfm = 0x30a;
+
+    /*
+     * The newest frame deliberately has the same CFM.  Only the older frame
+     * matches both architectural identity components.
+     */
+    g_assert_cmpint(find_return_frame(&env, 0x3001, 0x30a), ==, 1);
+}
+
+static void test_conflicting_components_do_not_match(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[3];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].ret_addr = 0x2000;
+    frames[1].cfm = 0x30a;
+    frames[2].ret_addr = 0x3000;
+    frames[2].cfm = 0x38a;
+
+    /*
+     * The return address and PFS each match a frame, but not the same frame.
+     * Discarding either frame would turn inconsistent state into corruption.
+     */
+    g_assert_cmpint(find_return_frame(&env, 0x2001, 0x38a), ==, -1);
+}
+
+static void test_return_address_only_does_not_match(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[2];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].ret_addr = 0x2000;
+    frames[1].cfm = 0x302;
+
+    g_assert_cmpint(find_return_frame(&env, 0x2002, 0x777), ==, -1);
+}
+
+static void test_pfs_only_does_not_match(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[2];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].ret_addr = 0x2000;
+    frames[1].cfm = 0x302;
+
+    g_assert_cmpint(find_return_frame(&env, 0x9000, 0x302), ==, -1);
+}
+
+static void test_duplicate_exact_match_prefers_newest(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[3];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].ret_addr = 0x2000;
+    frames[1].cfm = 0x30a;
+    frames[2].ret_addr = 0x2000;
+    frames[2].cfm = 0x30a;
+
+    g_assert_cmpint(find_return_frame(&env, 0x2001, 0x30a), ==, 2);
+}
+
+static void test_zero_target_does_not_match(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[1];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0;
+    frames[0].cfm = 0x201;
+
+    g_assert_cmpint(find_return_frame(&env, 0, 0x201), ==, -1);
+}
+
+static void test_no_match(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[2];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].ret_addr = 0x2000;
+    frames[1].cfm = 0x302;
+
+    g_assert_cmpint(find_return_frame(&env, 0x9000, 0x777), ==, -1);
+}
+
+int main(int argc, char **argv)
+{
+    g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/ia64/rse/empty", test_empty);
+    g_test_add_func("/ia64/rse/top-exact-match", test_top_exact_match);
+    g_test_add_func("/ia64/rse/nonlocal-return-address-wins",
+                    test_nonlocal_return_address_wins);
+    g_test_add_func("/ia64/rse/conflicting-components",
+                    test_conflicting_components_do_not_match);
+    g_test_add_func("/ia64/rse/return-address-only",
+                    test_return_address_only_does_not_match);
+    g_test_add_func("/ia64/rse/pfs-only", test_pfs_only_does_not_match);
+    g_test_add_func("/ia64/rse/duplicate-exact-prefers-newest",
+                    test_duplicate_exact_match_prefers_newest);
+    g_test_add_func("/ia64/rse/zero-target", test_zero_target_does_not_match);
+    g_test_add_func("/ia64/rse/no-match", test_no_match);
+    return g_test_run();
+}

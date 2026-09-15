@@ -1286,6 +1286,7 @@ S: Maintained
 F: configs/devices/ia64-softmmu/
 F: configs/targets/ia64-softmmu.mak
 F: docs/devel/ia64-*
+F: docs/ia64-*
 F: hw/ia64/
 F: target/ia64/
 F: tests/unit/test-ia64-*

@@ -9,6 +9,7 @@
 #include "interrupt.h"
 #include "pal.h"
 #include "sal.h"
+#include "rse.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
@@ -17429,10 +17430,6 @@ static void ia64_fw_pei_maybe_handle_hob_flow_ret(CPUIA64State *env)
 void HELPER(ret_restore)(CPUIA64State *env)
 {
     static int log_count;
-    static int unwind_enabled = -1;
-    if (unwind_enabled == -1) {
-        unwind_enabled = getenv("QEMU_IA64_RET_UNWIND_PFS") ? 1 : 0;
-    }
     static uint64_t watch_b0;
     static bool watch_b0_inited;
     if (!watch_b0_inited) {
@@ -17628,22 +17625,39 @@ void HELPER(ret_restore)(CPUIA64State *env)
     }
     uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 46) - 1);
     uint64_t b0 = env->b[0] & ~0xFULL;
-    if (unwind_enabled && env->rse_depth > 0) {
-        int unwind = 0;
-        while (env->rse_depth > 0) {
-            const struct IA64RSEFrame *frame =
-                &env->rse_frames[env->rse_depth - 1];
-            if (frame->ret_addr == b0 || frame->cfm == pfs_cfm) {
-                break;
+
+    /*
+     * The architectural return target and ar.pfs select the caller.  A
+     * stack-switch continuation can bypass intervening br.call frames, so
+     * blindly popping the newest shadow frame restores the wrong register
+     * window and can corrupt gp before the branch is taken.
+     */
+    if (env->rse_depth > 0) {
+        const struct IA64RSEReturnFrameView view = {
+            .base = env->rse_frames,
+            .count = env->rse_depth,
+            .stride = sizeof(*env->rse_frames),
+            .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+            .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+        };
+        int selected = ia64_rse_find_return_frame(&view, b0, pfs_cfm);
+        int dropped = 0;
+
+        if (selected >= 0) {
+            int drop_count = (int)env->rse_depth - selected - 1;
+
+            while (dropped < drop_count && env->rse_depth > 0) {
+                ia64_rse_pop_window(env);
+                dropped++;
             }
-            ia64_rse_pop_window(env);
-            unwind++;
         }
-        if (unwind && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+
+        if (dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "ret_unwind pfs_cfm=%016" PRIx64 " b0=%016" PRIx64
+                          "ret_reconcile pfs_cfm=%016" PRIx64
+                          " b0=%016" PRIx64 " selected=%d"
                           " dropped=%d depth=%u\n",
-                          pfs_cfm, b0, unwind, env->rse_depth);
+                          pfs_cfm, b0, selected, dropped, env->rse_depth);
         }
     }
     if (ia64_rse_pop_window(env)) {
