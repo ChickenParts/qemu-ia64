@@ -1,0 +1,115 @@
+name: Temporary IA-64 RSE execution kit
+
+on:
+  push:
+    branches:
+      - fix/ia64-rse-return-identity
+    paths:
+      - .github/workflows/ia64-rse-execution-kit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  emulator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out exact feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-rse-return-identity
+          fetch-depth: 1
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+
+      - name: Build emulator and observational plugins
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --enable-plugins \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
+            --disable-vnc \
+            --disable-werror
+          ninja -C build -j"$(nproc)" \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-rse
+          build/tests/unit/test-ia64-rse
+          bash scripts/build-ia64-hob-write-plugin.sh \
+            "$PWD/build/libia64-hob-write-trace.so"
+          bash scripts/build-ia64-hob-register-plugin.sh \
+            "$PWD/build/libia64-hob-write-regs.so"
+
+      - name: Package execution kit
+        run: |
+          set -euo pipefail
+          mkdir -p execution-kit/bin execution-kit/scripts execution-kit/plugins
+          cp build/qemu-system-ia64 execution-kit/bin/
+          cp scripts/run-ia64-firmware.sh execution-kit/scripts/
+          cp scripts/run-ia64-rooster-firmware-matrix.py execution-kit/scripts/
+          cp scripts/analyze-ia64-hob-migration.py execution-kit/scripts/
+          cp scripts/analyze-ia64-hob-write-trace.py execution-kit/scripts/
+          cp scripts/analyze-ia64-hob-register-trace.py execution-kit/scripts/
+          cp build/libia64-hob-write-trace.so execution-kit/plugins/
+          cp build/libia64-hob-write-regs.so execution-kit/plugins/
+          chmod +x execution-kit/bin/qemu-system-ia64 execution-kit/scripts/*.sh
+          ldd execution-kit/bin/qemu-system-ia64 > execution-kit/ldd.txt
+          sha256sum \
+            execution-kit/bin/qemu-system-ia64 \
+            execution-kit/plugins/*.so \
+            > execution-kit/SHA256SUMS
+          git rev-parse HEAD > execution-kit/SOURCE_HEAD
+
+      - name: Upload emulator kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-rse-execution-kit-${{ github.run_id }}
+          path: execution-kit/
+          retention-days: 14
+          if-no-files-found: error
+
+  payload:
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    timeout-minutes: 20
+    steps:
+      - name: Install IA-64 cross tools
+        run: |
+          set -euo pipefail
+          dnf --assumeyes --setopt=install_weak_deps=False install \
+            binutils-ia64-linux-gnu coreutils file \
+            gcc-ia64-linux-gnu git python3
+
+      - name: Check out exact feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-rse-return-identity
+          fetch-depth: 1
+
+      - name: Build Rooster IA-64 EFI payload
+        run: |
+          set -euo pipefail
+          bash tests/ia64/rooster-efi-smoke/build.sh \
+            "$PWD/payload"
+          file payload/BOOTIA64.EFI | tee payload/file.txt
+          sha256sum payload/BOOTIA64.EFI > payload/SHA256SUMS
+          git rev-parse HEAD > payload/SOURCE_HEAD
+
+      - name: Upload payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-rse-rooster-payload-${{ github.run_id }}
+          path: payload/
+          retention-days: 14
+          if-no-files-found: error
