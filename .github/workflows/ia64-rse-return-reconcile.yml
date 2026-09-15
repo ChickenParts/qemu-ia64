@@ -8,6 +8,7 @@ on:
       - .github/patches/ia64-rse-return-reconcile.patch
       - .github/patches/ia64-rse-return-reconcile-v2.patch
       - .github/patches/ia64-rse-return-reconcile-helper-v3.patch
+      - .github/patches/ia64-rse-return-reconcile-contract-v4.patch
       - .github/workflows/ia64-rse-return-reconcile.yml
   workflow_dispatch:
 
@@ -36,6 +37,10 @@ jobs:
           git apply \
             --exclude=target/ia64/helper.c \
             .github/patches/ia64-rse-return-reconcile-v2.patch
+          git apply --check \
+            .github/patches/ia64-rse-return-reconcile-contract-v4.patch
+          git apply \
+            .github/patches/ia64-rse-return-reconcile-contract-v4.patch
           git apply --check \
             .github/patches/ia64-rse-return-reconcile-helper-v3.patch
           git apply \
