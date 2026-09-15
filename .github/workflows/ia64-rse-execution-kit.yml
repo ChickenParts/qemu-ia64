@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build pkg-config python3 \
-            libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
+            libglib2.0-dev libpixman-1-dev zlib1g-dev
 
       - name: Build emulator and focused RSE test
         run: |
@@ -37,6 +37,7 @@ jobs:
           ./configure \
             --target-list=ia64-softmmu \
             --enable-plugins \
+            --disable-slirp \
             --disable-docs \
             --disable-gtk \
             --disable-sdl \
@@ -59,6 +60,10 @@ jobs:
           cp scripts/analyze-ia64-hob-register-trace.py execution-kit/scripts/
           chmod +x execution-kit/bin/qemu-system-ia64 execution-kit/scripts/*.sh
           ldd execution-kit/bin/qemu-system-ia64 > execution-kit/ldd.txt
+          if grep -q 'not found' execution-kit/ldd.txt; then
+            cat execution-kit/ldd.txt
+            exit 1
+          fi
           sha256sum execution-kit/bin/qemu-system-ia64 \
             > execution-kit/SHA256SUMS
           printf '%s\n' "$GITHUB_SHA" > execution-kit/SOURCE_HEAD
