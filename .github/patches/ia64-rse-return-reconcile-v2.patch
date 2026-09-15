@@ -1,0 +1,387 @@
+diff --git a/target/ia64/rse.c b/target/ia64/rse.c
+--- a/target/ia64/rse.c
++++ b/target/ia64/rse.c
+@@ -51,3 +51,32 @@
+ 
+     return -1;
+ }
++
++IA64RSEReturnState ia64_rse_reconcile_return(
++    CPUIA64State *env, uint64_t ret_addr, uint64_t pfs_cfm,
++    IA64RSEPopWindowFn pop_window)
++{
++    IA64RSEReturnState result = {
++        .selected = -1,
++    };
++    unsigned int drop_count = 0;
++
++    if (!env || !pop_window || env->rse_depth == 0) {
++        return result;
++    }
++
++    result.selected = ia64_rse_find_return_frame(env, ret_addr, pfs_cfm);
++    if (result.selected >= 0) {
++        drop_count = env->rse_depth - (unsigned int)result.selected - 1;
++    }
++
++    while (result.dropped < drop_count) {
++        if (!pop_window(env)) {
++            return result;
++        }
++        result.dropped++;
++    }
++
++    result.restored = pop_window(env);
++    return result;
++}
+diff --git a/target/ia64/rse.h b/target/ia64/rse.h
+--- a/target/ia64/rse.h
++++ b/target/ia64/rse.h
+@@ -8,6 +8,14 @@
+ #define TARGET_IA64_RSE_H
+ 
+ #include "cpu.h"
++
++typedef bool (*IA64RSEPopWindowFn)(CPUIA64State *env);
++
++typedef struct IA64RSEReturnState {
++    int selected;
++    unsigned int dropped;
++    bool restored;
++} IA64RSEReturnState;
+ 
+ /*
+  * Locate the shadow call frame selected by a br.ret.
+@@ -20,4 +28,15 @@
+ int ia64_rse_find_return_frame(const CPUIA64State *env,
+                                uint64_t ret_addr, uint64_t pfs_cfm);
+ 
++/*
++ * Pop intervening shadow frames and restore the frame selected by br.ret.
++ *
++ * When no shadow frame matches, preserve the legacy local-return behavior by
++ * popping only the newest frame.  The callback is the target's architectural
++ * pop implementation, so production and unit tests share the orchestration.
++ */
++IA64RSEReturnState ia64_rse_reconcile_return(
++    CPUIA64State *env, uint64_t ret_addr, uint64_t pfs_cfm,
++    IA64RSEPopWindowFn pop_window);
++
+ #endif /* TARGET_IA64_RSE_H */
+diff --git a/tests/unit/test-ia64-rse.c b/tests/unit/test-ia64-rse.c
+--- a/tests/unit/test-ia64-rse.c
++++ b/tests/unit/test-ia64-rse.c
+@@ -8,85 +8,200 @@
+ #include "qemu/osdep.h"
+ #include "target/ia64/rse.h"
+ 
++#define MAX_TEST_POPS 8
++
++static unsigned int pop_count;
++static uint64_t popped_returns[MAX_TEST_POPS];
++
++static void seed_frame(struct IA64RSEFrame *frame, uint64_t tag,
++                       uint64_t ret_addr, uint64_t cfm)
++{
++    size_t index;
++
++    frame->ret_addr = ret_addr;
++    frame->cfm = cfm;
++    frame->ar_pfs = (tag << 48) | cfm;
++    for (index = 0; index < G_N_ELEMENTS(frame->r); index++) {
++        frame->r[index] = (tag << 32) | index;
++        frame->nat[index] = (tag + index) & 1;
++    }
++}
++
+ static void init_frames(CPUIA64State *env,
+                         struct IA64RSEFrame *frames,
+                         size_t count)
+ {
+     memset(env, 0, sizeof(*env));
+     memset(frames, 0, sizeof(*frames) * count);
++    memset(popped_returns, 0, sizeof(popped_returns));
++    pop_count = 0;
+     env->rse_frames = frames;
+     env->rse_depth = count;
++    env->rse_capacity = count;
++    memset(env->r + 32, 0xa5, sizeof(frames[0].r));
++    memset(env->nat + 32, 0x5a, sizeof(frames[0].nat));
++}
++
++static bool test_pop_window(CPUIA64State *env)
++{
++    struct IA64RSEFrame *frame;
++
++    if (!env->rse_frames || env->rse_depth == 0) {
++        return false;
++    }
++
++    frame = &env->rse_frames[env->rse_depth - 1];
++    if (pop_count < G_N_ELEMENTS(popped_returns)) {
++        popped_returns[pop_count] = frame->ret_addr;
++    }
++    pop_count++;
++
++    memcpy(env->r + 32, frame->r, sizeof(frame->r));
++    memcpy(env->nat + 32, frame->nat, sizeof(frame->nat));
++    env->ar[IA64_AR_PFS] = frame->ar_pfs;
++    env->cfm = frame->cfm;
++    env->rse_depth--;
++    return true;
++}
++
++static void assert_frame_restored(const CPUIA64State *env,
++                                  const struct IA64RSEFrame *frame)
++{
++    g_assert_cmpmem(env->r + 32, sizeof(frame->r),
++                    frame->r, sizeof(frame->r));
++    g_assert_cmpmem(env->nat + 32, sizeof(frame->nat),
++                    frame->nat, sizeof(frame->nat));
++    g_assert_cmphex(env->ar[IA64_AR_PFS], ==, frame->ar_pfs);
++    g_assert_cmphex(env->cfm, ==, frame->cfm);
+ }
+ 
+ static void test_empty(void)
+ {
+     CPUIA64State env = { 0 };
+-
+-    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x1000, 0x301), ==, -1);
++    IA64RSEReturnState state;
++
++    state = ia64_rse_reconcile_return(&env, 0x1000, 0x301,
++                                      test_pop_window);
++    g_assert_cmpint(state.selected, ==, -1);
++    g_assert_cmpuint(state.dropped, ==, 0);
++    g_assert_false(state.restored);
++    g_assert_cmpuint(pop_count, ==, 0);
+ }
+ 
+ static void test_top_return_address(void)
+ {
+     CPUIA64State env;
+     struct IA64RSEFrame frames[2];
+-
+-    init_frames(&env, frames, G_N_ELEMENTS(frames));
+-    frames[0].ret_addr = 0x1000;
+-    frames[0].cfm = 0x201;
+-    frames[1].ret_addr = 0x2000;
+-    frames[1].cfm = 0x302;
+-
+-    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x2002, 0x302), ==, 1);
++    IA64RSEReturnState state;
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    seed_frame(&frames[0], 1, 0x1000, 0x201);
++    seed_frame(&frames[1], 2, 0x2000, 0x302);
++
++    state = ia64_rse_reconcile_return(&env, 0x2002, 0x302,
++                                      test_pop_window);
++    g_assert_cmpint(state.selected, ==, 1);
++    g_assert_cmpuint(state.dropped, ==, 0);
++    g_assert_true(state.restored);
++    g_assert_cmpuint(pop_count, ==, 1);
++    g_assert_cmphex(popped_returns[0], ==, 0x2000);
++    g_assert_cmpuint(env.rse_depth, ==, 1);
++    assert_frame_restored(&env, &frames[1]);
+ }
+ 
+ static void test_nonlocal_return_address_wins(void)
+ {
+     CPUIA64State env;
+     struct IA64RSEFrame frames[3];
+-
+-    init_frames(&env, frames, G_N_ELEMENTS(frames));
+-    frames[0].ret_addr = 0x1000;
+-    frames[0].cfm = 0x201;
+-    frames[1].ret_addr = 0x3000;
+-    frames[1].cfm = 0x30a;
+-    frames[2].ret_addr = 0x4000;
+-    frames[2].cfm = 0x30a;
++    IA64RSEReturnState state;
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    seed_frame(&frames[0], 1, 0x1000, 0x201);
++    seed_frame(&frames[1], 2, 0x3000, 0x30a);
++    seed_frame(&frames[2], 3, 0x4000, 0x30a);
+ 
+     /*
+      * The newest frame deliberately has the same CFM.  The older exact return
+      * address must win for a non-local return or continuation transfer.
+      */
+-    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x3001, 0x30a), ==, 1);
++    state = ia64_rse_reconcile_return(&env, 0x3001, 0x30a,
++                                      test_pop_window);
++    g_assert_cmpint(state.selected, ==, 1);
++    g_assert_cmpuint(state.dropped, ==, 1);
++    g_assert_true(state.restored);
++    g_assert_cmpuint(pop_count, ==, 2);
++    g_assert_cmphex(popped_returns[0], ==, 0x4000);
++    g_assert_cmphex(popped_returns[1], ==, 0x3000);
++    g_assert_cmpuint(env.rse_depth, ==, 1);
++    assert_frame_restored(&env, &frames[1]);
++}
++
++static void test_nonlocal_multiple_frames(void)
++{
++    CPUIA64State env;
++    struct IA64RSEFrame frames[4];
++    IA64RSEReturnState state;
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    seed_frame(&frames[0], 1, 0x1000, 0x201);
++    seed_frame(&frames[1], 2, 0x2000, 0x302);
++    seed_frame(&frames[2], 3, 0x3000, 0x403);
++    seed_frame(&frames[3], 4, 0x4000, 0x504);
++
++    state = ia64_rse_reconcile_return(&env, 0x100f, 0x777,
++                                      test_pop_window);
++    g_assert_cmpint(state.selected, ==, 0);
++    g_assert_cmpuint(state.dropped, ==, 3);
++    g_assert_true(state.restored);
++    g_assert_cmpuint(pop_count, ==, 4);
++    g_assert_cmphex(popped_returns[0], ==, 0x4000);
++    g_assert_cmphex(popped_returns[1], ==, 0x3000);
++    g_assert_cmphex(popped_returns[2], ==, 0x2000);
++    g_assert_cmphex(popped_returns[3], ==, 0x1000);
++    g_assert_cmpuint(env.rse_depth, ==, 0);
++    assert_frame_restored(&env, &frames[0]);
+ }
+ 
+ static void test_pfs_fallback(void)
+ {
+     CPUIA64State env;
+     struct IA64RSEFrame frames[3];
+-
+-    init_frames(&env, frames, G_N_ELEMENTS(frames));
+-    frames[0].ret_addr = 0x1000;
+-    frames[0].cfm = 0x201;
+-    frames[1].ret_addr = 0x2000;
+-    frames[1].cfm = 0x30a;
+-    frames[2].ret_addr = 0x3000;
+-    frames[2].cfm = 0x38a;
+-
+-    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x9000, 0x30a), ==, 1);
++    IA64RSEReturnState state;
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    seed_frame(&frames[0], 1, 0x1000, 0x201);
++    seed_frame(&frames[1], 2, 0x2000, 0x30a);
++    seed_frame(&frames[2], 3, 0x3000, 0x38a);
++
++    state = ia64_rse_reconcile_return(&env, 0x9000, 0x30a,
++                                      test_pop_window);
++    g_assert_cmpint(state.selected, ==, 1);
++    g_assert_cmpuint(state.dropped, ==, 1);
++    g_assert_true(state.restored);
++    g_assert_cmpuint(pop_count, ==, 2);
++    g_assert_cmpuint(env.rse_depth, ==, 1);
++    assert_frame_restored(&env, &frames[1]);
+ }
+ 
+-static void test_no_match(void)
++static void test_no_match_preserves_local_return(void)
+ {
+     CPUIA64State env;
+     struct IA64RSEFrame frames[2];
+-
+-    init_frames(&env, frames, G_N_ELEMENTS(frames));
+-    frames[0].ret_addr = 0x1000;
+-    frames[0].cfm = 0x201;
+-    frames[1].ret_addr = 0x2000;
+-    frames[1].cfm = 0x302;
+-
+-    g_assert_cmpint(ia64_rse_find_return_frame(&env, 0x9000, 0x777), ==, -1);
++    IA64RSEReturnState state;
++
++    init_frames(&env, frames, G_N_ELEMENTS(frames));
++    seed_frame(&frames[0], 1, 0x1000, 0x201);
++    seed_frame(&frames[1], 2, 0x2000, 0x302);
++
++    state = ia64_rse_reconcile_return(&env, 0x9000, 0x777,
++                                      test_pop_window);
++    g_assert_cmpint(state.selected, ==, -1);
++    g_assert_cmpuint(state.dropped, ==, 0);
++    g_assert_true(state.restored);
++    g_assert_cmpuint(pop_count, ==, 1);
++    g_assert_cmphex(popped_returns[0], ==, 0x2000);
++    g_assert_cmpuint(env.rse_depth, ==, 1);
++    assert_frame_restored(&env, &frames[1]);
+ }
+ 
+ int main(int argc, char **argv)
+@@ -96,7 +211,10 @@
+     g_test_add_func("/ia64/rse/top-return-address", test_top_return_address);
+     g_test_add_func("/ia64/rse/nonlocal-return-address-wins",
+                     test_nonlocal_return_address_wins);
++    g_test_add_func("/ia64/rse/nonlocal-multiple-frames",
++                    test_nonlocal_multiple_frames);
+     g_test_add_func("/ia64/rse/pfs-fallback", test_pfs_fallback);
+-    g_test_add_func("/ia64/rse/no-match", test_no_match);
++    g_test_add_func("/ia64/rse/no-match-preserves-local-return",
++                    test_no_match_preserves_local_return);
+     return g_test_run();
+ }
+diff --git a/target/ia64/helper.c b/target/ia64/helper.c
+--- a/target/ia64/helper.c
++++ b/target/ia64/helper.c
+@@ -17626,28 +17626,19 @@
+     uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 46) - 1);
+     uint64_t b0 = env->b[0] & ~0xFULL;
+ 
+-    if (env->rse_depth > 0) {
+-        int selected = ia64_rse_find_return_frame(env, b0, pfs_cfm);
+-        int dropped = 0;
++    IA64RSEReturnState reconcile =
++        ia64_rse_reconcile_return(env, b0, pfs_cfm,
++                                  ia64_rse_pop_window);
+ 
+-        if (selected >= 0) {
+-            int drop_count = (int)env->rse_depth - selected - 1;
+-
+-            while (dropped < drop_count && env->rse_depth > 0) {
+-                ia64_rse_pop_window(env);
+-                dropped++;
+-            }
+-        }
+-
+-        if (dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+-            qemu_log_mask(LOG_GUEST_ERROR,
+-                          "ret_reconcile pfs_cfm=%016" PRIx64
+-                          " b0=%016" PRIx64 " selected=%d"
+-                          " dropped=%d depth=%u\n",
+-                          pfs_cfm, b0, selected, dropped, env->rse_depth);
+-        }
++    if (reconcile.dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "ret_reconcile pfs_cfm=%016" PRIx64
++                      " b0=%016" PRIx64 " selected=%d"
++                      " dropped=%u depth=%u\n",
++                      pfs_cfm, b0, reconcile.selected,
++                      reconcile.dropped, env->rse_depth);
+     }
+-    if (ia64_rse_pop_window(env)) {
++    if (reconcile.restored) {
+         ia64_restore_ec_from_pfs(env);
+     }
+     if (watch_hit) {
+diff --git a/scripts/check-ia64-rooster-branch.py b/scripts/check-ia64-rooster-branch.py
+--- a/scripts/check-ia64-rooster-branch.py
++++ b/scripts/check-ia64-rooster-branch.py
+@@ -62,10 +62,14 @@
+     require(environment, "QEMU_IA64_TRACE_GP_ZERO_ABORT",
+             "GP provenance documentation")
+-    require(helper_c, "ia64_rse_find_return_frame(env, b0, pfs_cfm)",
++    require(helper_c, "ia64_rse_reconcile_return(env, b0, pfs_cfm",
+             "architectural return reconciliation")
+     require(rse, "The return address is the strongest identity",
+             "architectural return reconciliation")
+-    require(rse_test, "/ia64/rse/nonlocal-return-address-wins",
++    require(rse, "preserve the legacy local-return behavior",
++            "architectural return reconciliation")
++    require(rse_test, "/ia64/rse/nonlocal-multiple-frames",
+             "architectural return reconciliation test")
++    require(rse_test, "assert_frame_restored",
++            "architectural return state restoration test")
+     require(environment, "br.ret` always reconciles",
+             "architectural return reconciliation documentation")
