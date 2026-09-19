@@ -75,26 +75,36 @@ jobs:
           build/tests/unit/test-ia64-rse
           build_qemu "$RUNNER_TEMP/qemu-ia64-baseline"
 
+      - name: Prepare evidence directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/xen-rooster-ab"
+          mkdir -p "$root/payload" "$root/firmware"
+
       - name: Build Rooster EFI payload
         shell: bash
         run: |
           set -euo pipefail
+          root="$PWD/scratch/xen-rooster-ab"
           docker run --rm \
-            -v "$PWD:/work" -w /work fedora:44 \
+            -v "$PWD:/work:ro" \
+            -v "$root/payload:/output" \
+            -w /work fedora:44 \
             bash -lc '
               set -euo pipefail
               dnf --assumeyes --setopt=install_weak_deps=False install \
                 binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
-              bash tests/ia64/rooster-efi-smoke/build.sh \
-                /work/scratch/xen-rooster-ab/payload
+              bash tests/ia64/rooster-efi-smoke/build.sh /output
             '
+          sudo chown -R "$(id -u):$(id -g)" "$root/payload"
+          test -r "$root/payload/BOOTIA64.EFI"
 
       - name: Fetch and identify canonical Xen firmware
         shell: bash
         run: |
           set -euo pipefail
           root="$PWD/scratch/xen-rooster-ab"
-          mkdir -p "$root/firmware"
           IA64_XEN_FIRMWARE_KEEP_SRC=1 \
             bash scripts/fetch-ia64-xen-firmware.sh "$root/firmware"
           expected=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
@@ -142,81 +152,87 @@ jobs:
           import os
           from pathlib import Path
 
-          root = Path('scratch/xen-rooster-ab')
-          baseline = json.loads((root / 'baseline/matrix.json').read_text())[0]
-          feature = json.loads((root / 'feature/matrix.json').read_text())[0]
+          root = Path("scratch/xen-rooster-ab")
+          baseline = json.loads((root / "baseline/matrix.json").read_text())[0]
+          feature = json.loads((root / "feature/matrix.json").read_text())[0]
           order = [
-              'pal-sal', 'fit', 'pei', 'dxe-ipl',
-              'dxe-core', 'bds-shell', 'rooster',
+              "pal-sal", "fit", "pei", "dxe-ipl",
+              "dxe-core", "bds-shell", "rooster",
           ]
 
           def rank(record):
-              stages = set(record.get('stages', []))
+              stages = set(record.get("stages", []))
               return max(
                   (index for index, stage in enumerate(order) if stage in stages),
                   default=-1,
               )
 
           def read_logs(directory):
-              return '\n'.join(
-                  path.read_text(errors='replace')
-                  for path in sorted(directory.rglob('*.log'))
+              return "\n".join(
+                  path.read_text(errors="replace")
+                  for path in sorted(directory.rglob("*.log"))
               )
 
-          baseline_logs = read_logs(root / 'baseline')
-          feature_logs = read_logs(root / 'feature')
+          baseline_logs = read_logs(root / "baseline")
+          feature_logs = read_logs(root / "feature")
           baseline_rank = rank(baseline)
           feature_rank = rank(feature)
           report = {
-              'schema': 1,
-              'baseline': baseline,
-              'feature': feature,
-              'baseline_rank': baseline_rank,
-              'feature_rank': feature_rank,
-              'stage_advanced': feature_rank > baseline_rank,
-              'stage_regressed': feature_rank < baseline_rank,
-              'baseline_ret_reconcile_count': baseline_logs.count('ret_reconcile'),
-              'feature_ret_reconcile_count': feature_logs.count('ret_reconcile'),
-              'baseline_rooster_entry': 'ROOSTER-IA64-EFI-ENTRY: PASS' in baseline_logs,
-              'feature_rooster_entry': 'ROOSTER-IA64-EFI-ENTRY: PASS' in feature_logs,
-              'baseline_null_call_fix': 'CALL_NULL_FIX applied' in baseline_logs,
-              'feature_null_call_fix': 'CALL_NULL_FIX applied' in feature_logs,
-              'baseline_fv_hob_restore': 'IA64 FV_HOB_RESTORE source=' in baseline_logs,
-              'feature_fv_hob_restore': 'IA64 FV_HOB_RESTORE source=' in feature_logs,
+              "schema": 1,
+              "baseline": baseline,
+              "feature": feature,
+              "baseline_rank": baseline_rank,
+              "feature_rank": feature_rank,
+              "stage_advanced": feature_rank > baseline_rank,
+              "stage_regressed": feature_rank < baseline_rank,
+              "baseline_ret_reconcile_count": baseline_logs.count("ret_reconcile"),
+              "feature_ret_reconcile_count": feature_logs.count("ret_reconcile"),
+              "baseline_rooster_entry":
+                  "ROOSTER-IA64-EFI-ENTRY: PASS" in baseline_logs,
+              "feature_rooster_entry":
+                  "ROOSTER-IA64-EFI-ENTRY: PASS" in feature_logs,
+              "baseline_null_call_fix":
+                  "CALL_NULL_FIX applied" in baseline_logs,
+              "feature_null_call_fix":
+                  "CALL_NULL_FIX applied" in feature_logs,
+              "baseline_fv_hob_restore":
+                  "IA64 FV_HOB_RESTORE source=" in baseline_logs,
+              "feature_fv_hob_restore":
+                  "IA64 FV_HOB_RESTORE source=" in feature_logs,
           }
-          (root / 'comparison.json').write_text(
-              json.dumps(report, indent=2, sort_keys=True) + '\n'
+          (root / "comparison.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n"
           )
 
           summary = [
-              '## IA-64 Xen/Rooster A/B',
-              '',
+              "## IA-64 Xen/Rooster A/B",
+              "",
               f"- Baseline stages: `{', '.join(baseline.get('stages', []))}`",
               f"- Feature stages: `{', '.join(feature.get('stages', []))}`",
               f"- Stage rank: `{baseline_rank} -> {feature_rank}`",
-              f"- Return reconciliations: "
+              "- Return reconciliations: "
               f"`{report['baseline_ret_reconcile_count']} -> "
               f"{report['feature_ret_reconcile_count']}`",
-              f"- Rooster entry: "
+              "- Rooster entry: "
               f"`{report['baseline_rooster_entry']} -> "
               f"{report['feature_rooster_entry']}`",
-              f"- Null-call workaround observed: "
+              "- Null-call workaround observed: "
               f"`{report['baseline_null_call_fix']} / "
               f"{report['feature_null_call_fix']}`",
-              f"- FV-HOB restoration probe observed: "
+              "- FV-HOB restoration probe observed: "
               f"`{report['baseline_fv_hob_restore']} / "
               f"{report['feature_fv_hob_restore']}`",
           ]
-          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as output:
-              output.write('\n'.join(summary) + '\n')
-          print('\n'.join(summary))
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
+              output.write("\n".join(summary) + "\n")
+          print("\n".join(summary))
 
-          if report['baseline_null_call_fix'] or report['feature_null_call_fix']:
-              raise SystemExit('null-call workaround contaminated the A/B run')
-          if report['baseline_fv_hob_restore'] or report['feature_fv_hob_restore']:
-              raise SystemExit('FV-HOB diagnostic probe contaminated the A/B run')
+          if report["baseline_null_call_fix"] or report["feature_null_call_fix"]:
+              raise SystemExit("null-call workaround contaminated the A/B run")
+          if report["baseline_fv_hob_restore"] or report["feature_fv_hob_restore"]:
+              raise SystemExit("FV-HOB diagnostic probe contaminated the A/B run")
           if feature_rank < baseline_rank:
-              raise SystemExit('the feature branch regressed the firmware stage')
+              raise SystemExit("the feature branch regressed the firmware stage")
           PY
 
       - name: Upload A/B evidence
