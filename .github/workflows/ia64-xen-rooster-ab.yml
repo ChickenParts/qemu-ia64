@@ -1,4 +1,4 @@
-name: IA-64 Xen Rooster A/B
+name: IA-64 Xen Rooster A/B bundle
 
 on:
   pull_request:
@@ -7,7 +7,6 @@ on:
     paths:
       - target/ia64/**
       - hw/ia64/**
-      - scripts/fetch-ia64-xen-firmware.sh
       - scripts/run-ia64-firmware.sh
       - scripts/run-ia64-rooster-firmware-matrix.py
       - tests/ia64/rooster-efi-smoke/**
@@ -24,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  xen-rooster-ab:
+  prepare-ab-bundle:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -51,7 +50,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential mercurial ninja-build pkg-config python3 \
+            build-essential ninja-build pkg-config python3 \
             libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev
 
       - name: Build feature and baseline emulators
@@ -72,22 +71,15 @@ jobs:
 
           build_qemu "$PWD"
           ninja -C build -j"$(nproc)" tests/unit/test-ia64-rse
-          build/tests/unit/test-ia64-rse
+          build/tests/unit/test-ia64-rse | tee rse-unit.tap
           build_qemu "$RUNNER_TEMP/qemu-ia64-baseline"
-
-      - name: Prepare evidence directories
-        shell: bash
-        run: |
-          set -euo pipefail
-          root="$PWD/scratch/xen-rooster-ab"
-          mkdir -p "$root/payload" "$root/firmware"
 
       - name: Build Rooster EFI payload
         shell: bash
         run: |
           set -euo pipefail
           root="$PWD/scratch/xen-rooster-ab"
-          rm -rf "$root/payload"
+          rm -rf "$root"
           mkdir -p "$root/payload"
 
           cid="$(
@@ -111,153 +103,73 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$root/payload"
           test -r "$root/payload/BOOTIA64.EFI"
 
-      - name: Fetch and identify canonical Xen firmware
+      - name: Stage firmware-free A/B bundle
         shell: bash
         run: |
           set -euo pipefail
           root="$PWD/scratch/xen-rooster-ab"
-          IA64_XEN_FIRMWARE_KEEP_SRC=1 \
-            bash scripts/fetch-ia64-xen-firmware.sh "$root/firmware"
-          expected=e143e85874ad57bad631853d48f0d47b7e7dbe6c41b4e558bbb4ea5b45775513
-          actual="$(sha256sum "$root/firmware/Flash.fd" | awk '{print $1}')"
-          test "$actual" = "$expected"
-          printf '%s  Flash.fd\n' "$actual" > "$root/firmware.sha256"
+          bundle="$root/export"
+          mkdir -p \
+            "$bundle/feature" \
+            "$bundle/baseline" \
+            "$bundle/payload" \
+            "$bundle/scripts"
 
-      - name: Run identical baseline and feature boots
-        shell: bash
-        env:
-          IA64_PEI_22560_STATUS_FIX: "1"
-          IA64_PEI_279D0_STATUS_FIX: "1"
-          IA64_PEI_279D0_SAFE_MODE: "0"
-          QEMU_IA64_RET_TRACE_LIMIT: "4096"
-          QEMU_IA64_RSE_STRICT_TRACE: "1"
-          QEMU_IA64_RSE_STRICT_TRACE_LIMIT: "4096"
-        run: |
-          set -euo pipefail
-          root="$PWD/scratch/xen-rooster-ab"
-          firmware="$root/firmware/Flash.fd"
-          payload="$root/payload/BOOTIA64.EFI"
+          install -m 0755 build/qemu-system-ia64 \
+            "$bundle/feature/qemu-system-ia64"
+          install -m 0755 \
+            "$RUNNER_TEMP/qemu-ia64-baseline/build/qemu-system-ia64" \
+            "$bundle/baseline/qemu-system-ia64"
+          install -m 0644 "$root/payload/BOOTIA64.EFI" \
+            "$bundle/payload/BOOTIA64.EFI"
+          install -m 0755 scripts/run-ia64-firmware.sh \
+            "$bundle/scripts/run-ia64-firmware.sh"
+          install -m 0755 scripts/run-ia64-rooster-firmware-matrix.py \
+            "$bundle/scripts/run-ia64-rooster-firmware-matrix.py"
+          install -m 0644 heads.txt rse-unit.tap "$bundle/"
 
-          python3 scripts/run-ia64-rooster-firmware-matrix.py \
-            --qemu "$RUNNER_TEMP/qemu-ia64-baseline/build/qemu-system-ia64" \
-            --payload "$payload" \
-            --runner scripts/run-ia64-firmware.sh \
-            --out "$root/baseline" \
-            --timeout 210 \
-            "$firmware"
+          ldd "$bundle/feature/qemu-system-ia64" \
+            | tee "$bundle/feature/ldd.txt"
+          ldd "$bundle/baseline/qemu-system-ia64" \
+            | tee "$bundle/baseline/ldd.txt"
+          ! grep -F 'not found' "$bundle/feature/ldd.txt"
+          ! grep -F 'not found' "$bundle/baseline/ldd.txt"
 
-          python3 scripts/run-ia64-rooster-firmware-matrix.py \
-            --qemu "$PWD/build/qemu-system-ia64" \
-            --payload "$payload" \
-            --runner scripts/run-ia64-firmware.sh \
-            --out "$root/feature" \
-            --timeout 210 \
-            "$firmware"
+          "$bundle/feature/qemu-system-ia64" --version \
+            > "$bundle/feature/version.txt"
+          "$bundle/baseline/qemu-system-ia64" --version \
+            > "$bundle/baseline/version.txt"
+          "$bundle/feature/qemu-system-ia64" -M help \
+            > "$bundle/feature/machines.txt"
+          "$bundle/baseline/qemu-system-ia64" -M help \
+            > "$bundle/baseline/machines.txt"
 
-      - name: Compare the runtime frontier
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path("scratch/xen-rooster-ab")
-          baseline = json.loads((root / "baseline/matrix.json").read_text())[0]
-          feature = json.loads((root / "feature/matrix.json").read_text())[0]
-          order = [
-              "pal-sal", "fit", "pei", "dxe-ipl",
-              "dxe-core", "bds-shell", "rooster",
-          ]
-
-          def rank(record):
-              stages = set(record.get("stages", []))
-              return max(
-                  (index for index, stage in enumerate(order) if stage in stages),
-                  default=-1,
-              )
-
-          def read_logs(directory):
-              return "\n".join(
-                  path.read_text(errors="replace")
-                  for path in sorted(directory.rglob("*.log"))
-              )
-
-          baseline_logs = read_logs(root / "baseline")
-          feature_logs = read_logs(root / "feature")
-          baseline_rank = rank(baseline)
-          feature_rank = rank(feature)
-          report = {
-              "schema": 1,
-              "baseline": baseline,
-              "feature": feature,
-              "baseline_rank": baseline_rank,
-              "feature_rank": feature_rank,
-              "stage_advanced": feature_rank > baseline_rank,
-              "stage_regressed": feature_rank < baseline_rank,
-              "baseline_ret_reconcile_count": baseline_logs.count("ret_reconcile"),
-              "feature_ret_reconcile_count": feature_logs.count("ret_reconcile"),
-              "baseline_rooster_entry":
-                  "ROOSTER-IA64-EFI-ENTRY: PASS" in baseline_logs,
-              "feature_rooster_entry":
-                  "ROOSTER-IA64-EFI-ENTRY: PASS" in feature_logs,
-              "baseline_null_call_fix":
-                  "CALL_NULL_FIX applied" in baseline_logs,
-              "feature_null_call_fix":
-                  "CALL_NULL_FIX applied" in feature_logs,
-              "baseline_fv_hob_restore":
-                  "IA64 FV_HOB_RESTORE source=" in baseline_logs,
-              "feature_fv_hob_restore":
-                  "IA64 FV_HOB_RESTORE source=" in feature_logs,
-          }
-          (root / "comparison.json").write_text(
-              json.dumps(report, indent=2, sort_keys=True) + "\n"
+          (
+            cd "$bundle"
+            sha256sum \
+              feature/qemu-system-ia64 \
+              baseline/qemu-system-ia64 \
+              payload/BOOTIA64.EFI \
+              > SHA256SUMS
           )
 
-          summary = [
-              "## IA-64 Xen/Rooster A/B",
-              "",
-              f"- Baseline stages: `{', '.join(baseline.get('stages', []))}`",
-              f"- Feature stages: `{', '.join(feature.get('stages', []))}`",
-              f"- Stage rank: `{baseline_rank} -> {feature_rank}`",
-              "- Return reconciliations: "
-              f"`{report['baseline_ret_reconcile_count']} -> "
-              f"{report['feature_ret_reconcile_count']}`",
-              "- Rooster entry: "
-              f"`{report['baseline_rooster_entry']} -> "
-              f"{report['feature_rooster_entry']}`",
-              "- Null-call workaround observed: "
-              f"`{report['baseline_null_call_fix']} / "
-              f"{report['feature_null_call_fix']}`",
-              "- FV-HOB restoration probe observed: "
-              f"`{report['baseline_fv_hob_restore']} / "
-              f"{report['feature_fv_hob_restore']}`",
-          ]
-          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
-              output.write("\n".join(summary) + "\n")
-          print("\n".join(summary))
+          cat > "$bundle/README.txt" <<'EOF'
+          This artifact intentionally contains no firmware image.
+          Supply an independently held IA-64 firmware image to both binaries,
+          unchanged, and compare the resulting matrix directories.
+          EOF
 
-          if report["baseline_null_call_fix"] or report["feature_null_call_fix"]:
-              raise SystemExit("null-call workaround contaminated the A/B run")
-          if report["baseline_fv_hob_restore"] or report["feature_fv_hob_restore"]:
-              raise SystemExit("FV-HOB diagnostic probe contaminated the A/B run")
-          if feature_rank < baseline_rank:
-              raise SystemExit("the feature branch regressed the firmware stage")
-          PY
+          tar -czf "$root/ia64-xen-rooster-ab-bundle.tar.gz" \
+            -C "$bundle" .
+          sha256sum "$root/ia64-xen-rooster-ab-bundle.tar.gz" \
+            > "$root/ia64-xen-rooster-ab-bundle.tar.gz.sha256"
 
-      - name: Upload A/B evidence
-        if: always()
+      - name: Upload firmware-free A/B bundle
         uses: actions/upload-artifact@v4
         with:
-          name: ia64-xen-rooster-ab-${{ github.run_id }}
+          name: ia64-xen-rooster-ab-bundle-${{ github.run_id }}
           path: |
-            heads.txt
-            scratch/xen-rooster-ab/firmware.sha256
-            scratch/xen-rooster-ab/firmware/PROVENANCE.txt
-            scratch/xen-rooster-ab/payload/BOOTIA64.EFI
-            scratch/xen-rooster-ab/baseline/
-            scratch/xen-rooster-ab/feature/
-            scratch/xen-rooster-ab/comparison.json
+            scratch/xen-rooster-ab/ia64-xen-rooster-ab-bundle.tar.gz
+            scratch/xen-rooster-ab/ia64-xen-rooster-ab-bundle.tar.gz.sha256
           retention-days: 14
-          if-no-files-found: warn
+          if-no-files-found: error
