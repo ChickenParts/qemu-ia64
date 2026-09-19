@@ -173,6 +173,28 @@ static void test_no_match(void)
     g_assert_cmpint(find_return_frame(&env, 0x9000, 0x777), ==, -1);
 }
 
+static void test_pfs_non_pfm_bits_ignored(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[1];
+    uint64_t pfs;
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].ret_addr = 0x2000;
+    frames[0].cfm = 0x302;
+
+    /*
+     * PFS.pfm is bits 37:0.  Reserved bit 40, PEC in bits 57:52, and PPL in
+     * bits 63:62 must not take part in frame identity.
+     */
+    pfs = UINT64_C(0x302) |
+          (UINT64_C(1) << 40) |
+          (UINT64_C(0x2a) << 52) |
+          (UINT64_C(3) << 62);
+
+    g_assert_cmpint(find_return_frame(&env, 0x2002, pfs), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -189,5 +211,7 @@ int main(int argc, char **argv)
                     test_duplicate_exact_match_prefers_newest);
     g_test_add_func("/ia64/rse/zero-target", test_zero_target_does_not_match);
     g_test_add_func("/ia64/rse/no-match", test_no_match);
+    g_test_add_func("/ia64/rse/pfs-non-pfm-bits-ignored",
+                    test_pfs_non_pfm_bits_ignored);
     return g_test_run();
 }

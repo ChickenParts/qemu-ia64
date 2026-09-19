@@ -70,12 +70,19 @@ def main() -> int:
             "architectural return reconciliation")
     require(rse, "view->cfm_offset", "architectural return frame view")
     require(rse, "view->ret_addr_offset", "architectural return frame view")
+    require(rse, "IA64_RSE_PFM_MASK",
+            "architectural return PFM width")
+    require(rse, "UINT64_C(1) << 38",
+            "architectural return PFM width")
+    forbid(rse, r"<<\s*46", "architectural return PFM width")
     forbid(rse, r'#include\s+"cpu\.h"',
            "target-independent return frame selector")
     require(rse, "The return address is the strongest identity",
             "architectural return reconciliation")
     require(rse_test, "/ia64/rse/nonlocal-return-address-wins",
             "architectural return reconciliation test")
+    require(rse_test, "/ia64/rse/pfs-non-pfm-bits-ignored",
+            "architectural PFS masking test")
     require(environment, "br.ret` always reconciles",
             "architectural return reconciliation documentation")
     forbid(helper_c, r'getenv\("QEMU_IA64_RET_UNWIND_PFS"\)',

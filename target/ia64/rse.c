@@ -7,7 +7,8 @@
 #include "qemu/osdep.h"
 #include "rse.h"
 
-#define IA64_RSE_CFM_MASK ((UINT64_C(1) << 46) - 1)
+/* CFM and PFS.pfm share the architectural frame layout in bits 37:0. */
+#define IA64_RSE_PFM_MASK ((UINT64_C(1) << 38) - 1)
 
 static bool ia64_rse_view_valid(const struct IA64RSEReturnFrameView *view)
 {
@@ -26,7 +27,7 @@ int ia64_rse_find_return_frame(const struct IA64RSEReturnFrameView *view,
 {
     const uint8_t *base;
     uint64_t target = ret_addr & ~UINT64_C(0xf);
-    uint64_t caller_cfm = pfs_cfm & IA64_RSE_CFM_MASK;
+    uint64_t caller_pfm = pfs_cfm & IA64_RSE_PFM_MASK;
     int index;
 
     if (!ia64_rse_view_valid(view) || target == 0) {
@@ -53,7 +54,7 @@ int ia64_rse_find_return_frame(const struct IA64RSEReturnFrameView *view,
                sizeof(frame_ret_addr));
         if (frame_ret_addr != 0 &&
             (frame_ret_addr & ~UINT64_C(0xf)) == target &&
-            (frame_cfm & IA64_RSE_CFM_MASK) == caller_cfm) {
+            (frame_cfm & IA64_RSE_PFM_MASK) == caller_pfm) {
             return index;
         }
     }
