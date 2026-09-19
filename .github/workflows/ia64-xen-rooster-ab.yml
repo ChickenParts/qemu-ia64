@@ -87,17 +87,27 @@ jobs:
         run: |
           set -euo pipefail
           root="$PWD/scratch/xen-rooster-ab"
-          docker run --rm \
-            -v "$PWD:/work:ro" \
-            -v "$root:/output-root" \
-            -w /work fedora:44 \
-            bash -lc '
-              set -euo pipefail
-              dnf --assumeyes --setopt=install_weak_deps=False install \
-                binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
-              bash tests/ia64/rooster-efi-smoke/build.sh \
-                /output-root/payload
-            '
+          rm -rf "$root/payload"
+          mkdir -p "$root/payload"
+
+          cid="$(
+            docker create \
+              -v "$PWD:/work:ro" \
+              -w /work fedora:44 \
+              bash -lc '
+                set -euo pipefail
+                dnf --assumeyes --setopt=install_weak_deps=False install \
+                  binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
+                bash tests/ia64/rooster-efi-smoke/build.sh /tmp/payload
+              '
+          )"
+          cleanup() {
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker start -a "$cid"
+          docker cp "$cid:/tmp/payload/." "$root/payload/"
           sudo chown -R "$(id -u):$(id -g)" "$root/payload"
           test -r "$root/payload/BOOTIA64.EFI"
 
