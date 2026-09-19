@@ -89,13 +89,14 @@ jobs:
           root="$PWD/scratch/xen-rooster-ab"
           docker run --rm \
             -v "$PWD:/work:ro" \
-            -v "$root/payload:/output" \
+            -v "$root:/output-root" \
             -w /work fedora:44 \
             bash -lc '
               set -euo pipefail
               dnf --assumeyes --setopt=install_weak_deps=False install \
                 binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
-              bash tests/ia64/rooster-efi-smoke/build.sh /output
+              bash tests/ia64/rooster-efi-smoke/build.sh \
+                /output-root/payload
             '
           sudo chown -R "$(id -u):$(id -g)" "$root/payload"
           test -r "$root/payload/BOOTIA64.EFI"
