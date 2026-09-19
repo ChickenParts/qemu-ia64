@@ -36,6 +36,8 @@ def main() -> int:
     causality_workflow = read(".github/workflows/ia64-fv-hob-causality.yml")
     helper_h = read("target/ia64/helper.h")
     helper_c = read("target/ia64/helper.c")
+    rse = read("target/ia64/rse.c")
+    rse_test = read("tests/unit/test-ia64-rse.c")
     translate = read("target/ia64/translate.c")
     environment = read("docs/ia64-environment-variables.md")
 
@@ -62,6 +64,26 @@ def main() -> int:
             "GP provenance documentation")
     require(environment, "QEMU_IA64_TRACE_GP_ZERO_ABORT",
             "GP provenance documentation")
+    require(helper_c, "struct IA64RSEReturnFrameView view",
+            "architectural return reconciliation")
+    require(helper_c, "ia64_rse_find_return_frame(&view, b0, pfs_cfm)",
+            "architectural return reconciliation")
+    require(rse, "view->cfm_offset", "architectural return frame view")
+    require(rse, "view->ret_addr_offset", "architectural return frame view")
+    forbid(rse, r'#include\s+"cpu\.h"',
+           "target-independent return frame selector")
+    require(rse, "The return address is the strongest identity",
+            "architectural return reconciliation")
+    require(rse_test, "/ia64/rse/nonlocal-return-address-wins",
+            "architectural return reconciliation test")
+    require(environment, "br.ret` always reconciles",
+            "architectural return reconciliation documentation")
+    forbid(helper_c, r'getenv\("QEMU_IA64_RET_UNWIND_PFS"\)',
+           "architectural return reconciliation")
+    forbid(environment, r"QEMU_IA64_RET_UNWIND_PFS",
+           "architectural return reconciliation documentation")
+    forbid(rse, r"0x1ff[0-9a-f]{5,}",
+           "architectural return reconciliation")
 
     # The causality experiment may restore records that already exist in guest
     # memory, but it may never manufacture a DXE target or key off a firmware
