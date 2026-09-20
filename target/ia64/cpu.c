@@ -579,6 +579,20 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  " kind=%" PRIu64 " insn=%011" PRIx64 "\n",
                  env->prev_b0_write_pc, env->prev_b0_write_val,
                  env->prev_b0_write_kind, env->prev_b0_write_insn);
+    qemu_fprintf(f, "B7_CURRENT val=%016" PRIx64 "\n",
+                 env->b[7]);
+    qemu_fprintf(f, "LAST_B7_WRITE pc=%016" PRIx64
+                 " kind=%" PRIu64 " aux=%" PRIu64
+                 " old=%016" PRIx64 " val=%016" PRIx64 "\n",
+                 env->last_b7_write_pc, env->last_b7_write_kind,
+                 env->last_b7_write_aux, env->last_b7_write_old,
+                 env->last_b7_write_val);
+    qemu_fprintf(f, "PREV_B7_WRITE pc=%016" PRIx64
+                 " kind=%" PRIu64 " aux=%" PRIu64
+                 " old=%016" PRIx64 " val=%016" PRIx64 "\n",
+                 env->prev_b7_write_pc, env->prev_b7_write_kind,
+                 env->prev_b7_write_aux, env->prev_b7_write_old,
+                 env->prev_b7_write_val);
     qemu_fprintf(f, "B0_TRACE idx=%u\n", env->b0_trace_idx);
     for (int i = 0; i < 16; i++) {
         qemu_fprintf(f, "b0_trace[%02d] pc=%016" PRIx64 " val=%016" PRIx64
