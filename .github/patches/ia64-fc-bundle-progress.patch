@@ -1,0 +1,43 @@
+diff --git a/target/ia64/helper.c b/target/ia64/helper.c
+index 8428fbe..be6b0aa 100644
+--- a/target/ia64/helper.c
++++ b/target/ia64/helper.c
+@@ -1476,24 +1476,22 @@ void HELPER(fw_b7_write)(CPUIA64State *env, uint64_t pc, uint32_t kind,
+ void HELPER(fc)(CPUIA64State *env, uint64_t va)
+ {
+     /*
+-     * Flush cache line for address in va (fc/fc.i).
++     * IA-64 fc/fc.i writes back a cache line; it does not terminate the
++     * instruction group or suppress later slots in the same bundle.
+      *
+-     * QEMU doesn't model caches, but Linux relies on fc+sync.i+srlz.i around
+-     * patching to ensure updated instructions are visible to fetch. Mirror
+-     * SKI's clearPdecode() by invalidating translated code covering this
+-     * address.
++     * System-mode TCG already invalidates translated code when guest writes
++     * modify RAM.  Explicitly invalidating a translated page from this helper
++     * can make execution restart at the fc slot before the following slots
++     * run.  Real firmware commonly uses bundles such as
++     *
++     *     fc r32; adds r32 = 32, r32; cmp...;;
++     *
++     * and that restart turns a finite cache-flush loop into an infinite one.
++     * Match the other system-mode targets: caches are not modeled, so fc is a
++     * no-op and sync.i/srlz.i retain their ordering role.
+      */
+-    uint64_t pa = va;
+-    if (env->psr & IA64_PSR_DT) {
+-        pa = helper_tpa(env, va);
+-    }
+-
+-    pa &= TARGET_PAGE_MASK;
+-    if (pa == env->fc_last_page) {
+-        return;
+-    }
+-    env->fc_last_page = pa;
+-    tb_invalidate_phys_range(env_cpu(env), pa, pa + TARGET_PAGE_SIZE - 1);
++    (void)env;
++    (void)va;
+ }
+ 
+ static void ia64_rse_ensure(CPUIA64State *env, uint32_t need)
