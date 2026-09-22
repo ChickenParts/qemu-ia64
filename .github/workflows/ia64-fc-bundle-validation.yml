@@ -1,0 +1,122 @@
+name: IA-64 fc bundle validation
+
+on:
+  push:
+    branches:
+      - fix/ia64-fc-bundle-progress
+    paths:
+      - .github/patches/ia64-fc-bundle-progress.patch
+      - .github/workflows/ia64-fc-bundle-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-fc-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-patched-emulator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact branch head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Apply candidate source change
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch=.github/patches/ia64-fc-bundle-progress.patch
+          git apply --check "$patch"
+          git apply "$patch"
+          git diff --check
+          git diff -- target/ia64/helper.c | tee ia64-fc-change.diff
+
+      - name: Verify the architectural shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path("target/ia64/helper.c").read_text()
+          start = source.index("void HELPER(fc)(")
+          end = source.index("\nstatic void ia64_rse_ensure", start)
+          body = source[start:end]
+          assert "tb_invalidate_phys_range" not in body
+          assert "helper_tpa" not in body
+          assert "(void)env;" in body
+          assert "(void)va;" in body
+          assert "restart at the fc slot" in body
+          print(body)
+          PY
+
+      - name: Install emulator dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure \
+            --target-list=ia64-softmmu \
+            --enable-plugins \
+            --disable-slirp \
+            --disable-docs --disable-gtk --disable-sdl --disable-werror
+          ninja -C build -j"$(nproc)" \
+            qemu-system-ia64 \
+            tests/unit/test-ia64-rse \
+            |& tee ia64-fc-build.log
+
+      - name: Run focused and branch validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/tests/unit/test-ia64-rse | tee ia64-rse-unit.tap
+          python3 scripts/check-ia64-rooster-branch.py \
+            | tee ia64-rooster-check.txt
+          build/qemu-system-ia64 --version | tee qemu-version.txt
+          build/qemu-system-ia64 -M help | tee qemu-machines.txt
+
+      - name: Stage exact runtime candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ia64-fc-bundle
+          rm -rf "$out"
+          mkdir -p "$out"
+          install -m 0755 build/qemu-system-ia64 "$out/qemu-system-ia64"
+          install -m 0644 \
+            ia64-fc-change.diff \
+            ia64-fc-build.log \
+            ia64-rse-unit.tap \
+            ia64-rooster-check.txt \
+            qemu-version.txt \
+            qemu-machines.txt \
+            .github/patches/ia64-fc-bundle-progress.patch \
+            "$out/"
+          printf 'source_head=%s\n' "$(git rev-parse HEAD)" > "$out/HEADS.txt"
+          printf 'patch_sha256=%s\n' \
+            "$(sha256sum .github/patches/ia64-fc-bundle-progress.patch | awk '{print $1}')" \
+            >> "$out/HEADS.txt"
+          sha256sum "$out/qemu-system-ia64" > "$out/SHA256SUMS"
+          ldd "$out/qemu-system-ia64" | tee "$out/ldd.txt"
+          ! grep -F 'not found' "$out/ldd.txt"
+
+      - name: Upload runtime candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-fc-bundle-${{ github.run_id }}
+          path: scratch/ia64-fc-bundle/
+          retention-days: 7
+          if-no-files-found: error
