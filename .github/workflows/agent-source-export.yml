@@ -3,12 +3,7 @@ name: Temporary IA-64 source export
 on:
   push:
     branches:
-      - agent/ia64-xen-dev-firmware-boot
-    paths:
-      - .github/workflows/agent-source-export.yml
-  pull_request:
-    branches:
-      - master
+      - fix/ia64-rse-bsp-semantics
     paths:
       - .github/workflows/agent-source-export.yml
   workflow_dispatch:
@@ -21,75 +16,31 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Check out integration branch
+      - name: Check out exact branch head
         uses: actions/checkout@v4
         with:
-          ref: agent/ia64-xen-dev-firmware-boot
+          ref: ${{ github.sha }}
           fetch-depth: 1
-
-      - name: Install multi-architecture binutils
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y binutils-multiarch
-
-      - name: Disassemble development-firmware loop frontiers
-        shell: bash
-        run: |
-          set -euo pipefail
-          out=scratch/agent-source-export
-          mkdir -p "$out/toolchain/lib"
-          objdump -i > "$out/objdump-targets.txt"
-          ldd "$(command -v objdump)" > "$out/objdump-ldd.txt"
-          cp "$(command -v objdump)" "$out/toolchain/objdump"
-          while IFS= read -r lib; do
-            [[ -f "$lib" ]] || continue
-            cp -L "$lib" "$out/toolchain/lib/"
-          done < <(ldd "$(command -v objdump)" | awk '/=> \/|^\// { for (i=1; i<=NF; i++) if ($i ~ /^\//) print $i }')
-
-          disassemble() {
-            local firmware=$1
-            local base=$2
-            local start=$3
-            local stop=$4
-            local output=$5
-            {
-              echo "# firmware=$firmware base=$base range=$start..$stop"
-              objdump -D -b binary -m ia64 \
-                --adjust-vma="$base" \
-                --start-address="$start" \
-                --stop-address="$stop" \
-                "$firmware"
-            } > "$output" 2>&1
-          }
-
-          disassemble 'stuff/bios130.BIN' 0xffc00000 \
-            0xfffe1c00 0xfffe2300 "$out/bios130-delay.txt"
-          disassemble 'stuff/bios130.BIN' 0xffc00000 \
-            0xfffea000 0xfffeb000 "$out/bios130-init.txt"
-
-          rx_size=$(stat -c '%s' 'stuff/rx4610_117B.BIN')
-          rx_base=$(printf '0x%x' $((0x100000000 - rx_size)))
-          disassemble 'stuff/rx4610_117B.BIN' "$rx_base" \
-            0xfffd9f00 0xfffdba00 "$out/rx4610-loop.txt"
 
       - name: Pack source tree
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p scratch/agent-source-export
+          out=scratch/agent-source-export
+          rm -rf "$out"
+          mkdir -p "$out"
           tar \
             --exclude=.git \
             --exclude=build \
-            --exclude=scratch/agent-source-export \
-            -czf scratch/agent-source-export/qemu-ia64-source.tar.gz .
-          sha256sum scratch/agent-source-export/qemu-ia64-source.tar.gz \
-            > scratch/agent-source-export/SHA256SUMS
+            --exclude="$out" \
+            -czf "$out/qemu-ia64-source.tar.gz" .
+          sha256sum "$out/qemu-ia64-source.tar.gz" > "$out/SHA256SUMS"
+          git rev-parse HEAD > "$out/HEAD"
 
-      - name: Upload source workspace and disassembly
-        if: always()
+      - name: Upload source workspace
         uses: actions/upload-artifact@v4
         with:
-          name: ia64-source-${{ github.run_id }}
+          name: ia64-rse-bsp-source-${{ github.run_id }}
           path: scratch/agent-source-export/
           retention-days: 1
           if-no-files-found: error
