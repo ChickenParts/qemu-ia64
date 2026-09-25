@@ -47,9 +47,13 @@ def main() -> int:
     require(harness, "EFI/BOOT/BOOTIA64.EFI", "EFI harness")
     require(matrix, "IA64_CALL_NULL_FIX", "firmware matrix")
     require(matrix, '"0"', "firmware matrix")
-    require(matrix,
-            '"-vga",\n            "none",\n            "-nic",\n            "none",',
-            "headless firmware matrix")
+    require(matrix, '"--vga"', "firmware matrix display selector")
+    require(matrix, 'arguments.vga', "firmware matrix display selector")
+    require(matrix, '"--qemu-data-dir"', "firmware matrix ROM path")
+    require(matrix, 'environment["IA64_QEMU_DATA_DIR"]',
+            "firmware matrix ROM path")
+    require(matrix, 'a display-enabled run requires --qemu-data-dir',
+            "firmware matrix ROM diagnostic")
     require(frontier, "permanent HOB list", "HOB frontier")
     require(frontier, "EFI_HOB_TYPE_FV", "HOB frontier")
     require(causality, "QEMU_IA64_PEI_FV_HOB_RESTORE", "causality probe")

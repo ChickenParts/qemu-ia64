@@ -12,6 +12,7 @@ Environment overrides:
   IA64_SMP        (default: 1)
   IA64_LOGDIR     (default: scratch/ia64_logs)
   IA64_DISPLAY    (default: none)
+  IA64_QEMU_DATA_DIR (default: sibling pc-bios directory when present)
   IA64_FW_FASTPATH (default: 0; enable memcpy/memset accel)
   IA64_GUEST_ERRORS (default: 0; enable -d guest_errors/-D)
   IA64_HANG_ABORT (default: 0; empty/0 disables)
@@ -123,6 +124,13 @@ mem="${IA64_MEM:-512M}"
 smp="${IA64_SMP:-1}"
 logdir="${IA64_LOGDIR:-scratch/ia64_logs}"
 display="${IA64_DISPLAY:-none}"
+qemu_data_dir="${IA64_QEMU_DATA_DIR:-}"
+if [[ -z "$qemu_data_dir" ]]; then
+  candidate="$(dirname "$qemu_bin")/pc-bios"
+  if [[ -d "$candidate" ]]; then
+    qemu_data_dir="$candidate"
+  fi
+fi
 fw_fastpath="${IA64_FW_FASTPATH:-0}"
 guest_errors="${IA64_GUEST_ERRORS:-0}"
 
@@ -498,6 +506,14 @@ args=(
   -serial "file:$serial_log"
   -bios "$bios"
 )
+
+if [[ -n "$qemu_data_dir" ]]; then
+  if [[ ! -d "$qemu_data_dir" ]]; then
+    echo "IA64_QEMU_DATA_DIR is not a directory: $qemu_data_dir" >&2
+    exit 2
+  fi
+  args+=(-L "$qemu_data_dir")
+fi
 
 if [[ -n "${guest_errors:-}" && "${guest_errors:-0}" != "0" ]]; then
   args+=(-d guest_errors -D "$qemu_log")
