@@ -7,6 +7,8 @@ on:
     paths:
       - target/ia64/**
       - hw/ia64/**
+      - pc-bios/vgabios*.bin
+      - pc-bios/README
       - scripts/run-ia64-firmware.sh
       - scripts/run-ia64-rooster-firmware-matrix.py
       - tests/ia64/rooster-efi-smoke/**
@@ -104,15 +106,15 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$root/payload"
           test -r "$root/payload/BOOTIA64.EFI"
 
-      - name: Stage firmware-free A/B bundle
+      - name: Stage platform-firmware-free A/B bundle
         shell: bash
         run: |
           set -euo pipefail
           root="$PWD/scratch/xen-rooster-ab"
           bundle="$root/export"
           mkdir -p \
-            "$bundle/feature" \
-            "$bundle/baseline" \
+            "$bundle/feature/pc-bios" \
+            "$bundle/baseline/pc-bios" \
             "$bundle/payload" \
             "$bundle/scripts"
 
@@ -121,6 +123,34 @@ jobs:
           install -m 0755 \
             "$RUNNER_TEMP/qemu-ia64-baseline/build/qemu-system-ia64" \
             "$bundle/baseline/qemu-system-ia64"
+
+          # A relocated QEMU binary no longer discovers the source-tree data
+          # directory by itself.  Package the matching VGA option ROMs beside
+          # each emulator and let the runner pass that directory with -L.
+          shopt -s nullglob
+          feature_roms=(pc-bios/vgabios*.bin)
+          baseline_roms=("$RUNNER_TEMP/qemu-ia64-baseline"/pc-bios/vgabios*.bin)
+          (( ${#feature_roms[@]} > 0 ))
+          (( ${#baseline_roms[@]} > 0 ))
+          install -m 0644 "${feature_roms[@]}" "$bundle/feature/pc-bios/"
+          install -m 0644 "${baseline_roms[@]}" "$bundle/baseline/pc-bios/"
+          install -m 0644 pc-bios/README "$bundle/feature/pc-bios/README"
+          install -m 0644 \
+            "$RUNNER_TEMP/qemu-ia64-baseline/pc-bios/README" \
+            "$bundle/baseline/pc-bios/README"
+
+          for side in feature baseline; do
+            for required in \
+              vgabios-stdvga.bin \
+              vgabios-cirrus.bin \
+              vgabios-bochs-display.bin \
+              vgabios-ati.bin; do
+              test -s "$bundle/$side/pc-bios/$required"
+            done
+            strings "$bundle/$side/qemu-system-ia64" \
+              | grep -Fx 'vgabios-stdvga.bin' >/dev/null
+          done
+
           install -m 0644 "$root/payload/BOOTIA64.EFI" \
             "$bundle/payload/BOOTIA64.EFI"
           install -m 0755 scripts/run-ia64-firmware.sh \
@@ -147,17 +177,29 @@ jobs:
 
           (
             cd "$bundle"
-            sha256sum \
-              feature/qemu-system-ia64 \
-              baseline/qemu-system-ia64 \
-              payload/BOOTIA64.EFI \
-              > SHA256SUMS
+            {
+              sha256sum \
+                feature/qemu-system-ia64 \
+                baseline/qemu-system-ia64 \
+                payload/BOOTIA64.EFI
+              find feature/pc-bios baseline/pc-bios \
+                -maxdepth 1 -type f -name 'vgabios*.bin' -print0 \
+                | sort -z \
+                | xargs -0 sha256sum
+            } > SHA256SUMS
           )
 
           cat > "$bundle/README.txt" <<'EOF'
-          This artifact intentionally contains no firmware image.
+          This artifact intentionally contains no IA-64 platform firmware image.
           Supply an independently held IA-64 firmware image to both binaries,
           unchanged, and compare the resulting matrix directories.
+
+          Each emulator is accompanied by its matching QEMU VGA option ROMs in
+          a sibling pc-bios directory.  The bundled runner discovers that
+          directory automatically and passes it to QEMU with -L.  Use the
+          matrix default (--vga none) as the CPU/firmware control lane, and use
+          --vga std --display none for a display-device/ROM lane that remains
+          suitable for unattended runs.
           EOF
 
           tar -czf "$root/ia64-xen-rooster-ab-bundle.tar.gz" \
@@ -165,7 +207,7 @@ jobs:
           sha256sum "$root/ia64-xen-rooster-ab-bundle.tar.gz" \
             > "$root/ia64-xen-rooster-ab-bundle.tar.gz.sha256"
 
-      - name: Upload firmware-free A/B bundle
+      - name: Upload A/B bundle with VGA option ROMs
         uses: actions/upload-artifact@v4
         with:
           name: ia64-xen-rooster-ab-bundle-${{ github.run_id }}
