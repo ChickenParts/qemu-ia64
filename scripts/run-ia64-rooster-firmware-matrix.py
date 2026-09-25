@@ -143,6 +143,12 @@ def main(argv: list[str]) -> int:
             f"{arguments.timeout}s",
             str(arguments.runner.resolve()),
             "--",
+            # Keep firmware replay independent of QEMU data-ROM packaging.
+            # IA-64 bring-up is serial-only, so neither VGA nor a NIC is needed.
+            "-vga",
+            "none",
+            "-nic",
+            "none",
             "-drive",
             f"file=fat:rw:{esp},format=raw,media=disk,if=ide",
         ]
