@@ -1,0 +1,93 @@
+_switch(env);
++
+     static uint64_t watch_b0;
+     static bool watch_b0_inited;
+     if (!watch_b0_inited) {
+@@ -29700,6 +29793,8 @@ void HELPER(loadrs)(CPUIA64State *env)
+ void HELPER(cover)(CPUIA64State *env)
+ {
+     static int log_count;
++
++    ia64_rse_cancel_stack_switch(env);
+     uint64_t old_cfm = env->cfm;
+     uint8_t sof = old_cfm & 0x7f;
+     uint64_t bsp = ia64_rse_get_bsp(env);
+@@ -29742,6 +29837,8 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
+      */
+     bspstore &= ~0x7ULL;
+     uint64_t old_bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
++    uint64_t old_bsp = ia64_rse_get_bsp(env);
++    bool task_switch = false;
+     static int log_bspstore = -1;
+     if (log_bspstore == -1) {
+         log_bspstore = getenv("QEMU_IA64_LOG_BSPSTORE") ? 1 : 0;
+@@ -29762,10 +29859,40 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
+                       env->ar[65], env->ar[66], env->cfm);
+     }
+ #ifndef CONFIG_USER_ONLY
+-    if (ia64_is_task_switch_pc(env, env->ip)) {
++    task_switch = ia64_is_task_switch_pc(env, env->ip);
++    if (task_switch) {
+         ia64_rse_switch_bspstore(env, bspstore);
+     }
+ #endif
++
++    /*
++     * A non-local return restores an older backing-store position and a
++     * return identity which does not belong to the newest active shadow
++     * frame.  Arm a one-shot reconciliation for the following br.ret.
++     * Ordinary calls/alloc/cover/rfi cancel this state, so a firmware or OS
++     * stack initialization cannot leak into a later unrelated return.
++     */
++    uint64_t restored_b0 = env->b[0] & ~UINT64_C(0xf);
++    uint64_t top_ret = 0;
++    if (env->rse_depth > 0 && env->rse_frames) {
++        top_ret = env->rse_frames[env->rse_depth - 1].ret_addr &
++                  ~UINT64_C(0xf);
++    }
++    if (!task_switch && old_bspstore != 0 && bspstore != 0 &&
++        env->rse_depth > 0 && ia64_rse_is_lazy(env) &&
++        bspstore <= old_bspstore && bspstore <= old_bsp &&
++        restored_b0 != 0 && restored_b0 != top_ret) {
++        env->rse_stack_switch_pending = 1;
++        env->rse_stack_switch_bsp = bspstore;
++        env->rse_stack_switch_pfs = env->ar[IA64_AR_PFS];
++        env->rse_stack_switch_b0 = restored_b0;
++        env->rse_stack_switch_ip = env->ip;
++        ia64_rse_strict_trace(env, "stack_switch_arm", bspstore,
++                              restored_b0);
++    } else {
++        ia64_rse_cancel_stack_switch(env);
++    }
++
+     ia64_rse_strict_trace(env, "set_bspstore_pre", old_bspstore, bspstore);
+     env->ar[IA64_AR_BSPSTORE] = bspstore;
+     env->ar[IA64_AR_BSP] = bspstore;
+diff --git a/target/ia64/rse.c b/target/ia64/rse.c
+index 987a707..c766f95 100644
+--- a/target/ia64/rse.c
++++ b/target/ia64/rse.c
+@@ -10,7 +10,7 @@
+ /* CFM and PFS.pfm share the architectural frame layout in bits 37:0. */
+ #define IA64_RSE_PFM_MASK ((UINT64_C(1) << 38) - 1)
+ 
+-static bool ia64_rse_view_valid(const struct IA64RSEReturnFrameView *view)
++static bool ia64_rse_view_base_valid(const struct IA64RSEReturnFrameView *view)
+ {
+     if (!view || !view->base || view->count == 0 ||
+         view->count > INT_MAX || view->stride < sizeof(uint64_t) ||
+@@ -18,10 +18,32 @@ static bool ia64_rse_view_valid(const struct IA64RSEReturnFrameView *view)
+         return false;
+     }
+ 
++    return true;
++}
++
++static bool ia64_rse_return_view_valid(
++    const struct IA64RSEReturnFrameView *view)
++{
++    if (!ia64_rse_view_base_valid(view)) {
++        return false;
++    }
++
+     re
