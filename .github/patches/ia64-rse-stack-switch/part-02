@@ -1,0 +1,81 @@
+r & IA64_PSR_BN) ? 1 : 0;
+@@ -13369,6 +13394,8 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
+      * updates CFM. ar.pfs itself is set up by br.call/brl.call and must not
+      * be overwritten here (see SKI's allocEx + cfmWrt sequencing).
+      */
++    ia64_rse_cancel_stack_switch(env);
++
+     uint64_t old_pfs = env->ar[64]; /* ar.pfs */
+     uint64_t old_cfm = env->cfm;
+     uint8_t old_sof = old_cfm & 0x7f;
+@@ -17619,49 +17646,113 @@ void HELPER(ret_restore)(CPUIA64State *env)
+         env->fw_pei_install_guid_valid = 0;
+     }
+     uint64_t bsp = ia64_rse_get_bsp(env);
+-    uint8_t sof = env->cfm & 0x7f;
+-    if (!ia64_rse_is_lazy(env)) {
+-        ia64_rse_store_frame(env, bsp, sof);
+-    }
+-    uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 46) - 1);
++    uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & IA64_PFM_MASK;
+     uint64_t b0 = env->b[0] & ~0xFULL;
++    bool stack_switch = ia64_rse_stack_switch_matches(env, bsp, b0,
++                                                      pfs_cfm);
++
++    if (stack_switch) {
++        int boundary = -1;
++        bool restored_from_shadow = false;
++
++        if (env->rse_depth > 0) {
++            const struct IA64RSEReturnFrameView view = {
++                .base = env->rse_frames,
++                .count = env->rse_depth,
++                .stride = sizeof(*env->rse_frames),
++                .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
++                .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
++                .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
++            };
+ 
+-    /*
+-     * The architectural return target and ar.pfs select the caller.  A
+-     * stack-switch continuation can bypass intervening br.call frames, so
+-     * blindly popping the newest shadow frame restores the wrong register
+-     * window and can corrupt gp before the branch is taken.
+-     */
+-    if (env->rse_depth > 0) {
+-        const struct IA64RSEReturnFrameView view = {
+-            .base = env->rse_frames,
+-            .count = env->rse_depth,
+-            .stride = sizeof(*env->rse_frames),
+-            .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+-            .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+-        };
+-        int selected = ia64_rse_find_return_frame(&view, b0, pfs_cfm);
+-        int dropped = 0;
+-
+-        if (selected >= 0) {
+-            int drop_count = (int)env->rse_depth - selected - 1;
++            boundary = ia64_rse_find_stack_switch_boundary(&view, bsp,
++                                                            pfs_cfm);
++            if (boundary >= 0) {
++                const struct IA64RSEFrame *frame =
++                    &env->rse_frames[boundary];
++                bool exact = (frame->bsp & ~UINT64_C(0x7)) == bsp &&
++                             (frame->cfm & IA64_PFM_MASK) == pfs_cfm;
++
++                if (exact) {
++                    memcpy(&env->r[32], frame->r, sizeof(frame->r));
++                    memcpy(&env->nat[32], frame->nat, sizeof(frame->nat));
++                    restored_from_shadow = true;
++                }
+ 
+-            while (dropped < drop_count && env->rse_depth > 0) {
+-                ia64_rse_pop_window(env);
+-                dropped++;
++                /* The boundary frame is a call made by the target frame. */
++                env->rse_depth = boundary;
+             }
+         }
+ 
+-        if (dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+-            qe
