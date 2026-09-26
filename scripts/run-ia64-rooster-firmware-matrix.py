@@ -67,6 +67,21 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--out", type=pathlib.Path, required=True)
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--memory", default="512M")
+    parser.add_argument(
+        "--vga",
+        default="none",
+        help="QEMU -vga device (default: none for the diagnostic control lane)",
+    )
+    parser.add_argument(
+        "--display",
+        default="none",
+        help="QEMU host display backend (default: none; VGA may still be present)",
+    )
+    parser.add_argument(
+        "--qemu-data-dir",
+        type=pathlib.Path,
+        help="QEMU data directory containing VGA option ROMs",
+    )
     parser.add_argument("--config", type=pathlib.Path)
     parser.add_argument("firmware", nargs="+", type=pathlib.Path)
     arguments = parser.parse_args(argv)
@@ -80,6 +95,21 @@ def main(argv: list[str]) -> int:
             parser.error(f"{label} is missing: {path}")
     if not os.access(arguments.qemu, os.X_OK):
         parser.error(f"QEMU is not executable: {arguments.qemu}")
+
+    qemu_data_dir = arguments.qemu_data_dir
+    if qemu_data_dir is None:
+        candidate = arguments.qemu.resolve().parent / "pc-bios"
+        if candidate.is_dir():
+            qemu_data_dir = candidate
+    if qemu_data_dir is not None:
+        qemu_data_dir = qemu_data_dir.resolve()
+        if not qemu_data_dir.is_dir():
+            parser.error(f"QEMU data directory is missing: {qemu_data_dir}")
+    elif arguments.vga != "none":
+        parser.error(
+            "a display-enabled run requires --qemu-data-dir or a pc-bios "
+            "directory beside qemu-system-ia64"
+        )
 
     output = arguments.out.resolve()
     if output.exists():
@@ -110,6 +140,9 @@ def main(argv: list[str]) -> int:
             "firmware": str(firmware),
             "sha256": identity,
             "bytes": firmware.stat().st_size,
+            "vga": arguments.vga,
+            "display": arguments.display,
+            "qemu_data_dir": str(qemu_data_dir) if qemu_data_dir else None,
         }
         if duplicate is not None:
             record["duplicate_of"] = duplicate
@@ -126,7 +159,7 @@ def main(argv: list[str]) -> int:
                 "IA64_LOGDIR": str(run_directory),
                 "IA64_MEM": arguments.memory,
                 "IA64_SMP": "1",
-                "IA64_DISPLAY": "none",
+                "IA64_DISPLAY": arguments.display,
                 "IA64_GUEST_ERRORS": "1",
                 "IA64_CALL_NULL_FIX": "0",
                 "IA64_PEI_SYSMEM_HOB_FIX": "1",
@@ -136,6 +169,9 @@ def main(argv: list[str]) -> int:
                 "IA64_DXE_LOAD_TRACE_LIMIT": "4096",
             }
         )
+        if qemu_data_dir is not None:
+            environment["IA64_QEMU_DATA_DIR"] = str(qemu_data_dir)
+
         command = [
             "timeout",
             "--signal=TERM",
@@ -143,6 +179,13 @@ def main(argv: list[str]) -> int:
             f"{arguments.timeout}s",
             str(arguments.runner.resolve()),
             "--",
+            # The default is the headless CPU/firmware control lane.  Passing
+            # --vga std (or another device) exercises the packaged ROM and
+            # framebuffer path without requiring a host window.
+            "-vga",
+            arguments.vga,
+            "-nic",
+            "none",
             "-drive",
             f"file=fat:rw:{esp},format=raw,media=disk,if=ide",
         ]
@@ -192,13 +235,14 @@ def main(argv: list[str]) -> int:
     markdown = [
         "# IA-64 Rooster firmware matrix",
         "",
-        "| Firmware | SHA-256 | Bytes | Return | Observed stages |",
-        "|---|---|---:|---:|---|",
+        "| Firmware | VGA | SHA-256 | Bytes | Return | Observed stages |",
+        "|---|---|---|---:|---:|---|",
     ]
     for record in results:
         markdown.append(
-            "| `{}` | `{}` | {} | {} | {} |".format(
+            "| `{}` | `{}` | `{}` | {} | {} | {} |".format(
                 pathlib.Path(str(record["firmware"])).name,
+                record.get("vga", ""),
                 record.get("sha256", ""),
                 record.get("bytes", ""),
                 record.get("return_code", record.get("error", "duplicate")),

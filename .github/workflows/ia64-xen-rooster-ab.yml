@@ -1,0 +1,218 @@
+name: IA-64 Xen Rooster A/B bundle
+
+on:
+  pull_request:
+    branches:
+      - ia64-rooster-bringup
+    paths:
+      - target/ia64/**
+      - hw/ia64/**
+      - pc-bios/vgabios*.bin
+      - pc-bios/README
+      - scripts/run-ia64-firmware.sh
+      - scripts/run-ia64-rooster-firmware-matrix.py
+      - tests/ia64/rooster-efi-smoke/**
+      - tests/unit/meson.build
+      - tests/unit/test-ia64-rse.c
+      - .github/workflows/ia64-xen-rooster-ab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-xen-rooster-ab-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-ab-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact feature head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Create canonical baseline worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin ia64-rooster-bringup
+          git worktree add "$RUNNER_TEMP/qemu-ia64-baseline" \
+            origin/ia64-rooster-bringup
+          printf 'feature=%s\n' "$(git rev-parse HEAD)" | tee heads.txt
+          printf 'baseline=%s\n' \
+            "$(git -C "$RUNNER_TEMP/qemu-ia64-baseline" rev-parse HEAD)" \
+            | tee -a heads.txt
+
+      - name: Install emulator dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev
+
+      - name: Build feature and baseline emulators
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_qemu() {
+            local source=$1
+            (
+              cd "$source"
+              ./configure \
+                --target-list=ia64-softmmu \
+                --enable-plugins \
+                --disable-slirp \
+                --disable-docs --disable-gtk --disable-sdl --disable-werror
+              ninja -C build -j"$(nproc)" qemu-system-ia64
+            )
+          }
+
+          build_qemu "$PWD"
+          ninja -C build -j"$(nproc)" tests/unit/test-ia64-rse
+          build/tests/unit/test-ia64-rse | tee rse-unit.tap
+          build_qemu "$RUNNER_TEMP/qemu-ia64-baseline"
+
+      - name: Build Rooster EFI payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/xen-rooster-ab"
+          rm -rf "$root"
+          mkdir -p "$root/payload"
+
+          cid="$(
+            docker create \
+              -v "$PWD:/work:ro" \
+              -w /work fedora:44 \
+              bash -lc '
+                set -euo pipefail
+                dnf --assumeyes --setopt=install_weak_deps=False install \
+                  binutils-ia64-linux-gnu coreutils gcc-ia64-linux-gnu git python3
+                bash tests/ia64/rooster-efi-smoke/build.sh /tmp/payload
+              '
+          )"
+          cleanup() {
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker start -a "$cid"
+          docker cp "$cid:/tmp/payload/." "$root/payload/"
+          sudo chown -R "$(id -u):$(id -g)" "$root/payload"
+          test -r "$root/payload/BOOTIA64.EFI"
+
+      - name: Stage platform-firmware-free A/B bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/scratch/xen-rooster-ab"
+          bundle="$root/export"
+          mkdir -p \
+            "$bundle/feature/pc-bios" \
+            "$bundle/baseline/pc-bios" \
+            "$bundle/payload" \
+            "$bundle/scripts"
+
+          install -m 0755 build/qemu-system-ia64 \
+            "$bundle/feature/qemu-system-ia64"
+          install -m 0755 \
+            "$RUNNER_TEMP/qemu-ia64-baseline/build/qemu-system-ia64" \
+            "$bundle/baseline/qemu-system-ia64"
+
+          # A relocated QEMU binary no longer discovers the source-tree data
+          # directory by itself.  Package the matching VGA option ROMs beside
+          # each emulator and let the runner pass that directory with -L.
+          shopt -s nullglob
+          feature_roms=(pc-bios/vgabios*.bin)
+          baseline_roms=("$RUNNER_TEMP/qemu-ia64-baseline"/pc-bios/vgabios*.bin)
+          (( ${#feature_roms[@]} > 0 ))
+          (( ${#baseline_roms[@]} > 0 ))
+          install -m 0644 "${feature_roms[@]}" "$bundle/feature/pc-bios/"
+          install -m 0644 "${baseline_roms[@]}" "$bundle/baseline/pc-bios/"
+          install -m 0644 pc-bios/README "$bundle/feature/pc-bios/README"
+          install -m 0644 \
+            "$RUNNER_TEMP/qemu-ia64-baseline/pc-bios/README" \
+            "$bundle/baseline/pc-bios/README"
+
+          for side in feature baseline; do
+            for required in \
+              vgabios-stdvga.bin \
+              vgabios-cirrus.bin \
+              vgabios-bochs-display.bin \
+              vgabios-ati.bin; do
+              test -s "$bundle/$side/pc-bios/$required"
+            done
+            strings "$bundle/$side/qemu-system-ia64" \
+              | grep -Fx 'vgabios-stdvga.bin' >/dev/null
+          done
+
+          install -m 0644 "$root/payload/BOOTIA64.EFI" \
+            "$bundle/payload/BOOTIA64.EFI"
+          install -m 0755 scripts/run-ia64-firmware.sh \
+            "$bundle/scripts/run-ia64-firmware.sh"
+          install -m 0755 scripts/run-ia64-rooster-firmware-matrix.py \
+            "$bundle/scripts/run-ia64-rooster-firmware-matrix.py"
+          install -m 0644 heads.txt rse-unit.tap "$bundle/"
+
+          ldd "$bundle/feature/qemu-system-ia64" \
+            | tee "$bundle/feature/ldd.txt"
+          ldd "$bundle/baseline/qemu-system-ia64" \
+            | tee "$bundle/baseline/ldd.txt"
+          ! grep -F 'not found' "$bundle/feature/ldd.txt"
+          ! grep -F 'not found' "$bundle/baseline/ldd.txt"
+
+          "$bundle/feature/qemu-system-ia64" --version \
+            > "$bundle/feature/version.txt"
+          "$bundle/baseline/qemu-system-ia64" --version \
+            > "$bundle/baseline/version.txt"
+          "$bundle/feature/qemu-system-ia64" -M help \
+            > "$bundle/feature/machines.txt"
+          "$bundle/baseline/qemu-system-ia64" -M help \
+            > "$bundle/baseline/machines.txt"
+
+          (
+            cd "$bundle"
+            {
+              sha256sum \
+                feature/qemu-system-ia64 \
+                baseline/qemu-system-ia64 \
+                payload/BOOTIA64.EFI
+              find feature/pc-bios baseline/pc-bios \
+                -maxdepth 1 -type f -name 'vgabios*.bin' -print0 \
+                | sort -z \
+                | xargs -0 sha256sum
+            } > SHA256SUMS
+          )
+
+          cat > "$bundle/README.txt" <<'EOF'
+          This artifact intentionally contains no IA-64 platform firmware image.
+          Supply an independently held IA-64 firmware image to both binaries,
+          unchanged, and compare the resulting matrix directories.
+
+          Each emulator is accompanied by its matching QEMU VGA option ROMs in
+          a sibling pc-bios directory.  The bundled runner discovers that
+          directory automatically and passes it to QEMU with -L.  Use the
+          matrix default (--vga none) as the CPU/firmware control lane, and use
+          --vga std --display none for a display-device/ROM lane that remains
+          suitable for unattended runs.
+          EOF
+
+          tar -czf "$root/ia64-xen-rooster-ab-bundle.tar.gz" \
+            -C "$bundle" .
+          sha256sum "$root/ia64-xen-rooster-ab-bundle.tar.gz" \
+            > "$root/ia64-xen-rooster-ab-bundle.tar.gz.sha256"
+
+      - name: Upload A/B bundle with VGA option ROMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-xen-rooster-ab-bundle-${{ github.run_id }}
+          path: |
+            scratch/xen-rooster-ab/ia64-xen-rooster-ab-bundle.tar.gz
+            scratch/xen-rooster-ab/ia64-xen-rooster-ab-bundle.tar.gz.sha256
+          retention-days: 14
+          if-no-files-found: error

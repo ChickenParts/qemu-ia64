@@ -9,6 +9,7 @@
 #include "interrupt.h"
 #include "pal.h"
 #include "sal.h"
+#include "rse.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
@@ -141,6 +142,7 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 #define IA64_CFM_SOR_MASK  0xfULL
 #define IA64_CFM_RRBF_SHIFT 25
 #define IA64_CFM_RRBF_MASK  0x7fULL
+#define IA64_PFM_MASK       ((UINT64_C(1) << 38) - 1)
 
 #define IA64_FR_ROT_BASE 32
 #define IA64_FR_ROT_SIZE 96
@@ -370,6 +372,26 @@ static inline uint64_t ia64_rse_get_bsp(const CPUIA64State *env)
         bsp = env->ar[IA64_AR_BSPSTORE];
     }
     return bsp & ~0x7ULL;
+}
+
+static void ia64_rse_cancel_stack_switch(CPUIA64State *env)
+{
+    env->rse_stack_switch_pending = 0;
+    env->rse_stack_switch_bsp = 0;
+    env->rse_stack_switch_pfs = 0;
+    env->rse_stack_switch_b0 = 0;
+    env->rse_stack_switch_ip = 0;
+}
+
+static bool ia64_rse_stack_switch_matches(const CPUIA64State *env,
+                                          uint64_t bsp, uint64_t b0,
+                                          uint64_t pfs_cfm)
+{
+    return env->rse_stack_switch_pending &&
+           env->rse_stack_switch_bsp == (bsp & ~UINT64_C(0x7)) &&
+           env->rse_stack_switch_b0 == (b0 & ~UINT64_C(0xf)) &&
+           (env->rse_stack_switch_pfs & IA64_PFM_MASK) ==
+               (pfs_cfm & IA64_PFM_MASK);
 }
 
 static void ia64_rse_write_mem(CPUIA64State *env, uint64_t addr, uint64_t val)
@@ -1546,12 +1568,14 @@ static bool ia64_intr_pop_window(CPUIA64State *env)
 
 static void ia64_rse_push_window(CPUIA64State *env, uint64_t ret_addr)
 {
+    ia64_rse_cancel_stack_switch(env);
     ia64_rse_ensure(env, env->rse_depth + 1);
     struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth++];
     memcpy(frame->r, &env->r[32], sizeof(frame->r));
     memcpy(frame->nat, &env->nat[32], sizeof(frame->nat));
     frame->ar_pfs = env->ar[64]; /* ar.pfs */
     frame->cfm = env->cfm;
+    frame->bsp = ia64_rse_get_bsp(env);
     frame->ret_addr = ret_addr & ~0xFULL;
     frame->share_outs = 1;
 }
@@ -1658,6 +1682,8 @@ void HELPER(bsw)(CPUIA64State *env, uint32_t bn)
 void HELPER(rfi)(CPUIA64State *env)
 {
     static int rfi_log_count;
+
+    ia64_rse_cancel_stack_switch(env);
     uint64_t new_psr = env->cr_ipsr;
     uint32_t cur_bn = (env->psr & IA64_PSR_BN) ? 1 : 0;
     uint32_t new_bn = (new_psr & IA64_PSR_BN) ? 1 : 0;
@@ -13368,6 +13394,8 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
      * updates CFM. ar.pfs itself is set up by br.call/brl.call and must not
      * be overwritten here (see SKI's allocEx + cfmWrt sequencing).
      */
+    ia64_rse_cancel_stack_switch(env);
+
     uint64_t old_pfs = env->ar[64]; /* ar.pfs */
     uint64_t old_cfm = env->cfm;
     uint8_t old_sof = old_cfm & 0x7f;
@@ -17429,10 +17457,6 @@ static void ia64_fw_pei_maybe_handle_hob_flow_ret(CPUIA64State *env)
 void HELPER(ret_restore)(CPUIA64State *env)
 {
     static int log_count;
-    static int unwind_enabled = -1;
-    if (unwind_enabled == -1) {
-        unwind_enabled = getenv("QEMU_IA64_RET_UNWIND_PFS") ? 1 : 0;
-    }
     static uint64_t watch_b0;
     static bool watch_b0_inited;
     if (!watch_b0_inited) {
@@ -17622,32 +17646,113 @@ void HELPER(ret_restore)(CPUIA64State *env)
         env->fw_pei_install_guid_valid = 0;
     }
     uint64_t bsp = ia64_rse_get_bsp(env);
-    uint8_t sof = env->cfm & 0x7f;
-    if (!ia64_rse_is_lazy(env)) {
-        ia64_rse_store_frame(env, bsp, sof);
-    }
-    uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 46) - 1);
+    uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & IA64_PFM_MASK;
     uint64_t b0 = env->b[0] & ~0xFULL;
-    if (unwind_enabled && env->rse_depth > 0) {
-        int unwind = 0;
-        while (env->rse_depth > 0) {
-            const struct IA64RSEFrame *frame =
-                &env->rse_frames[env->rse_depth - 1];
-            if (frame->ret_addr == b0 || frame->cfm == pfs_cfm) {
-                break;
+    bool stack_switch = ia64_rse_stack_switch_matches(env, bsp, b0,
+                                                      pfs_cfm);
+
+    if (stack_switch) {
+        int boundary = -1;
+        bool restored_from_shadow = false;
+
+        if (env->rse_depth > 0) {
+            const struct IA64RSEReturnFrameView view = {
+                .base = env->rse_frames,
+                .count = env->rse_depth,
+                .stride = sizeof(*env->rse_frames),
+                .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+                .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+                .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
+            };
+
+            boundary = ia64_rse_find_stack_switch_boundary(&view, bsp,
+                                                            pfs_cfm);
+            if (boundary >= 0) {
+                const struct IA64RSEFrame *frame =
+                    &env->rse_frames[boundary];
+                bool exact = (frame->bsp & ~UINT64_C(0x7)) == bsp &&
+                             (frame->cfm & IA64_PFM_MASK) == pfs_cfm;
+
+                if (exact) {
+                    memcpy(&env->r[32], frame->r, sizeof(frame->r));
+                    memcpy(&env->nat[32], frame->nat, sizeof(frame->nat));
+                    restored_from_shadow = true;
+                }
+
+                /* The boundary frame is a call made by the target frame. */
+                env->rse_depth = boundary;
             }
-            ia64_rse_pop_window(env);
-            unwind++;
         }
-        if (unwind && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "ret_unwind pfs_cfm=%016" PRIx64 " b0=%016" PRIx64
-                          " dropped=%d depth=%u\n",
-                          pfs_cfm, b0, unwind, env->rse_depth);
+
+        if (!restored_from_shadow) {
+            ia64_rse_load_frame(env, bsp, pfs_cfm & 0x7f, true);
         }
-    }
-    if (ia64_rse_pop_window(env)) {
+
+        /* br.ret installs PFS.PFM as the current frame marker. */
+        env->cfm = pfs_cfm;
+        env->ar[IA64_AR_BSP] = bsp;
+        env->ar[IA64_AR_BSPSTORE] = bsp;
         ia64_restore_ec_from_pfs(env);
+
+        if (qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ret_stack_switch arm_ip=%016" PRIx64
+                          " b0=%016" PRIx64 " bsp=%016" PRIx64
+                          " pfs_cfm=%016" PRIx64 " boundary=%d"
+                          " source=%s depth=%u\n",
+                          env->rse_stack_switch_ip, b0, bsp, pfs_cfm,
+                          boundary,
+                          restored_from_shadow ? "shadow" : "backing-store",
+                          env->rse_depth);
+        }
+        ia64_rse_cancel_stack_switch(env);
+    } else {
+        uint8_t sof = env->cfm & 0x7f;
+
+        ia64_rse_cancel_stack_switch(env);
+        if (!ia64_rse_is_lazy(env)) {
+            ia64_rse_store_frame(env, bsp, sof);
+        }
+
+        /*
+         * The architectural return target and ar.pfs select the caller.  A
+         * stack-switch continuation can bypass intervening br.call frames,
+         * so blindly popping the newest shadow frame restores the wrong
+         * register window and can corrupt gp before the branch is taken.
+         */
+        if (env->rse_depth > 0) {
+            const struct IA64RSEReturnFrameView view = {
+                .base = env->rse_frames,
+                .count = env->rse_depth,
+                .stride = sizeof(*env->rse_frames),
+                .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+                .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+                .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
+            };
+            int selected = ia64_rse_find_return_frame(&view, b0, pfs_cfm);
+            int dropped = 0;
+
+            if (selected >= 0) {
+                int drop_count = (int)env->rse_depth - selected - 1;
+
+                while (dropped < drop_count && env->rse_depth > 0) {
+                    ia64_rse_pop_window(env);
+                    dropped++;
+                }
+            }
+
+            if (dropped > 0 && qemu_loglevel_mask(LOG_GUEST_ERROR)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "ret_reconcile pfs_cfm=%016" PRIx64
+                              " b0=%016" PRIx64 " selected=%d"
+                              " dropped=%d depth=%u\n",
+                              pfs_cfm, b0, selected, dropped,
+                              env->rse_depth);
+            }
+        }
+        if (ia64_rse_pop_window(env)) {
+            ia64_restore_ec_from_pfs(env);
+        }
     }
     if (watch_hit) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -17670,6 +17775,8 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
      * register frame.  Only unwind our modeled RSE window if b0 was last
      * written by br.call/brl.call.
      */
+    ia64_rse_cancel_stack_switch(env);
+
     static uint64_t watch_b0;
     static bool watch_b0_inited;
     if (!watch_b0_inited) {
@@ -29686,6 +29793,8 @@ void HELPER(loadrs)(CPUIA64State *env)
 void HELPER(cover)(CPUIA64State *env)
 {
     static int log_count;
+
+    ia64_rse_cancel_stack_switch(env);
     uint64_t old_cfm = env->cfm;
     uint8_t sof = old_cfm & 0x7f;
     uint64_t bsp = ia64_rse_get_bsp(env);
@@ -29728,6 +29837,8 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
      */
     bspstore &= ~0x7ULL;
     uint64_t old_bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
+    uint64_t old_bsp = ia64_rse_get_bsp(env);
+    bool task_switch = false;
     static int log_bspstore = -1;
     if (log_bspstore == -1) {
         log_bspstore = getenv("QEMU_IA64_LOG_BSPSTORE") ? 1 : 0;
@@ -29748,10 +29859,40 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
                       env->ar[65], env->ar[66], env->cfm);
     }
 #ifndef CONFIG_USER_ONLY
-    if (ia64_is_task_switch_pc(env, env->ip)) {
+    task_switch = ia64_is_task_switch_pc(env, env->ip);
+    if (task_switch) {
         ia64_rse_switch_bspstore(env, bspstore);
     }
 #endif
+
+    /*
+     * A non-local return restores an older backing-store position and a
+     * return identity which does not belong to the newest active shadow
+     * frame.  Arm a one-shot reconciliation for the following br.ret.
+     * Ordinary calls/alloc/cover/rfi cancel this state, so a firmware or OS
+     * stack initialization cannot leak into a later unrelated return.
+     */
+    uint64_t restored_b0 = env->b[0] & ~UINT64_C(0xf);
+    uint64_t top_ret = 0;
+    if (env->rse_depth > 0 && env->rse_frames) {
+        top_ret = env->rse_frames[env->rse_depth - 1].ret_addr &
+                  ~UINT64_C(0xf);
+    }
+    if (!task_switch && old_bspstore != 0 && bspstore != 0 &&
+        env->rse_depth > 0 && ia64_rse_is_lazy(env) &&
+        bspstore <= old_bspstore && bspstore <= old_bsp &&
+        restored_b0 != 0 && restored_b0 != top_ret) {
+        env->rse_stack_switch_pending = 1;
+        env->rse_stack_switch_bsp = bspstore;
+        env->rse_stack_switch_pfs = env->ar[IA64_AR_PFS];
+        env->rse_stack_switch_b0 = restored_b0;
+        env->rse_stack_switch_ip = env->ip;
+        ia64_rse_strict_trace(env, "stack_switch_arm", bspstore,
+                              restored_b0);
+    } else {
+        ia64_rse_cancel_stack_switch(env);
+    }
+
     ia64_rse_strict_trace(env, "set_bspstore_pre", old_bspstore, bspstore);
     env->ar[IA64_AR_BSPSTORE] = bspstore;
     env->ar[IA64_AR_BSP] = bspstore;

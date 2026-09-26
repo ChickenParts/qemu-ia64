@@ -407,10 +407,19 @@ Environment variables are organized into the following categories:
 | `QEMU_IA64_LOG_BSPSTORE` | Log BSP store operations |
 | `QEMU_IA64_DIVHELP_LOG` | Log division helper calls |
 | `QEMU_IA64_MANUAL_CALL_LOG` | Log manual call linkage |
-| `QEMU_IA64_RET_UNWIND_PFS` | Enable return PFS unwinding |
 | `QEMU_IA64_RET_WATCH_B0` | Watch B0 on returns |
 | `QEMU_IA64_RET_TRACE_RANGE` | Trace ret_restore/b0 in a PC range (start-end or start+len) |
 | `QEMU_IA64_RET_TRACE_LIMIT` | Limit return trace entries |
+
+`br.ret` always reconciles the modeled shadow call stack against the
+architectural return target in `b0` and the caller frame state in `ar.pfs`.
+This is required for non-local returns and stack-switch continuations and is
+not controlled by a firmware compatibility switch.  A lazy-mode write of an
+older `ar.bspstore` arms a one-shot architectural unwind.  The following
+matching `br.ret` restores the target frame by BSP/PFS identity, discards only
+the invalidated inner shadow frames, and leaves surviving outer callers intact.
+This models setjmp/longjmp and context-restore sequences without firmware-PC or
+image-specific behavior.
 
 ## Assert and Debug Buffer
 

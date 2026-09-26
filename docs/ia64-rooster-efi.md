@@ -34,6 +34,20 @@ IA64_ESP=scratch/ia64-esp \
 The wrapper intentionally rejects `-kernel` so that a passing test proves the
 firmware/EFI path rather than QEMU loading the application itself.
 
+## Display-capable replay
+
+The firmware matrix keeps two distinct lanes.  Its default `--vga none` lane is
+the serial-only CPU/firmware control.  The `--vga std --display none` lane still
+instantiates the VGA device and loads its option ROM while remaining suitable
+for unattended testing.  Relocated emulator artifacts carry their matching
+`vgabios*.bin` files in a sibling `pc-bios` directory, which the runner supplies
+to QEMU with `-L`.
+
+The display lane is not a substitute for the serial control and is not merely
+packaging insurance: it preserves the path toward firmware framebuffer/GOP
+bring-up.  A later acceptance gate must confirm visible framebuffer output and
+mode-setting behavior rather than stopping at successful option-ROM loading.
+
 ## QEMU readiness gates
 
 For Rooster EFI bring-up, success is staged:

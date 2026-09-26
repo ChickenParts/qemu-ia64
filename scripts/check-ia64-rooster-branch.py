@@ -36,6 +36,8 @@ def main() -> int:
     causality_workflow = read(".github/workflows/ia64-fv-hob-causality.yml")
     helper_h = read("target/ia64/helper.h")
     helper_c = read("target/ia64/helper.c")
+    rse = read("target/ia64/rse.c")
+    rse_test = read("tests/unit/test-ia64-rse.c")
     translate = read("target/ia64/translate.c")
     environment = read("docs/ia64-environment-variables.md")
 
@@ -45,6 +47,13 @@ def main() -> int:
     require(harness, "EFI/BOOT/BOOTIA64.EFI", "EFI harness")
     require(matrix, "IA64_CALL_NULL_FIX", "firmware matrix")
     require(matrix, '"0"', "firmware matrix")
+    require(matrix, '"--vga"', "firmware matrix display selector")
+    require(matrix, 'arguments.vga', "firmware matrix display selector")
+    require(matrix, '"--qemu-data-dir"', "firmware matrix ROM path")
+    require(matrix, 'environment["IA64_QEMU_DATA_DIR"]',
+            "firmware matrix ROM path")
+    require(matrix, 'a display-enabled run requires --qemu-data-dir',
+            "firmware matrix ROM diagnostic")
     require(frontier, "permanent HOB list", "HOB frontier")
     require(frontier, "EFI_HOB_TYPE_FV", "HOB frontier")
     require(causality, "QEMU_IA64_PEI_FV_HOB_RESTORE", "causality probe")
@@ -62,6 +71,50 @@ def main() -> int:
             "GP provenance documentation")
     require(environment, "QEMU_IA64_TRACE_GP_ZERO_ABORT",
             "GP provenance documentation")
+    require(helper_c, "struct IA64RSEReturnFrameView view",
+            "architectural return reconciliation")
+    require(helper_c, "ia64_rse_find_return_frame(&view, b0, pfs_cfm)",
+            "architectural return reconciliation")
+    require(helper_c, "ia64_rse_stack_switch_matches",
+            "architectural stack-switch return")
+    require(helper_c, "ia64_rse_find_stack_switch_boundary(&view, bsp",
+            "architectural stack-switch return")
+    require(helper_c, '"ret_stack_switch arm_ip=%016"',
+            "architectural stack-switch diagnostics")
+    require(helper_c, "frame->bsp = ia64_rse_get_bsp(env)",
+            "architectural call-frame BSP identity")
+    require(rse, "view->cfm_offset", "architectural return frame view")
+    require(rse, "view->ret_addr_offset", "architectural return frame view")
+    require(rse, "view->bsp_offset", "architectural return frame view")
+    require(rse, "ia64_rse_find_stack_switch_boundary",
+            "architectural stack-switch selector")
+    require(rse, "IA64_RSE_PFM_MASK",
+            "architectural return PFM width")
+    require(rse, "UINT64_C(1) << 38",
+            "architectural return PFM width")
+    forbid(rse, r"<<\s*46", "architectural return PFM width")
+    forbid(rse, r'#include\s+"cpu\.h"',
+           "target-independent return frame selector")
+    require(rse, "The return address is the strongest identity",
+            "architectural return reconciliation")
+    require(rse_test, "/ia64/rse/nonlocal-return-address-wins",
+            "architectural return reconciliation test")
+    require(rse_test, "/ia64/rse/pfs-non-pfm-bits-ignored",
+            "architectural PFS masking test")
+    require(rse_test, "/ia64/rse/stack-switch-exact-boundary",
+            "architectural stack-switch test")
+    require(rse_test, "/ia64/rse/stack-switch-monotonic-fallback",
+            "architectural stack-switch fallback test")
+    require(environment, "br.ret` always reconciles",
+            "architectural return reconciliation documentation")
+    forbid(helper_c, r'getenv\("QEMU_IA64_RET_UNWIND_PFS"\)',
+           "architectural return reconciliation")
+    forbid(environment, r"QEMU_IA64_RET_UNWIND_PFS",
+           "architectural return reconciliation documentation")
+    forbid(rse, r"0x1ff[0-9a-f]{5,}",
+           "architectural return reconciliation")
+    forbid(helper_c, r"rse_stack_switch[^\n]*0x1ff[0-9a-f]{5,}",
+           "architectural stack-switch return")
 
     # The causality experiment may restore records that already exist in guest
     # memory, but it may never manufacture a DXE target or key off a firmware
