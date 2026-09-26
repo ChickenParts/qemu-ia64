@@ -1,0 +1,61 @@
+name: Export active IA-64 bring-up source
+
+on:
+  push:
+    branches:
+      - fix/ia64-rse-return-identity
+    paths:
+      - .github/workflows/ia64-active-source-export.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ia64-active-source-export
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out active bring-up branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/ia64-rse-return-identity
+          fetch-depth: 0
+
+      - name: Pack source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=scratch/ia64-active-source-export
+          mkdir -p "$out"
+          tar \
+            --exclude=.git \
+            --exclude=build \
+            --exclude=scratch/ia64-active-source-export \
+            -czf "$out/qemu-ia64-source.tar.gz" .
+          sha256sum "$out/qemu-ia64-source.tar.gz" > "$out/SHA256SUMS"
+          git rev-parse HEAD > "$out/HEAD.txt"
+
+      - name: Upload active source tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-active-source-${{ github.run_id }}
+          path: scratch/ia64-active-source-export/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/ia64-active-source-export.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'ci/ia64: remove active source export workflow'
+          git fetch origin fix/ia64-rse-return-identity
+          git rebase origin/fix/ia64-rse-return-identity
+          git push origin HEAD:fix/ia64-rse-return-identity
