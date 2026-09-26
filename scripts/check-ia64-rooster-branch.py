@@ -75,8 +75,19 @@ def main() -> int:
             "architectural return reconciliation")
     require(helper_c, "ia64_rse_find_return_frame(&view, b0, pfs_cfm)",
             "architectural return reconciliation")
+    require(helper_c, "ia64_rse_stack_switch_matches",
+            "architectural stack-switch return")
+    require(helper_c, "ia64_rse_find_stack_switch_boundary(&view, bsp",
+            "architectural stack-switch return")
+    require(helper_c, '"ret_stack_switch arm_ip=%016"',
+            "architectural stack-switch diagnostics")
+    require(helper_c, "frame->bsp = ia64_rse_get_bsp(env)",
+            "architectural call-frame BSP identity")
     require(rse, "view->cfm_offset", "architectural return frame view")
     require(rse, "view->ret_addr_offset", "architectural return frame view")
+    require(rse, "view->bsp_offset", "architectural return frame view")
+    require(rse, "ia64_rse_find_stack_switch_boundary",
+            "architectural stack-switch selector")
     require(rse, "IA64_RSE_PFM_MASK",
             "architectural return PFM width")
     require(rse, "UINT64_C(1) << 38",
@@ -90,6 +101,10 @@ def main() -> int:
             "architectural return reconciliation test")
     require(rse_test, "/ia64/rse/pfs-non-pfm-bits-ignored",
             "architectural PFS masking test")
+    require(rse_test, "/ia64/rse/stack-switch-exact-boundary",
+            "architectural stack-switch test")
+    require(rse_test, "/ia64/rse/stack-switch-monotonic-fallback",
+            "architectural stack-switch fallback test")
     require(environment, "br.ret` always reconciles",
             "architectural return reconciliation documentation")
     forbid(helper_c, r'getenv\("QEMU_IA64_RET_UNWIND_PFS"\)',
@@ -98,6 +113,8 @@ def main() -> int:
            "architectural return reconciliation documentation")
     forbid(rse, r"0x1ff[0-9a-f]{5,}",
            "architectural return reconciliation")
+    forbid(helper_c, r"rse_stack_switch[^\n]*0x1ff[0-9a-f]{5,}",
+           "architectural stack-switch return")
 
     # The causality experiment may restore records that already exist in guest
     # memory, but it may never manufacture a DXE target or key off a firmware

@@ -110,11 +110,26 @@ typedef struct CPUArchState {
         uint8_t nat[96];
         uint64_t ar_pfs;
         uint64_t cfm;
+        uint64_t bsp;       /* caller frame end at the call boundary */
         uint64_t ret_addr;  /* caller return address (bundle PC) */
         uint8_t share_outs; /* caller OUTs share physical regs with callee INs */
     } *rse_frames;
     uint32_t rse_depth;
     uint32_t rse_capacity;
+
+    /*
+     * One-shot architectural backing-store unwind state.
+     *
+     * IA-64 longjmp/context-restore sequences install an older BSPSTORE,
+     * PFS, and return pointer before br.ret.  Preserve that identity across
+     * the intervening mov/invala instructions so ret_restore can rebuild the
+     * target activation without popping an unrelated shadow call frame.
+     */
+    uint64_t rse_stack_switch_bsp;
+    uint64_t rse_stack_switch_pfs;
+    uint64_t rse_stack_switch_b0;
+    uint64_t rse_stack_switch_ip;
+    uint8_t rse_stack_switch_pending;
 
     /*
      * Interrupt snapshots for the stacked register window.

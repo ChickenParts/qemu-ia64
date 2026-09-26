@@ -414,7 +414,12 @@ Environment variables are organized into the following categories:
 `br.ret` always reconciles the modeled shadow call stack against the
 architectural return target in `b0` and the caller frame state in `ar.pfs`.
 This is required for non-local returns and stack-switch continuations and is
-not controlled by a firmware compatibility switch.
+not controlled by a firmware compatibility switch.  A lazy-mode write of an
+older `ar.bspstore` arms a one-shot architectural unwind.  The following
+matching `br.ret` restores the target frame by BSP/PFS identity, discards only
+the invalidated inner shadow frames, and leaves surviving outer callers intact.
+This models setjmp/longjmp and context-restore sequences without firmware-PC or
+image-specific behavior.
 
 ## Assert and Debug Buffer
 

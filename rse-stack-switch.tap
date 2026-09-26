@@ -1,0 +1,22 @@
+TAP version 13
+# random seed: R02Sc6de117bed342bb91df677c121d5bd0f
+1..15
+# Start of ia64 tests
+# Start of rse tests
+ok 1 /ia64/rse/empty
+ok 2 /ia64/rse/top-exact-match
+ok 3 /ia64/rse/nonlocal-return-address-wins
+ok 4 /ia64/rse/conflicting-components
+ok 5 /ia64/rse/return-address-only
+ok 6 /ia64/rse/pfs-only
+ok 7 /ia64/rse/duplicate-exact-prefers-newest
+ok 8 /ia64/rse/zero-target
+ok 9 /ia64/rse/no-match
+ok 10 /ia64/rse/pfs-non-pfm-bits-ignored
+ok 11 /ia64/rse/stack-switch-exact-boundary
+ok 12 /ia64/rse/stack-switch-oldest-exact
+ok 13 /ia64/rse/stack-switch-monotonic-fallback
+ok 14 /ia64/rse/stack-switch-all-frames-survive
+ok 15 /ia64/rse/stack-switch-pfs-mask
+# End of rse tests
+# End of ia64 tests

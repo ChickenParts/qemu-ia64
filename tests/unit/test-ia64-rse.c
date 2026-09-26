@@ -11,6 +11,7 @@ struct IA64RSEFrame {
     uint64_t padding;
     uint64_t cfm;
     uint64_t ret_addr;
+    uint64_t bsp;
 };
 
 typedef struct TestIA64RSEState {
@@ -37,9 +38,25 @@ static int find_return_frame(const TestIA64RSEState *env,
         .stride = sizeof(*env->rse_frames),
         .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
         .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+        .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
     };
 
     return ia64_rse_find_return_frame(&view, ret_addr, pfs_cfm);
+}
+
+static int find_stack_switch_boundary(const TestIA64RSEState *env,
+                                      uint64_t bsp, uint64_t pfs_cfm)
+{
+    const struct IA64RSEReturnFrameView view = {
+        .base = env->rse_frames,
+        .count = env->rse_depth,
+        .stride = sizeof(*env->rse_frames),
+        .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+        .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+        .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
+    };
+
+    return ia64_rse_find_stack_switch_boundary(&view, bsp, pfs_cfm);
 }
 
 static void test_empty(void)
@@ -195,6 +212,92 @@ static void test_pfs_non_pfm_bits_ignored(void)
     g_assert_cmpint(find_return_frame(&env, 0x2002, pfs), ==, 0);
 }
 
+static void test_stack_switch_exact_boundary(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[4];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].bsp = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].bsp = 0x1800;
+    frames[1].cfm = 0x30a;
+    frames[2].bsp = 0x1800;
+    frames[2].cfm = 0x30a;
+    frames[3].bsp = 0x2000;
+    frames[3].cfm = 0x407;
+
+    /* The oldest target-frame call is the unwind boundary. */
+    g_assert_cmpint(find_stack_switch_boundary(&env, 0x1803, 0x30a), ==, 1);
+}
+
+static void test_stack_switch_ignores_newer_same_pfm(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[4];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].bsp = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].bsp = 0x1800;
+    frames[1].cfm = 0x30a;
+    frames[2].bsp = 0x1a00;
+    frames[2].cfm = 0x30a;
+    frames[3].bsp = 0x2000;
+    frames[3].cfm = 0x407;
+
+    g_assert_cmpint(find_stack_switch_boundary(&env, 0x1800, 0x30a), ==, 1);
+}
+
+static void test_stack_switch_monotonic_fallback(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[4];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].bsp = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].bsp = 0x1700;
+    frames[1].cfm = 0x222;
+    frames[2].bsp = 0x1900;
+    frames[2].cfm = 0x333;
+    frames[3].bsp = 0x2000;
+    frames[3].cfm = 0x444;
+
+    /* Preserve frames below the restored BSP even without an exact PFM. */
+    g_assert_cmpint(find_stack_switch_boundary(&env, 0x1800, 0x777), ==, 2);
+}
+
+static void test_stack_switch_all_frames_survive(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[2];
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].bsp = 0x1000;
+    frames[0].cfm = 0x201;
+    frames[1].bsp = 0x1800;
+    frames[1].cfm = 0x302;
+
+    g_assert_cmpint(find_stack_switch_boundary(&env, 0x2000, 0x777), ==, -1);
+}
+
+static void test_stack_switch_pfs_non_pfm_bits_ignored(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[1];
+    uint64_t pfs;
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].bsp = 0x1800;
+    frames[0].cfm = 0x30a;
+    pfs = UINT64_C(0x30a) |
+          (UINT64_C(0x2a) << 52) |
+          (UINT64_C(3) << 62);
+
+    g_assert_cmpint(find_stack_switch_boundary(&env, 0x1800, pfs), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -213,5 +316,15 @@ int main(int argc, char **argv)
     g_test_add_func("/ia64/rse/no-match", test_no_match);
     g_test_add_func("/ia64/rse/pfs-non-pfm-bits-ignored",
                     test_pfs_non_pfm_bits_ignored);
+    g_test_add_func("/ia64/rse/stack-switch-exact-boundary",
+                    test_stack_switch_exact_boundary);
+    g_test_add_func("/ia64/rse/stack-switch-oldest-exact",
+                    test_stack_switch_ignores_newer_same_pfm);
+    g_test_add_func("/ia64/rse/stack-switch-monotonic-fallback",
+                    test_stack_switch_monotonic_fallback);
+    g_test_add_func("/ia64/rse/stack-switch-all-frames-survive",
+                    test_stack_switch_all_frames_survive);
+    g_test_add_func("/ia64/rse/stack-switch-pfs-mask",
+                    test_stack_switch_pfs_non_pfm_bits_ignored);
     return g_test_run();
 }
