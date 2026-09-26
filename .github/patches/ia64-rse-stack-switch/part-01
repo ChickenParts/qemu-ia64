@@ -1,0 +1,94 @@
+eb4fd..55396ad 100644
+--- a/target/ia64/cpu.h
++++ b/target/ia64/cpu.h
+@@ -110,12 +110,27 @@ typedef struct CPUArchState {
+         uint8_t nat[96];
+         uint64_t ar_pfs;
+         uint64_t cfm;
++        uint64_t bsp;       /* caller frame end at the call boundary */
+         uint64_t ret_addr;  /* caller return address (bundle PC) */
+         uint8_t share_outs; /* caller OUTs share physical regs with callee INs */
+     } *rse_frames;
+     uint32_t rse_depth;
+     uint32_t rse_capacity;
+ 
++    /*
++     * One-shot architectural backing-store unwind state.
++     *
++     * IA-64 longjmp/context-restore sequences install an older BSPSTORE,
++     * PFS, and return pointer before br.ret.  Preserve that identity across
++     * the intervening mov/invala instructions so ret_restore can rebuild the
++     * target activation without popping an unrelated shadow call frame.
++     */
++    uint64_t rse_stack_switch_bsp;
++    uint64_t rse_stack_switch_pfs;
++    uint64_t rse_stack_switch_b0;
++    uint64_t rse_stack_switch_ip;
++    uint8_t rse_stack_switch_pending;
++
+     /*
+      * Interrupt snapshots for the stacked register window.
+      *
+diff --git a/target/ia64/helper.c b/target/ia64/helper.c
+index 8428fbe..76cd5a8 100644
+--- a/target/ia64/helper.c
++++ b/target/ia64/helper.c
+@@ -142,6 +142,7 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
+ #define IA64_CFM_SOR_MASK  0xfULL
+ #define IA64_CFM_RRBF_SHIFT 25
+ #define IA64_CFM_RRBF_MASK  0x7fULL
++#define IA64_PFM_MASK       ((UINT64_C(1) << 38) - 1)
+ 
+ #define IA64_FR_ROT_BASE 32
+ #define IA64_FR_ROT_SIZE 96
+@@ -373,6 +374,26 @@ static inline uint64_t ia64_rse_get_bsp(const CPUIA64State *env)
+     return bsp & ~0x7ULL;
+ }
+ 
++static void ia64_rse_cancel_stack_switch(CPUIA64State *env)
++{
++    env->rse_stack_switch_pending = 0;
++    env->rse_stack_switch_bsp = 0;
++    env->rse_stack_switch_pfs = 0;
++    env->rse_stack_switch_b0 = 0;
++    env->rse_stack_switch_ip = 0;
++}
++
++static bool ia64_rse_stack_switch_matches(const CPUIA64State *env,
++                                          uint64_t bsp, uint64_t b0,
++                                          uint64_t pfs_cfm)
++{
++    return env->rse_stack_switch_pending &&
++           env->rse_stack_switch_bsp == (bsp & ~UINT64_C(0x7)) &&
++           env->rse_stack_switch_b0 == (b0 & ~UINT64_C(0xf)) &&
++           (env->rse_stack_switch_pfs & IA64_PFM_MASK) ==
++               (pfs_cfm & IA64_PFM_MASK);
++}
++
+ static void ia64_rse_write_mem(CPUIA64State *env, uint64_t addr, uint64_t val)
+ {
+     cpu_stq_data(env, addr, val);
+@@ -1547,12 +1568,14 @@ static bool ia64_intr_pop_window(CPUIA64State *env)
+ 
+ static void ia64_rse_push_window(CPUIA64State *env, uint64_t ret_addr)
+ {
++    ia64_rse_cancel_stack_switch(env);
+     ia64_rse_ensure(env, env->rse_depth + 1);
+     struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth++];
+     memcpy(frame->r, &env->r[32], sizeof(frame->r));
+     memcpy(frame->nat, &env->nat[32], sizeof(frame->nat));
+     frame->ar_pfs = env->ar[64]; /* ar.pfs */
+     frame->cfm = env->cfm;
++    frame->bsp = ia64_rse_get_bsp(env);
+     frame->ret_addr = ret_addr & ~0xFULL;
+     frame->share_outs = 1;
+ }
+@@ -1659,6 +1682,8 @@ void HELPER(bsw)(CPUIA64State *env, uint32_t bn)
+ void HELPER(rfi)(CPUIA64State *env)
+ {
+     static int rfi_log_count;
++
++    ia64_rse_cancel_stack_switch(env);
+     uint64_t new_psr = env->cr_ipsr;
+     uint32_t cur_bn = (env->psr & IA64_PSR_BN) ? 1 : 0;
+     uint32_t new_bn = (new_ps
