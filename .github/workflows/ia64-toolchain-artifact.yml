@@ -69,12 +69,12 @@ jobs:
               mknod -m 666 /toolroot/dev/null c 1 3
               mknod -m 666 /toolroot/dev/zero c 1 5
 
-              cat > /toolroot/tmp/ia64-toolchain-smoke.c <<"EOF"
-              unsigned long ia64_toolchain_smoke(unsigned long value)
-              {
-                  return value ^ 0xa55aa55af00dcafeUL;
-              }
-              EOF
+              printf "%s\n" \
+                "unsigned long ia64_toolchain_smoke(unsigned long value)" \
+                "{" \
+                "    return value ^ 0xa55aa55af00dcafeUL;" \
+                "}" \
+                > /toolroot/tmp/ia64-toolchain-smoke.c
               chroot /toolroot /usr/bin/ia64-linux-gnu-gcc \
                 -ffreestanding -fno-stack-protector -c \
                 /tmp/ia64-toolchain-smoke.c \
