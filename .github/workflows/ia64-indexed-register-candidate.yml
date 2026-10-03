@@ -6,6 +6,7 @@ on:
       - fix/ia64-indexed-register-decode
     paths:
       - scripts/apply-ia64-rse-deferred-restore.rb
+      - scripts/apply-ia64-rse-backing-store-persistence.py
       - scripts/apply-ia64-indexed-register-decode.py
       - .github/workflows/ia64-indexed-register-candidate.yml
   workflow_dispatch:
@@ -51,6 +52,8 @@ jobs:
           set -euo pipefail
           ruby scripts/apply-ia64-rse-deferred-restore.rb --check .
           ruby scripts/apply-ia64-rse-deferred-restore.rb --apply .
+          python3 scripts/apply-ia64-rse-backing-store-persistence.py --check .
+          python3 scripts/apply-ia64-rse-backing-store-persistence.py --apply .
           python3 scripts/apply-ia64-indexed-register-decode.py --check .
           python3 scripts/apply-ia64-indexed-register-decode.py --apply .
           python3 scripts/check-ia64-rooster-branch.py
@@ -104,6 +107,7 @@ jobs:
           {
             printf 'source_head=%s\n' "$(git rev-parse HEAD)"
             printf 'rse_repair=deferred-bspstore-identity\n'
+            printf 'rse_backing_store_persistence=shadow-frame-materialization\n'
             printf 'decode_repair=m43-indexed-register-read\n'
             printf 'built_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > "$out/IDENTITY.txt"
