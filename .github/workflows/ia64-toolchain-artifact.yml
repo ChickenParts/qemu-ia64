@@ -1,0 +1,116 @@
+name: IA-64 Fedora toolchain artifact
+
+on:
+  push:
+    branches:
+      - ci/ia64-toolchain-artifact
+    paths:
+      - .github/workflows/ia64-toolchain-artifact.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-toolchain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    name: Export Fedora 44 IA-64 cross toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out exact candidate revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build self-contained toolchain root
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ia64-toolchain-out
+          mkdir -p ia64-toolchain-out
+
+          docker run --rm \
+            --volume "$PWD/ia64-toolchain-out:/out" \
+            fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf --assumeyes --setopt=install_weak_deps=False install \
+                tar zstd
+              dnf --assumeyes \
+                --installroot=/toolroot \
+                --releasever=44 \
+                --setopt=install_weak_deps=False \
+                --setopt=keepcache=False \
+                install \
+                bash \
+                binutils-ia64-linux-gnu \
+                coreutils \
+                file \
+                findutils \
+                gcc-ia64-linux-gnu \
+                grep \
+                python3
+
+              rm -rf \
+                /toolroot/var/cache/dnf \
+                /toolroot/var/log/* \
+                /toolroot/usr/share/doc \
+                /toolroot/usr/share/info \
+                /toolroot/usr/share/man
+              mkdir -p /toolroot/dev /toolroot/tmp /toolroot/work
+              chmod 1777 /toolroot/tmp
+              mknod -m 666 /toolroot/dev/null c 1 3
+              mknod -m 666 /toolroot/dev/zero c 1 5
+
+              cat > /toolroot/tmp/ia64-toolchain-smoke.c <<"EOF"
+              unsigned long ia64_toolchain_smoke(unsigned long value)
+              {
+                  return value ^ 0xa55aa55af00dcafeUL;
+              }
+              EOF
+              chroot /toolroot /usr/bin/ia64-linux-gnu-gcc \
+                -ffreestanding -fno-stack-protector -c \
+                /tmp/ia64-toolchain-smoke.c \
+                -o /tmp/ia64-toolchain-smoke.o
+              chroot /toolroot /usr/bin/ia64-linux-gnu-readelf \
+                -h /tmp/ia64-toolchain-smoke.o \
+                | tee /toolroot/TOOLCHAIN_SMOKE.txt
+              grep -q "IA-64" /toolroot/TOOLCHAIN_SMOKE.txt
+
+              {
+                printf "FEDORA_RELEASE=44\n"
+                rpm --root /toolroot -q \
+                  gcc-ia64-linux-gnu \
+                  binutils-ia64-linux-gnu \
+                  cross-gcc-common \
+                  cross-binutils-common
+                chroot /toolroot /usr/bin/ia64-linux-gnu-gcc --version \
+                  | head -1
+                chroot /toolroot /usr/bin/ia64-linux-gnu-ld --version \
+                  | head -1
+              } | tee /toolroot/TOOLCHAIN_MANIFEST.txt
+
+              rm -f /toolroot/tmp/ia64-toolchain-smoke.c \
+                    /toolroot/tmp/ia64-toolchain-smoke.o
+              tar --zstd -C /toolroot \
+                -cf /out/fedora44-ia64-toolroot.tar.zst .
+              sha256sum /out/fedora44-ia64-toolroot.tar.zst \
+                | tee /out/SHA256SUMS
+            '
+
+          test -s ia64-toolchain-out/fedora44-ia64-toolroot.tar.zst
+          cat ia64-toolchain-out/SHA256SUMS
+
+      - name: Upload toolchain root
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora44-ia64-toolroot-${{ github.run_id }}
+          path: ia64-toolchain-out/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
