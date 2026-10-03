@@ -44,6 +44,7 @@ jobs:
               dnf --assumeyes \
                 --installroot=/toolroot \
                 --releasever=44 \
+                --use-host-config \
                 --setopt=install_weak_deps=False \
                 --setopt=keepcache=False \
                 install \
