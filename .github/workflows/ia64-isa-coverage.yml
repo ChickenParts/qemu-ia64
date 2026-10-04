@@ -1,0 +1,42 @@
+name: IA-64 ISA coverage
+
+on:
+  push:
+    branches: [work/ia64-isa-coverage]
+    paths:
+      - .github/workflows/ia64-isa-coverage.yml
+      - tests/ia64/isa/**
+      - scripts/ia64-isa-coverage.py
+      - target/ia64/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-isa-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Export firmware-free audit inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-inputs
+          git rev-parse HEAD > audit-inputs/source-head.txt
+          git ls-files -z -- target/ia64 scripts tests/unit tests/ia64 hw/ia64 docs/ia64* IA64* AGENTS.md .github/AGENTS.md > audit-inputs/paths
+          tar --null -T audit-inputs/paths -czf audit-inputs/source.tar.gz
+          sha256sum audit-inputs/source.tar.gz > audit-inputs/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ia64-isa-audit-inputs
+          path: audit-inputs/
+          retention-days: 7
+          if-no-files-found: error
