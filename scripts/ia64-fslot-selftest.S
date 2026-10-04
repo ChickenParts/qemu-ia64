@@ -176,9 +176,11 @@ test_fcvt_xf_min_exp:
 pass:
 	movl r8 = 0x66736c70		/* "fslp" marker in break log */
 	break 0
-	br.sptk.many pass
+pass_spin:
+	br.sptk.many pass_spin
 
 fail:
 	movl r8 = 0x66736c66		/* "fslf" marker in break log */
 	break 0
-	br.sptk.many fail
+fail_spin:
+	br.sptk.many fail_spin
