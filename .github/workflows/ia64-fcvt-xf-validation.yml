@@ -102,7 +102,7 @@ jobs:
           IA64_KERNEL=scratch/ia64_fslot_selftest/fslot-selftest.elf \
           IA64_INITRD= \
           IA64_APPEND= \
-            timeout -k 2s 12s scripts/run-ia64-kernel.sh
+            timeout -k 1s 3s scripts/run-ia64-kernel.sh
           rc=$?
           set -e
 
@@ -112,10 +112,10 @@ jobs:
           fi
 
           test -f "$logdir/qemu.log"
-          grep -F "IA64: breaki" "$logdir/qemu.log"
-          ! grep -F "IA64 UNIMPL" "$logdir/qemu.log" | grep -F "000e000e1c0"
-          ! grep -F "r8=0000000066736c66" "$logdir/qemu.log"
-          grep -F "r8=0000000066736c70" "$logdir/qemu.log"
+          grep -Fqm1 "IA64: breaki" "$logdir/qemu.log"
+          ! grep -F "IA64 UNIMPL" "$logdir/qemu.log" | grep -Fqm1 "000e000e1c0"
+          ! grep -Fqm1 "r8=0000000066736c66" "$logdir/qemu.log"
+          grep -Fqm1 "r8=0000000066736c70" "$logdir/qemu.log"
 
       - name: Upload validation evidence
         if: always()
