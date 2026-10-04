@@ -102,7 +102,7 @@ jobs:
           IA64_KERNEL=scratch/ia64_fslot_selftest/fslot-selftest.elf \
           IA64_INITRD= \
           IA64_APPEND= \
-            timeout 12s scripts/run-ia64-kernel.sh
+            timeout -k 2s 12s scripts/run-ia64-kernel.sh
           rc=$?
           set -e
 
