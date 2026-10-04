@@ -1,0 +1,103 @@
+name: IA-64 ISA coverage
+
+on:
+  push:
+    branches: [work/ia64-isa-coverage]
+    paths:
+      - .github/workflows/ia64-isa-coverage.yml
+      - tests/ia64/isa/**
+      - scripts/ia64-isa-coverage.py
+      - target/ia64/**
+      - docs/generated/ia64-instruction-coverage.md
+  pull_request:
+    paths:
+      - .github/workflows/ia64-isa-coverage.yml
+      - tests/ia64/isa/**
+      - scripts/ia64-isa-coverage.py
+      - target/ia64/**
+      - docs/generated/ia64-instruction-coverage.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-isa-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: Production decoder audit and mutation tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install audit-only dependency
+        run: python3 -m pip install -r tests/ia64/isa/requirements.txt
+      - name: Check known-gap snapshot and fail-closed tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/isa-host
+          python3 scripts/ia64-isa-coverage.py --check \
+            --output scratch/isa-host/observations.json5 \
+            | tee scratch/isa-host/audit.txt
+          python3 -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v \
+            2>&1 | tee scratch/isa-host/tests.txt
+          cp docs/generated/ia64-instruction-coverage.md scratch/isa-host/
+          git rev-parse HEAD > scratch/isa-host/source-head.txt
+          git diff --exit-code
+      - name: Retain audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-isa-host-audit
+          path: scratch/isa-host/
+          retention-days: 14
+          if-no-files-found: error
+
+  assembler:
+    name: Independent GNU IA-64 byte oracle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Match every named-form vector to GNU assembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/isa-assembler
+          docker run --rm \
+            --volume "$PWD:/src:ro" \
+            --volume "$PWD/scratch/isa-assembler:/out" \
+            --workdir /src \
+            fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf --assumeyes --setopt=install_weak_deps=False install \
+                gcc binutils-ia64-linux-gnu python3 python3-pip
+              python3 -m venv /tmp/isa-venv
+              /tmp/isa-venv/bin/python -m pip install \
+                -r tests/ia64/isa/requirements.txt
+              rpm -q gcc binutils-ia64-linux-gnu > /out/packages.txt
+              /tmp/isa-venv/bin/python scripts/ia64-isa-coverage.py \
+                --check --assembler --evidence-dir /out \
+                --output /out/observations.json5
+            ' 2>&1 | tee scratch/isa-assembler/validation.txt
+          git rev-parse HEAD > scratch/isa-assembler/source-head.txt
+          git diff --exit-code
+      - name: Retain independent encoding evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-isa-assembler-oracle
+          path: scratch/isa-assembler/
+          retention-days: 14
+          if-no-files-found: error

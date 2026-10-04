@@ -1,0 +1,2 @@
+# Audit tooling only; no new QEMU runtime dependency.
+json5==0.14.0
