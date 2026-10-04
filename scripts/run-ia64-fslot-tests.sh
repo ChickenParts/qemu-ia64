@@ -42,7 +42,7 @@ bin="$outdir/fslot-selftest.elf"
 
 set +e
 QEMU_IA64_BREAK_LOG=1 IA64_LOGDIR="$logdir" IA64_KERNEL="$bin" IA64_INITRD= IA64_APPEND= \
-  timeout "$run_timeout" scripts/run-ia64-kernel.sh
+  timeout -k 2s "$run_timeout" scripts/run-ia64-kernel.sh
 rc=$?
 set -e
 
