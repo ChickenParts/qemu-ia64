@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ia64-fcvt-xf-${{ github.ref }}
+  group: ia64-fcvt-xf-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
