@@ -87,30 +87,42 @@ def generate(case):
     lines = ['.text', '.explicit', '.align 16', '.global _start', '_start:']
     common_start(lines)
 
+    literal(lines, 14, 'source')
+    emit(lines, 'm', 'ldf.fill f7=[r14]')
     if case == 'disabled':
-        literal(lines, 20, '1')
-        emit(lines, 'm', 'setf.sig f7=r20')
+        literal(lines, 20, '63')
+        emit(lines, 'm', 'mov ar.fpsr=r20')
         emit(lines, 'm', 'rsm 0x10')
         emit(lines, 'm', 'ssm 0x40')
         emit(lines, 'm', 'srlz.d')
         lines.append('fault_bundle:')
         emit(lines, 'f', 'fcvt.fx.s0 f6=f7')
-        emit(lines, 'b', 'br.cond.sptk fail')
+        lines.append('after_retry:')
+        emit(lines, 'm', 'getf.sig r9=f6')
+        compare(lines, 9, '1')
+        emit(lines, 'm', 'getf.exp r9=f6')
+        compare(lines, 9, '0x1003e')
+        emit(lines, 'm', 'mov r9=ar.fpsr')
+        compare(lines, 9, '63')
+        emit(lines, 'b', 'br.cond.sptk pass')
     elif case == 'invalid':
-        literal(lines, 20, '0x1234')
-        emit(lines, 'm', 'setf.sig f6=r20')
-        literal(lines, 20, '0x1ffff')
-        emit(lines, 'm', 'setf.exp f7=r20')
+        literal(lines, 14, 'sentinel')
+        emit(lines, 'm', 'ldf.fill f6=[r14]')
         literal(lines, 20, '62')
         emit(lines, 'm', 'mov ar.fpsr=r20')
         emit(lines, 'm', 'rsm 0x10')
         emit(lines, 'm', 'srlz.d')
         lines.append('fault_bundle:')
         emit(lines, 'f', 'fcvt.fx.s0 f6=f7')
-        emit(lines, 'b', 'br.cond.sptk fail')
+        lines.append('after_retry:')
+        emit(lines, 'm', 'getf.sig r9=f6')
+        compare(lines, 9, '0x8000000000000000')
+        emit(lines, 'm', 'getf.exp r9=f6')
+        compare(lines, 9, '0x1003e')
+        emit(lines, 'm', 'mov r9=ar.fpsr')
+        compare(lines, 9, '0x203f')
+        emit(lines, 'b', 'br.cond.sptk pass')
     else:
-        literal(lines, 14, 'source')
-        emit(lines, 'm', 'ldf.fill f7=[r14]')
         literal(lines, 20, '31')
         emit(lines, 'm', 'mov ar.fpsr=r20')
         emit(lines, 'm', 'rsm 0x10')
@@ -118,7 +130,7 @@ def generate(case):
         lines.append('fault_bundle:')
         emit(lines, 'f', 'fcvt.fx.s0 f6=f7')
         lines.append('after_trap:')
-        emit(lines, 'b', 'br.cond.sptk fail')
+        emit(lines, 'b', 'br.cond.sptk pass')
 
     # Reserve an aligned IVT base and place this case's vector at base+offset.
     lines += [f'.org {IVT_OFFSET}', 'ivt_base:',
@@ -130,17 +142,29 @@ def generate(case):
         check_fault_common(lines, ei | (1 << 34) | (1 << 33) | 1,
                            'fault_bundle')
         emit(lines, 'm', 'mov r9=cr.ipsr')
-        emit(lines, 'i', 'and r9=0x40,r9')
-        compare(lines, 9, '0x40')
+        emit(lines, 'i', 'and r10=0x40,r9')
+        compare(lines, 10, '0x40')
+        # Clear DFL in the saved PSR, then rfi.  The fault must retry the
+        # original F10 slot and fall through to after_retry.
+        emit(lines, 'i', 'andcm r9=0x40,r9')
+        emit(lines, 'm', 'mov cr.ipsr=r9')
+        emit(lines, 'b', 'rfi')
     elif case == 'invalid':
         check_fault_common(lines, ei | 1, 'fault_bundle')
         emit(lines, 'm', 'getf.sig r9=f6')
         compare(lines, 9, '0x1234')
+        emit(lines, 'm', 'getf.exp r9=f6')
+        compare(lines, 9, '0x23456')
         emit(lines, 'm', 'mov r9=ar.fpsr')
         compare(lines, 9, '62')
         emit(lines, 'm', 'mov r9=cr.ipsr')
-        emit(lines, 'i', 'and r9=0x10,r9')
-        compare(lines, 9, '0')
+        emit(lines, 'i', 'and r10=0x10,r9')
+        compare(lines, 10, '0')
+        # Mask invalid in FPSR and restart the faulting conversion.  The retry
+        # must commit the indefinite integer and sticky V flag.
+        literal(lines, 20, '63')
+        emit(lines, 'm', 'mov ar.fpsr=r20')
+        emit(lines, 'b', 'rfi')
     else:
         # fp + I(high/scalar) + FPA(high/scalar), EI identifies slot 2.
         emit(lines, 'm', 'mov r9=cr.isr')
@@ -163,11 +187,20 @@ def generate(case):
         compare(lines, 9, '0x1003e')
         emit(lines, 'm', 'mov r9=ar.fpsr')
         compare(lines, 9, '0x4001f')
+        # A trap resumes at after_trap rather than re-executing the F10 slot.
+        emit(lines, 'b', 'rfi')
 
+    lines.append('pass:')
     terminal(lines, passed, failed)
-    if case == 'inexact':
-        lines += ['.data', '.align 16', 'source:',
-                  '.quad 0xc000000000000000, 0xffff']
+    lines += ['.data', '.align 16', 'source:']
+    if case == 'disabled':
+        lines += ['.quad 0x8000000000000000, 0xffff']
+    elif case == 'invalid':
+        lines += ['.quad 0x8000000000000000, 0x1ffff',
+                  '.align 16', 'sentinel:',
+                  '.quad 0x1234, 0x23456']
+    else:
+        lines += ['.quad 0xc000000000000000, 0xffff']
     return '\n'.join(lines) + '\n'
 
 
