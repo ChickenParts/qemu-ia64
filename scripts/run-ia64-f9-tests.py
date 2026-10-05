@@ -14,6 +14,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('f9_oracle', ROOT / 'tests/ia64/isa/test_f9.py')
@@ -147,20 +148,53 @@ def main():
            '-display', 'none', '-monitor', 'none', '-vga', 'none', '-nic', 'none',
            '-serial', 'file:' + str(out / 'serial.log'), '-d', 'guest_errors',
            '-D', str(log), '-kernel', str(elf)]
+    # Terminate on the first terminal marker. BREAK enters an exception
+    # handler rather than necessarily returning to the guest spin loop.
+    # Bound both runtime and retained log memory even on a broken handler.
+    limit = 16 * 1024 * 1024
+    truncated = False
     with (out / 'stderr.txt').open('w') as stderr:
         proc = subprocess.Popen(cmd, env=env, stdout=stderr, stderr=stderr)
+        deadline = time.monotonic() + args.timeout
+        offset, tail = 0, ''
         try:
-            rc = proc.wait(timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            proc.terminate()
-            try:
-                rc = proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                rc = proc.wait(timeout=2)
-    text = log.read_text(errors='replace') if log.exists() else ''
-    passed = PASS in text and FAIL not in text and 'IA64 UNIMPL' not in text and rc in (0, -15, -9)
+            while proc.poll() is None and time.monotonic() < deadline:
+                if log.exists():
+                    with log.open('rb') as stream:
+                        stream.seek(offset)
+                        chunk = stream.read(1024 * 1024)
+                    offset += len(chunk)
+                    text = tail + chunk.decode(errors='replace')
+                    if PASS in text or FAIL in text or 'IA64 UNIMPL' in text:
+                        break
+                    tail = text[-128:]
+                    if offset >= limit:
+                        truncated = True
+                        break
+                time.sleep(0.02)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+        rc = proc.returncode
+    if log.exists():
+        size = log.stat().st_size
+        with log.open('rb') as stream:
+            text = stream.read(limit).decode(errors='replace')
+        if size > limit:
+            truncated = True
+            with log.open('r+b') as stream:
+                stream.truncate(limit)
+    else:
+        text = ''
+    passed = (PASS in text and FAIL not in text and 'IA64 UNIMPL' not in text
+              and not truncated and rc in (0, -15, -9))
     evidence.update(execution='pass' if passed else 'fail', returncode=rc,
+                    log_limit_exceeded=truncated,
                     qemu_sha256=hashlib.sha256(Path(qemu).read_bytes()).hexdigest())
     evidence_path.write_text(json.dumps(evidence, indent=2) + '\n')
     if not passed:

@@ -2,25 +2,87 @@ name: IA-64 F9 validation
 on:
   push:
     branches: [work/ia64-f9-bitops]
-    paths: [.github/workflows/ia64-f9-validation.yml]
+    paths:
+      - .github/workflows/ia64-f9-validation.yml
+      - target/ia64/**
+      - scripts/run-ia64-f9-tests.py
+      - scripts/ia64-isa-coverage.py
+      - scripts/ia64-fslot-selftest.S
+      - tests/ia64/isa/**
+  pull_request:
+    paths:
+      - .github/workflows/ia64-f9-validation.yml
+      - target/ia64/**
+      - scripts/run-ia64-f9-tests.py
+      - scripts/ia64-isa-coverage.py
+      - scripts/ia64-fslot-selftest.S
+      - tests/ia64/isa/**
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ia64-f9-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
-  source:
+  runtime:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: |
-          mkdir -p scratch/f9-inputs
-          git archive --format=tar.gz HEAD target/ia64 scripts tests/ia64/isa docs/generated/ia64-instruction-coverage.md .github/workflows/ia64-isa-coverage.yml > scratch/f9-inputs/source.tar.gz
-          git rev-parse HEAD > scratch/f9-inputs/source-head.txt
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 python3-venv zlib1g-dev
+          python3 -m venv /tmp/f9-venv
+          /tmp/f9-venv/bin/pip install -r tests/ia64/isa/requirements.txt
+      - name: Check committed audit and production-helper tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/f9-evidence
+          /tmp/f9-venv/bin/python scripts/ia64-isa-coverage.py --check --assembler \
+            --evidence-dir scratch/f9-evidence \
+            --output scratch/f9-evidence/observations.json5
+          /tmp/f9-venv/bin/python -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v \
+            2>&1 | tee scratch/f9-evidence/host-tests.txt
+          git diff --exit-code
+      - name: Build the actual IA-64 system emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir build-f9
+          (cd build-f9; ../configure --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+            --disable-slirp --disable-werror)
+          ninja -C build-f9 -j"$(nproc)" qemu-system-ia64
+      - name: Execute raw-FR F9 guest and previous F-slot regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-f9-tests.py --qemu build-f9/qemu-system-ia64 \
+            --out scratch/f9-evidence/guest
+          QEMU_BIN="$PWD/build-f9/qemu-system-ia64" \
+          IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+          IA64_FSLOT_LOGDIR=scratch/f9-evidence/previous-fslot/logs \
+          IA64_FSLOT_OUTDIR=scratch/f9-evidence/previous-fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+      - name: Record exact source and executable
+        if: always()
+        run: |
+          mkdir -p scratch/f9-evidence
+          git rev-parse HEAD > scratch/f9-evidence/source-head.txt
+          if test -f build-f9/qemu-system-ia64; then
+            cp build-f9/qemu-system-ia64 scratch/f9-evidence/
+            sha256sum build-f9/qemu-system-ia64 > scratch/f9-evidence/qemu-sha256.txt
+          fi
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: ia64-f9-inputs
-          path: scratch/f9-inputs/
-          retention-days: 7
+          name: ia64-f9-validation-${{ github.run_id }}
+          path: scratch/f9-evidence/
+          retention-days: 14
           if-no-files-found: error

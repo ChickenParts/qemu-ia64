@@ -45,9 +45,46 @@ known-gap assertions, then run `--record` to refresh the JSON5 measurement
 and generated report. CI never rebaselines automatically. Retain independent
 assembler verification after changing the encoding registry or format packer.
 
-The current high-priority work is #8 (F1/F6/F7 decoding), #9 (bitwise and
-normalization semantics), #10 (FP state/FPSR) and #11 (remaining families and
-legality). No target source is modified by this audit tranche.
+PR #13 repaired F1/F6/F7 selection. F9 now has a dedicated integer-only
+implementation for all 19 families; the report still labels shared FP-state
+limitations. #10 (FP state/FPSR) and #11 (remaining families and legality) stay
+open. The audit command itself never modifies target source.
+
+## F9 execution evidence
+
+`test_f9.py` executes the actual production F9 helper and FR accessors in a
+host C harness. It compares 4,864 directed pattern pairs and 19,456 seeded
+random pairs against a separate bit-string oracle, plus 14,592 helper calls
+covering all 96 FP-rotation values and destination/source aliases. It checks
+NaTVal, illegal-destination fault requests, PSR.mfl/mfh and untouched state.
+The fault hook observes requests; it does not emulate QEMU exception delivery.
+A deliberately corrupted merge implementation proves the numerical tests
+catch errors that a decode-only probe cannot.
+
+```sh
+python3 scripts/run-ia64-f9-tests.py --qemu build-f9/qemu-system-ia64
+```
+
+This builds a firmware-free guest with 4,256 cases across all 19 families.
+Each case checks both spill words, PSR dirty bits, and unchanged FPSR;
+source/destination aliases, low/high FRs, constant sources, NaTVal, SP
+denormals, and true/false predication are included. Its separate data segment
+is pinned into physical RAM rather than the GNU IA-64 default region-3 VMA.
+The runner rejects stale logs, FAIL/UNIMPL output and missing completion,
+and terminates QEMU within a bounded time.
+
+The F9 decoder header is part of the audit source fingerprint. Neither
+selection nor data-path correctness certifies all architectural faults:
+disabled-FP register delivery and its exception priority remain in #10.
+F9 does not use FPSR rounding/status fields; its bit operations leave FPSR
+unchanged and update the destination bank's PSR modification bit.
+
+References: Intel SDM Vol. 3 rev. 2.3, F9 and the individual instruction
+operations (fand, fmerge, fmix, for, fpack, fpmerge, fswap, fsxt, fxor).
+The fp_single memory-format bit wiring was cross-checked against HP's
+GPL-2.0-or-later SKI `freg2sgl`, not copied as a numeric implementation:
+`trofi/ski` commit `dfc2902ea1423d9b32543a5daf8026213f2b37a1`,
+`src/exec.incl.c`. All new data-path code is integer-only.
 
 ## Limits
 
