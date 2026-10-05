@@ -134,7 +134,9 @@ def oracle(op, source, fpsr, sf):
 
 
 class Result(ctypes.Structure):
-    _fields_ = [('value', FR), ('flags', ctypes.c_uint32), ('enabled', ctypes.c_uint32)]
+    _fields_ = [('value', FR), ('flags', ctypes.c_uint32),
+                ('enabled', ctypes.c_uint32), ('fault_code', ctypes.c_uint16),
+                ('trap_code', ctypes.c_uint16)]
 
 
 class State(ctypes.Structure):
@@ -153,7 +155,9 @@ def compile_harness(root, directory):
     constants = []
     for name in ('IA64_FR_ROT_BASE', 'IA64_FR_ROT_SIZE', 'IA64_CFM_RRBF_SHIFT',
                  'IA64_CFM_RRBF_MASK', 'IA64_PSR_MFL', 'IA64_PSR_MFH',
-                 'IA64_PSR_DFL', 'IA64_PSR_DFH', 'IA64_AR_FPSR'):
+                 'IA64_PSR_DFL', 'IA64_PSR_DFH', 'IA64_AR_FPSR',
+                 'IA64_VEC_DISABLED_FP', 'IA64_VEC_FP_FAULT', 'IA64_VEC_FP_TRAP',
+                 'IA64_ISR_R_BIT', 'IA64_ISR_W_BIT'):
         lines = [line for line in (source + '\n' + cpu).splitlines()
                  if line.startswith('#define ' + name + ' ')]
         if len(set(lines)) != 1:
@@ -172,23 +176,29 @@ typedef struct CPUIA64State {
 #define IA64_VEC_ILLEGAL_OP 0x5400
 #define g_assert_not_reached() abort()
 static jmp_buf escape;
+static uint32_t delivered_vector;
+static uint16_t delivered_code;
+static uint64_t delivered_isr_extra;
+static bool delivered_trap;
 static bool ia64_fault(void *cpu, CPUIA64State *env, bool write, bool data,
                       int vector, uint64_t iim, uintptr_t pc) {
     (void)cpu; (void)env; (void)write; (void)data; (void)iim; (void)pc;
+    delivered_vector = vector;
+    delivered_code = 0;
+    delivered_isr_extra = 0;
+    delivered_trap = false;
     longjmp(escape, vector);
     return false;
 }
-static void helper_unimpl(CPUIA64State *env, uint64_t pc, uint32_t ri,
-                          uint64_t insn, uint64_t why) {
-    (void)env; (void)pc; (void)ri; (void)insn;
-    const char *message = (const char *)(uintptr_t)why;
-    if (strcmp(message, "F10 disabled-FP delivery unsupported") == 0) {
-        longjmp(escape, 0xf10d);
-    }
-    if (strcmp(message, "F10 enabled-FP exception delivery unsupported") == 0) {
-        longjmp(escape, 0xf10e);
-    }
-    abort();
+static void ia64_fp_interrupt(CPUIA64State *env, uint32_t vector,
+                              uint16_t code, uint64_t isr_extra,
+                              bool trap, uintptr_t pc) {
+    (void)env; (void)pc;
+    delivered_vector = vector;
+    delivered_code = code;
+    delivered_isr_extra = isr_extra;
+    delivered_trap = trap;
+    longjmp(escape, vector);
 }
 '''
     exports = '''
@@ -197,10 +207,17 @@ IA64F10Result result(int op, IA64FRBits source, uint64_t fpsr, unsigned sf) {
     return ia64_f10_result(op, source, fpsr, sf);
 }
 int run(CPUIA64State *env, uint64_t insn) {
+    delivered_vector = delivered_code = 0;
+    delivered_isr_extra = 0;
+    delivered_trap = false;
     int fault = setjmp(escape);
     if (!fault) { helper_f10(env, insn); }
     return fault;
 }
+uint32_t last_vector(void) { return delivered_vector; }
+uint16_t last_code(void) { return delivered_code; }
+uint64_t last_isr_extra(void) { return delivered_isr_extra; }
+int last_trap(void) { return delivered_trap; }
 '''
     path = directory / 'f10-test.c'
     path.write_text(prelude + '\n'.join(constants) + '\n' +
@@ -215,6 +232,10 @@ int run(CPUIA64State *env, uint64_t insn) {
     lib.result.argtypes, lib.result.restype = [ctypes.c_int, FR, ctypes.c_uint64, ctypes.c_uint], Result
     lib.decode.argtypes, lib.decode.restype = [ctypes.c_uint64], ctypes.c_int
     lib.run.argtypes, lib.run.restype = [ctypes.POINTER(State), ctypes.c_uint64], ctypes.c_int
+    lib.last_vector.restype = ctypes.c_uint32
+    lib.last_code.restype = ctypes.c_uint16
+    lib.last_isr_extra.restype = ctypes.c_uint64
+    lib.last_trap.restype = ctypes.c_int
     return lib
 
 
@@ -312,18 +333,72 @@ class F10Tests(unittest.TestCase):
             for i in {0, 1, phys(f2)} - {phys(f1)}:
                 self.assertEqual(tuple(state.f[i]), before[i])
 
-    def test_explicit_exception_frontiers_do_not_commit_state(self):
-        for destination, source, psr, fpsr, reason in (
-                (0, scalar(1), 0, 63, 0x5400), (1, scalar(1), 0, 63, 0x5400),
-                (6, scalar(1), 64, 63, 0xf10d), (127, NAT, 128, 63, 0xf10d),
-                (6, scalar(Fraction(3, 2)), 0, 31, 0xf10e),
-                (6, (1 << 63, 0x1ffff), 0, 62, 0xf10e)):
+    def test_architectural_exception_delivery_and_commit_order(self):
+        # Illegal target is checked before FP-bank state and commits nothing.
+        for destination in (0, 1):
+            state = State()
+            state.f[7][:] = scalar(1)
+            state.ar[40] = 63
+            before = bytes(state)
+            self.assertEqual(self.lib.run(ctypes.byref(state),
+                                          word(0, 0, destination, 7)), 0x5400)
+            self.assertEqual(bytes(state), before)
+
+        # Disabled-bank faults report bank in ISR.code and operand direction.
+        for f1, f2, psr, code, rw in (
+                (6, 7, 64, 1, 3 << 33),       # low source read + destination write
+                (126, 125, 128, 2, 3 << 33),  # high source read + destination write
+                (126, 7, 192, 3, 3 << 33)):   # low read and high write
+            state = State()
+            state.f[f2][:] = scalar(1)
+            state.psr, state.ar[40] = psr, 63
+            before = bytes(state)
+            self.assertEqual(self.lib.run(ctypes.byref(state),
+                                          word(0, 0, f1, f2)), 0x5500)
+            self.assertEqual(bytes(state), before)
+            self.assertEqual(self.lib.last_code(), code)
+            self.assertEqual(self.lib.last_isr_extra(), rw)
+            self.assertFalse(self.lib.last_trap())
+
+        # Enabled invalid and denormal exceptions are faults: no destination,
+        # FPSR, or dirty state is committed.
+        for source, fpsr, code in (
+                ((1 << 63, 0x1ffff), 62, 1),
+                ((1, 0), 61, 2)):
             state = State()
             state.f[7][:] = source
-            state.psr, state.ar[40] = psr, fpsr
+            state.f[6][:] = (0x1234, 0x23456)
+            state.ar[40] = fpsr
             before = bytes(state)
-            self.assertEqual(self.lib.run(ctypes.byref(state), word(0, 0, destination, 7)), reason)
+            self.assertEqual(self.lib.run(ctypes.byref(state),
+                                          word(0, 0, 6, 7)), 0x5c00)
             self.assertEqual(bytes(state), before)
+            self.assertEqual(self.lib.last_code(), code)
+            self.assertFalse(self.lib.last_trap())
+
+        # Enabled inexact is a post-result trap.  The rounded result, selected
+        # FPSR I flag, and PSR dirty bit are visible before the trap request.
+        state = State()
+        state.f[7][:] = scalar(Fraction(3, 2))
+        state.ar[40] = 31  # I enabled, V/D masked; s0 round-nearest/even.
+        self.assertEqual(self.lib.run(ctypes.byref(state),
+                                      word(0, 0, 6, 7)), 0x5d00)
+        self.assertEqual(tuple(state.f[6]), (2, 0x1003e))
+        self.assertEqual(state.ar[40], 31 | (32 << 13))
+        self.assertEqual(state.psr & 0x30, 0x10)
+        self.assertEqual(self.lib.last_code(), 1 | (1 << 13) | (1 << 14))
+        self.assertTrue(self.lib.last_trap())
+
+        # Packed low-lane and high-lane exception codes are distinguishable.
+        for source, expected in (
+                ((0x7f800000 << 32) | 0x3f800000, 1),
+                ((0x3f800000 << 32) | 0x7f800000, 1 << 4)):
+            state = State()
+            state.f[7][:] = (source, 0x1003e)
+            state.ar[40] = 62
+            self.assertEqual(self.lib.run(ctypes.byref(state),
+                                          word(4, 0, 6, 7)), 0x5c00)
+            self.assertEqual(self.lib.last_code(), expected)
 
     def test_rounding_mutation_is_detected(self):
         with tempfile.TemporaryDirectory(prefix='f10-mutation-') as tmp:

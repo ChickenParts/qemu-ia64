@@ -137,7 +137,8 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 #define IA64_ISR_X_BIT 32 /* execute access */
 #define IA64_ISR_W_BIT 33 /* write access */
 #define IA64_ISR_R_BIT 34 /* read access */
-#define IA64_ISR_CODE_MASK 0xf
+#define IA64_ISR_CODE_MASK 0xffff
+#define IA64_ISR_EI_SHIFT 41
 
 /* CFM fields */
 #define IA64_CFM_SOR_SHIFT 14
@@ -577,9 +578,10 @@ static void ia64_switch_banks(CPUIA64State *env)
     }
 }
 
-static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
-                       bool write, uint32_t vec, uint64_t iim,
-                       uintptr_t retaddr)
+static bool ia64_exception(CPUState *cs, CPUIA64State *env, bool is_data,
+                           bool write, uint32_t vec, uint64_t iim,
+                           uint16_t code, uint64_t isr_extra,
+                           bool access_bits, bool trap, uintptr_t retaddr)
 {
     static uint64_t last_ip;
     static uint32_t last_vec;
@@ -590,6 +592,11 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     if (retaddr) {
         cpu_restore_state(cs, retaddr);
     }
+
+    uint64_t interrupted_ip = env->ip;
+    uint64_t interrupted_psr = env->psr;
+    unsigned interrupted_ri =
+        (interrupted_psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
 
     /*
      * Debug helper: repair_env_string() BUG() in init/main.c is usually a
@@ -702,10 +709,20 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
         }
     }
 
-    /* Save interruption state */
+    /* Save interruption state. Faults restart; traps resume after the source. */
     ia64_intr_push_window(env);
-    env->cr_ipsr = env->psr;
-    env->cr_iip = env->ip & ~0xFULL;
+    env->cr_ipsr = interrupted_psr;
+    env->cr_iip = interrupted_ip & ~0xFULL;
+    if (trap) {
+        env->cr_iipa = interrupted_ip & ~0xFULL;
+        env->cr_ipsr &= ~IA64_PSR_RI_MASK;
+        if (interrupted_ri < 2) {
+            env->cr_ipsr |=
+                (uint64_t)(interrupted_ri + 1) << IA64_PSR_RI_SHIFT;
+        } else {
+            env->cr_iip += 16;
+        }
+    }
     /*
      * IFS = CFM{38:0} | AR.EC{5:0} << 52 | V (bit 63 set by cover).
      * Save CFM and AR.EC together so rfi can restore both.
@@ -715,16 +732,18 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
      * Build ISR flags (X/W/R) and leave isr.code at 0 for normal accesses.
      * Linux uses bit 32 (IA64_ISR_X_BIT) to distinguish instruction misses.
      */
-    uint64_t isr = 0;
-    if (!is_data) {
-        isr |= 1ULL << IA64_ISR_X_BIT;
-        isr |= 1ULL << IA64_ISR_R_BIT; /* treat instruction fetch as read */
-    } else if (write) {
-        isr |= 1ULL << IA64_ISR_W_BIT;
-    } else {
-        isr |= 1ULL << IA64_ISR_R_BIT;
+    uint64_t isr = isr_extra | (code & IA64_ISR_CODE_MASK);
+    isr |= (uint64_t)interrupted_ri << IA64_ISR_EI_SHIFT;
+    if (access_bits) {
+        if (!is_data) {
+            isr |= 1ULL << IA64_ISR_X_BIT;
+            isr |= 1ULL << IA64_ISR_R_BIT; /* treat instruction fetch as read */
+        } else if (write) {
+            isr |= 1ULL << IA64_ISR_W_BIT;
+        } else {
+            isr |= 1ULL << IA64_ISR_R_BIT;
+        }
     }
-    isr |= 0 & IA64_ISR_CODE_MASK;
     env->cr_isr = isr;
     env->cr_iim = iim;
     cs->exception_index = IA64_EXCP_BASE + vec;
@@ -756,6 +775,23 @@ static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
     }
     cpu_loop_exit_restore(cs, retaddr);
     return false;
+}
+
+static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
+                       bool write, uint32_t vec, uint64_t iim,
+                       uintptr_t retaddr)
+{
+    return ia64_exception(cs, env, is_data, write, vec, iim, 0, 0,
+                          true, false, retaddr);
+}
+
+static G_NORETURN void ia64_fp_interrupt(CPUIA64State *env, uint32_t vec,
+                                         uint16_t code, uint64_t isr_extra,
+                                         bool trap, uintptr_t retaddr)
+{
+    ia64_exception(env_cpu(env), env, false, false, vec, 0, code,
+                   isr_extra, false, trap, retaddr);
+    g_assert_not_reached();
 }
 
 void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
@@ -2062,35 +2098,65 @@ void HELPER(f10)(CPUIA64State *env, uint64_t insn)
     int op = ia64_f10_decode(insn);
     IA64FRBits source;
     IA64F10Result result;
-    uint64_t disabled = (f1 < IA64_FR_ROT_BASE || f2 < IA64_FR_ROT_BASE ?
-                         IA64_PSR_DFL : 0) |
-                        (f1 >= IA64_FR_ROT_BASE || f2 >= IA64_FR_ROT_BASE ?
-                         IA64_PSR_DFH : 0);
+    uint16_t disabled_code = 0;
+    uint64_t disabled_isr = 0;
 
     if (op == IA64_F10_INVALID || f1 <= 1) {
         ia64_fault(env_cpu(env), env, false, false, IA64_VEC_ILLEGAL_OP,
                    0, GETPC());
         g_assert_not_reached();
     }
-    if (env->psr & disabled) {
-        /* Unsupported exception delivery must not execute the data path. */
-        HELPER(unimpl)(env, env->ip, (env->psr >> 41) & 3, insn,
-                       (uint64_t)(uintptr_t)"F10 disabled-FP delivery unsupported");
-        g_assert_not_reached();
+
+    /*
+     * F10 reads f2 and writes f1.  ISR.code bit 0 reports the disabled
+     * low bank (f2-f31), bit 1 the high bank (f32-f127); ISR.r/w identify
+     * which operand access triggered the fault.
+     */
+    if (env->psr & IA64_PSR_DFL) {
+        if (f2 >= 2 && f2 < IA64_FR_ROT_BASE) {
+            disabled_code |= 1;
+            disabled_isr |= 1ULL << IA64_ISR_R_BIT;
+        }
+        if (f1 >= 2 && f1 < IA64_FR_ROT_BASE) {
+            disabled_code |= 1;
+            disabled_isr |= 1ULL << IA64_ISR_W_BIT;
+        }
     }
+    if (env->psr & IA64_PSR_DFH) {
+        if (f2 >= IA64_FR_ROT_BASE) {
+            disabled_code |= 2;
+            disabled_isr |= 1ULL << IA64_ISR_R_BIT;
+        }
+        if (f1 >= IA64_FR_ROT_BASE) {
+            disabled_code |= 2;
+            disabled_isr |= 1ULL << IA64_ISR_W_BIT;
+        }
+    }
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code,
+                          disabled_isr, false, GETPC());
+    }
+
     source = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
                            HELPER(fr_get_hi)(env, f2) };
     result = ia64_f10_result(op, source, env->ar[IA64_AR_FPSR], sf);
-    if (result.enabled) {
-        /* V/D fault versus I trap delivery remains #10. Do not fake either. */
-        HELPER(unimpl)(env, env->ip, (env->psr >> 41) & 3, insn,
-                       (uint64_t)(uintptr_t)"F10 enabled-FP exception delivery unsupported");
-        g_assert_not_reached();
+
+    /* V and D are faults: no result/FPSR/dirty state is committed. */
+    if (result.fault_code) {
+        ia64_fp_interrupt(env, IA64_VEC_FP_FAULT, result.fault_code,
+                          0, false, GETPC());
     }
+
     HELPER(fr_set_lo)(env, f1, result.value.significand);
     HELPER(fr_set_hi)(env, f1, result.value.sign_exp);
     env->ar[IA64_AR_FPSR] |= (uint64_t)result.flags << (13 + 13 * sf);
     env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
+
+    /* I is a post-result trap: architectural destination state is visible. */
+    if (result.trap_code) {
+        ia64_fp_interrupt(env, IA64_VEC_FP_TRAP, result.trap_code,
+                          0, true, GETPC());
+    }
 }
 
 uint64_t HELPER(gr_nat)(CPUIA64State *env, uint32_t gr)
