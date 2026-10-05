@@ -25,12 +25,15 @@ enum {
 typedef struct IA64IntConversion {
     uint64_t value;
     uint32_t flags;
+    bool rounded_up;
 } IA64IntConversion;
 
 typedef struct IA64F10Result {
     IA64FRBits value;
     uint32_t flags;
     uint32_t enabled;
+    uint16_t fault_code;
+    uint16_t trap_code;
 } IA64F10Result;
 
 static inline int ia64_f10_decode(uint64_t insn)
@@ -58,10 +61,10 @@ static inline IA64IntConversion ia64_f10_integer(uint64_t significand,
                      (negative ? indefinite : indefinite - 1);
     int half_compare = -1;
     bool increment;
-    IA64IntConversion invalid = { indefinite, IA64_F10_V };
+    IA64IntConversion invalid = { indefinite, IA64_F10_V, false };
 
     if (!significand) {
-        return (IA64IntConversion) { 0, unnormal ? IA64_F10_D : 0 };
+        return (IA64IntConversion) { 0, unnormal ? IA64_F10_D : 0, false };
     }
     if (shift >= 0) {
         if (shift >= (int)width || significand > (limit >> shift)) {
@@ -103,7 +106,8 @@ static inline IA64IntConversion ia64_f10_integer(uint64_t significand,
     return (IA64IntConversion) {
         (negative ? UINT64_C(0) - magnitude : magnitude) &
             (width == 64 ? UINT64_MAX : UINT32_MAX),
-        (unnormal ? IA64_F10_D : 0) | (remainder ? IA64_F10_I : 0)
+        (unnormal ? IA64_F10_D : 0) | (remainder ? IA64_F10_I : 0),
+        increment
     };
 }
 
@@ -118,7 +122,7 @@ static inline IA64IntConversion ia64_f10_scalar(IA64FRBits source,
 
     /* Every NaN/infinity encoding is invalid for integer conversion. */
     if (exponent == 0x1ffff) {
-        return (IA64IntConversion) { UINT64_C(1) << 63, IA64_F10_V };
+        return (IA64IntConversion) { UINT64_C(1) << 63, IA64_F10_V, false };
     }
     /* exp=0 nonzero inputs are double-extended (pseudo-)denormals. */
     if (exponent == 0) {
@@ -138,7 +142,7 @@ static inline IA64IntConversion ia64_f10_lane(uint32_t source,
     bool unnormal = exponent == 0 && significand != 0;
 
     if (exponent == 255) {
-        return (IA64IntConversion) { UINT64_C(1) << 31, IA64_F10_V };
+        return (IA64IntConversion) { UINT64_C(1) << 31, IA64_F10_V, false };
     }
     if (exponent) {
         significand |= UINT64_C(1) << 23;
@@ -168,12 +172,36 @@ static inline IA64F10Result ia64_f10_result(int op, IA64FRBits source,
                           op & IA64_F10_UNSIGNED, rounding);
         result.value.significand = (hi.value << 32) | lo.value;
         result.flags = hi.flags | lo.flags;
+        result.fault_code = (hi.flags & (IA64_F10_V | IA64_F10_D) & ~disabled) |
+                            ((lo.flags & (IA64_F10_V | IA64_F10_D) & ~disabled) << 4);
+        if ((hi.flags & IA64_F10_I) & ~disabled) {
+            result.trap_code |= 1u << 13;
+            if (hi.rounded_up) {
+                result.trap_code |= 1u << 14;
+            }
+        }
+        if ((lo.flags & IA64_F10_I) & ~disabled) {
+            result.trap_code |= 1u << 9;
+            if (lo.rounded_up) {
+                result.trap_code |= 1u << 10;
+            }
+        }
     } else {
         lo = ia64_f10_scalar(source, op & IA64_F10_UNSIGNED, rounding);
         result.value.significand = lo.value;
         result.flags = lo.flags;
+        result.fault_code = lo.flags & (IA64_F10_V | IA64_F10_D) & ~disabled;
+        if ((lo.flags & IA64_F10_I) & ~disabled) {
+            result.trap_code |= 1u << 13;
+            if (lo.rounded_up) {
+                result.trap_code |= 1u << 14;
+            }
+        }
     }
     result.enabled = result.flags & ~disabled;
+    if (result.trap_code) {
+        result.trap_code |= 1u; /* ISR.code.fp: floating-point exception trap. */
+    }
     return result;
 }
 
