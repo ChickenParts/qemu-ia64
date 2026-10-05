@@ -7626,56 +7626,31 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             }
 
             if (!handled &&
-                (f_major == 0x8 || f_major == 0xA) &&
-                extract64(insn, 36, 1) == 1 &&
-                extract64(insn, 33, 1) == 0 &&
-                extract64(insn, 34, 2) == 0) {
+                (f_major == 0x0 || f_major == 0x1) &&
+                extract64(insn, 33, 1) == 1) {
                 /*
-                 * F1 pseudos in arithmetic form:
-                 * - fadd.s: major=0x8, x=1, f4=1
-                 * - fsub.s: major=0xA, x=1, f4=1
-                 * - fmpy.s: major=0x8, x=1, f2=0
+                 * F6/F7 reciprocal-approximation families.
                  *
-                 * Reuse existing fused helpers with constant-register operands.
+                 * Encoding:
+                 *   op{40:37}: 0 scalar, 1 parallel
+                 *   q{36}:     0 reciprocal, 1 reciprocal-square-root
+                 *   sf{35:34}: status field (not part of opcode selection)
+                 *   x{33}:     1
+                 *   p2{32:27}: predicate destination
+                 *
+                 * The existing helper implements only the scalar reciprocal
+                 * approximation path and remains architecturally limited
+                 * (FPSR/special-case work is tracked separately).  Do not
+                 * route rsqrt or parallel forms through it: that would execute
+                 * a different mathematical operation.
                  */
-                uint8_t f4 = extract64(insn, 27, 7);
+                uint8_t q = extract64(insn, 36, 1);
+                uint8_t p2 = extract64(insn, 27, 6);
                 uint8_t f3 = extract64(insn, 20, 7);
                 uint8_t f2 = extract64(insn, 13, 7);
                 uint8_t f1 = extract64(insn, 6, 7);
 
-                if (f_major == 0x8 && f4 == 1) {
-                    gen_helper_fma_s1(tcg_env,
-                                      tcg_constant_i32(f1),
-                                      tcg_constant_i32(f3),
-                                      tcg_constant_i32(f4),
-                                      tcg_constant_i32(f2));
-                    handled = true;
-                } else if (f_major == 0xA && f4 == 1) {
-                    gen_helper_fms_s1(tcg_env,
-                                      tcg_constant_i32(f1),
-                                      tcg_constant_i32(f3),
-                                      tcg_constant_i32(f4),
-                                      tcg_constant_i32(f2));
-                    handled = true;
-                } else if (f_major == 0x8 && f2 == 0) {
-                    gen_helper_fma_s1(tcg_env,
-                                      tcg_constant_i32(f1),
-                                      tcg_constant_i32(f3),
-                                      tcg_constant_i32(f4),
-                                      tcg_constant_i32(f2));
-                    handled = true;
-                }
-            }
-
-            if (f_major == 0x0) {
-                /* F8: frcpa.s* f1,p2 = f2,f3 */
-                uint8_t x3 = extract64(insn, 33, 3);
-                uint8_t x2 = extract64(insn, 31, 2);
-                if (x3 == 3 && x2 == 0) {
-                    uint8_t p2 = extract64(insn, 27, 6);
-                    uint8_t f3 = extract64(insn, 20, 7);
-                    uint8_t f2 = extract64(insn, 13, 7);
-                    uint8_t f1 = extract64(insn, 6, 7);
+                if (f_major == 0x0 && q == 0) {
                     gen_helper_frcpa_s1(tcg_env,
                                         tcg_constant_i32(f1),
                                         tcg_constant_i32(p2),
@@ -7924,12 +7899,14 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
              */
             if (!handled && f_major >= 0x8 && f_major <= 0xD) {
                 uint8_t x = extract64(insn, 36, 1);
+                uint8_t op = (f_major - 0x8) >> 1;
+                uint8_t pc = ((f_major & 1) << 1) | x;
                 uint8_t f4 = extract64(insn, 27, 7) & 0x7f;
                 uint8_t f3 = extract64(insn, 20, 7) & 0x7f;
                 uint8_t f2 = extract64(insn, 13, 7) & 0x7f;
                 uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
 
-                if (x == 0 && f4 == 1 && f2 == 0) {
+                if (op == 0 && pc != 3 && f4 == 1 && f2 == 0) {
                     TCGv_i64 mant = tcg_temp_new_i64();
                     TCGv_i64 expw = tcg_temp_new_i64();
                     gen_fr_load_lo(mant, f3);
@@ -7985,29 +7962,37 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                  *
                  * For now, model them using host long double arithmetic.
                  */
-                if (!handled && x == 0) {
-                    if (f_major == 0x8 || f_major == 0x9) {
+                /*
+                 * F1 precision control is encoded by {op[0], x}:
+                 *   0: scalar default, 1: scalar single,
+                 *   2: scalar double, 3: parallel.
+                 *
+                 * The scalar helpers are still FPSR/precision-limited (#10),
+                 * but opcode selection must not depend on f2/f4 values.
+                 * Parallel forms stay explicitly unimplemented until their
+                 * lane semantics have dedicated helpers.
+                 */
+                if (!handled && pc != 3) {
+                    if (op == 0) {
                         gen_helper_fma_s1(tcg_env,
                                           tcg_constant_i32(f1),
                                           tcg_constant_i32(f3),
                                           tcg_constant_i32(f4),
                                           tcg_constant_i32(f2));
-                        handled = true;
-                    } else if (f_major == 0xA || f_major == 0xB) {
+                    } else if (op == 1) {
                         gen_helper_fms_s1(tcg_env,
                                           tcg_constant_i32(f1),
                                           tcg_constant_i32(f3),
                                           tcg_constant_i32(f4),
                                           tcg_constant_i32(f2));
-                        handled = true;
-                    } else if (f_major == 0xC || f_major == 0xD) {
+                    } else {
                         gen_helper_fnma_s1(tcg_env,
                                            tcg_constant_i32(f1),
                                            tcg_constant_i32(f3),
                                            tcg_constant_i32(f4),
                                            tcg_constant_i32(f2));
-                        handled = true;
                     }
+                    handled = true;
                 }
             }
 
