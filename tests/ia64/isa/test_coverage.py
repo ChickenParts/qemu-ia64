@@ -66,13 +66,13 @@ class CoverageTests(unittest.TestCase):
 
     def test_inventory_size_and_scope(self):
         self.assertEqual(len(self.data['forms']), 75)
-        self.assertEqual(len(self.vectors), 1864)
+        self.assertEqual(len(self.vectors), 2097)
         self.assertEqual(self.measurement['forms'], 233)
         self.assertEqual(self.data['units']['A'], 'not-audited')
         self.assertEqual(self.data['units']['F'], 'inventoried')
 
     def test_vector_identity_is_unique(self):
-        self.assertEqual(len({v['id'] for v in self.vectors}), 1864)
+        self.assertEqual(len({v['id'] for v in self.vectors}), 2097)
 
     def test_all_words_fit_41_bits(self):
         self.assertTrue(all(0 <= v['word'] < (1 << 41) for v in self.vectors))
