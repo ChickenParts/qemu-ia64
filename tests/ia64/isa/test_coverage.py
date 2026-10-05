@@ -50,7 +50,7 @@ class CoverageTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         for relative in (AUDIT.REGISTRY, AUDIT.BASELINE, AUDIT.REPORT,
-                         Path('target/ia64/translate.c')):
+                         Path('target/ia64/translate.c'), Path('target/ia64/fp-bitops.h')):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, destination)
@@ -200,6 +200,12 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(self.routes['fnma.s0/unit-multiply'], 'fnma_s1')
         self.assertEqual(self.routes['fnma.s.s0/unit-multiply'], 'fnma_s1')
         self.assertEqual(self.routes['fms.s0/unit-multiply'], 'fms_s1')
+
+    def test_all_f9_forms_reach_the_bit_operation_helper(self):
+        vectors = [v for v in self.vectors if v['format'] == 'F9']
+        self.assertEqual(len(vectors), 19 * len(AUDIT.PROFILES))
+        for v in vectors:
+            self.assertEqual(self.routes[v['id']], 'f9', v['id'])
 
     def test_known_break_zero_skip(self):
         self.assertEqual(AUDIT.probe(self.executable, [0]), ['none'])

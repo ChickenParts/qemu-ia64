@@ -18,11 +18,11 @@ The host harness compiles the actual production `case SLOT_F` with recording TCG
 
 The additional unassigned-encoding probes do **not** assert reserved/illegal behavior. Intel’s opcode-table color key distinguishes ignored, reserved, and conditional-reserved cells. Their architectural dispositions are unadjudicated here; no negative-encoding conformance claim is made.
 
-The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block hash supplies provenance; moving code also requires refreshing generated evidence.
+The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-F9-header hash supplies provenance; moving code also requires refreshing generated evidence.
 
 ## Observed dispatch by family
 
-Form-level observation (not semantic correctness): {'all_probes_accepted': 60, 'all_probes_rejected': 172, 'operand_dependent': 1}.
+Form-level observation (not semantic correctness): {'all_probes_accepted': 74, 'all_probes_rejected': 158, 'operand_dependent': 1}.
 
 | Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |
 |---|---|---:|---:|---|---|
@@ -67,25 +67,25 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 60, '
 | `fpcmp.nlt` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
 | `fpcmp.nle` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
 | `fpcmp.ord` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fmerge.s` | F9 | 1 | 9/9 | `tcg`:9 | FP-BITOPS |
-| `fmerge.ns` | F9 | 1 | 9/9 | `tcg`:9 | FP-BITOPS |
-| `fmerge.se` | F9 | 1 | 9/9 | `tcg`:9 | FP-BITOPS |
-| `fmix.lr` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fmix.r` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fmix.l` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fsxt.r` | F9 | 1 | 9/9 | `tcg`:9 | FP-BITOPS |
-| `fsxt.l` | F9 | 1 | 9/9 | `tcg`:9 | FP-BITOPS |
-| `fpack` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fswap` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fswap.nl` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fswap.nr` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fand` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fandcm` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `for` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fxor` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fpmerge.s` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fpmerge.ns` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
-| `fpmerge.se` | F9 | 1 | 0/9 | `unimplemented`:9 | MISSING |
+| `fmerge.s` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fmerge.ns` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fmerge.se` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fmix.lr` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fmix.r` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fmix.l` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fsxt.r` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fsxt.l` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fpack` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fswap` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fswap.nl` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fswap.nr` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fand` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fandcm` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `for` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fxor` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fpmerge.s` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fpmerge.ns` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
+| `fpmerge.se` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
 | `fcvt.fx` | F10 | 4 | 0/36 | `unimplemented`:36 | FP-CONVERT |
 | `fcvt.fxu` | F10 | 4 | 0/36 | `unimplemented`:36 | FP-CONVERT |
 | `fcvt.fx.trunc` | F10 | 4 | 0/36 | `unimplemented`:36 | FP-CONVERT |
@@ -112,7 +112,7 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 60, '
 
 **FP-APPROX.** Scalar frcpa now decodes independently of sf and p2, while rsqrt and parallel forms remain explicitly unimplemented. The reciprocal helper still uses host division and ignores numerator/special-case, FPSR and exception semantics.
 
-**FP-BITOPS.** Scalar fmerge fast path mistakes general operands for fabs/fneg aliases; fallback merges binary64 bits instead of 82-bit FR fields. fsxt writes a noncanonical high word. Needs directed bitwise/NaTVal tests.
+**FP-BITOPS.** All 19 F9 data paths are integer-only 82-bit/packed operations with NaTVal propagation. Production-helper tests cover aliases, all 96 FR rotations, dirty bits and illegal-destination fault requests. Full QEMU disabled-FP fault delivery remains #10; an accepted encoding is not whole-instruction conformance.
 
 **FP-CONVERT.** Only scalar fcvt.fxu.trunc.s1 is dispatched; exception/status/NaTVal semantics remain incomplete.
 
@@ -152,7 +152,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block SHA-256: `2a1b54bde030e30b26d21db9b1aaad166810417ca4fb48f697f87245ad87f8bf`.
-- All-vector observation SHA-256: `6723b8c04fba9019dbf42df929059aec49f7c043f88d6c3da6e3b19c758adfb1`.
+- F-block plus F9 header SHA-256: `936d663ea9e7e29770fccf76d2c8bb19adc26bc03ae077cc81791d25aa6d1f75`.
+- All-vector observation SHA-256: `2faa437f4e68a66c4515d8b4403b97aca537e8458af8d82c5ed73373f824f541`.
 
-No firmware, ROM, or private payload is needed or included. No emulator semantics are changed by this audit tranche.
+No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.

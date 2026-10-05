@@ -365,10 +365,10 @@ struct IA64CPUClass {
 #define IA64_PSR_BE       (1ULL << 1)   /* Big-Endian data access */
 #define IA64_PSR_UP       (1ULL << 2)   /* User Performance monitor enable */
 #define IA64_PSR_AC       (1ULL << 3)   /* Alignment Check */
-#define IA64_PSR_MFL      (1ULL << 4)   /* Lower FP registers disabled */
-#define IA64_PSR_MFH      (1ULL << 5)   /* Upper FP registers disabled */
-#define IA64_PSR_DFL      (1ULL << 6)   /* Lower FP fault disabled */
-#define IA64_PSR_DFH      (1ULL << 7)   /* Upper FP fault disabled */
+#define IA64_PSR_MFL      (1ULL << 4)   /* Lower FP registers modified */
+#define IA64_PSR_MFH      (1ULL << 5)   /* Upper FP registers modified */
+#define IA64_PSR_DFL      (1ULL << 6)   /* Lower FP registers disabled */
+#define IA64_PSR_DFH      (1ULL << 7)   /* Upper FP registers disabled */
 #define IA64_PSR_IC       (1ULL << 13)  /* Interruption Collection */
 #define IA64_PSR_I        (1ULL << 14)  /* Interrupt enable */
 #define IA64_PSR_PK       (1ULL << 15)  /* Protection Key enable */

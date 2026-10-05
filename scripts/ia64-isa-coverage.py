@@ -33,7 +33,7 @@ EMITTERS = '''gen_set_label gen_set_predicates gen_fr_load_lo gen_fr_load_hi
  tcg_gen_clzi_i64 tcg_gen_shl_i64 tcg_gen_or_i64 tcg_gen_br
  tcg_gen_shri_i64 tcg_gen_neg_i64 tcg_gen_shli_i64'''.split()
 HELPERS = '''fcmp_s0 fma_s1 fms_s1 fnma_s1 frcpa_s1 fcvt_fxu_trunc_s1
- xma_l xma_hu xma_h'''.split()
+ xma_l xma_hu xma_h f9'''.split()
 
 
 def digest(data):
@@ -217,13 +217,15 @@ int main(void) {
     return ferror(stdin) || ferror(stdout);
 }
 '''
+    header = (root / 'target/ia64/fp-bitops.h').read_bytes()
+    prelude += '#include "fp-bitops.h"\n'
     path = directory / 'f-unit-probe.c'
     path.write_text(prelude + body + main)
     executable = directory / 'f-unit-probe'
     subprocess.run(shlex.split(cc) + ['-std=c11', '-Wall', '-Wextra', '-Werror',
-                   '-O0', str(path), '-o', str(executable)], check=True, timeout=60,
+                   '-O0', '-I' + str(root / 'target/ia64'), str(path), '-o', str(executable)], check=True, timeout=60,
                    capture_output=True, text=True)
-    return executable, digest(block.encode())
+    return executable, digest(block.encode() + b'\0fp-bitops.h\0' + header)
 
 
 def probe(executable, words):
@@ -313,7 +315,7 @@ def render(data, vectors, executable, measurement):
              'The host harness compiles the actual production `case SLOT_F` with recording TCG emitters. It observes translation dispatch without copying the decoder into Python. It does not execute TCG, evaluate guest predicates, prove numeric results, or test architectural exception delivery. An accepted word can still be incorrectly implemented.', '',
              f'{len(PROFILES)} profiles cover ordinary/high/aliased FP operands, unit-multiply and high-register multiply operands, predication, and the p15/p16/p63 predicate-destination boundary. All profile encodings can be independently assembled and byte-compared with `--assembler`; that optional check is not implied by the host-only check.', '',
              'The additional unassigned-encoding probes do **not** assert reserved/illegal behavior. Intel’s opcode-table color key distinguishes ignored, reserved, and conditional-reserved cells. Their architectural dispositions are unadjudicated here; no negative-encoding conformance claim is made.', '',
-             'The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block hash supplies provenance; moving code also requires refreshing generated evidence.', '',
+             'The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-F9-header hash supplies provenance; moving code also requires refreshing generated evidence.', '',
              '## Observed dispatch by family', '',
              f"Form-level observation (not semantic correctness): {measurement['form_dispositions']}.", '',
              '| Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |',
@@ -340,9 +342,9 @@ def render(data, vectors, executable, measurement):
               'python3 scripts/ia64-isa-coverage.py --record', '```', '',
               '## Provenance', '',
               f"- Starting stack: `{data['baseline']}` (PR #6, above indexed-register/RSE work).",
-              f"- F-block SHA-256: `{measurement['source_f_block_sha256']}`.",
+              f"- F-block plus F9 header SHA-256: `{measurement['source_f_block_sha256']}`.",
               f"- All-vector observation SHA-256: `{measurement['observations_sha256']}`.", '',
-              'No firmware, ROM, or private payload is needed or included. No emulator semantics are changed by this audit tranche.', '']
+              'No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.', '']
     return '\n'.join(lines)
 
 
