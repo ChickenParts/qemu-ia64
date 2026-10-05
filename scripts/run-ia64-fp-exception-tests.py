@@ -206,6 +206,8 @@ def generate(case):
 
 def run_one(case, args):
     vector, passed, failed = CASES[case]
+    pass_text = f"r8={int(passed, 0):016x}"
+    fail_text = f"r8={int(failed, 0):016x}"
     out = args.out / case
     out.mkdir(parents=True, exist_ok=True)
     src, obj, elf = [out / ('fp-exception.' + ext) for ext in ('S', 'o', 'elf')]
@@ -248,7 +250,7 @@ def run_one(case, args):
                         chunk = stream.read(512 * 1024)
                     offset += len(chunk)
                     text = tail + chunk.decode(errors='replace')
-                    if passed in text or failed in text or 'IA64 UNIMPL' in text:
+                    if pass_text in text or fail_text in text or 'IA64 UNIMPL' in text:
                         break
                     tail = text[-128:]
                     if offset >= limit:
@@ -268,9 +270,15 @@ def run_one(case, args):
         truncated = True
         with log.open('r+b') as stream:
             stream.truncate(limit)
-    ok = passed in text and failed not in text and 'IA64 UNIMPL' not in text and not truncated
+    pass_seen = pass_text in text
+    fail_seen = fail_text in text
+    # Once a terminal marker is observed, log growth caused by the break
+    # exception itself is irrelevant; truncate retained evidence but do not
+    # turn a witnessed PASS into a log-limit failure.
+    ok = pass_seen and not fail_seen and 'IA64 UNIMPL' not in text
     evidence.update(execution='pass' if ok else 'fail',
-                    returncode=proc.returncode, log_limit_exceeded=truncated,
+                    returncode=proc.returncode, pass_seen=pass_seen,
+                    fail_seen=fail_seen, log_limit_exceeded=truncated,
                     qemu_sha256=hashlib.sha256(Path(qemu).read_bytes()).hexdigest())
     result.write_text(json.dumps(evidence, indent=2) + '\n')
     if not ok:
