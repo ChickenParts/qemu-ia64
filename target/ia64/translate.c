@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "fp-bitops.h"
 #include "tcg/tcg-op.h"
 #include "tcg/tcg.h"
 #include "exec/helper-proto.h"
@@ -7660,36 +7661,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
             }
 
-            if (!handled && f_major == 0x0 &&
-                extract64(insn, 36, 1) == 0 &&
-                extract64(insn, 34, 2) == 0 &&
-                extract64(insn, 33, 1) == 0 &&
-                extract64(insn, 31, 2) == 1) {
-                /*
-                 * F9: fabs / fneg scalar forms.
-                 * Keep raw FP payload and only toggle/clear the sign bit in
-                 * the exp/sign word.
-                 */
-                uint8_t x6 = extract64(insn, 27, 6);
-                if (x6 == 0x10 || x6 == 0x11) {
-                    uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
-                    uint8_t src = (x6 == 0x10) ? (extract64(insn, 20, 7) & 0x7f)
-                                               : (extract64(insn, 13, 7) & 0x7f);
-                    if (f1 > 1) {
-                        TCGv_i64 lo = tcg_temp_new_i64();
-                        TCGv_i64 hi = tcg_temp_new_i64();
-                        gen_fr_load_lo(lo, src);
-                        gen_fr_load_hi(hi, src);
-                        if (x6 == 0x10) {
-                            tcg_gen_andi_i64(hi, hi, ~0x20000ULL);
-                        } else {
-                            tcg_gen_xori_i64(hi, hi, 0x20000ULL);
-                        }
-                        gen_fr_store_lo(f1, lo);
-                        gen_fr_store_hi(f1, hi);
-                    }
-                    handled = true;
-                }
+            if (!handled && ia64_f9_decode(insn) != IA64_F9_INVALID) {
+                /* All F9 forms operate on the full 82-bit register value. */
+                gen_helper_f9(tcg_env, tcg_constant_i64(insn));
+                handled = true;
             }
 
             if (!handled && f_major == 0x0) {
@@ -7777,115 +7752,6 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                         gen_fr_store_hi(f1, tcg_constant_i64(0));
                     }
                     gen_set_label(done);
-                    handled = true;
-                }
-            }
-
-            if (!handled && f_major == 0x0) {
-                /* F9: fmerge.{s,ns,se} f1 = f2, f3 */
-                uint8_t x = extract64(insn, 33, 1);
-                uint8_t x6 = extract64(insn, 27, 6);
-                if (x == 0 && (x6 == 0x10 || x6 == 0x11 || x6 == 0x12)) {
-                    uint8_t f3 = extract64(insn, 20, 7);
-                    uint8_t f2 = extract64(insn, 13, 7);
-                    uint8_t f1 = extract64(insn, 6, 7);
-
-                    TCGv_i64 a = tcg_temp_new_i64();
-                    TCGv_i64 b = tcg_temp_new_i64();
-                    gen_fr_load_lo(a, f2);
-                    gen_fr_load_lo(b, f3);
-
-                    /* Bit-level approximation of SKI's spill merge. */
-                    const uint64_t SIGN_MASK = 0x8000000000000000ULL;
-                    const uint64_t EXP_MASK  = 0x7ff0000000000000ULL;
-                    const uint64_t SIGNEXP_MASK = SIGN_MASK | EXP_MASK;
-
-                    TCGv_i64 res = tcg_temp_new_i64();
-                    if (x6 == 0x10) {
-                        /* fmerge.s: sign from a, rest from b */
-                        TCGv_i64 sign = tcg_temp_new_i64();
-                        TCGv_i64 mag = tcg_temp_new_i64();
-                        tcg_gen_andi_i64(sign, a, SIGN_MASK);
-                        tcg_gen_andi_i64(mag, b, ~SIGN_MASK);
-                        tcg_gen_or_i64(res, mag, sign);
-                    } else if (x6 == 0x11) {
-                        /* fmerge.ns: inverted sign from a, rest from b */
-                        TCGv_i64 sign = tcg_temp_new_i64();
-                        TCGv_i64 mag = tcg_temp_new_i64();
-                        tcg_gen_andi_i64(sign, a, SIGN_MASK);
-                        tcg_gen_xori_i64(sign, sign, SIGN_MASK);
-                        tcg_gen_andi_i64(mag, b, ~SIGN_MASK);
-                        tcg_gen_or_i64(res, mag, sign);
-                    } else {
-                        /* fmerge.se: sign+exp from a, mantissa from b */
-                        TCGv_i64 se = tcg_temp_new_i64();
-                        TCGv_i64 mant = tcg_temp_new_i64();
-                        tcg_gen_andi_i64(se, a, SIGNEXP_MASK);
-                        tcg_gen_andi_i64(mant, b, ~SIGNEXP_MASK);
-                        tcg_gen_or_i64(res, mant, se);
-                    }
-
-                    if (f1 > 1) {
-                        gen_fr_store_lo(f1, res);
-                        gen_fr_store_hi(f1, tcg_constant_i64(0));
-                    }
-                    handled = true;
-                }
-            }
-
-            if (!handled && f_major == 0x0) {
-                /*
-                 * F9: fsxt.{r,l} f1 = f2, f3
-                 *
-                 * Used by the kernel for integer arithmetic lowered into
-                 * FP-unit ops (e.g. size_t multiplication in percpu setup).
-                 *
-                 * Mirror SKI's bit-level behavior on the "dword" payload:
-                 *  - fsxt.r: sign-extend low 32 bits of f3 using bit31 of f2
-                 *  - fsxt.l: sign-extend high 32 bits of f3 using sign bit of f2
-                 *
-                 * We model the integer payload in f[][0] and ignore the full
-                 * FP status/classification for now.
-                 */
-                uint8_t x = extract64(insn, 33, 1);
-                uint8_t x6 = extract64(insn, 27, 6);
-                if (x == 0 && (x6 == 0x3c || x6 == 0x3d)) {
-                    uint8_t f3 = extract64(insn, 20, 7);
-                    uint8_t f2 = extract64(insn, 13, 7);
-                    uint8_t f1 = extract64(insn, 6, 7);
-
-                    TCGv_i64 a = tcg_temp_new_i64();
-                    TCGv_i64 b = tcg_temp_new_i64();
-                    gen_fr_load_lo(a, f2);
-                    gen_fr_load_lo(b, f3);
-
-                    TCGv_i64 sign = tcg_temp_new_i64();
-                    TCGv_i64 ext = tcg_temp_new_i64();
-                    TCGv_i64 low = tcg_temp_new_i64();
-                    TCGv_i64 res = tcg_temp_new_i64();
-
-                    if (x6 == 0x3c) {
-                        /* fsxt.r */
-                        tcg_gen_shri_i64(sign, a, 31);
-                        tcg_gen_andi_i64(sign, sign, 1);
-                        tcg_gen_neg_i64(ext, sign);      /* 0 or -1 */
-                        tcg_gen_shli_i64(ext, ext, 32);  /* 0 or 0xffffffff00000000 */
-                        tcg_gen_andi_i64(low, b, 0xffffffffULL);
-                    } else {
-                        /* fsxt.l */
-                        tcg_gen_shri_i64(sign, a, 63);
-                        tcg_gen_andi_i64(sign, sign, 1);
-                        tcg_gen_neg_i64(ext, sign);
-                        tcg_gen_shli_i64(ext, ext, 32);
-                        tcg_gen_shri_i64(low, b, 32);
-                        tcg_gen_andi_i64(low, low, 0xffffffffULL);
-                    }
-                    tcg_gen_or_i64(res, ext, low);
-
-                    if (f1 > 1) {
-                        gen_fr_store_lo(f1, res);
-                        gen_fr_store_hi(f1, tcg_constant_i64(0));
-                    }
                     handled = true;
                 }
             }

@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "fp-bitops.h"
 #include "interrupt.h"
 #include "pal.h"
 #include "sal.h"
@@ -2017,6 +2018,34 @@ void HELPER(fr_set_hi)(CPUIA64State *env, uint32_t f, uint64_t val)
         return;
     }
     env->f[pf][1] = val;
+}
+
+/*
+ * F9 bit operations.  Source snapshots precede every destination write so
+ * f1=f2, f1=f3 and f2=f3 are safe, including rotating FRs.
+ * Disabled-FP fault delivery remains part of the shared FP-state work (#10).
+ */
+void HELPER(f9)(CPUIA64State *env, uint64_t insn)
+{
+    unsigned f1 = (insn >> 6) & 127;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned f3 = (insn >> 20) & 127;
+    int op = ia64_f9_decode(insn);
+    IA64FRBits a, b, result;
+
+    if (op == IA64_F9_INVALID || f1 <= 1) {
+        ia64_fault(env_cpu(env), env, false, false, IA64_VEC_ILLEGAL_OP,
+                   0, GETPC());
+        g_assert_not_reached();
+    }
+    a = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                      HELPER(fr_get_hi)(env, f2) };
+    b = (IA64FRBits) { HELPER(fr_get_lo)(env, f3),
+                      HELPER(fr_get_hi)(env, f3) };
+    result = ia64_f9_result(op, a, b);
+    HELPER(fr_set_lo)(env, f1, result.significand);
+    HELPER(fr_set_hi)(env, f1, result.sign_exp);
+    env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
 }
 
 uint64_t HELPER(gr_nat)(CPUIA64State *env, uint32_t gr)

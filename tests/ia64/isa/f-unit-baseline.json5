@@ -1,18 +1,19 @@
 // Known-gap measurement; NOT an ISA correctness certificate.
 {
   "schema_version": 1,
-  "source_f_block_sha256": "2a1b54bde030e30b26d21db9b1aaad166810417ca4fb48f697f87245ad87f8bf",
-  "observations_sha256": "6723b8c04fba9019dbf42df929059aec49f7c043f88d6c3da6e3b19c758adfb1",
+  "source_f_block_sha256": "936d663ea9e7e29770fccf76d2c8bb19adc26bc03ae077cc81791d25aa6d1f75",
+  "observations_sha256": "2faa437f4e68a66c4515d8b4403b97aca537e8458af8d82c5ed73373f824f541",
   "vectors": 2097,
   "forms": 233,
   "form_dispositions": {
-    "all_probes_accepted": 60,
-    "all_probes_rejected": 172,
+    "all_probes_accepted": 74,
+    "all_probes_rejected": 158,
     "operand_dependent": 1
   },
   "unassigned_vectors": 21,
   "unassigned_observations_sha256": "85ff94a3169719ff8495751e4866526a05457643faed3459f79045dd95016879",
   "routes": {
+    "f9": 171,
     "fcmp_s0": 72,
     "fcvt_fxu_trunc_s1": 9,
     "fma_s1": 96,
@@ -20,8 +21,8 @@
     "fnma_s1": 108,
     "frcpa_s1": 36,
     "none": 19,
-    "tcg": 66,
-    "unimplemented": 1556,
+    "tcg": 21,
+    "unimplemented": 1430,
     "xma_h": 9,
     "xma_hu": 9,
     "xma_l": 9
