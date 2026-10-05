@@ -30,15 +30,14 @@ jobs:
           python3 scripts/ia64-isa-coverage.py --check
           python3 -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v
           git diff --check
-      - name: Commit ordinary source and remove one-use transport
+      - name: Commit ordinary source and remove patch transport
         shell: bash
         run: |
           set -euo pipefail
-          git rm -r -- scripts/f10-stage scripts/ia64-f10-stage.py \
-            .github/workflows/ia64-f10-publish.yml \
-            .github/workflows/ia64-f10-source-snapshot.yml
-          git add -- .github/workflows/ia64-f9-validation.yml \
-            docs/generated/ia64-instruction-coverage.md \
+          # Workflow writes use the connected app, not this contents-only token.
+          git restore -- .github/workflows/ia64-f9-validation.yml
+          git rm -r -- scripts/f10-stage scripts/ia64-f10-stage.py
+          git add -- docs/generated/ia64-instruction-coverage.md \
             scripts/ia64-isa-coverage.py scripts/run-ia64-f10-tests.py \
             scripts/run-ia64-f9-tests.py target/ia64/fp-convert.h \
             target/ia64/helper.c target/ia64/helper.h target/ia64/translate.c \
