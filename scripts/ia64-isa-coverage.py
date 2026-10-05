@@ -24,7 +24,7 @@ REGISTRY = Path('tests/ia64/isa/coverage.json5')
 REPORT = Path('docs/generated/ia64-instruction-coverage.md')
 BASELINE = Path('tests/ia64/isa/f-unit-baseline.json5')
 PROFILES = ('low', 'high', 'alias', 'unit-multiply', 'high-multiply',
-            'predicated', 'p16', 'p63')
+            'predicated', 'p15', 'p16', 'p63')
 # Explicit emitter allowlist: source changes using a new API fail to compile
 # until reviewed. No guessed helper bodies, regex classification, or eval().
 EMITTERS = '''gen_set_label gen_set_predicates gen_fr_load_lo gen_fr_load_hi
@@ -92,6 +92,8 @@ def vector(row, sf, unc, profile):
         v.update(f4=65, f2=0, imm=0x100000, cls=0x80)
     elif profile == 'predicated':
         v.update(qp=5, imm=0x12345)
+    elif profile == 'p15':
+        v.update(p2=15, imm=0xabc)
     elif profile == 'p16':
         v.update(p2=16, imm=0x1abc)
     elif profile == 'p63':
@@ -309,7 +311,7 @@ def render(data, vectors, executable, measurement):
              'A, I, M, B and L/X are **not audited** in this tranche. Aliases are linked rather than counted twice. Processor-generation availability and exhaustive ignored/reserved-bit constraints remain to be audited.', '',
              '## Method and limits', '',
              'The host harness compiles the actual production `case SLOT_F` with recording TCG emitters. It observes translation dispatch without copying the decoder into Python. It does not execute TCG, evaluate guest predicates, prove numeric results, or test architectural exception delivery. An accepted word can still be incorrectly implemented.', '',
-             'Eight profiles cover ordinary/high/aliased FP operands, unit-multiply and high-register multiply operands, predication, and predicate destinations p16/p63. All profile encodings can be independently assembled and byte-compared with `--assembler`; that optional check is not implied by the host-only check.', '',
+             f'{len(PROFILES)} profiles cover ordinary/high/aliased FP operands, unit-multiply and high-register multiply operands, predication, and the p15/p16/p63 predicate-destination boundary. All profile encodings can be independently assembled and byte-compared with `--assembler`; that optional check is not implied by the host-only check.', '',
              'The additional unassigned-encoding probes do **not** assert reserved/illegal behavior. Intel’s opcode-table color key distinguishes ignored, reserved, and conditional-reserved cells. Their architectural dispositions are unadjudicated here; no negative-encoding conformance claim is made.', '',
              'The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block hash supplies provenance; moving code also requires refreshing generated evidence.', '',
              '## Observed dispatch by family', '',
