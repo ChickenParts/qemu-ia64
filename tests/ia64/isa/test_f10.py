@@ -156,7 +156,8 @@ def compile_harness(root, directory):
     for name in ('IA64_FR_ROT_BASE', 'IA64_FR_ROT_SIZE', 'IA64_CFM_RRBF_SHIFT',
                  'IA64_CFM_RRBF_MASK', 'IA64_PSR_MFL', 'IA64_PSR_MFH',
                  'IA64_PSR_DFL', 'IA64_PSR_DFH', 'IA64_AR_FPSR',
-                 'IA64_VEC_DISABLED_FP', 'IA64_VEC_FP_FAULT', 'IA64_VEC_FP_TRAP'):
+                 'IA64_VEC_DISABLED_FP', 'IA64_VEC_FP_FAULT', 'IA64_VEC_FP_TRAP',
+                 'IA64_ISR_R_BIT', 'IA64_ISR_W_BIT'):
         lines = [line for line in (source + '\n' + cpu).splitlines()
                  if line.startswith('#define ' + name + ' ')]
         if len(set(lines)) != 1:
