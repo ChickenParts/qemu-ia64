@@ -53,6 +53,8 @@ jobs:
             --output scratch/f9-evidence/observations.json5
           /tmp/f9-venv/bin/python -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v \
             2>&1 | tee scratch/f9-evidence/host-tests.txt
+          python3 scripts/run-ia64-fp-exception-tests.py --assemble-only \
+            --out scratch/f9-evidence/fp-exceptions-assembly
           git diff --exit-code
       - name: Build the actual IA-64 system emulator
         shell: bash
