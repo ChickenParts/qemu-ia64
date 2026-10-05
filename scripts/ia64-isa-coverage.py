@@ -32,8 +32,8 @@ EMITTERS = '''gen_set_label gen_set_predicates gen_fr_load_lo gen_fr_load_hi
  tcg_gen_brcondi_i64 tcg_gen_mov_i64 tcg_gen_movi_i64 tcg_gen_sub_i64
  tcg_gen_clzi_i64 tcg_gen_shl_i64 tcg_gen_or_i64 tcg_gen_br
  tcg_gen_shri_i64 tcg_gen_neg_i64 tcg_gen_shli_i64'''.split()
-HELPERS = '''fcmp_s0 fma_s1 fms_s1 fnma_s1 frcpa_s1 fcvt_fxu_trunc_s1
- xma_l xma_hu xma_h f9'''.split()
+HELPERS = '''fcmp_s0 fma_s1 fms_s1 fnma_s1 frcpa_s1
+ xma_l xma_hu xma_h f9 f10'''.split()
 
 
 def digest(data):
@@ -218,14 +218,15 @@ int main(void) {
 }
 '''
     header = (root / 'target/ia64/fp-bitops.h').read_bytes()
-    prelude += '#include "fp-bitops.h"\n'
+    prelude += '#include "fp-bitops.h"\n#include "fp-convert.h"\n'
     path = directory / 'f-unit-probe.c'
     path.write_text(prelude + body + main)
     executable = directory / 'f-unit-probe'
     subprocess.run(shlex.split(cc) + ['-std=c11', '-Wall', '-Wextra', '-Werror',
                    '-O0', '-I' + str(root / 'target/ia64'), str(path), '-o', str(executable)], check=True, timeout=60,
                    capture_output=True, text=True)
-    return executable, digest(block.encode() + b'\0fp-bitops.h\0' + header)
+    return executable, digest(block.encode() + b'\0fp-bitops.h\0' + header +
+                              b'\0fp-convert.h\0' + (root / 'target/ia64/fp-convert.h').read_bytes())
 
 
 def probe(executable, words):

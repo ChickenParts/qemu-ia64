@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "fp-bitops.h"
+#include "fp-convert.h"
 #include "tcg/tcg-op.h"
 #include "tcg/tcg.h"
 #include "exec/helper-proto.h"
@@ -7667,27 +7668,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 handled = true;
             }
 
-            if (!handled && f_major == 0x0) {
-                /*
-                 * F10: fcvt.fxu.trunc.s1 f1 = f2
-                 *
-                 * Used by the Xen GFW firmware's FP runtime sequences.
-                 *
-                 * Encoding per SKI:
-                 *   op{40:37}=0 x{33}=0 x6{32:27}=0x1b sf{35:34}=1
-                 */
-                uint8_t x = extract64(insn, 33, 1);
-                uint8_t sf = extract64(insn, 34, 2);
-                uint8_t x6 = extract64(insn, 27, 6);
-                uint8_t f3 = extract64(insn, 20, 7);
-                if (x == 0 && sf == 1 && x6 == 0x1b && f3 == 0) {
-                    uint8_t f2 = extract64(insn, 13, 7);
-                    uint8_t f1 = extract64(insn, 6, 7);
-                    gen_helper_fcvt_fxu_trunc_s1(tcg_env,
-                                                 tcg_constant_i32(f1),
-                                                 tcg_constant_i32(f2));
-                    handled = true;
-                }
+            if (!handled && ia64_f10_decode(insn) != IA64_F10_INVALID) {
+                /* F10: signed/unsigned, rounded/truncated, scalar/packed. */
+                gen_helper_f10(tcg_env, tcg_constant_i64(insn));
+                handled = true;
             }
 
             if (!handled && f_major == 0x0) {
