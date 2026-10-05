@@ -1,0 +1,53 @@
+name: IA-64 F10 candidate publish
+
+on:
+  push:
+    branches: [work/ia64-f10-conversions]
+    paths: [.github/workflows/ia64-f10-publish.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'ChickenParts/qemu-ia64' && github.ref == 'refs/heads/work/ia64-f10-conversions'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply and verify exact reviewed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install -r tests/ia64/isa/requirements.txt
+          python3 scripts/ia64-f10-stage.py
+          python3 scripts/ia64-isa-coverage.py --check
+          python3 -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v
+          git diff --check
+      - name: Commit ordinary source and remove one-use transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -r -- scripts/f10-stage scripts/ia64-f10-stage.py \
+            .github/workflows/ia64-f10-publish.yml \
+            .github/workflows/ia64-f10-source-snapshot.yml
+          git add -- .github/workflows/ia64-f9-validation.yml \
+            docs/generated/ia64-instruction-coverage.md \
+            scripts/ia64-isa-coverage.py scripts/run-ia64-f10-tests.py \
+            scripts/run-ia64-f9-tests.py target/ia64/fp-convert.h \
+            target/ia64/helper.c target/ia64/helper.h target/ia64/translate.c \
+            tests/ia64/isa/README.md tests/ia64/isa/coverage.json5 \
+            tests/ia64/isa/f-unit-baseline.json5 \
+            tests/ia64/isa/test_coverage.py tests/ia64/isa/test_f10.py
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'target/ia64: implement scalar and packed F10 masked conversions'
+          git push origin HEAD:refs/heads/work/ia64-f10-conversions
+          git rev-parse HEAD
