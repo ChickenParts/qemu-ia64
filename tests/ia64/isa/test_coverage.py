@@ -155,23 +155,51 @@ class CoverageTests(unittest.TestCase):
         self.assertIn('architectural dispositions are unadjudicated', self.report)
         self.assertNotIn('reserved_vectors', self.measurement)
 
-    def test_known_reciprocal_operand_hole(self):
-        self.assertEqual(self.routes['frcpa.s1/low'], 'frcpa_s1')
-        self.assertEqual(self.routes['frcpa.s1/p16'], 'unimplemented')
-        self.assertEqual(self.routes['frcpa.s1/p63'], 'unimplemented')
-        self.assertEqual(self.routes['frcpa.s0/low'], 'unimplemented')
+    def test_frcpa_decode_is_operand_and_status_independent(self):
+        for sf in range(4):
+            for profile in AUDIT.PROFILES:
+                self.assertEqual(
+                    self.routes[f'frcpa.s{sf}/{profile}'], 'frcpa_s1')
 
-    def test_known_rsqrt_misdispatch(self):
-        self.assertEqual(self.routes['frsqrta.s1/low'], 'frcpa_s1')
+    def test_rsqrt_never_routes_to_reciprocal(self):
+        for sf in range(4):
+            for profile in AUDIT.PROFILES:
+                self.assertEqual(
+                    self.routes[f'frsqrta.s{sf}/{profile}'], 'unimplemented')
 
-    def test_known_fma_single_operand_hole(self):
-        self.assertEqual(self.routes['fma.s.s0/low'], 'unimplemented')
-        self.assertEqual(self.routes['fma.s.s0/unit-multiply'], 'fma_s1')
-        self.assertEqual(self.routes['fma.s.s0/high-multiply'], 'unimplemented')
+    def test_scalar_f1_decode_is_operand_independent(self):
+        families = {
+            'fma': 'fma_s1',
+            'fma.s': 'fma_s1',
+            'fma.d': 'fma_s1',
+            'fms': 'fms_s1',
+            'fms.s': 'fms_s1',
+            'fms.d': 'fms_s1',
+            'fnma': 'fnma_s1',
+            'fnma.s': 'fnma_s1',
+            'fnma.d': 'fnma_s1',
+        }
+        for family, helper in families.items():
+            for sf in range(4):
+                for profile in AUDIT.PROFILES:
+                    route = self.routes[f'{family}.s{sf}/{profile}']
+                    if family in ('fma', 'fma.s', 'fma.d') and profile == 'unit-multiply':
+                        self.assertEqual(route, 'tcg')
+                    else:
+                        self.assertEqual(route, helper)
 
-    def test_known_negative_multiply_normalization_route(self):
-        self.assertEqual(self.routes['fnma.s0/unit-multiply'], 'tcg')
-        self.assertEqual(self.routes['fnma.s0/low'], 'fnma_s1')
+    def test_parallel_f1_stays_explicitly_unimplemented(self):
+        for family in ('fpma', 'fpms', 'fpnma'):
+            for sf in range(4):
+                for profile in AUDIT.PROFILES:
+                    self.assertEqual(
+                        self.routes[f'{family}.s{sf}/{profile}'],
+                        'unimplemented')
+
+    def test_negative_multiply_is_not_normalization(self):
+        self.assertEqual(self.routes['fnma.s0/unit-multiply'], 'fnma_s1')
+        self.assertEqual(self.routes['fnma.s.s0/unit-multiply'], 'fnma_s1')
+        self.assertEqual(self.routes['fms.s0/unit-multiply'], 'fms_s1')
 
     def test_known_break_zero_skip(self):
         self.assertEqual(AUDIT.probe(self.executable, [0]), ['none'])
