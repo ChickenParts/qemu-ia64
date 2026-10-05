@@ -351,8 +351,19 @@ def render(data, vectors, executable, measurement):
 
 def check_snapshot(root, measurement, report):
     expected = json5.loads((root / BASELINE).read_text(), allow_duplicate_keys=False)
-    if measurement != expected or (root / REPORT).read_text() != report:
-        raise ValueError('audit drift: inspect detailed routes; review before --record')
+    recorded_report = (root / REPORT).read_text()
+    if measurement != expected or recorded_report != report:
+        details = []
+        for key in sorted(set(measurement) | set(expected)):
+            if measurement.get(key) != expected.get(key):
+                details.append(f"{key}: expected={expected.get(key)!r} observed={measurement.get(key)!r}")
+        if recorded_report != report:
+            details.append(
+                "generated report differs: recorded_sha256=" +
+                digest(recorded_report.encode()) + " observed_sha256=" +
+                digest(report.encode()))
+        raise ValueError('audit drift: ' + '; '.join(details) +
+                         '; review before --record')
 
 
 def main():
