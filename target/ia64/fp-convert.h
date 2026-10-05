@@ -156,7 +156,7 @@ static inline IA64IntConversion ia64_f10_lane(uint32_t source,
 static inline IA64F10Result ia64_f10_result(int op, IA64FRBits source,
                                            uint64_t fpsr, unsigned sf)
 {
-    IA64F10Result result = { { 0, 0x1003e }, 0, 0 };
+    IA64F10Result result = { .value = { 0, 0x1003e } };
     unsigned controls = (fpsr >> (6 + 13 * sf)) & 127;
     unsigned rounding = op & IA64_F10_TRUNCATE ? 3 : (controls >> 4) & 3;
     unsigned disabled = (sf != 0 && (controls & 64)) ? 63 : fpsr & 63;
