@@ -1,0 +1,105 @@
+name: IA-64 F10 exception validation
+
+on:
+  push:
+    branches: [work/ia64-f10-exceptions]
+    paths:
+      - .github/workflows/ia64-f10-exception-validation.yml
+      - target/ia64/**
+      - tests/ia64/isa/**
+      - scripts/ia64-isa-coverage.py
+      - scripts/run-ia64-fp-exception-tests.py
+      - scripts/run-ia64-f10-tests.py
+      - scripts/run-ia64-f9-tests.py
+      - scripts/run-ia64-fslot-tests.sh
+      - scripts/ia64-fslot-selftest.S
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-f10-exception-validation
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 python3-venv zlib1g-dev
+          python3 -m venv /tmp/fp-venv
+          /tmp/fp-venv/bin/pip install -r tests/ia64/isa/requirements.txt
+
+      - name: Audit, native helper tests, and IVT assembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/fp-exception-evidence
+          /tmp/fp-venv/bin/python scripts/ia64-isa-coverage.py --check --assembler \
+            --evidence-dir scratch/fp-exception-evidence \
+            --output scratch/fp-exception-evidence/observations.json5
+          /tmp/fp-venv/bin/python -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v \
+            2>&1 | tee scratch/fp-exception-evidence/host-tests.txt
+          python3 scripts/run-ia64-fp-exception-tests.py --assemble-only \
+            --out scratch/fp-exception-evidence/ivt-assembly
+          git diff --exit-code
+
+      - name: Build qemu-system-ia64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir build-fp-exceptions
+          (
+            cd build-fp-exceptions
+            ../configure --target-list=ia64-softmmu \
+              --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+              --disable-slirp --disable-werror
+          )
+          ninja -C build-fp-exceptions -j"$(nproc)" qemu-system-ia64
+          test -x build-fp-exceptions/qemu-system-ia64
+
+      - name: Execute IVT and F-unit regression guests
+        shell: bash
+        run: |
+          set -euo pipefail
+          qemu="$PWD/build-fp-exceptions/qemu-system-ia64"
+          python3 scripts/run-ia64-fp-exception-tests.py --qemu "$qemu" \
+            --out scratch/fp-exception-evidence/ivt --timeout 7
+          python3 scripts/run-ia64-f10-tests.py --qemu "$qemu" \
+            --out scratch/fp-exception-evidence/f10 --timeout 10
+          python3 scripts/run-ia64-f9-tests.py --qemu "$qemu" \
+            --out scratch/fp-exception-evidence/f9 --timeout 10
+          QEMU_BIN="$qemu" IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+            IA64_FSLOT_LOGDIR=scratch/fp-exception-evidence/fslot/logs \
+            IA64_FSLOT_OUTDIR=scratch/fp-exception-evidence/fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+
+      - name: Record exact source and emulator
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p scratch/fp-exception-evidence
+          git rev-parse HEAD > scratch/fp-exception-evidence/source-head.txt
+          if test -f build-fp-exceptions/qemu-system-ia64; then
+            cp build-fp-exceptions/qemu-system-ia64 scratch/fp-exception-evidence/
+            sha256sum build-fp-exceptions/qemu-system-ia64 > scratch/fp-exception-evidence/qemu-sha256.txt
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-f10-exception-validation-${{ github.run_id }}
+          path: scratch/fp-exception-evidence/
+          retention-days: 14
+          if-no-files-found: error
