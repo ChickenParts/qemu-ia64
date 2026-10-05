@@ -110,10 +110,11 @@ def generate():
     return '\n'.join(lines) + '\n', count
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
+def run_generated_guest(suite, generator, family_count, pass_marker, fail_marker):
+    """Shared bounded runner. Each suite supplies independent cases and markers."""
+    p = argparse.ArgumentParser(description=f'Generate and execute {suite} raw-FR tests')
     p.add_argument('--qemu', default=os.environ.get('QEMU_BIN', './build/qemu-system-ia64'))
-    p.add_argument('--out', type=Path, default=Path('scratch/ia64-f9'))
+    p.add_argument('--out', type=Path, default=Path('scratch/ia64-' + suite.lower()))
     p.add_argument('--assemble-only', action='store_true')
     p.add_argument('--timeout', type=float, default=5.0)
     args = p.parse_args()
@@ -121,23 +122,23 @@ def main():
         p.error('--timeout must be in (0,60]')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    assembly, count = generate()
-    src, obj, elf = [out / ('f9-selftest.' + ext) for ext in ('S', 'o', 'elf')]
+    assembly, count = generator()
+    src, obj, elf = [out / (suite.lower() + '-selftest.' + ext) for ext in ('S', 'o', 'elf')]
     src.write_text(assembly)
     commands = [('AS', 'as', ['-o', str(obj), str(src)]),
-                ('LD', 'ld', ['-static', '-nostdlib', '-e', '_start', '-Ttext=0x5000000', '-Tdata=0x5800000',
+                ('LD', 'ld', ['-static', '-nostdlib', '-e', '_start', '-Ttext=0x5000000', '-Tdata=0x8000000',
                               '-o', str(elf), str(obj)])]
     for var, name, arguments in commands:
         subprocess.run(shlex.split(os.environ.get('IA64_' + var, 'ia64-linux-gnu-' + name)) + arguments,
                        check=True, timeout=60)
-    evidence = dict(cases=count, families=len(ORACLE.OPS),
+    evidence = dict(cases=count, families=family_count,
                     assembly_sha256=hashlib.sha256(src.read_bytes()).hexdigest(),
                     elf_sha256=hashlib.sha256(elf.read_bytes()).hexdigest(),
                     execution='not-run')
     evidence_path = out / 'result.json5'
     evidence_path.write_text(json.dumps(evidence, indent=2) + '\n')
     if args.assemble_only:
-        print(f'F9 assembly PASS: {count} cases across {len(ORACLE.OPS)} families')
+        print(f'{suite} assembly PASS: {count} cases across {family_count} families')
         return
     qemu = str(Path(args.qemu).resolve())
     log = out / 'qemu.log'
@@ -165,7 +166,7 @@ def main():
                         chunk = stream.read(1024 * 1024)
                     offset += len(chunk)
                     text = tail + chunk.decode(errors='replace')
-                    if PASS in text or FAIL in text or 'IA64 UNIMPL' in text:
+                    if pass_marker in text or fail_marker in text or 'IA64 UNIMPL' in text:
                         break
                     tail = text[-128:]
                     if offset >= limit:
@@ -191,15 +192,19 @@ def main():
                 stream.truncate(limit)
     else:
         text = ''
-    passed = (PASS in text and FAIL not in text and 'IA64 UNIMPL' not in text
+    passed = (pass_marker in text and fail_marker not in text and 'IA64 UNIMPL' not in text
               and not truncated and rc in (0, -15, -9))
     evidence.update(execution='pass' if passed else 'fail', returncode=rc,
                     log_limit_exceeded=truncated,
                     qemu_sha256=hashlib.sha256(Path(qemu).read_bytes()).hexdigest())
     evidence_path.write_text(json.dumps(evidence, indent=2) + '\n')
     if not passed:
-        raise RuntimeError(f'F9 guest FAILED; see {out} (rc={rc})')
-    print(f'F9 execution PASS: {count} cases; raw results, NaTVal, aliases, predication, PSR/FPSR')
+        raise RuntimeError(f'{suite} guest FAILED; see {out} (rc={rc})')
+    print(f'{suite} execution PASS: {count} cases; raw results, NaTVal, aliases, predication, PSR/FPSR')
+
+
+def main():
+    run_generated_guest('F9', generate, len(ORACLE.OPS), PASS, FAIL)
 
 
 if __name__ == '__main__':

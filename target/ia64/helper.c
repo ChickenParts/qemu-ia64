@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "fp-bitops.h"
+#include "fp-convert.h"
 #include "interrupt.h"
 #include "pal.h"
 #include "sal.h"
@@ -2048,6 +2049,50 @@ void HELPER(f9)(CPUIA64State *env, uint64_t insn)
     env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
 }
 
+/*
+ * F10 numerical / masked-event support. Enabled FP exception delivery and
+ * disabled-register faults are an explicit frontier of the shared FP-state
+ * work, not silently ignored controls. Keep state untouched on that frontier.
+ */
+void HELPER(f10)(CPUIA64State *env, uint64_t insn)
+{
+    unsigned f1 = (insn >> 6) & 127;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned sf = (insn >> 34) & 3;
+    int op = ia64_f10_decode(insn);
+    IA64FRBits source;
+    IA64F10Result result;
+    uint64_t disabled = (f1 < IA64_FR_ROT_BASE || f2 < IA64_FR_ROT_BASE ?
+                         IA64_PSR_DFL : 0) |
+                        (f1 >= IA64_FR_ROT_BASE || f2 >= IA64_FR_ROT_BASE ?
+                         IA64_PSR_DFH : 0);
+
+    if (op == IA64_F10_INVALID || f1 <= 1) {
+        ia64_fault(env_cpu(env), env, false, false, IA64_VEC_ILLEGAL_OP,
+                   0, GETPC());
+        g_assert_not_reached();
+    }
+    if (env->psr & disabled) {
+        /* Unsupported exception delivery must not execute the data path. */
+        HELPER(unimpl)(env, env->ip, (env->psr >> 41) & 3, insn,
+                       (uint64_t)(uintptr_t)"F10 disabled-FP delivery unsupported");
+        g_assert_not_reached();
+    }
+    source = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                           HELPER(fr_get_hi)(env, f2) };
+    result = ia64_f10_result(op, source, env->ar[IA64_AR_FPSR], sf);
+    if (result.enabled) {
+        /* V/D fault versus I trap delivery remains #10. Do not fake either. */
+        HELPER(unimpl)(env, env->ip, (env->psr >> 41) & 3, insn,
+                       (uint64_t)(uintptr_t)"F10 enabled-FP exception delivery unsupported");
+        g_assert_not_reached();
+    }
+    HELPER(fr_set_lo)(env, f1, result.value.significand);
+    HELPER(fr_set_hi)(env, f1, result.value.sign_exp);
+    env->ar[IA64_AR_FPSR] |= (uint64_t)result.flags << (13 + 13 * sf);
+    env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
+}
+
 uint64_t HELPER(gr_nat)(CPUIA64State *env, uint32_t gr)
 {
     return ia64_gr_nat_get(env, gr) ? 1 : 0;
@@ -3104,67 +3149,6 @@ uint64_t HELPER(fcmp_s0)(CPUIA64State *env, uint32_t f2, uint32_t f3,
     }
 
     return cond ? 1 : 0;
-}
-
-static void ia64_fcvt_invalid(CPUIA64State *env, const char *op,
-                              uint32_t fsrc, uint64_t expw, uint64_t mant)
-{
-    static uint32_t count;
-
-    if (count++ >= 16) {
-        return;
-    }
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "IA64: %s invalid ip=%016" PRIx64 " f%u expw=%05" PRIx64
-                  " mant=%016" PRIx64 "\n",
-                  op, env->ip, fsrc & 0x7f, (uint64_t)(expw & 0x3ffffULL), mant);
-}
-
-void HELPER(fcvt_fxu_trunc_s1)(CPUIA64State *env, uint32_t f1, uint32_t f2)
-{
-    uint32_t pf1 = ia64_fr_phys(env, f1);
-    uint32_t pf2 = ia64_fr_phys(env, f2);
-    if (pf1 <= 1) {
-        return;
-    }
-
-    uint64_t mant = env->f[pf2][0];
-    uint64_t expw = env->f[pf2][1];
-    uint64_t res = 0;
-
-    if (mant != 0) {
-        bool sign = (expw & 0x20000ULL) != 0;
-        uint64_t exp = expw & 0x1ffffULL;
-        if (exp == 0) {
-            exp = IA64_FP_EXP_INTEGER;
-        }
-
-        if (sign) {
-            res = 0x8000000000000000ULL;
-            ia64_fcvt_invalid(env, "fcvt.fxu.trunc.s1", f2, expw, mant);
-        } else {
-            int64_t shift = (int64_t)exp - (int64_t)IA64_FP_EXP_BIAS - 63;
-            if (shift <= -64) {
-                res = 0;
-            } else if (shift >= 64) {
-                res = 0x8000000000000000ULL;
-                ia64_fcvt_invalid(env, "fcvt.fxu.trunc.s1", f2, expw, mant);
-            } else if (shift >= 0) {
-                __uint128_t v = (__uint128_t)mant << shift;
-                if (v > UINT64_MAX) {
-                    res = 0x8000000000000000ULL;
-                    ia64_fcvt_invalid(env, "fcvt.fxu.trunc.s1", f2, expw, mant);
-                } else {
-                    res = (uint64_t)v;
-                }
-            } else {
-                res = mant >> (-shift);
-            }
-        }
-    }
-
-    env->f[pf1][0] = res;
-    env->f[pf1][1] = IA64_FP_SEXP(0, IA64_FP_EXP_INTEGER);
 }
 
 /*
