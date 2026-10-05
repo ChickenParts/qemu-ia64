@@ -29,6 +29,38 @@ test_fsub:
 test_fmpy:
 	fmpy.s f13 = f6, f7
 	fcmp.eq p6,p7 = f13, f10
+(p6)	br.cond.spnt test_fma_single_general
+	br.sptk.many fail
+
+test_fma_single_general:
+	/* General F1 operands: do not depend on f4==f1 or f2==f0 aliases. */
+	movl r30 = 7
+	setf.sig f22 = r30
+	fma.s.s0 f23 = f6, f7, f9
+	fcmp.eq p6,p7 = f23, f22
+(p6)	br.cond.spnt test_fms_single_general
+	br.sptk.many fail
+
+test_fms_single_general:
+	/* Exercise a non-s0 status field through the same architectural decode. */
+	fms.s.s2 f24 = f7, f6, f9
+	fcmp.eq p6,p7 = f24, f8
+(p6)	br.cond.spnt test_fnma_single_general
+	br.sptk.many fail
+
+test_fnma_single_general:
+	fnma.s.s3 f25 = f6, f7, f9
+	fneg f26 = f8
+	fcmp.eq p6,p7 = f25, f26
+(p6)	br.cond.spnt test_fma_false_predicate
+	br.sptk.many fail
+
+test_fma_false_predicate:
+	/* p7 is false from the successful equality above; f27 must survive. */
+	movl r30 = 5
+	setf.sig f27 = r30
+(p7)	fma.s.s1 f27 = f6, f7, f9
+	fcmp.eq p6,p7 = f27, f8
 (p6)	br.cond.spnt test_fneg_fabs
 	br.sptk.many fail
 

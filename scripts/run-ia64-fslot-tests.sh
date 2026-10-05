@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/run-ia64-fslot-tests.sh [timeout]
 
 Builds and runs a bare-metal IA-64 directed selftest for core F-slot ops:
-`fadd.s`, `fsub.s`, `fmpy.s`, `fneg`, `fabs`, `fcmp.*`, and `fcvt.xf`.
+`fadd.s`, `fsub.s`, `fmpy.s`, general `fma.s`/`fms.s`/`fnma.s`, `fneg`, `fabs`, `fcmp.*`, and `fcvt.xf`.
 
 Arguments:
   timeout   Optional timeout passed to `timeout` (default: 12s)
