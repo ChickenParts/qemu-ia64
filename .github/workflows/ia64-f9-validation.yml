@@ -1,7 +1,7 @@
 name: IA-64 F9 and F10 validation
 on:
   push:
-    branches: [work/ia64-f9-bitops, work/ia64-f10-conversions]
+    branches: [work/ia64-f9-bitops, work/ia64-f10-conversions, work/ia64-f10-exceptions]
     paths:
       - .github/workflows/ia64-f9-validation.yml
       - target/ia64/**
