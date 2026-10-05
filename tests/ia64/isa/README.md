@@ -51,7 +51,7 @@ legality). No target source is modified by this audit tranche.
 
 ## Limits
 
-The 1,864 vectors sample eight operand profiles per form; they are not an
+The 1,864 vectors sample nine operand profiles per form; they are not an
 exhaustive enumeration of operand values. Unused fields are zero. Model
 availability and exhaustive ignored/reserved-bit legality are not audited.
 The 21 additional unassigned opcode observations are **not** a reserved-
