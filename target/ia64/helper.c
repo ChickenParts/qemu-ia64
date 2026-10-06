@@ -3545,7 +3545,12 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
         cpu_abort(cs, "IA64: breaki iim=%016" PRIx64 " ip=%016" PRIx64,
                   iim, env->ip);
     }
-    ia64_fault(cs, env, false, false, IA64_VEC_BREAK, iim, GETPC());
+    /*
+     * BREAK is an instruction fault, but ISR.r/w/x describe memory accesses
+     * and must remain clear here (Ski breakInstFault uses setFaultIRs(0, 0)).
+     */
+    ia64_exception(cs, env, false, false, IA64_VEC_BREAK, iim, 0, 0,
+                   false, false, GETPC());
 }
 
 /*
