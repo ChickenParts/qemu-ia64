@@ -122,6 +122,11 @@ def generate():
     compare(lines, 15, 3)
 
     lines.append('pass:')
+    # terminal() reports PASS with break.m 0.  Point the BREAK vector at the
+    # pass spin first so the reporting break cannot re-enter the last case
+    # handler and manufacture a later FAIL marker.
+    literal(lines, 14, 'pass_spin')
+    emit(lines, 'i', 'mov b6=r14')
     ivt.terminal(lines, PASS, FAIL)
 
     # Real vector stubs dispatch to the case-specific b6 handler.
