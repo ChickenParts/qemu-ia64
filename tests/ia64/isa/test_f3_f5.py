@@ -48,7 +48,8 @@ def compile_harness(directory):
     constants = []
     for name in ('IA64_FR_ROT_BASE','IA64_FR_ROT_SIZE','IA64_CFM_RRBF_SHIFT',
                  'IA64_CFM_RRBF_MASK','IA64_PSR_MFL','IA64_PSR_MFH',
-                 'IA64_PSR_DFL','IA64_PSR_DFH','IA64_FP_EXP_INTEGER'):
+                 'IA64_PSR_DFL','IA64_PSR_DFH','IA64_FP_EXP_BIAS',
+                 'IA64_FP_EXP_INTEGER'):
         lines = [l for l in (source + '\n' + cpu).splitlines()
                  if l.startswith('#define ' + name + ' ')]
         if len(set(lines)) != 1:
@@ -79,12 +80,20 @@ static _Noreturn void ia64_fp_interrupt(CPUIA64State *env, uint32_t vector,
 '''
     exports = r'''
 int run_select(CPUIA64State *env, uint64_t insn) {
-    delivered_code = 0; int fault = setjmp(escape);
-    if (!fault) helper_fselect(env, insn); return fault;
+    delivered_code = 0;
+    int fault = setjmp(escape);
+    if (!fault) {
+        helper_fselect(env, insn);
+    }
+    return fault;
 }
 int run_class(CPUIA64State *env, uint64_t insn) {
-    delivered_code = 0; int fault = setjmp(escape);
-    if (!fault) helper_fclass(env, insn); return fault;
+    delivered_code = 0;
+    int fault = setjmp(escape);
+    if (!fault) {
+        helper_fclass(env, insn);
+    }
+    return fault;
 }
 uint16_t last_code(void) { return delivered_code; }
 uint16_t classify(uint64_t sig, uint64_t se) {
