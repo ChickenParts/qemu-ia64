@@ -22,7 +22,7 @@ The baseline file locks **all vector routes**, not merely this summary. Rebaseli
 
 ## Observed dispatch by family
 
-Form-level observation (not semantic correctness): {'all_probes_accepted': 108, 'all_probes_rejected': 124, 'operand_dependent': 1}.
+Form-level observation (not semantic correctness): {'all_probes_accepted': 121, 'all_probes_rejected': 112}.
 
 | Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |
 |---|---|---:|---:|---|---|
@@ -95,10 +95,10 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 108, 
 | `fpcvt.fx.trunc` | F10 | 4 | 36/36 | `f10`:36 | FP-CONVERT |
 | `fpcvt.fxu.trunc` | F10 | 4 | 36/36 | `f10`:36 | FP-CONVERT |
 | `fcvt.xf` | F11 | 1 | 9/9 | `tcg`:9 | FP-STATE |
-| `fsetc` | F12 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fclrf` | F13 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fchkf` | F14 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `break.f` | F15 | 1 | 1/9 | `none`:1, `unimplemented`:8 | FP-BREAK |
+| `fsetc` | F12 | 4 | 36/36 | `fsetc`:36 | FP-CONTROL |
+| `fclrf` | F13 | 4 | 36/36 | `fclrf`:36 | FP-CONTROL |
+| `fchkf` | F14 | 4 | 36/36 | `tcg`:36 | FP-CHECK |
+| `break.f` | F15 | 1 | 9/9 | `tcg`:9 | FP-BREAK |
 | `nop.f` | F16 | 1 | 9/9 | `none`:9 | HINT |
 | `hint.f` | F16 | 1 | 9/9 | `none`:9 | HINT |
 
@@ -116,7 +116,11 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 108, 
 
 **FP-CONVERT.** All eight F10 scalar/packed data paths use exact integer rounding, selected sf.rc or truncation, V/D/I classification, NaTVal and rotating accessors. Disabled-register faults use architectural PSR bits 18/19 and ISR.r/w/x=0. V/D faults precede result/FPSR/dirty commit; I traps follow it. Separate IVT tests require actual handler entry and verify ISR/IIP/IPSR/IIPA and retry versus resume. These F10 results do not certify the shared FP architecture outside F10 (#10).
 
-**FP-BREAK.** Nonzero break.f falls into UNIMPL; the all-zero break.f word is silently skipped.
+**FP-BREAK.** F15 break.f routes through architectural break delivery for zero/nonzero immediates and obeys normal qp predication. Real-IVT evidence is tracked separately.
+
+**FP-CONTROL.** F12 fsetc derives controls from sf0 and faults on reserved control values; F13 fclrf clears only the selected status-field flags. System-mode evidence is tracked separately.
+
+**FP-CHECK.** F14 fchkf branches on selected flags that are enabled by traps or newly absent from sf0 flags. Generic PSR.tb taken-branch trapping remains target-wide follow-up work.
 
 **FP-SELECT.** F3 fselect uses raw 64-bit significands, propagates NaTVal, checks target/disabled banks before reads, and writes canonical integer-format exponent/sign state. Full-system execution evidence is tracked separately.
 
@@ -156,7 +160,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus F9 header SHA-256: `26228e135095a369035be5b9f993fabc373d6584e5a96431afc5a1328c37d8fc`.
-- All-vector observation SHA-256: `5ce61ba6ab50c49882f1a11e17fc2da1cb00f696a885d295d13a9d82b1a0a688`.
+- F-block plus F9 header SHA-256: `e3a6c738a00e2d295b44fea48707d4740e8be2ba9468d190c98a9b87d80788ed`.
+- All-vector observation SHA-256: `0385b20222acc5daf31ff6d294368717899de6af9f89f368c94c29c651cc9d48`.
 
 No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.
