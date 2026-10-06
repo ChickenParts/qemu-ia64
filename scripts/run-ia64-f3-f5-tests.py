@@ -29,6 +29,13 @@ def generate():
     fill(7,mask,0x12345); fill(8,a,0x22222); fill(9,b,0x33333)
     emit(L,'m','rsm 0x30'); emit(L,'f','fselect f6=f8,f9,f7')
     spill(6,result,0x1003e); count+=1
+    # Ordinary false qualification must suppress the helper entirely.
+    fill(6,0xdeadbeefcafef00d,0x24567)
+    emit(L,'i','cmp.ne p5,p4=r0,r0')
+    emit(L,'f','(p5) fselect f6=f8,f9,f7')
+    spill(6,0xdeadbeefcafef00d,0x24567)
+    emit(L,'m','mov r16=psr'); emit(L,'i','and r16=0x30,r16')
+    compare(L,16,'0x10'); count+=1
     fill(7,0,0x1fffe); fill(8,1<<63,0xffff); fill(9,1<<63,0xffff)
     emit(L,'f','fselect f6=f8,f9,f7'); spill(6,0,0x1fffe); count+=1
     classes=[(0,0x1fffe,0x100),(0xc000000000000001,0x1ffff,0x080),
