@@ -103,7 +103,9 @@ def generate():
                 if f1 not in (f2, f3, f4):
                     fill(f1, sentinel)
                 for reg, value in ((f2, selector), (f3, a), (f4, b)):
-                    if reg > 1 and reg != f1:
+                    # Sources must be initialized even when the destination
+                    # aliases one of them; the helper snapshots before write.
+                    if reg > 1:
                         fill(reg, value)
                 emit('m', 'rsm 0x30')
                 emit('m', 'srlz.d')
