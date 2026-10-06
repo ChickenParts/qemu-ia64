@@ -47,7 +47,7 @@ def spill_check(lines, reg, bits):
     compare(lines, 10, hex(bits[1]))
 
 
-def check_saved(lines, vector, code, fault_label, slot=2):
+def check_saved(lines, vector, code, fault_label, saved_mask=0, slot=2):
     compare(lines, 12, hex(vector))
     emit(lines, 'm', 'mov r9=cr.isr')
     compare(lines, 9, hex((slot << 41) | code))
@@ -58,6 +58,7 @@ def check_saved(lines, vector, code, fault_label, slot=2):
     emit(lines, 'm', 'mov r9=cr.ipsr')
     literal(lines, 14, hex((3 << 41) | DFL | DFH | DIRTY))
     emit(lines, 'i', 'and r9=r9,r14')
+    compare(lines, 9, hex((slot << 41) | saved_mask))
     return slot
 
 
@@ -116,7 +117,7 @@ def generate():
     lines.append('fselect_disabled_handler:')
     compare(lines, 15, 0)
     literal(lines, 15, 1)
-    check_saved(lines, 0x5500, 1, 'fselect_disabled_fault')
+    check_saved(lines, 0x5500, 1, 'fselect_disabled_fault', DFL)
     spill_check(lines, 32, SENTINEL)
     emit(lines, 'm', 'mov r9=ar.fpsr')
     compare(lines, 9, hex(FPSR))
@@ -159,7 +160,7 @@ def generate():
     lines.append('fclass_disabled_handler:')
     compare(lines, 15, 2)
     literal(lines, 15, 3)
-    check_saved(lines, 0x5500, 1, 'fclass_disabled_fault')
+    check_saved(lines, 0x5500, 1, 'fclass_disabled_fault', DFL)
     clear_saved_disable_and_retry(lines, DFL)
 
     # F5: equal predicate destinations are illegal when qualified.
