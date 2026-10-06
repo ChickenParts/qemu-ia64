@@ -54,16 +54,13 @@ def compile_harness(root, directory):
         "void HELPER(fr_set_lo)(",
         "void HELPER(fr_set_hi)(",
         "static uint16_t ia64_fp_disabled_code(",
-        "static unsigned ia64_pr_phys(",
         "void HELPER(fselect)(",
         "uint64_t HELPER(fclass)(",
     ]
     bodies = "\n".join(function(source, s) for s in signatures)
     constants = []
     for name in ("IA64_FR_ROT_BASE", "IA64_FR_ROT_SIZE", "IA64_CFM_RRBF_SHIFT",
-                 "IA64_CFM_RRBF_MASK", "IA64_CFM_RRBP_SHIFT",
-                 "IA64_CFM_RRBP_MASK", "IA64_PR_ROT_BASE",
-                 "IA64_PR_ROT_SIZE", "IA64_PSR_MFL", "IA64_PSR_MFH",
+                 "IA64_CFM_RRBF_MASK", "IA64_PSR_MFL", "IA64_PSR_MFH",
                  "IA64_PSR_DFL", "IA64_PSR_DFH"):
         lines = [l for l in (source + "\n" + cpu).splitlines()
                  if l.startswith("#define " + name + " ")]
@@ -108,9 +105,19 @@ int run_select(CPUIA64State *env, uint64_t insn) {
     if (!fault) helper_fselect(env, insn);
     return fault;
 }
+/*
+ * Harness-only model of translate.c gen_pr_write_bit().  The production path
+ * commits helper-returned bits through TCG; this mirror lets the native helper
+ * tests exercise the API contract without claiming TCG execution coverage.
+ */
 static void write_pr(CPUIA64State *env, unsigned p, unsigned value) {
-    if (p != 0) {
-        uint64_t mask = UINT64_C(1) << p;
+    unsigned phys = p & 63;
+    if (phys >= 16) {
+        unsigned rrbp = (env->cfm >> 32) & 63;
+        phys = 16 + ((phys - 16 + rrbp) % 48);
+    }
+    if (phys != 0) {
+        uint64_t mask = UINT64_C(1) << phys;
         env->pr = value ? (env->pr | mask) : (env->pr & ~mask);
     }
     env->pr |= 1;
