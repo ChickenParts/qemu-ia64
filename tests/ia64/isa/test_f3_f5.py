@@ -107,9 +107,11 @@ int run_select(CPUIA64State *env, uint64_t insn) {
     return fault;
 }
 int run_class(CPUIA64State *env, uint64_t insn) {
+    unsigned qp = insn & 63;
+    uint64_t qual = qp == 0 || ((env->pr >> qp) & 1);
     delivered_code = 0;
     int fault = setjmp(escape);
-    if (!fault) helper_fclass(env, insn);
+    if (!fault) helper_fclass(env, insn, qual);
     return fault;
 }
 """
