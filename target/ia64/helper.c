@@ -2099,19 +2099,6 @@ static unsigned ia64_pr_phys(const CPUIA64State *env, unsigned p)
            ((p - IA64_PR_ROT_BASE + rrbp) % IA64_PR_ROT_SIZE);
 }
 
-static void ia64_pr_write(CPUIA64State *env, unsigned p, bool value)
-{
-    unsigned phys = ia64_pr_phys(env, p);
-
-    if (phys != 0) {
-        if (value) {
-            env->pr |= UINT64_C(1) << phys;
-        } else {
-            env->pr &= ~(UINT64_C(1) << phys);
-        }
-    }
-    env->pr |= 1; /* p0 is hardwired true. */
-}
 
 /* F3 floating-point select: integer-format significand mux. */
 void HELPER(fselect)(CPUIA64State *env, uint64_t insn)
@@ -2151,7 +2138,8 @@ void HELPER(fselect)(CPUIA64State *env, uint64_t insn)
  * form executes when qp is false: it validates distinct predicate targets and
  * clears both predicates without reading a disabled source register.
  */
-void HELPER(fclass)(CPUIA64State *env, uint64_t insn, uint64_t qual_arg)
+uint64_t HELPER(fclass)(CPUIA64State *env, uint64_t insn,
+                         uint64_t qual_arg)
 {
     unsigned qp = insn & 63;
     unsigned p1 = (insn >> 6) & 63;
@@ -2166,15 +2154,13 @@ void HELPER(fclass)(CPUIA64State *env, uint64_t insn, uint64_t qual_arg)
     bool nat_clears, result;
 
     if (!qual && !unc) {
-        return;
+        return 0;
     }
     if (p1 == p2) {
         ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
     }
     if (!qual) {
-        ia64_pr_write(env, p1, false);
-        ia64_pr_write(env, p2, false);
-        return;
+        return 0; /* .unc false qualification clears both predicates. */
     }
 
     disabled_code = ia64_fp_disabled_code(env, 0, f2, 0, 0);
@@ -2186,12 +2172,9 @@ void HELPER(fclass)(CPUIA64State *env, uint64_t insn, uint64_t qual_arg)
                            HELPER(fr_get_hi)(env, f2) };
     result = ia64_fclass_relation(value, fclass9, &nat_clears);
     if (nat_clears) {
-        ia64_pr_write(env, p1, false);
-        ia64_pr_write(env, p2, false);
-    } else {
-        ia64_pr_write(env, p1, result);
-        ia64_pr_write(env, p2, !result);
+        return 0;
     }
+    return result ? 1 : 2; /* bit0=p1, bit1=p2 */
 }
 
 /*
