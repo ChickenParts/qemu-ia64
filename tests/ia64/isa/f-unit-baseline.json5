@@ -1,14 +1,13 @@
 // Known-gap measurement; NOT an ISA correctness certificate.
 {
   "schema_version": 1,
-  "source_f_block_sha256": "26228e135095a369035be5b9f993fabc373d6584e5a96431afc5a1328c37d8fc",
-  "observations_sha256": "5ce61ba6ab50c49882f1a11e17fc2da1cb00f696a885d295d13a9d82b1a0a688",
+  "source_f_block_sha256": "e3a6c738a00e2d295b44fea48707d4740e8be2ba9468d190c98a9b87d80788ed",
+  "observations_sha256": "0385b20222acc5daf31ff6d294368717899de6af9f89f368c94c29c651cc9d48",
   "vectors": 2097,
   "forms": 233,
   "form_dispositions": {
-    "all_probes_accepted": 108,
-    "all_probes_rejected": 124,
-    "operand_dependent": 1
+    "all_probes_accepted": 121,
+    "all_probes_rejected": 112
   },
   "unassigned_vectors": 21,
   "unassigned_observations_sha256": "85ff94a3169719ff8495751e4866526a05457643faed3459f79045dd95016879",
@@ -16,15 +15,17 @@
     "f10": 288,
     "f9": 171,
     "fclass": 18,
+    "fclrf": 36,
     "fcmp_s0": 72,
     "fma_s1": 96,
     "fms_s1": 108,
     "fnma_s1": 108,
     "frcpa_s1": 36,
     "fselect": 9,
-    "none": 19,
-    "tcg": 21,
-    "unimplemented": 1124,
+    "fsetc": 36,
+    "none": 18,
+    "tcg": 66,
+    "unimplemented": 1008,
     "xma_h": 9,
     "xma_hu": 9,
     "xma_l": 9

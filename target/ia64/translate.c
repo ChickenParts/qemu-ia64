@@ -1618,6 +1618,25 @@ static void gen_set_ri_const(uint8_t ri)
     tcg_gen_mov_i64(cpu_psr, t);
 }
 
+static void gen_fchkf_branch(DisasContext *ctx, uint64_t insn)
+{
+    unsigned sf = extract64(insn, 34, 2);
+    uint64_t imm = (extract64(insn, 36, 1) << 20) |
+                   extract64(insn, 6, 20);
+    int64_t disp = sextract64(imm, 0, 21) << 4;
+    uint64_t target = ctx->base.pc_next + disp;
+    TCGv_i64 cond = tcg_temp_new_i64();
+    TCGLabel *not_taken = gen_new_label();
+
+    gen_helper_fchkf_cond(cond, tcg_env, tcg_constant_i32(sf));
+    tcg_gen_brcondi_i64(TCG_COND_EQ, cond, 0, not_taken);
+    gen_record_branch(ctx, insn, 4, tcg_constant_i64(target));
+    tcg_gen_movi_i64(cpu_pc, target);
+    gen_set_ri_const(0);
+    tcg_gen_exit_tb(NULL, 0);
+    gen_set_label(not_taken);
+}
+
 static void gen_a_unit_nat1(uint8_t dst, uint8_t src)
 {
     if (dst == 0) {
@@ -7593,12 +7612,50 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         break;
     case SLOT_F:
         /* F-unit instructions (minimal subset for kernel/libgcc helpers). */
-        if (insn != 0) {
+        {
             uint8_t qp = insn & 0x3f;
             uint8_t f_major = (insn >> 37) & 0xf;
             bool fclass_unc = f_major == 0x5 && extract64(insn, 12, 1);
             TCGLabel *skip = fclass_unc ? NULL : gen_qp_skip(qp);
             bool handled = false;
+
+            uint8_t f_x = extract64(insn, 33, 1);
+            uint8_t f_x6 = extract64(insn, 27, 6);
+
+            /*
+             * F15 break.f aliases architectural break instruction delivery.
+             * Treat the all-zero word as break.f 0 rather than an empty slot.
+             * Bits 35:34 and bit 26 are ignored by F15.
+             */
+            if (!handled && f_major == 0x0 && f_x == 0 && f_x6 == 0) {
+                uint64_t imm = (extract64(insn, 36, 1) << 20) |
+                               extract64(insn, 6, 20);
+                gen_break_common(ctx, insn, imm, qp, "F-slot break");
+                handled = true;
+            }
+
+            /* F12 fsetc.sf amask7,omask7; bits 36 and 12:6 are ignored. */
+            if (!handled && f_major == 0x0 && f_x == 0 && f_x6 == 4) {
+                gen_helper_fsetc(tcg_env, tcg_constant_i64(insn));
+                handled = true;
+            }
+
+            /* F13 fclrf.sf; bits 36 and 26:6 are ignored. */
+            if (!handled && f_major == 0x0 && f_x == 0 && f_x6 == 5) {
+                gen_helper_fclrf(tcg_env,
+                                 tcg_constant_i32(extract64(insn, 34, 2)));
+                handled = true;
+            }
+
+            /*
+             * F14 fchkf.sf target25.  The qp skip is outside this block;
+             * helper evaluation is pure and the translator owns the branch.
+             * Generic PSR.tb taken-branch traps remain a target-wide gap.
+             */
+            if (!handled && f_major == 0x0 && f_x == 0 && f_x6 == 8) {
+                gen_fchkf_branch(ctx, insn);
+                handled = true;
+            }
 
             /* nop.f / hint.f */
             if (f_major == 0x0 &&

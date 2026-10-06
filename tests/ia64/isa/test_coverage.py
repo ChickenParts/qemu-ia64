@@ -214,9 +214,11 @@ class CoverageTests(unittest.TestCase):
         for v in selected:
             self.assertEqual(self.routes[v['id']], 'f10', v['id'])
 
-    def test_known_break_zero_skip(self):
-        self.assertEqual(AUDIT.probe(self.executable, [0]), ['none'])
-        self.assertEqual(self.routes['break.f/alias'], 'unimplemented')
+    def test_break_f_zero_and_nonzero_reach_architectural_path(self):
+        # Word zero is the valid encoding of break.f 0, not an empty F slot.
+        self.assertEqual(AUDIT.probe(self.executable, [0]), ['tcg'])
+        for profile in AUDIT.PROFILES:
+            self.assertEqual(self.routes[f'break.f/{profile}'], 'tcg')
 
     def test_production_decoder_mutation_is_detected(self):
         root = self.modified_root()

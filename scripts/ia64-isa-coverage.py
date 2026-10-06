@@ -31,9 +31,10 @@ EMITTERS = '''gen_set_label gen_set_predicates gen_fr_load_lo gen_fr_load_hi
  gen_fr_store_lo gen_fr_store_hi tcg_gen_andi_i64 tcg_gen_xori_i64
  tcg_gen_brcondi_i64 tcg_gen_mov_i64 tcg_gen_movi_i64 tcg_gen_sub_i64
  tcg_gen_clzi_i64 tcg_gen_shl_i64 tcg_gen_or_i64 tcg_gen_br
- tcg_gen_shri_i64 tcg_gen_neg_i64 tcg_gen_shli_i64'''.split()
+ tcg_gen_shri_i64 tcg_gen_neg_i64 tcg_gen_shli_i64
+ gen_fchkf_branch gen_break_common'''.split()
 HELPERS = '''fcmp_s0 fma_s1 fms_s1 fnma_s1 frcpa_s1
- xma_l xma_hu xma_h f9 f10 fselect fclass'''.split()
+ xma_l xma_hu xma_h f9 f10 fselect fclass fsetc fclrf'''.split()
 
 
 def digest(data):
@@ -201,7 +202,10 @@ static void gen_pr_write_bit(unsigned p, uintptr_t value)
 { (void)p; (void)value; }
 static void record(const char *name, ...) {
     if (strncmp(name, "gen_helper_", 11) == 0) { route = name + 11; }
-    else if (strncmp(name, "gen_fr_", 7) == 0 && strcmp(route, "none") == 0)
+    else if ((strncmp(name, "gen_fr_", 7) == 0 ||
+              strcmp(name, "gen_fchkf_branch") == 0 ||
+              strcmp(name, "gen_break_common") == 0) &&
+             strcmp(route, "none") == 0)
         route = "tcg";
 }
 static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)

@@ -2160,6 +2160,55 @@ uint64_t HELPER(fclass)(CPUIA64State *env, uint64_t insn,
 }
 
 /*
+ * F12/F13/F14 FPSR-control helpers.  FPSR status fields are laid out from
+ * least-significant bits as traps[5:0], then sf0..sf3 with seven control bits
+ * followed by six flag bits.
+ */
+void HELPER(fsetc)(CPUIA64State *env, uint64_t insn)
+{
+    unsigned sf = (insn >> 34) & 3;
+    unsigned amask = (insn >> 13) & 0x7f;
+    unsigned omask = (insn >> 20) & 0x7f;
+    unsigned shift = 6 + 13 * sf;
+    uint64_t fpsr = env->ar[IA64_AR_FPSR];
+    unsigned sf0_controls = (fpsr >> 6) & 0x7f;
+    unsigned controls = (sf0_controls & amask) | omask;
+    unsigned pc = (controls >> 2) & 3;
+
+    /*
+     * fsetc always derives the new controls from sf0.  Precision-control
+     * encoding 1 is reserved for every status field; sf0 additionally
+     * reserves TD=1.
+     */
+    if (pc == 1 || (sf == 0 && (controls & 0x40))) {
+        ia64_fp_interrupt(env, IA64_VEC_GENERAL_EXCEPTION, 0x30, 0,
+                          false, GETPC());
+    }
+
+    fpsr &= ~(UINT64_C(0x7f) << shift);
+    fpsr |= (uint64_t)controls << shift;
+    env->ar[IA64_AR_FPSR] = fpsr;
+}
+
+void HELPER(fclrf)(CPUIA64State *env, uint32_t sf)
+{
+    unsigned shift = 13 + 13 * (sf & 3);
+
+    env->ar[IA64_AR_FPSR] &= ~(UINT64_C(0x3f) << shift);
+}
+
+uint64_t HELPER(fchkf_cond)(CPUIA64State *env, uint32_t sf)
+{
+    uint64_t fpsr = env->ar[IA64_AR_FPSR];
+    unsigned flags = (fpsr >> (13 + 13 * (sf & 3))) & 0x3f;
+    unsigned traps = fpsr & 0x3f;
+    unsigned sf0_flags = (fpsr >> 13) & 0x3f;
+
+    return ((flags & (~traps & 0x3f)) ||
+            (flags & (~sf0_flags & 0x3f))) ? 1 : 0;
+}
+
+/*
  * F9 bit operations.  Source snapshots precede every destination write so
  * f1=f2, f1=f3 and f2=f3 are safe, including rotating FRs.
  * Target legality precedes disabled-bank faults, which precede NaTVal and
@@ -3496,7 +3545,12 @@ void HELPER(breaki)(CPUIA64State *env, uint64_t iim)
         cpu_abort(cs, "IA64: breaki iim=%016" PRIx64 " ip=%016" PRIx64,
                   iim, env->ip);
     }
-    ia64_fault(cs, env, false, false, IA64_VEC_BREAK, iim, GETPC());
+    /*
+     * BREAK is an instruction fault, but ISR.r/w/x describe memory accesses
+     * and must remain clear here (Ski breakInstFault uses setFaultIRs(0, 0)).
+     */
+    ia64_exception(cs, env, false, false, IA64_VEC_BREAK, iim, 0, 0,
+                   false, false, GETPC());
 }
 
 /*
