@@ -2124,7 +2124,6 @@ void HELPER(fselect)(CPUIA64State *env, uint64_t insn)
 uint64_t HELPER(fclass)(CPUIA64State *env, uint64_t insn,
                          uint64_t qual_arg)
 {
-    unsigned qp = insn & 63;
     unsigned p1 = (insn >> 6) & 63;
     bool unc = ((insn >> 12) & 1) != 0;
     unsigned f2 = (insn >> 13) & 127;
