@@ -145,8 +145,12 @@ static inline uint64_t ia64_fw_encode_addr(uint64_t template, uint64_t phys)
 #define IA64_CFM_SOR_MASK  0xfULL
 #define IA64_CFM_RRBF_SHIFT 25
 #define IA64_CFM_RRBF_MASK  0x7fULL
+#define IA64_CFM_RRBP_SHIFT 32
+#define IA64_CFM_RRBP_MASK  0x3fULL
 #define IA64_PFM_MASK       ((UINT64_C(1) << 38) - 1)
 
+#define IA64_PR_ROT_BASE 16
+#define IA64_PR_ROT_SIZE 48
 #define IA64_FR_ROT_BASE 32
 #define IA64_FR_ROT_SIZE 96
 
@@ -2082,14 +2086,28 @@ static uint16_t ia64_fp_disabled_code(CPUIA64State *env, unsigned f1,
     return code;
 }
 
+static unsigned ia64_pr_phys(const CPUIA64State *env, unsigned p)
+{
+    unsigned rrbp;
+
+    p &= 63;
+    if (p < IA64_PR_ROT_BASE) {
+        return p;
+    }
+    rrbp = (env->cfm >> IA64_CFM_RRBP_SHIFT) & IA64_CFM_RRBP_MASK;
+    return IA64_PR_ROT_BASE +
+           ((p - IA64_PR_ROT_BASE + rrbp) % IA64_PR_ROT_SIZE);
+}
+
 static void ia64_pr_write(CPUIA64State *env, unsigned p, bool value)
 {
-    p &= 63;
-    if (p != 0) {
+    unsigned phys = ia64_pr_phys(env, p);
+
+    if (phys != 0) {
         if (value) {
-            env->pr |= UINT64_C(1) << p;
+            env->pr |= UINT64_C(1) << phys;
         } else {
-            env->pr &= ~(UINT64_C(1) << p);
+            env->pr &= ~(UINT64_C(1) << phys);
         }
     }
     env->pr |= 1; /* p0 is hardwired true. */
