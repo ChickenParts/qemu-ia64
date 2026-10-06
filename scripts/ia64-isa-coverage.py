@@ -197,6 +197,8 @@ static TCGLabel *gen_qp_skip(unsigned qp)
 { return qp ? gen_new_label() : NULL; }
 static uintptr_t gen_pr_read_bit(unsigned qp)
 { (void)qp; return 1; }
+static void gen_pr_write_bit(unsigned p, uintptr_t value)
+{ (void)p; (void)value; }
 static void record(const char *name, ...) {
     if (strncmp(name, "gen_helper_", 11) == 0) { route = name + 11; }
     else if (strncmp(name, "gen_fr_", 7) == 0 && strcmp(route, "none") == 0)
