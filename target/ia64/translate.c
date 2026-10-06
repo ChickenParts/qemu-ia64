@@ -7595,8 +7595,9 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         /* F-unit instructions (minimal subset for kernel/libgcc helpers). */
         if (insn != 0) {
             uint8_t qp = insn & 0x3f;
-            TCGLabel *skip = gen_qp_skip(qp);
             uint8_t f_major = (insn >> 37) & 0xf;
+            bool fclass_unc = f_major == 0x5 && extract64(insn, 12, 1);
+            TCGLabel *skip = fclass_unc ? NULL : gen_qp_skip(qp);
             bool handled = false;
 
             /* nop.f / hint.f */
@@ -7608,6 +7609,37 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                     gen_set_label(skip);
                 }
                 break;
+            }
+
+            if (!handled && f_major == 0x5) {
+                /*
+                 * F5 fclass.m{,.unc}: the helper validates/faults and returns
+                 * predicate-result bits. Commit PR writes in TCG so cpu_pr
+                 * stays coherent with following instructions in the same TB.
+                 * .unc still receives the live qp value because it executes
+                 * even when that predicate is false.
+                 */
+                uint8_t p1 = extract64(insn, 6, 6);
+                uint8_t p2 = extract64(insn, 27, 6);
+                TCGv_i64 qual = gen_pr_read_bit(qp);
+                TCGv_i64 pred_bits = tcg_temp_new_i64();
+                TCGv_i64 p1v = tcg_temp_new_i64();
+                TCGv_i64 p2v = tcg_temp_new_i64();
+
+                gen_helper_fclass(pred_bits, tcg_env,
+                                  tcg_constant_i64(insn), qual);
+                tcg_gen_andi_i64(p1v, pred_bits, 1);
+                tcg_gen_shri_i64(p2v, pred_bits, 1);
+                tcg_gen_andi_i64(p2v, p2v, 1);
+                gen_pr_write_bit(p1, p1v);
+                gen_pr_write_bit(p2, p2v);
+                handled = true;
+            }
+
+            if (!handled && f_major == 0xE && extract64(insn, 36, 1) == 0) {
+                /* F3 fselect: bits 35:34 are ignored by this format. */
+                gen_helper_fselect(tcg_env, tcg_constant_i64(insn));
+                handled = true;
             }
 
             if (!handled && f_major == 0x4 && extract64(insn, 34, 2) == 0) {

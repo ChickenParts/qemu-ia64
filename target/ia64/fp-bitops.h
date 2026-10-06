@@ -69,6 +69,72 @@ static inline bool ia64_f9_is_natval(IA64FRBits v)
     return v.significand == 0 && (v.sign_exp & 0x3ffff) == 0x1fffe;
 }
 
+/*
+ * F3 fselect and F5 fclass are raw-register operations. Keep them out of
+ * host floating point so NaTVal, unsupported encodings and unnormalized
+ * values remain distinguishable.
+ */
+static inline IA64FRBits ia64_fselect_result(IA64FRBits when_true,
+                                             IA64FRBits when_false,
+                                             IA64FRBits selector)
+{
+    if (ia64_f9_is_natval(when_true) ||
+        ia64_f9_is_natval(when_false) ||
+        ia64_f9_is_natval(selector)) {
+        return (IA64FRBits) { 0, 0x1fffe };
+    }
+    return (IA64FRBits) {
+        (when_true.significand & selector.significand) |
+        (when_false.significand & ~selector.significand),
+        0x1003e
+    };
+}
+
+/*
+ * Fclass9 bits: 8 NaT, 7 qNaN, 6 sNaN, 5 inf, 4 normal, 3 unnormal,
+ * 2 zero, 1 negative, 0 positive. Unsupported register-format values
+ * match no class.
+ */
+static inline bool ia64_fclass_relation(IA64FRBits value, unsigned fclass9,
+                                        bool *nat_clears)
+{
+    uint64_t significand = value.significand;
+    unsigned exponent = value.sign_exp & 0x1ffff;
+    bool sign = (value.sign_exp & 0x20000) != 0;
+    bool integer_bit = (significand >> 63) != 0;
+    bool nat = ia64_f9_is_natval(value);
+    bool inf, qnan, snan, unsupported, zero, unorm, normal, sign_match;
+
+    if (nat) {
+        *nat_clears = (fclass9 & 0x100) == 0;
+        return (fclass9 & 0x100) != 0;
+    }
+    *nat_clears = false;
+
+    inf = exponent == 0x1ffff &&
+          significand == UINT64_C(0x8000000000000000);
+    qnan = exponent == 0x1ffff && integer_bit && !inf &&
+           (significand & UINT64_C(0x4000000000000000));
+    snan = exponent == 0x1ffff && integer_bit && !inf && !qnan;
+    unsupported = exponent == 0x1ffff && !integer_bit;
+    zero = !unsupported && !inf && !qnan && !snan &&
+           significand == 0 && exponent == 0;
+    unorm = !unsupported && !inf && !qnan && !snan && !zero &&
+             ((significand == 0 && exponent != 0) ||
+              (significand != 0 && (exponent == 0 || !integer_bit)));
+    normal = !unsupported && !inf && !qnan && !snan && !zero && !unorm;
+    sign_match = (!sign && (fclass9 & 0x001)) ||
+                 (sign && (fclass9 & 0x002));
+
+    return (sign_match &&
+            ((zero && (fclass9 & 0x004)) ||
+             (unorm && (fclass9 & 0x008)) ||
+             (normal && (fclass9 & 0x010)) ||
+             (inf && (fclass9 & 0x020)))) ||
+           (snan && (fclass9 & 0x040)) ||
+           (qnan && (fclass9 & 0x080));
+}
+
 static inline uint32_t ia64_f9_single_bits(IA64FRBits v)
 {
     /*

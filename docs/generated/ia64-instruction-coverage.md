@@ -22,7 +22,7 @@ The baseline file locks **all vector routes**, not merely this summary. Rebaseli
 
 ## Observed dispatch by family
 
-Form-level observation (not semantic correctness): {'all_probes_accepted': 105, 'all_probes_rejected': 127, 'operand_dependent': 1}.
+Form-level observation (not semantic correctness): {'all_probes_accepted': 108, 'all_probes_rejected': 124, 'operand_dependent': 1}.
 
 | Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |
 |---|---|---:|---:|---|---|
@@ -41,12 +41,12 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 105, 
 | `xma.l` | F2 | 1 | 9/9 | `xma_l`:9 | FP-STATE |
 | `xma.hu` | F2 | 1 | 9/9 | `xma_hu`:9 | FP-STATE |
 | `xma.h` | F2 | 1 | 9/9 | `xma_h`:9 | FP-STATE |
-| `fselect` | F3 | 1 | 0/9 | `unimplemented`:9 | MISSING |
+| `fselect` | F3 | 1 | 9/9 | `fselect`:9 | FP-SELECT |
 | `fcmp.eq` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
 | `fcmp.lt` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
 | `fcmp.le` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
 | `fcmp.unord` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
-| `fclass.m` | F5 | 2 | 0/18 | `unimplemented`:18 | MISSING |
+| `fclass.m` | F5 | 2 | 18/18 | `fclass`:18 | FP-CLASS |
 | `frcpa` | F6 | 4 | 36/36 | `frcpa_s1`:36 | FP-APPROX |
 | `frsqrta` | F7 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
 | `fprcpa` | F6 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
@@ -118,6 +118,10 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 105, 
 
 **FP-BREAK.** Nonzero break.f falls into UNIMPL; the all-zero break.f word is silently skipped.
 
+**FP-SELECT.** F3 fselect uses raw 64-bit significands, propagates NaTVal, checks target/disabled banks before reads, and writes canonical integer-format exponent/sign state. Full-system execution evidence is tracked separately.
+
+**FP-CLASS.** F5 fclass implements sign/class masks, NaTVal predicate clearing, distinct-target legality, architectural disabled-bank checks, and .unc false-predicate clearing without host floating point. Full-system execution evidence is tracked separately.
+
 **HINT.** NOP/hint decode observed; hint no-op policy is allowed, but this emission audit is not an execution proof.
 
 **MISSING.** No dedicated production implementation observed for this family.
@@ -152,7 +156,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus F9 header SHA-256: `d93e40bba35e48df4eeaa6c261f4340e495269f936d13973ba1496f99873cc4c`.
-- All-vector observation SHA-256: `de60ce5af6189bde17f26869fc8d1d301640172c4bbd32fe2ede3f7c1cd9ebbd`.
+- F-block plus F9 header SHA-256: `26228e135095a369035be5b9f993fabc373d6584e5a96431afc5a1328c37d8fc`.
+- All-vector observation SHA-256: `5ce61ba6ab50c49882f1a11e17fc2da1cb00f696a885d295d13a9d82b1a0a688`.
 
 No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.

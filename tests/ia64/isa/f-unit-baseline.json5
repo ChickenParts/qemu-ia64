@@ -1,13 +1,13 @@
 // Known-gap measurement; NOT an ISA correctness certificate.
 {
   "schema_version": 1,
-  "source_f_block_sha256": "d93e40bba35e48df4eeaa6c261f4340e495269f936d13973ba1496f99873cc4c",
-  "observations_sha256": "de60ce5af6189bde17f26869fc8d1d301640172c4bbd32fe2ede3f7c1cd9ebbd",
+  "source_f_block_sha256": "26228e135095a369035be5b9f993fabc373d6584e5a96431afc5a1328c37d8fc",
+  "observations_sha256": "5ce61ba6ab50c49882f1a11e17fc2da1cb00f696a885d295d13a9d82b1a0a688",
   "vectors": 2097,
   "forms": 233,
   "form_dispositions": {
-    "all_probes_accepted": 105,
-    "all_probes_rejected": 127,
+    "all_probes_accepted": 108,
+    "all_probes_rejected": 124,
     "operand_dependent": 1
   },
   "unassigned_vectors": 21,
@@ -15,14 +15,16 @@
   "routes": {
     "f10": 288,
     "f9": 171,
+    "fclass": 18,
     "fcmp_s0": 72,
     "fma_s1": 96,
     "fms_s1": 108,
     "fnma_s1": 108,
     "frcpa_s1": 36,
+    "fselect": 9,
     "none": 19,
     "tcg": 21,
-    "unimplemented": 1151,
+    "unimplemented": 1124,
     "xma_h": 9,
     "xma_hu": 9,
     "xma_l": 9

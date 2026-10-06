@@ -33,7 +33,7 @@ EMITTERS = '''gen_set_label gen_set_predicates gen_fr_load_lo gen_fr_load_hi
  tcg_gen_clzi_i64 tcg_gen_shl_i64 tcg_gen_or_i64 tcg_gen_br
  tcg_gen_shri_i64 tcg_gen_neg_i64 tcg_gen_shli_i64'''.split()
 HELPERS = '''fcmp_s0 fma_s1 fms_s1 fnma_s1 frcpa_s1
- xma_l xma_hu xma_h f9 f10'''.split()
+ xma_l xma_hu xma_h f9 f10 fselect fclass'''.split()
 
 
 def digest(data):
@@ -195,6 +195,10 @@ static uintptr_t tcg_constant_i64(uint64_t v) { return v; }
 static TCGLabel *gen_new_label(void) { static TCGLabel l; return &l; }
 static TCGLabel *gen_qp_skip(unsigned qp)
 { return qp ? gen_new_label() : NULL; }
+static uintptr_t gen_pr_read_bit(unsigned qp)
+{ (void)qp; return 1; }
+static void gen_pr_write_bit(unsigned p, uintptr_t value)
+{ (void)p; (void)value; }
 static void record(const char *name, ...) {
     if (strncmp(name, "gen_helper_", 11) == 0) { route = name + 11; }
     else if (strncmp(name, "gen_fr_", 7) == 0 && strcmp(route, "none") == 0)
