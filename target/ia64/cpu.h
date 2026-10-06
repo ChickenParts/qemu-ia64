@@ -367,14 +367,12 @@ struct IA64CPUClass {
 #define IA64_PSR_AC       (1ULL << 3)   /* Alignment Check */
 #define IA64_PSR_MFL      (1ULL << 4)   /* Lower FP registers modified */
 #define IA64_PSR_MFH      (1ULL << 5)   /* Upper FP registers modified */
-#define IA64_PSR_DFL      (1ULL << 6)   /* Lower FP registers disabled */
-#define IA64_PSR_DFH      (1ULL << 7)   /* Upper FP registers disabled */
+#define IA64_PSR_DFL      (1ULL << 18)  /* Lower FP registers disabled */
+#define IA64_PSR_DFH      (1ULL << 19)  /* Upper FP registers disabled */
 #define IA64_PSR_IC       (1ULL << 13)  /* Interruption Collection */
 #define IA64_PSR_I        (1ULL << 14)  /* Interrupt enable */
 #define IA64_PSR_PK       (1ULL << 15)  /* Protection Key enable */
 #define IA64_PSR_DT       (1ULL << 17)  /* Data Translation */
-#define IA64_PSR_DFI      (1ULL << 18)  /* Disable FP Interlock */
-#define IA64_PSR_DII      (1ULL << 19)  /* Disable Instruction set trans */
 #define IA64_PSR_SP       (1ULL << 20)  /* Secure Performance monitors */
 #define IA64_PSR_PP       (1ULL << 21)  /* Privileged Perf monitor enable */
 #define IA64_PSR_DI       (1ULL << 22)  /* Disable Instruction set trans */

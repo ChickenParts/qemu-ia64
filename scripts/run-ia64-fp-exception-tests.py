@@ -86,6 +86,7 @@ def generate(case):
     vector, passed, failed = CASES[case]
     lines = ['.text', '.explicit', '.align 16', '.global _start', '_start:']
     common_start(lines)
+    literal(lines, 15, 0)  # actual IVT-entry count; r15 is unbanked
 
     literal(lines, 14, 'source')
     emit(lines, 'm', 'ldf.fill f7=[r14]')
@@ -93,11 +94,12 @@ def generate(case):
         literal(lines, 20, '63')
         emit(lines, 'm', 'mov ar.fpsr=r20')
         emit(lines, 'm', 'rsm 0x10')
-        emit(lines, 'm', 'ssm 0x40')
+        emit(lines, 'm', 'ssm 0x40000')
         emit(lines, 'm', 'srlz.d')
         lines.append('fault_bundle:')
         emit(lines, 'f', 'fcvt.fx.s0 f6=f7')
         lines.append('after_retry:')
+        compare(lines, 15, 1)
         emit(lines, 'm', 'getf.sig r9=f6')
         compare(lines, 9, '1')
         emit(lines, 'm', 'getf.exp r9=f6')
@@ -115,6 +117,7 @@ def generate(case):
         lines.append('fault_bundle:')
         emit(lines, 'f', 'fcvt.fx.s0 f6=f7')
         lines.append('after_retry:')
+        compare(lines, 15, 1)
         emit(lines, 'm', 'getf.sig r9=f6')
         compare(lines, 9, '0x8000000000000000')
         emit(lines, 'm', 'getf.exp r9=f6')
@@ -130,23 +133,29 @@ def generate(case):
         lines.append('fault_bundle:')
         emit(lines, 'f', 'fcvt.fx.s0 f6=f7')
         lines.append('after_trap:')
+        compare(lines, 15, 1)
         emit(lines, 'b', 'br.cond.sptk pass')
 
     # Reserve an aligned IVT base and place this case's vector at base+offset.
     lines += [f'.org {IVT_OFFSET}', 'ivt_base:',
               f'.org {IVT_OFFSET + vector}', 'handler:']
 
+    # A correct result alone cannot prove that the IVT handler executed.
+    compare(lines, 15, 0)
+    literal(lines, 15, 1)
     ei = 2 << 41
     if case == 'disabled':
-        # Low-bank code bit, plus source read and destination write.
-        check_fault_common(lines, ei | (1 << 34) | (1 << 33) | 1,
-                           'fault_bundle')
+        # DFL is architectural bit 18. ISR.r/w/x are memory-access bits,
+        # so all three are zero for this register-only conversion.
+        check_fault_common(lines, ei | 1, 'fault_bundle')
         emit(lines, 'm', 'mov r9=cr.ipsr')
-        emit(lines, 'i', 'and r10=0x40,r9')
-        compare(lines, 10, '0x40')
+        literal(lines, 14, '0x40000')
+        emit(lines, 'i', 'and r10=r14,r9')
+        compare(lines, 10, '0x40000')
         # Clear DFL in the saved PSR, then rfi.  The fault must retry the
         # original F10 slot and fall through to after_retry.
-        emit(lines, 'i', 'andcm r9=0x40,r9')
+        literal(lines, 14, '0x40000')
+        emit(lines, 'i', 'andcm r9=r9,r14')
         emit(lines, 'm', 'mov cr.ipsr=r9')
         emit(lines, 'b', 'rfi')
     elif case == 'invalid':
@@ -204,14 +213,15 @@ def generate(case):
     return '\n'.join(lines) + '\n'
 
 
-def run_one(case, args):
-    vector, passed, failed = CASES[case]
+def run_one(case, args, *, case_spec=None, source=None):
+    """Assemble and execute a fixture; shared with F9 register-fault tests."""
+    vector, passed, failed = CASES[case] if case_spec is None else case_spec
     pass_text = f"r8={int(passed, 0):016x}"
     fail_text = f"r8={int(failed, 0):016x}"
     out = args.out / case
     out.mkdir(parents=True, exist_ok=True)
     src, obj, elf = [out / ('fp-exception.' + ext) for ext in ('S', 'o', 'elf')]
-    src.write_text(generate(case))
+    src.write_text(generate(case) if source is None else source)
     as_cmd = shlex.split(os.environ.get('IA64_AS', 'ia64-linux-gnu-as'))
     ld_cmd = shlex.split(os.environ.get('IA64_LD', 'ia64-linux-gnu-ld'))
     subprocess.run(as_cmd + ['-o', str(obj), str(src)], check=True, timeout=60)

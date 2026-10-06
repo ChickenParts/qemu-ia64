@@ -124,12 +124,14 @@ def compile_harness(root, directory):
     signatures = ['static inline uint32_t ia64_fr_phys(',
                   'uint64_t HELPER(fr_get_lo)(', 'uint64_t HELPER(fr_get_hi)(',
                   'void HELPER(fr_set_lo)(', 'void HELPER(fr_set_hi)(',
+                  'static uint16_t ia64_fp_disabled_code(',
                   'void HELPER(f9)(']
     bodies = '\n'.join(function(source, s) for s in signatures)
     # Use production constants as well as bodies, rather than testing a mirror.
     constants = []
     for name in ('IA64_FR_ROT_BASE', 'IA64_FR_ROT_SIZE', 'IA64_CFM_RRBF_SHIFT',
-                 'IA64_CFM_RRBF_MASK', 'IA64_PSR_MFL', 'IA64_PSR_MFH'):
+                 'IA64_CFM_RRBF_MASK', 'IA64_PSR_MFL', 'IA64_PSR_MFH',
+                 'IA64_PSR_DFL', 'IA64_PSR_DFH'):
         lines = [l for l in (source + '\n' + cpu).splitlines()
                  if l.startswith('#define ' + name + ' ')]
         if len(set(lines)) != 1:
@@ -142,16 +144,24 @@ def compile_harness(root, directory):
 #include "fp-bitops.h"
 typedef struct CPUIA64State { uint64_t f[128][2], cfm, psr; } CPUIA64State;
 #define HELPER(x) helper_##x
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define env_cpu(e) (e)
 #define GETPC() 0
 #define IA64_VEC_ILLEGAL_OP 0x5400
+#define IA64_VEC_DISABLED_FP 0x5500
 #define g_assert_not_reached() abort()
 static jmp_buf escape;
-static bool ia64_fault(void *cpu, CPUIA64State *env, bool write, bool data,
-                       int vector, uint64_t iim, uintptr_t pc) {
-    (void)cpu; (void)env; (void)write; (void)data; (void)iim; (void)pc;
+static uint16_t delivered_code;
+static uint64_t delivered_isr_extra;
+static bool delivered_trap;
+static void ia64_fp_interrupt(CPUIA64State *env, uint32_t vector,
+                              uint16_t code, uint64_t isr_extra,
+                              bool trap, uintptr_t pc) {
+    (void)env; (void)pc;
+    delivered_code = code;
+    delivered_isr_extra = isr_extra;
+    delivered_trap = trap;
     longjmp(escape, vector);
-    return false;
 }
 '''
     exports = '''
@@ -159,7 +169,12 @@ int decode(uint64_t insn) { return ia64_f9_decode(insn); }
 IA64FRBits result(int op, IA64FRBits a, IA64FRBits b) {
     return ia64_f9_result(op, a, b);
 }
+uint16_t last_code(void) { return delivered_code; }
+uint64_t last_isr_extra(void) { return delivered_isr_extra; }
+int last_trap(void) { return delivered_trap; }
 int run(CPUIA64State *env, uint64_t insn) {
+    delivered_code = delivered_isr_extra = 0;
+    delivered_trap = false;
     int fault = setjmp(escape);
     if (!fault) { helper_f9(env, insn); }
     return fault;
@@ -176,6 +191,9 @@ int run(CPUIA64State *env, uint64_t insn) {
     lib.result.argtypes, lib.result.restype = [ctypes.c_int, FR, FR], FR
     lib.decode.argtypes, lib.decode.restype = [ctypes.c_uint64], ctypes.c_int
     lib.run.argtypes, lib.run.restype = [ctypes.POINTER(State), ctypes.c_uint64], ctypes.c_int
+    lib.last_code.argtypes, lib.last_code.restype = [], ctypes.c_uint16
+    lib.last_isr_extra.argtypes, lib.last_isr_extra.restype = [], ctypes.c_uint64
+    lib.last_trap.argtypes, lib.last_trap.restype = [], ctypes.c_int
     return lib
 
 
