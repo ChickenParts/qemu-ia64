@@ -125,6 +125,8 @@ def generate():
 
     # F3: illegal destination f1 must precede any source evaluation.
     lines.append('case_fselect_illegal:')
+    emit(lines, 'm', 'rsm 0x30')
+    emit(lines, 'm', 'srlz.d')
     literal(lines, 14, 'fselect_illegal_handler')
     emit(lines, 'i', 'mov b6=r14')
     lines.append('fselect_illegal_fault:')
