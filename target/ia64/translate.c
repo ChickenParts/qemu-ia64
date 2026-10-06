@@ -7595,8 +7595,8 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
         /* F-unit instructions (minimal subset for kernel/libgcc helpers). */
         if (insn != 0) {
             uint8_t qp = insn & 0x3f;
-            TCGLabel *skip = gen_qp_skip(qp);
             uint8_t f_major = (insn >> 37) & 0xf;
+            TCGLabel *skip = f_major == 5 ? NULL : gen_qp_skip(qp);
             bool handled = false;
 
             /* nop.f / hint.f */
@@ -7665,6 +7665,16 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                         tcg_constant_i32(f3));
                     handled = true;
                 }
+            }
+
+            if (!handled && f_major == 5) {
+                gen_helper_fclass(tcg_env, tcg_constant_i64(insn));
+                handled = true;
+            }
+
+            if (!handled && f_major == 14 && extract64(insn, 36, 1) == 0) {
+                gen_helper_fselect(tcg_env, tcg_constant_i64(insn));
+                handled = true;
             }
 
             if (!handled && ia64_f9_decode(insn) != IA64_F9_INVALID) {

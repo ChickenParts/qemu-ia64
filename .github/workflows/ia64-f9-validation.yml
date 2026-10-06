@@ -1,7 +1,7 @@
 name: IA-64 F9 and F10 validation
 on:
   push:
-    branches: [work/ia64-f9-bitops, work/ia64-f10-conversions, work/ia64-f10-exceptions, work/ia64-f9-register-faults]
+    branches: [work/ia64-f9-bitops, work/ia64-f10-conversions, work/ia64-f10-exceptions, work/ia64-f9-register-faults, work/ia64-f3-f5-nonarithmetic]
     paths:
       - .github/workflows/ia64-f9-validation.yml
       - target/ia64/**
@@ -9,6 +9,7 @@ on:
       - scripts/run-ia64-f10-tests.py
       - scripts/run-ia64-fp-exception-tests.py
       - scripts/run-ia64-f9-exception-tests.py
+      - scripts/run-ia64-f3-f5-tests.py
       - scripts/ia64-isa-coverage.py
       - scripts/ia64-fslot-selftest.S
       - tests/ia64/isa/**
@@ -20,6 +21,7 @@ on:
       - scripts/run-ia64-f10-tests.py
       - scripts/run-ia64-fp-exception-tests.py
       - scripts/run-ia64-f9-exception-tests.py
+      - scripts/run-ia64-f3-f5-tests.py
       - scripts/ia64-isa-coverage.py
       - scripts/ia64-fslot-selftest.S
       - tests/ia64/isa/**
@@ -50,11 +52,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p scratch/f9-evidence
+          /tmp/f9-venv/bin/python -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v \
+            2>&1 | tee scratch/f9-evidence/host-tests.txt
+          python3 scripts/run-ia64-f3-f5-tests.py --assemble-only \
+            --out scratch/f9-evidence/f3-f5-assembly
           /tmp/f9-venv/bin/python scripts/ia64-isa-coverage.py --check --assembler \
             --evidence-dir scratch/f9-evidence \
             --output scratch/f9-evidence/observations.json5
-          /tmp/f9-venv/bin/python -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v \
-            2>&1 | tee scratch/f9-evidence/host-tests.txt
           python3 scripts/run-ia64-fp-exception-tests.py --assemble-only \
             --out scratch/f9-evidence/fp-exceptions-assembly
           python3 scripts/run-ia64-f9-exception-tests.py --assemble-only \
@@ -81,6 +85,8 @@ jobs:
             --out scratch/f9-evidence/fp-exceptions --timeout 5
           python3 scripts/run-ia64-f9-exception-tests.py --qemu build-f9/qemu-system-ia64 \
             --out scratch/f9-evidence/f9-exceptions --timeout 10
+          python3 scripts/run-ia64-f3-f5-tests.py --qemu build-f9/qemu-system-ia64 \
+            --out scratch/f9-evidence/f3-f5 --timeout 8
           QEMU_BIN="$PWD/build-f9/qemu-system-ia64" \
           IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
           IA64_FSLOT_LOGDIR=scratch/f9-evidence/previous-fslot/logs \
