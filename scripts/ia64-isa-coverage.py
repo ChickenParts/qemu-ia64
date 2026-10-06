@@ -202,7 +202,10 @@ static void gen_pr_write_bit(unsigned p, uintptr_t value)
 { (void)p; (void)value; }
 static void record(const char *name, ...) {
     if (strncmp(name, "gen_helper_", 11) == 0) { route = name + 11; }
-    else if (strncmp(name, "gen_fr_", 7) == 0 && strcmp(route, "none") == 0)
+    else if ((strncmp(name, "gen_fr_", 7) == 0 ||
+              strcmp(name, "gen_fchkf_branch") == 0 ||
+              strcmp(name, "gen_break_common") == 0) &&
+             strcmp(route, "none") == 0)
         route = "tcg";
 }
 static void gen_unimpl(DisasContext *ctx, uint64_t insn, const char *msg)
