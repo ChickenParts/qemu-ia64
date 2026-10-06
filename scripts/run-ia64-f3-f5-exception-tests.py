@@ -187,13 +187,15 @@ def generate():
     emit(lines, 'm', f'ssm {DFL:#x}')
     emit(lines, 'm', 'srlz.d')
     emit(lines, 'f', '(p5) fclass.m.unc p6,p7=f8,0x11')
+    # Snapshot p6/p7 before compare(), whose cmp.eq scratch predicates are
+    # themselves p6/p7 and would otherwise overwrite the value under test.
+    emit(lines, 'i', 'mov r20=pr')
+    emit(lines, 'i', 'shr.u r20=r20,6')
+    emit(lines, 'i', 'and r20=3,r20')
     compare(lines, 15, 4)
     emit(lines, 'm', f'rsm {DFL:#x}')
     emit(lines, 'm', 'srlz.d')
-    emit(lines, 'i', 'mov r9=pr')
-    emit(lines, 'i', 'shr.u r9=r9,6')
-    emit(lines, 'i', 'and r9=3,r9')
-    compare(lines, 9, 0)
+    compare(lines, 20, 0)
 
     # Ordinary false predication suppresses even equal-target legality checks.
     emit(lines, 'i', 'cmp.eq p4,p5=r0,r0')
@@ -201,13 +203,14 @@ def generate():
     emit(lines, 'm', f'ssm {DFL:#x}')
     emit(lines, 'm', 'srlz.d')
     emit(lines, 'f', '(p5) fclass.m p6,p6=f8,0x11')
+    # Same snapshot rule: verify suppression before scratch compares touch p6/p7.
+    emit(lines, 'i', 'mov r20=pr')
+    emit(lines, 'i', 'shr.u r20=r20,6')
+    emit(lines, 'i', 'and r20=3,r20')
     compare(lines, 15, 4)
     emit(lines, 'm', f'rsm {DFL:#x}')
     emit(lines, 'm', 'srlz.d')
-    emit(lines, 'i', 'mov r9=pr')
-    emit(lines, 'i', 'shr.u r9=r9,6')
-    emit(lines, 'i', 'and r9=3,r9')
-    compare(lines, 9, 1)
+    compare(lines, 20, 1)
 
     lines.append('pass:')
     ivt.terminal(lines, PASS, FAIL)
