@@ -82,18 +82,22 @@ jobs:
           python3 scripts/run-ia64-fp-exception-tests.py --assemble-only --out /tmp/f9-existing-ivt
           python3 scripts/run-ia64-f9-exception-tests.py --assemble-only --out /tmp/f9-new-ivt
           git diff --check
-      - name: Publish only source and permanent tests, never the staging workflow
+      - name: Publish source and tests without changing any workflow
         run: |
           set -euo pipefail
-          git add .github/workflows/ia64-f9-validation.yml docs/generated/ia64-instruction-coverage.md \
+          # GITHUB_TOKEN cannot update workflows. The authorized connector
+          # will apply the already-verified permanent workflow separately.
+          git restore --source=HEAD -- .github/workflows/ia64-f9-validation.yml
+          git add docs/generated/ia64-instruction-coverage.md \
             scripts/run-ia64-f9-exception-tests.py scripts/run-ia64-fp-exception-tests.py \
             target/ia64/cpu.h target/ia64/helper.c tests/ia64/isa/coverage.json5 \
             tests/ia64/isa/test_f10.py tests/ia64/isa/test_f9.py tests/ia64/isa/test_fp_register_faults.py
-          test "$(git diff --cached --name-only | wc -l)" = 10
+          test "$(git diff --cached --name-only | wc -l)" = 9
+          test -z "$(git diff --cached --name-only -- .github/workflows)"
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -m 'target/ia64: enforce F9 register faults and correct F10 PSR/ISR state'
           test "$(git rev-parse HEAD^)" = 7dedeecf720806efef5ffeabaf04adc344a74dad
           test -z "$(git ls-tree -r --name-only HEAD .ci-staging .github/workflows/ia64-f9-publish.yml .github/workflows/ia64-f9-tools.yml .github/workflows/ia64-f9-preparation.yml)"
           test -z "$(git ls-remote --heads origin refs/heads/work/ia64-f9-register-faults)"
           git push origin HEAD:refs/heads/work/ia64-f9-register-faults
-          echo "Published source $(git rev-parse HEAD); full-system PR CI still required" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published source $(git rev-parse HEAD); permanent workflow update and full-system PR CI still required" >> "$GITHUB_STEP_SUMMARY"
