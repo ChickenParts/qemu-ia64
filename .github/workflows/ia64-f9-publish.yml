@@ -1,0 +1,99 @@
+name: IA-64 materialize reviewed F9 patch
+on:
+  push:
+    branches: [staging/ia64-f9-exceptions-20261006]
+    paths: [.github/workflows/ia64-f9-publish.yml]
+permissions:
+  contents: write
+concurrency:
+  group: ia64-f9-register-fault-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
+      - name: Preserve reviewed inputs and select exact parent
+        run: |
+          set -euo pipefail
+          cp -a .ci-staging /tmp/f9-reviewed
+          cd /tmp/f9-reviewed
+          sha256sum -c <<'EOF'
+          c1ad98c8e4c0767159b60ef4b9cdd3436fceecf3fe89e8882fcd714576033d04  f9-core.patch
+          2a44b4984823870c5cdf75c03212a7b35ad4eaf7c35264f6be3f8f108a2e6721  run-ia64-f9-exception-tests.py
+          c4e9e3dae9e3648974cac138b8106baff5240a35053917ac582b36aadac2df1f  test_fp_register_faults.py
+          EOF
+          cd "$GITHUB_WORKSPACE"
+          git checkout --detach 7dedeecf720806efef5ffeabaf04adc344a74dad
+          test "$(git rev-parse HEAD)" = 7dedeecf720806efef5ffeabaf04adc344a74dad
+          test -z "$(git status --porcelain)"
+          test -z "$(git ls-remote --heads origin refs/heads/work/ia64-f9-register-faults)"
+          git apply --check /tmp/f9-reviewed/f9-core.patch
+          git apply /tmp/f9-reviewed/f9-core.patch
+          install -m 755 /tmp/f9-reviewed/run-ia64-f9-exception-tests.py scripts/run-ia64-f9-exception-tests.py
+          install -m 644 /tmp/f9-reviewed/test_fp_register_faults.py tests/ia64/isa/test_fp_register_faults.py
+      - name: Install public test-only dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-ia64-linux-gnu python3-venv
+          python3 -m venv /tmp/f9-venv
+          /tmp/f9-venv/bin/pip install -r tests/ia64/isa/requirements.txt
+      - name: Correct semantic source and regenerate report without changing routes
+        run: |
+          /tmp/f9-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json, json5
+          p = Path('tests/ia64/isa/coverage.json5')
+          text = p.read_text()
+          limitations = json5.loads(text)['limitations']
+          updates = {
+            'FP-BITOPS': 'All 19 F9 data paths are integer-only 82-bit/packed operations with NaTVal propagation. Target legality precedes architectural PSR.dfl/dfh checks and NaTVal handling. Host/accessor tests cover aliases and all 96 FR rotations; separate real-IVT tests cover both F-slot positions, disabled banks, illegal-target priority, non-commit, retry, constants and false predication. Register-only faults have ISR.r/w/x=0. Reserved/ignored encodings and other FP families remain outside this result.',
+            'FP-CONVERT': 'All eight F10 scalar/packed data paths use exact integer rounding, selected sf.rc or truncation, V/D/I classification, NaTVal and rotating accessors. Disabled-register faults use architectural PSR bits 18/19 and ISR.r/w/x=0. V/D faults precede result/FPSR/dirty commit; I traps follow it. Separate IVT tests require actual handler entry and verify ISR/IIP/IPSR/IIPA and retry versus resume. These F10 results do not certify the shared FP architecture outside F10 (#10).',
+          }
+          for key, value in updates.items():
+              old = json.dumps(limitations[key])
+              assert text.count(old) == 1
+              text = text.replace(old, json.dumps(value))
+          p.write_text(text)
+          PY
+          /tmp/f9-venv/bin/python scripts/ia64-isa-coverage.py --record
+          git diff --exit-code -- tests/ia64/isa/f-unit-baseline.json5
+      - name: Verify exact reviewed output and native/assembler gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum -c <<'EOF'
+          381635179ae98c7abb47f816d6a9cb3ff59cba23095df9004ec890c0436f1559  .github/workflows/ia64-f9-validation.yml
+          e2fdc79bdd21e050a4ba42511ad95b032868f56a2d7cfb15e14afeff871b4196  docs/generated/ia64-instruction-coverage.md
+          2a44b4984823870c5cdf75c03212a7b35ad4eaf7c35264f6be3f8f108a2e6721  scripts/run-ia64-f9-exception-tests.py
+          7ca2a45b29d0a5d86b7ceb5a5cde1053c7d394ed40fdc5983dabdd2c097edc51  scripts/run-ia64-fp-exception-tests.py
+          03ed5d1465bb83fb913552dd2235d8ec6429be0ea35b72242f40dcbc22ea0b32  target/ia64/cpu.h
+          a3008dac654cd33f1cc80e356a4794f6774d2706d5bed0402e91acf711fac803  target/ia64/helper.c
+          d84185107a100bf68fe4deb5da9fb549239b449eff69b7cfb13af47ffad05dab  tests/ia64/isa/coverage.json5
+          88ccbe1b836744d1c2e41a079ade9b19693c46c48426ab8bf348a4f7da16dd47  tests/ia64/isa/test_f10.py
+          9abfb29a35d09631e0100e288e42d22ff352c5e4efa5b46244d4043d0c6ab865  tests/ia64/isa/test_f9.py
+          c4e9e3dae9e3648974cac138b8106baff5240a35053917ac582b36aadac2df1f  tests/ia64/isa/test_fp_register_faults.py
+          EOF
+          /tmp/f9-venv/bin/python scripts/ia64-isa-coverage.py --check --assembler
+          /tmp/f9-venv/bin/python -m unittest discover -s tests/ia64/isa -p 'test_*.py' -v
+          python3 scripts/run-ia64-fp-exception-tests.py --assemble-only --out /tmp/f9-existing-ivt
+          python3 scripts/run-ia64-f9-exception-tests.py --assemble-only --out /tmp/f9-new-ivt
+          git diff --check
+      - name: Publish only source and permanent tests, never the staging workflow
+        run: |
+          set -euo pipefail
+          git add .github/workflows/ia64-f9-validation.yml docs/generated/ia64-instruction-coverage.md \
+            scripts/run-ia64-f9-exception-tests.py scripts/run-ia64-fp-exception-tests.py \
+            target/ia64/cpu.h target/ia64/helper.c tests/ia64/isa/coverage.json5 \
+            tests/ia64/isa/test_f10.py tests/ia64/isa/test_f9.py tests/ia64/isa/test_fp_register_faults.py
+          test "$(git diff --cached --name-only | wc -l)" = 10
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m 'target/ia64: enforce F9 register faults and correct F10 PSR/ISR state'
+          test "$(git rev-parse HEAD^)" = 7dedeecf720806efef5ffeabaf04adc344a74dad
+          test -z "$(git ls-tree -r --name-only HEAD .ci-staging .github/workflows/ia64-f9-publish.yml .github/workflows/ia64-f9-tools.yml .github/workflows/ia64-f9-preparation.yml)"
+          test -z "$(git ls-remote --heads origin refs/heads/work/ia64-f9-register-faults)"
+          git push origin HEAD:refs/heads/work/ia64-f9-register-faults
+          echo "Published source $(git rev-parse HEAD); full-system PR CI still required" >> "$GITHUB_STEP_SUMMARY"
