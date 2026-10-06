@@ -2064,9 +2064,10 @@ void HELPER(fr_set_hi)(CPUIA64State *env, uint32_t f, uint64_t val)
  * An unused source can be represented by f0 (as for F10 below).
  */
 static uint16_t ia64_fp_disabled_code(CPUIA64State *env, unsigned f1,
-                                     unsigned f2, unsigned f3)
+                                     unsigned f2, unsigned f3,
+                                     unsigned f4)
 {
-    const unsigned regs[] = { f1, f2, f3 };
+    const unsigned regs[] = { f1, f2, f3, f4 };
     uint16_t code = 0;
 
     for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
@@ -2079,6 +2080,98 @@ static uint16_t ia64_fp_disabled_code(CPUIA64State *env, unsigned f1,
         }
     }
     return code;
+}
+
+static void ia64_pr_write(CPUIA64State *env, unsigned p, bool value)
+{
+    p &= 63;
+    if (p != 0) {
+        if (value) {
+            env->pr |= UINT64_C(1) << p;
+        } else {
+            env->pr &= ~(UINT64_C(1) << p);
+        }
+    }
+    env->pr |= 1; /* p0 is hardwired true. */
+}
+
+/* F3 floating-point select: integer-format significand mux. */
+void HELPER(fselect)(CPUIA64State *env, uint64_t insn)
+{
+    unsigned f1 = (insn >> 6) & 127;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned f3 = (insn >> 20) & 127;
+    unsigned f4 = (insn >> 27) & 127;
+    uint16_t disabled_code;
+    IA64FRBits a, b, selector, result;
+
+    if (f1 <= 1) {
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
+    }
+    disabled_code = ia64_fp_disabled_code(env, f1, f2, f3, f4);
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
+    }
+
+    a = (IA64FRBits) { HELPER(fr_get_lo)(env, f3),
+                       HELPER(fr_get_hi)(env, f3) };
+    b = (IA64FRBits) { HELPER(fr_get_lo)(env, f4),
+                       HELPER(fr_get_hi)(env, f4) };
+    selector = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                              HELPER(fr_get_hi)(env, f2) };
+    result = ia64_fselect_result(a, b, selector);
+    HELPER(fr_set_lo)(env, f1, result.significand);
+    HELPER(fr_set_hi)(env, f1, result.sign_exp);
+    env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
+}
+
+/*
+ * F5 floating-point class. The .unc form executes even when qp is false:
+ * it validates distinct predicate targets and clears both predicates without
+ * reading a disabled source register.
+ */
+void HELPER(fclass)(CPUIA64State *env, uint64_t insn)
+{
+    unsigned qp = insn & 63;
+    unsigned p1 = (insn >> 6) & 63;
+    bool unc = ((insn >> 12) & 1) != 0;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned fclass9 = (((insn >> 20) & 0x7f) << 2) |
+                       ((insn >> 33) & 3);
+    unsigned p2 = (insn >> 27) & 63;
+    bool qual = qp == 0 || ((env->pr >> qp) & 1);
+    uint16_t disabled_code;
+    IA64FRBits value;
+    bool nat_clears, result;
+
+    if (!qual && !unc) {
+        return;
+    }
+    if (p1 == p2) {
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
+    }
+    if (!qual) {
+        ia64_pr_write(env, p1, false);
+        ia64_pr_write(env, p2, false);
+        return;
+    }
+
+    disabled_code = ia64_fp_disabled_code(env, 0, f2, 0, 0);
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
+    }
+    value = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                           HELPER(fr_get_hi)(env, f2) };
+    result = ia64_fclass_relation(value, fclass9, &nat_clears);
+    if (nat_clears) {
+        ia64_pr_write(env, p1, false);
+        ia64_pr_write(env, p2, false);
+    } else {
+        ia64_pr_write(env, p1, result);
+        ia64_pr_write(env, p2, !result);
+    }
 }
 
 /*
@@ -2099,7 +2192,7 @@ void HELPER(f9)(CPUIA64State *env, uint64_t insn)
     if (op == IA64_F9_INVALID || f1 <= 1) {
         ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
     }
-    disabled_code = ia64_fp_disabled_code(env, f1, f2, f3);
+    disabled_code = ia64_fp_disabled_code(env, f1, f2, f3, 0);
     if (disabled_code) {
         ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
                           false, GETPC());
@@ -2134,7 +2227,7 @@ void HELPER(f10)(CPUIA64State *env, uint64_t insn)
     }
 
     /* ISR.r/w/x describe memory access, not reads/writes of FR operands. */
-    disabled_code = ia64_fp_disabled_code(env, f1, f2, 0);
+    disabled_code = ia64_fp_disabled_code(env, f1, f2, 0, 0);
     if (disabled_code) {
         ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
                           false, GETPC());
