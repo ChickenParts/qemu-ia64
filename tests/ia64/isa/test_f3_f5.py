@@ -55,9 +55,8 @@ def compile_harness(root, directory):
         "void HELPER(fr_set_hi)(",
         "static uint16_t ia64_fp_disabled_code(",
         "static unsigned ia64_pr_phys(",
-        "static void ia64_pr_write(",
         "void HELPER(fselect)(",
-        "void HELPER(fclass)(",
+        "uint64_t HELPER(fclass)(",
     ]
     bodies = "\n".join(function(source, s) for s in signatures)
     constants = []
@@ -109,12 +108,26 @@ int run_select(CPUIA64State *env, uint64_t insn) {
     if (!fault) helper_fselect(env, insn);
     return fault;
 }
+static void write_pr(CPUIA64State *env, unsigned p, unsigned value) {
+    if (p != 0) {
+        uint64_t mask = UINT64_C(1) << p;
+        env->pr = value ? (env->pr | mask) : (env->pr & ~mask);
+    }
+    env->pr |= 1;
+}
 int run_class(CPUIA64State *env, uint64_t insn) {
     unsigned qp = insn & 63;
+    unsigned p1 = (insn >> 6) & 63;
+    unsigned p2 = (insn >> 27) & 63;
     uint64_t qual = qp == 0 || ((env->pr >> qp) & 1);
+    uint64_t bits = 0;
     delivered_code = 0;
     int fault = setjmp(escape);
-    if (!fault) helper_fclass(env, insn, qual);
+    if (!fault) {
+        bits = helper_fclass(env, insn, qual);
+        write_pr(env, p1, bits & 1);
+        write_pr(env, p2, (bits >> 1) & 1);
+    }
     return fault;
 }
 """
