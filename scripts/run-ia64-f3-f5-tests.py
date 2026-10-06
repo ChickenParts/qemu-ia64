@@ -122,6 +122,7 @@ def generate():
         ((0, 0), 0x005, 1),                    # +zero
         ((0, 0x20000), 0x006, 1),              # -zero
         ((0x4000000000000000, 0xffff), 0x009, 1), # +unnormal
+        ((0, 0x1003e), 0x009, 1),                 # +pseudo-zero => unnormal
         (ONE, 0x011, 1),                       # +normal
         ((1 << 63, 0x1ffff), 0x021, 1),        # +infinity
         ((0x8000000000000001, 0x1ffff), 0x040, 1), # sNaN
