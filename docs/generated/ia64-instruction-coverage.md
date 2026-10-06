@@ -156,7 +156,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus F9 header SHA-256: `9eceb4a385b37935df6d95e251949f2642fc1f51d1f74764d620ed14fcbdad45`.
+- F-block plus F9 header SHA-256: `26228e135095a369035be5b9f993fabc373d6584e5a96431afc5a1328c37d8fc`.
 - All-vector observation SHA-256: `5ce61ba6ab50c49882f1a11e17fc2da1cb00f696a885d295d13a9d82b1a0a688`.
 
 No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.
