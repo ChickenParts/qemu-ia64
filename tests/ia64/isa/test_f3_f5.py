@@ -194,6 +194,7 @@ class F3F5Tests(unittest.TestCase):
             0x005: (0, 0),
             0x006: (0, 0x20000),
             0x009: (0x4000000000000000, 0xffff),
+            0x009 | 0x001: (0, 0x1003e),  # positive pseudo-zero is unnormal
             0x011: (0x8000000000000000, 0xffff),
             0x021: (0x8000000000000000, 0x1ffff),
             0x040: (0x8000000000000001, 0x1ffff),
