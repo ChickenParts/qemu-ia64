@@ -7612,8 +7612,14 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             }
 
             if (!handled && f_major == 0x5) {
-                /* F5 fclass.m{,.unc}: helper owns .unc false-qp semantics. */
-                gen_helper_fclass(tcg_env, tcg_constant_i64(insn));
+                /*
+                 * F5 fclass.m{,.unc}: pass the live physical qp value into the
+                 * helper.  This is required for .unc (which runs with qp=false)
+                 * and for rotating predicates; env->pr may lag cpu_pr inside
+                 * the current translated block.
+                 */
+                TCGv_i64 qual = gen_pr_read_bit(qp);
+                gen_helper_fclass(tcg_env, tcg_constant_i64(insn), qual);
                 handled = true;
             }
 
