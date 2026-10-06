@@ -1,0 +1,35 @@
+name: IA-64 F9 local oracle tools
+on:
+  push:
+    branches: [staging/ia64-f9-exceptions-20261006]
+    paths: [.github/workflows/ia64-f9-tools.yml]
+permissions:
+  contents: read
+jobs:
+  tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Package unmodified distro GNU IA-64 tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-ia64-linux-gnu
+          mkdir -p /tmp/ia64-tools/bin /tmp/ia64-tools/lib /tmp/evidence
+          for tool in as ld objcopy objdump; do
+            p="/usr/bin/ia64-linux-gnu-$tool"
+            cp -L "$p" /tmp/ia64-tools/bin/
+            ldd "$p" | awk '$2 == "=>" && $3 ~ /^\// { print $3 }' | while read -r lib; do
+              case "$lib" in */libc.so.*|*/libm.so.*|*/ld-linux*) ;; *) cp -L "$lib" /tmp/ia64-tools/lib/ ;; esac
+            done
+          done
+          ia64-linux-gnu-as --version > /tmp/ia64-tools/version.txt
+          tar -C /tmp -czf /tmp/evidence/ia64-tools.tar.gz ia64-tools
+          sha256sum /tmp/evidence/ia64-tools.tar.gz > /tmp/evidence/sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ia64-f9-oracle-tools
+          path: /tmp/evidence/
+          retention-days: 1
+          if-no-files-found: error
