@@ -151,6 +151,7 @@ def compile_harness(root, directory):
     signatures = ['static inline uint32_t ia64_fr_phys(',
                   'uint64_t HELPER(fr_get_lo)(', 'uint64_t HELPER(fr_get_hi)(',
                   'void HELPER(fr_set_lo)(', 'void HELPER(fr_set_hi)(',
+                  'static uint16_t ia64_fp_disabled_code(',
                   'void HELPER(f10)(']
     constants = []
     for name in ('IA64_FR_ROT_BASE', 'IA64_FR_ROT_SIZE', 'IA64_CFM_RRBF_SHIFT',
@@ -171,6 +172,7 @@ typedef struct CPUIA64State {
     uint64_t f[128][2], cfm, psr, ip, ar[128];
 } CPUIA64State;
 #define HELPER(x) helper_##x
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define env_cpu(e) (e)
 #define GETPC() 0
 #define IA64_VEC_ILLEGAL_OP 0x5400
@@ -180,16 +182,6 @@ static uint32_t delivered_vector;
 static uint16_t delivered_code;
 static uint64_t delivered_isr_extra;
 static bool delivered_trap;
-static bool ia64_fault(void *cpu, CPUIA64State *env, bool write, bool data,
-                      int vector, uint64_t iim, uintptr_t pc) {
-    (void)cpu; (void)env; (void)write; (void)data; (void)iim; (void)pc;
-    delivered_vector = vector;
-    delivered_code = 0;
-    delivered_isr_extra = 0;
-    delivered_trap = false;
-    longjmp(escape, vector);
-    return false;
-}
 static void ia64_fp_interrupt(CPUIA64State *env, uint32_t vector,
                               uint16_t code, uint64_t isr_extra,
                               bool trap, uintptr_t pc) {
@@ -344,11 +336,11 @@ class F10Tests(unittest.TestCase):
                                           word(0, 0, destination, 7)), 0x5400)
             self.assertEqual(bytes(state), before)
 
-        # Disabled-bank faults report bank in ISR.code and operand direction.
+        # Register-only disabled faults have ISR.r/w/x=0 (memory access bits).
         for f1, f2, psr, code, rw in (
-                (6, 7, 64, 1, 3 << 33),       # low source read + destination write
-                (126, 125, 128, 2, 3 << 33),  # high source read + destination write
-                (126, 7, 192, 3, 3 << 33)):   # low read and high write
+                (6, 7, 0x40000, 1, 0),       # architectural PSR.dfl = bit 18
+                (126, 125, 0x80000, 2, 0),    # architectural PSR.dfh = bit 19
+                (126, 7, 0xc0000, 3, 0)):     # both banks disabled
             state = State()
             state.f[f2][:] = scalar(1)
             state.psr, state.ar[40] = psr, 63

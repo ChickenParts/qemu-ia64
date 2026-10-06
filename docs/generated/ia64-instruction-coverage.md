@@ -112,9 +112,9 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 105, 
 
 **FP-APPROX.** Scalar frcpa now decodes independently of sf and p2, while rsqrt and parallel forms remain explicitly unimplemented. The reciprocal helper still uses host division and ignores numerator/special-case, FPSR and exception semantics.
 
-**FP-BITOPS.** All 19 F9 data paths are integer-only 82-bit/packed operations with NaTVal propagation. Production-helper tests cover aliases, all 96 FR rotations, dirty bits and illegal-destination fault requests. Full QEMU disabled-FP fault delivery remains #10; an accepted encoding is not whole-instruction conformance.
+**FP-BITOPS.** All 19 F9 data paths are integer-only 82-bit/packed operations with NaTVal propagation. Target legality precedes architectural PSR.dfl/dfh checks and NaTVal handling. Host/accessor tests cover aliases and all 96 FR rotations; separate real-IVT tests cover both F-slot positions, disabled banks, illegal-target priority, non-commit, retry, constants and false predication. Register-only faults have ISR.r/w/x=0. Reserved/ignored encodings and other FP families remain outside this result.
 
-**FP-CONVERT.** All eight F10 scalar/packed data paths use exact integer rounding, selected sf.rc or truncation, masked V/D/I flags, NaTVal and rotating accessors. Enabled exception delivery and disabled-FP-register cases stop at explicit unsupported frontiers before committing state; they are not architecturally implemented. Fault/trap delivery and priority remain #10.
+**FP-CONVERT.** All eight F10 scalar/packed data paths use exact integer rounding, selected sf.rc or truncation, V/D/I classification, NaTVal and rotating accessors. Disabled-register faults use architectural PSR bits 18/19 and ISR.r/w/x=0. V/D faults precede result/FPSR/dirty commit; I traps follow it. Separate IVT tests require actual handler entry and verify ISR/IIP/IPSR/IIPA and retry versus resume. These F10 results do not certify the shared FP architecture outside F10 (#10).
 
 **FP-BREAK.** Nonzero break.f falls into UNIMPL; the all-zero break.f word is silently skipped.
 

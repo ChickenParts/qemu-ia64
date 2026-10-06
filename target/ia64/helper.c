@@ -2058,9 +2058,34 @@ void HELPER(fr_set_hi)(CPUIA64State *env, uint32_t f, uint64_t val)
 }
 
 /*
+ * Intel SDM Vol. 3: disabled_fp_register_check(f1, f2, f3, f4).
+ * f0/f1 are exempt.  Bank membership is architectural; FR rotation stays
+ * within the high bank.  Call only after target-register legality checks.
+ * An unused source can be represented by f0 (as for F10 below).
+ */
+static uint16_t ia64_fp_disabled_code(CPUIA64State *env, unsigned f1,
+                                     unsigned f2, unsigned f3)
+{
+    const unsigned regs[] = { f1, f2, f3 };
+    uint16_t code = 0;
+
+    for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+        unsigned reg = regs[i];
+
+        if (reg >= 2 && reg < IA64_FR_ROT_BASE && (env->psr & IA64_PSR_DFL)) {
+            code |= 1;
+        } else if (reg >= IA64_FR_ROT_BASE && (env->psr & IA64_PSR_DFH)) {
+            code |= 2;
+        }
+    }
+    return code;
+}
+
+/*
  * F9 bit operations.  Source snapshots precede every destination write so
  * f1=f2, f1=f3 and f2=f3 are safe, including rotating FRs.
- * Disabled-FP fault delivery remains part of the shared FP-state work (#10).
+ * Target legality precedes disabled-bank faults, which precede NaTVal and
+ * result/dirty-state changes.  These register-only operations have ISR.r/w/x=0.
  */
 void HELPER(f9)(CPUIA64State *env, uint64_t insn)
 {
@@ -2069,11 +2094,15 @@ void HELPER(f9)(CPUIA64State *env, uint64_t insn)
     unsigned f3 = (insn >> 20) & 127;
     int op = ia64_f9_decode(insn);
     IA64FRBits a, b, result;
+    uint16_t disabled_code;
 
     if (op == IA64_F9_INVALID || f1 <= 1) {
-        ia64_fault(env_cpu(env), env, false, false, IA64_VEC_ILLEGAL_OP,
-                   0, GETPC());
-        g_assert_not_reached();
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
+    }
+    disabled_code = ia64_fp_disabled_code(env, f1, f2, f3);
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
     }
     a = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
                       HELPER(fr_get_hi)(env, f2) };
@@ -2086,9 +2115,9 @@ void HELPER(f9)(CPUIA64State *env, uint64_t insn)
 }
 
 /*
- * F10 numerical / masked-event support. Enabled FP exception delivery and
- * disabled-register faults are an explicit frontier of the shared FP-state
- * work, not silently ignored controls. Keep state untouched on that frontier.
+ * F10 integer-only conversion and architectural exception delivery.
+ * Legality and disabled-bank checks precede V/D faults; I traps follow the
+ * committed result/FPSR/dirty state.
  */
 void HELPER(f10)(CPUIA64State *env, uint64_t insn)
 {
@@ -2098,43 +2127,17 @@ void HELPER(f10)(CPUIA64State *env, uint64_t insn)
     int op = ia64_f10_decode(insn);
     IA64FRBits source;
     IA64F10Result result;
-    uint16_t disabled_code = 0;
-    uint64_t disabled_isr = 0;
+    uint16_t disabled_code;
 
     if (op == IA64_F10_INVALID || f1 <= 1) {
-        ia64_fault(env_cpu(env), env, false, false, IA64_VEC_ILLEGAL_OP,
-                   0, GETPC());
-        g_assert_not_reached();
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
     }
 
-    /*
-     * F10 reads f2 and writes f1.  ISR.code bit 0 reports the disabled
-     * low bank (f2-f31), bit 1 the high bank (f32-f127); ISR.r/w identify
-     * which operand access triggered the fault.
-     */
-    if (env->psr & IA64_PSR_DFL) {
-        if (f2 >= 2 && f2 < IA64_FR_ROT_BASE) {
-            disabled_code |= 1;
-            disabled_isr |= 1ULL << IA64_ISR_R_BIT;
-        }
-        if (f1 >= 2 && f1 < IA64_FR_ROT_BASE) {
-            disabled_code |= 1;
-            disabled_isr |= 1ULL << IA64_ISR_W_BIT;
-        }
-    }
-    if (env->psr & IA64_PSR_DFH) {
-        if (f2 >= IA64_FR_ROT_BASE) {
-            disabled_code |= 2;
-            disabled_isr |= 1ULL << IA64_ISR_R_BIT;
-        }
-        if (f1 >= IA64_FR_ROT_BASE) {
-            disabled_code |= 2;
-            disabled_isr |= 1ULL << IA64_ISR_W_BIT;
-        }
-    }
+    /* ISR.r/w/x describe memory access, not reads/writes of FR operands. */
+    disabled_code = ia64_fp_disabled_code(env, f1, f2, 0);
     if (disabled_code) {
-        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code,
-                          disabled_isr, false, GETPC());
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
     }
 
     source = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
