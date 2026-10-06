@@ -62,6 +62,8 @@ def compile_harness(directory):
 typedef struct CPUIA64State { uint64_t f[128][2], cfm, psr, pr; } CPUIA64State;
 #define HELPER(x) helper_##x
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define env_cpu(e) (e)
+#define g_assert_not_reached() abort()
 #define GETPC() 0
 #define IA64_VEC_ILLEGAL_OP 0x5400
 #define IA64_VEC_DISABLED_FP 0x5500
@@ -92,11 +94,15 @@ uint16_t classify(uint64_t sig, uint64_t se) {
     path = directory / 'f3-f5-test.c'
     path.write_text(prelude + '\n'.join(constants) + '\n' + bodies + exports)
     libpath = directory / 'f3-f5-test.so'
-    subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+    result = subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
         '-std=c11','-Wall','-Wextra','-Werror','-O2','-fsanitize=undefined',
         '-shared','-fPIC','-I' + str(ROOT / 'target/ia64'),
-        str(path),'-o',str(libpath)], check=True, capture_output=True,
+        str(path),'-o',str(libpath)], capture_output=True,
         text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError(
+            'F3/F5 production-helper harness compilation failed:\n'
+            + result.stdout + result.stderr)
     lib = ctypes.CDLL(str(libpath))
     for name in ('run_select','run_class'):
         fn = getattr(lib, name)
