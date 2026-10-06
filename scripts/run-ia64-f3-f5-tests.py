@@ -33,6 +33,7 @@ def generate():
     lines = ['.text', '.explicit', '.align 16', '.global _start', '_start:']
     data = []
     count = 0
+    assertion = 0
 
     def emit(kind, insn):
         runner_emit = {
@@ -49,6 +50,9 @@ def generate():
         emit('l', f'movl r{reg}={value}')
 
     def compare(reg, value):
+        nonlocal assertion
+        assertion += 1
+        literal(10, assertion)  # persistent assertion ID in break log
         literal(18, hex(value) if isinstance(value, int) else value)
         emit('i', f'cmp.eq p6,p7=r{reg},r18')
         emit('b', '(p7) br.cond.spnt fail')
@@ -94,6 +98,7 @@ def generate():
             for false_predicate in (False, True):
                 count += 1
                 lines.append(f'case_select_{count}:')
+                literal(9, count)  # persistent case ID in break log
                 sentinel = (0x456789abcdef0123, 0x24567)
                 if f1 not in (f2, f3, f4):
                     fill(f1, sentinel)
@@ -137,6 +142,7 @@ def generate():
         for reg in (8, 126):
             count += 1
             lines.append(f'case_class_{idx}_{reg}:')
+            literal(9, count)  # persistent case ID in break log
             fill(reg, value)
             emit('m', 'rsm 0x30')
             emit('m', 'srlz.d')
@@ -158,6 +164,7 @@ def generate():
     fill(8, ONE)
     for unc, expected in ((False, 1), (True, 0)):
         count += 1
+        literal(9, count)  # persistent case ID in break log
         emit('i', 'cmp.eq p4,p5=r0,r0')       # p5=false
         emit('i', 'cmp.eq p6,p7=r0,r0')       # p6=1,p7=0
         suffix = '.unc' if unc else ''
