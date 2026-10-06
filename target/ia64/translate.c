@@ -7613,13 +7613,26 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
 
             if (!handled && f_major == 0x5) {
                 /*
-                 * F5 fclass.m{,.unc}: pass the live physical qp value into the
-                 * helper.  This is required for .unc (which runs with qp=false)
-                 * and for rotating predicates; env->pr may lag cpu_pr inside
-                 * the current translated block.
+                 * F5 fclass.m{,.unc}: the helper validates/faults and returns
+                 * predicate-result bits. Commit PR writes in TCG so cpu_pr
+                 * stays coherent with following instructions in the same TB.
+                 * .unc still receives the live qp value because it executes
+                 * even when that predicate is false.
                  */
+                uint8_t p1 = extract64(insn, 6, 6);
+                uint8_t p2 = extract64(insn, 27, 6);
                 TCGv_i64 qual = gen_pr_read_bit(qp);
-                gen_helper_fclass(tcg_env, tcg_constant_i64(insn), qual);
+                TCGv_i64 pred_bits = tcg_temp_new_i64();
+                TCGv_i64 p1v = tcg_temp_new_i64();
+                TCGv_i64 p2v = tcg_temp_new_i64();
+
+                gen_helper_fclass(pred_bits, tcg_env,
+                                  tcg_constant_i64(insn), qual);
+                tcg_gen_andi_i64(p1v, pred_bits, 1);
+                tcg_gen_shri_i64(p2v, pred_bits, 1);
+                tcg_gen_andi_i64(p2v, p2v, 1);
+                gen_pr_write_bit(p1, p1v);
+                gen_pr_write_bit(p2, p2v);
                 handled = true;
             }
 
