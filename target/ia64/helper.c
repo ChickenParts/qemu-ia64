@@ -2127,11 +2127,13 @@ void HELPER(fselect)(CPUIA64State *env, uint64_t insn)
 }
 
 /*
- * F5 floating-point class. The .unc form executes even when qp is false:
- * it validates distinct predicate targets and clears both predicates without
- * reading a disabled source register.
+ * F5 floating-point class. The translator passes the live, rotation-aware
+ * qualifying predicate value because cpu_pr may have changed earlier in the
+ * same TCG block and is not safely re-readable through env->pr here. The .unc
+ * form executes when qp is false: it validates distinct predicate targets and
+ * clears both predicates without reading a disabled source register.
  */
-void HELPER(fclass)(CPUIA64State *env, uint64_t insn)
+void HELPER(fclass)(CPUIA64State *env, uint64_t insn, uint64_t qual_arg)
 {
     unsigned qp = insn & 63;
     unsigned p1 = (insn >> 6) & 63;
@@ -2140,7 +2142,7 @@ void HELPER(fclass)(CPUIA64State *env, uint64_t insn)
     unsigned fclass9 = (((insn >> 20) & 0x7f) << 2) |
                        ((insn >> 33) & 3);
     unsigned p2 = (insn >> 27) & 63;
-    bool qual = qp == 0 || ((env->pr >> qp) & 1);
+    bool qual = qual_arg != 0;
     uint16_t disabled_code;
     IA64FRBits value;
     bool nat_clears, result;
