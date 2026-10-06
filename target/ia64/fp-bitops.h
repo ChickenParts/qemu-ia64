@@ -117,9 +117,11 @@ static inline bool ia64_fclass_relation(IA64FRBits value, unsigned fclass9,
            (significand & UINT64_C(0x4000000000000000));
     snan = exponent == 0x1ffff && integer_bit && !inf && !qnan;
     unsupported = exponent == 0x1ffff && !integer_bit;
-    zero = !unsupported && !inf && !qnan && !snan && significand == 0;
+    zero = !unsupported && !inf && !qnan && !snan &&
+           significand == 0 && exponent == 0;
     unorm = !unsupported && !inf && !qnan && !snan && !zero &&
-             (exponent == 0 || !integer_bit);
+             ((significand == 0 && exponent != 0) ||
+              (significand != 0 && (exponent == 0 || !integer_bit)));
     normal = !unsupported && !inf && !qnan && !snan && !zero && !unorm;
     sign_match = (!sign && (fclass9 & 0x001)) ||
                  (sign && (fclass9 & 0x002));
