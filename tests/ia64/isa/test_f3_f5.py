@@ -54,6 +54,7 @@ def compile_harness(root, directory):
         "void HELPER(fr_set_lo)(",
         "void HELPER(fr_set_hi)(",
         "static uint16_t ia64_fp_disabled_code(",
+        "static unsigned ia64_pr_phys(",
         "static void ia64_pr_write(",
         "void HELPER(fselect)(",
         "void HELPER(fclass)(",
@@ -61,7 +62,9 @@ def compile_harness(root, directory):
     bodies = "\n".join(function(source, s) for s in signatures)
     constants = []
     for name in ("IA64_FR_ROT_BASE", "IA64_FR_ROT_SIZE", "IA64_CFM_RRBF_SHIFT",
-                 "IA64_CFM_RRBF_MASK", "IA64_PSR_MFL", "IA64_PSR_MFH",
+                 "IA64_CFM_RRBF_MASK", "IA64_CFM_RRBP_SHIFT",
+                 "IA64_CFM_RRBP_MASK", "IA64_PR_ROT_BASE",
+                 "IA64_PR_ROT_SIZE", "IA64_PSR_MFL", "IA64_PSR_MFH",
                  "IA64_PSR_DFL", "IA64_PSR_DFH"):
         lines = [l for l in (source + "\n" + cpu).splitlines()
                  if l.startswith("#define " + name + " ")]
@@ -242,6 +245,17 @@ class F3F5Tests(unittest.TestCase):
         self.assertEqual(self.lib.run_class(ctypes.byref(state),
                          fclass_word(p1=6, p2=7, f2=8)), 0x5500)
         self.assertEqual(self.lib.last_code(), 1)
+
+    def test_fclass_rotating_predicate_destinations(self):
+        state = State()
+        state.cfm = 5 << 32
+        state.pr = 1
+        state.f[8][:] = ONE
+        self.assertEqual(self.lib.run_class(ctypes.byref(state),
+                         fclass_word(p1=16, p2=17, f2=8, mask=0x11)), 0)
+        # rrbp=5 maps architectural p16/p17 to physical p21/p22.
+        self.assertEqual((state.pr >> 21) & 3, 1)
+        self.assertEqual((state.pr >> 16) & 3, 0)
 
     def test_fclass_natval_predicate_clearing_and_member(self):
         state = State()
