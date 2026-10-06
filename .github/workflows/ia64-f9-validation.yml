@@ -9,6 +9,7 @@ on:
       - scripts/run-ia64-f10-tests.py
       - scripts/run-ia64-fp-exception-tests.py
       - scripts/run-ia64-f9-exception-tests.py
+      - scripts/run-ia64-f3-f5-tests.py
       - scripts/ia64-isa-coverage.py
       - scripts/ia64-fslot-selftest.S
       - tests/ia64/isa/**
@@ -20,6 +21,7 @@ on:
       - scripts/run-ia64-f10-tests.py
       - scripts/run-ia64-fp-exception-tests.py
       - scripts/run-ia64-f9-exception-tests.py
+      - scripts/run-ia64-f3-f5-tests.py
       - scripts/ia64-isa-coverage.py
       - scripts/ia64-fslot-selftest.S
       - tests/ia64/isa/**
@@ -59,6 +61,8 @@ jobs:
             --out scratch/f9-evidence/fp-exceptions-assembly
           python3 scripts/run-ia64-f9-exception-tests.py --assemble-only \
             --out scratch/f9-evidence/f9-exceptions-assembly
+          python3 scripts/run-ia64-f3-f5-tests.py --assemble-only \
+            --out scratch/f9-evidence/f3-f5-assembly
           git diff --exit-code
       - name: Build the actual IA-64 system emulator
         shell: bash
@@ -81,6 +85,8 @@ jobs:
             --out scratch/f9-evidence/fp-exceptions --timeout 5
           python3 scripts/run-ia64-f9-exception-tests.py --qemu build-f9/qemu-system-ia64 \
             --out scratch/f9-evidence/f9-exceptions --timeout 10
+          python3 scripts/run-ia64-f3-f5-tests.py --qemu build-f9/qemu-system-ia64 \
+            --out scratch/f9-evidence/f3-f5 --timeout 10
           QEMU_BIN="$PWD/build-f9/qemu-system-ia64" \
           IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
           IA64_FSLOT_LOGDIR=scratch/f9-evidence/previous-fslot/logs \
