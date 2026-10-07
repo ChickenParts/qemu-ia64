@@ -257,7 +257,7 @@ class CoverageTests(unittest.TestCase):
     def test_new_emitter_requires_explicit_review(self):
         root = self.modified_root()
         path = root / 'target/ia64/translate.c'
-        source = path.read_text().replace('gen_helper_fcmp_s0(', 'gen_helper_unreviewed(')
+        source = path.read_text().replace('gen_helper_fcmp(', 'gen_helper_unreviewed(')
         path.write_text(source)
         with self.assertRaises(subprocess.CalledProcessError):
             AUDIT.project(root, root, os.environ.get('CC', 'cc'))
