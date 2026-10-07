@@ -1,7 +1,7 @@
 name: IA-64 F9 and F10 validation
 on:
   push:
-    branches: [work/ia64-f9-bitops, work/ia64-f10-conversions, work/ia64-f10-exceptions, work/ia64-f9-register-faults]
+    branches: [work/ia64-f9-bitops, work/ia64-f10-conversions, work/ia64-f10-exceptions, work/ia64-f9-register-faults, work/ia64-f8]
     paths:
       - .github/workflows/ia64-f9-validation.yml
       - target/ia64/**
@@ -13,6 +13,8 @@ on:
       - scripts/run-ia64-f3-f5-exception-tests.py
       - scripts/run-ia64-f12-f14-tests.py
       - scripts/run-ia64-f12-f15-exception-tests.py
+      - scripts/run-ia64-f8-exception-tests.py
+      - scripts/run-ia64-f8-tests.py
       - scripts/ia64-isa-coverage.py
       - scripts/ia64-fslot-selftest.S
       - tests/ia64/isa/**
@@ -75,6 +77,10 @@ jobs:
             --out scratch/f9-evidence/f12-f14-assembly
           python3 scripts/run-ia64-f12-f15-exception-tests.py --assemble-only \
             --out scratch/f9-evidence/f12-f15-exceptions-assembly
+          python3 scripts/run-ia64-f8-tests.py --assemble-only \
+            --out scratch/f9-evidence/f8-assembly
+          python3 scripts/run-ia64-f8-exception-tests.py --assemble-only \
+            --out scratch/f9-evidence/f8-exceptions-assembly
           git diff --exit-code
       - name: Build the actual IA-64 system emulator
         shell: bash
@@ -105,6 +111,10 @@ jobs:
             --out scratch/f9-evidence/f12-f14 --timeout 10
           python3 scripts/run-ia64-f12-f15-exception-tests.py --qemu build-f9/qemu-system-ia64 \
             --out scratch/f9-evidence/f12-f15-exceptions --timeout 10
+          python3 scripts/run-ia64-f8-tests.py --qemu build-f9/qemu-system-ia64 \
+            --out scratch/f9-evidence/f8 --timeout 10
+          python3 scripts/run-ia64-f8-exception-tests.py --qemu build-f9/qemu-system-ia64 \
+            --out scratch/f9-evidence/f8-exceptions --timeout 10
           QEMU_BIN="$PWD/build-f9/qemu-system-ia64" \
           IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
           IA64_FSLOT_LOGDIR=scratch/f9-evidence/previous-fslot/logs \
