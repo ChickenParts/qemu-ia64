@@ -161,7 +161,7 @@ def ext_mag_key(v):
     if not sig:
         return (-1, 0)
     exp = se & 0x1ffff
-    exp = exp or 1
+    exp = exp or 0xc001
     return (exp + sig.bit_length(), sig << (64 - sig.bit_length()))
 
 
@@ -246,6 +246,7 @@ class F8Tests(unittest.TestCase):
         snan = (0x8000000000000001, 0x1ffff)
         unsupported = (0x4000000000000000, 0x1ffff)
         unnormal = (0x4000000000000000, 0xffff)
+        de0 = (1 << 63, 0)
         for special in (qnan, snan, unsupported):
             value, flags, fault = self.evaluate("fmax", special, normal)
             self.assertEqual((value, flags, fault), (normal, 1, 0))
@@ -255,6 +256,11 @@ class F8Tests(unittest.TestCase):
         self.assertEqual(fault, 0)
         self.assertEqual(self.evaluate("fmin", unnormal, normal, fpsr=0)[2], 2)
         self.assertNotEqual(value, NAT)
+        # DE0 is not an IEEE extended exp=1 denormal: IA-64 rebiases raw
+        # exponent zero to 0xc001 before normalization.
+        self.assertEqual(self.evaluate("fmin", de0, normal)[0], de0)
+        self.assertEqual(self.evaluate("fmax", de0, normal)[0], normal)
+        self.assertEqual(self.evaluate("fmin", de0, normal)[1:], (2, 0))
 
     def test_packed_minmax_and_compare_relations(self):
         lanes = [
