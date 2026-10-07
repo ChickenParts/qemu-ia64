@@ -208,6 +208,12 @@ class CoverageTests(unittest.TestCase):
         for v in selected:
             self.assertEqual(self.routes[v['id']], 'f8', v['id'])
 
+    def test_all_f4_forms_reach_fcmp_helper(self):
+        selected = [v for v in self.vectors if v['format'] == 'F4']
+        self.assertEqual(len(selected), 288)
+        for v in selected:
+            self.assertEqual(self.routes[v['id']], 'fcmp', v['id'])
+
     def test_all_f9_forms_reach_the_bit_operation_helper(self):
         vectors = [v for v in self.vectors if v['format'] == 'F9']
         self.assertEqual(len(vectors), 19 * len(AUDIT.PROFILES))
