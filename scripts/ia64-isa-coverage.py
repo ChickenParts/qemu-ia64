@@ -33,7 +33,7 @@ EMITTERS = '''gen_set_label gen_set_predicates gen_fr_load_lo gen_fr_load_hi
  tcg_gen_clzi_i64 tcg_gen_shl_i64 tcg_gen_or_i64 tcg_gen_br
  tcg_gen_shri_i64 tcg_gen_neg_i64 tcg_gen_shli_i64
  gen_fchkf_branch gen_break_common'''.split()
-HELPERS = '''fcmp_s0 fma_s1 fms_s1 fnma_s1 frcpa_s1
+HELPERS = '''fcmp fma_s1 fms_s1 fnma_s1 frcpa_s1
  xma_l xma_hu xma_h f8 f9 f10 fselect fclass fsetc fclrf'''.split()
 
 
@@ -226,7 +226,7 @@ int main(void) {
 }
 '''
     header = (root / 'target/ia64/fp-bitops.h').read_bytes()
-    prelude += '#include "fp-bitops.h"\n#include "fp-convert.h"\n#include "fp-f8.h"\n'
+    prelude += '#include "fp-bitops.h"\n#include "fp-convert.h"\n#include "fp-f8.h"\n#include "fp-compare.h"\n'
     path = directory / 'f-unit-probe.c'
     path.write_text(prelude + body + main)
     executable = directory / 'f-unit-probe'
@@ -235,7 +235,8 @@ int main(void) {
                    capture_output=True, text=True)
     return executable, digest(block.encode() + b'\0fp-bitops.h\0' + header +
                               b'\0fp-convert.h\0' + (root / 'target/ia64/fp-convert.h').read_bytes() +
-                              b'\0fp-f8.h\0' + (root / 'target/ia64/fp-f8.h').read_bytes())
+                              b'\0fp-f8.h\0' + (root / 'target/ia64/fp-f8.h').read_bytes() +
+                              b'\0fp-compare.h\0' + (root / 'target/ia64/fp-compare.h').read_bytes())
 
 
 def probe(executable, words):
