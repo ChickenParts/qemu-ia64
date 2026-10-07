@@ -3,15 +3,14 @@ on:
   push:
     branches: [work/ia64-f8]
 permissions:
-  contents: read
+  contents: write
 jobs:
   record:
+    if: "!contains(github.event.head_commit.message, 'record F8 audit baseline')"
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -21,13 +20,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/ia64-isa-coverage.py --record
-          mkdir -p scratch/f8-record/docs/generated scratch/f8-record/tests/ia64/isa
-          cp docs/generated/ia64-instruction-coverage.md scratch/f8-record/docs/generated/
-          cp tests/ia64/isa/f-unit-baseline.json5 scratch/f8-record/tests/ia64/isa/
-          python3 scripts/ia64-isa-coverage.py --check --output scratch/f8-record/observations.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ia64-f8-record-${{ github.run_id }}
-          path: scratch/f8-record/
-          retention-days: 2
-          if-no-files-found: error
+          python3 scripts/ia64-isa-coverage.py --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/ia64/isa/f-unit-baseline.json5 docs/generated/ia64-instruction-coverage.md
+          if ! git diff --cached --quiet; then
+            git commit -m "tests/ia64: record F8 audit baseline"
+            git push origin HEAD:work/ia64-f8
+          fi
