@@ -20,6 +20,7 @@ NEG_ONE = (1 << 63, 0x2ffff)
 NEG_TWO = (1 << 63, 0x30000)
 QNaN = (0xc000000000000001, 0x1ffff)
 UNORM = (0x4000000000000000, 0xffff)
+DE0 = (1 << 63, 0)
 FPSR_MASKED = 0x3f
 
 
@@ -89,6 +90,8 @@ def generate():
         ("fmax.s0", NAT, TWO, NAT, 0),
         ("fmax.s0", QNaN, TWO, TWO, 1),
         ("fmin.s0", UNORM, TWO, UNORM, 2),
+        ("fmin.s0", DE0, ONE, DE0, 2),
+        ("fmax.s0", DE0, ONE, ONE, 2),
     ]
     for mnemonic, a, b, expected, flags in scalar:
         setup_case(6, a, b)
