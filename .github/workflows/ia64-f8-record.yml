@@ -1,0 +1,29 @@
+name: IA-64 F8 audit recording
+on:
+  push:
+    branches: [work/ia64-f8]
+permissions:
+  contents: write
+jobs:
+  record:
+    if: "!contains(github.event.head_commit.message, 'record F8 audit baseline')"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install -r tests/ia64/isa/requirements.txt
+      - name: Record reviewed F8 audit delta
+        run: |
+          set -euo pipefail
+          python3 scripts/ia64-isa-coverage.py --record
+          python3 scripts/ia64-isa-coverage.py --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/ia64/isa/f-unit-baseline.json5 docs/generated/ia64-instruction-coverage.md
+          if ! git diff --cached --quiet; then
+            git commit -m "tests/ia64: record F8 audit baseline"
+            git push origin HEAD:work/ia64-f8
+          fi
