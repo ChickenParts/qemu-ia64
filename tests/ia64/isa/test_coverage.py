@@ -52,6 +52,7 @@ class CoverageTests(unittest.TestCase):
         for relative in (AUDIT.REGISTRY, AUDIT.BASELINE, AUDIT.REPORT,
                          Path('target/ia64/translate.c'), Path('target/ia64/fp-bitops.h'),
                          Path('target/ia64/fp-convert.h'), Path('target/ia64/fp-f8.h'),
+                         Path('target/ia64/fp-approx.h'),
                          Path('target/ia64/fp-compare.h')):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -157,17 +158,11 @@ class CoverageTests(unittest.TestCase):
         self.assertIn('architectural dispositions are unadjudicated', self.report)
         self.assertNotIn('reserved_vectors', self.measurement)
 
-    def test_frcpa_decode_is_operand_and_status_independent(self):
-        for sf in range(4):
-            for profile in AUDIT.PROFILES:
-                self.assertEqual(
-                    self.routes[f'frcpa.s{sf}/{profile}'], 'frcpa_s1')
-
-    def test_rsqrt_never_routes_to_reciprocal(self):
-        for sf in range(4):
-            for profile in AUDIT.PROFILES:
-                self.assertEqual(
-                    self.routes[f'frsqrta.s{sf}/{profile}'], 'unimplemented')
+    def test_all_f67_forms_reach_approximation_helper(self):
+        selected = [v for v in self.vectors if v['format'] in ('F6', 'F7')]
+        self.assertEqual(len(selected), 4 * 4 * len(AUDIT.PROFILES))
+        for v in selected:
+            self.assertEqual(self.routes[v['id']], 'f67', v['id'])
 
     def test_scalar_f1_decode_is_operand_independent(self):
         families = {

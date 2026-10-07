@@ -9,6 +9,7 @@
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f8.h"
+#include "fp-approx.h"
 #include "fp-compare.h"
 #include "interrupt.h"
 #include "pal.h"
@@ -3313,28 +3314,51 @@ static void ia64_ld_to_fp(CPUIA64State *env, uint32_t f, long double val)
     env->f[pf][1] = IA64_FP_SEXP(sign, (uint64_t)exp);
 }
 
-void HELPER(frcpa_s1)(CPUIA64State *env, uint32_t f1, uint32_t p2,
-                      uint32_t f2, uint32_t f3)
+uint64_t HELPER(f67)(CPUIA64State *env, uint64_t insn,
+                           uint64_t qual_arg)
 {
-    f1 &= 0x7f;
-    f2 &= 0x7f;
-    f3 &= 0x7f;
-    p2 &= 0x3f;
+    unsigned f1 = (insn >> 6) & 127;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned f3 = (insn >> 20) & 127;
+    unsigned sf = (insn >> 34) & 3;
+    int op = ia64_f67_decode(insn);
+    uint16_t disabled_code;
+    IA64FRBits a = { 0 }, b;
+    IA64F67Result result;
 
-    long double den = ia64_fp_to_ld(env, f3);
-    bool ok = (den != 0.0L);
-    long double res = ok ? (1.0L / den) : 0.0L;
-
-    ia64_ld_to_fp(env, f1, res);
-
-    if (p2 != 0) {
-        if (ok) {
-            env->pr |= (1ULL << p2);
-        } else {
-            env->pr &= ~(1ULL << p2);
-        }
-        env->pr |= 1ULL; /* p0 is always true */
+    if (!qual_arg) {
+        return 0;
     }
+    if (op == IA64_F67_INVALID || f1 <= 1) {
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
+    }
+    disabled_code = ia64_fp_disabled_code(
+        env, f1,
+        (op == IA64_F67_FRCPA || op == IA64_F67_FPRCPA) ? f2 : 0,
+        f3, 0);
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
+    }
+    if (op == IA64_F67_FRCPA || op == IA64_F67_FPRCPA) {
+        a = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                           HELPER(fr_get_hi)(env, f2) };
+    }
+    b = (IA64FRBits) { HELPER(fr_get_lo)(env, f3),
+                       HELPER(fr_get_hi)(env, f3) };
+    result = ia64_f67_result(op, a, b, env->ar[IA64_AR_FPSR], sf);
+    if (result.fault_code) {
+        ia64_fp_interrupt(env, IA64_VEC_FP_FAULT, result.fault_code,
+                          0, false, GETPC());
+    }
+    if (result.write_value) {
+        HELPER(fr_set_lo)(env, f1, result.value.significand);
+        HELPER(fr_set_hi)(env, f1, result.value.sign_exp);
+        env->ar[IA64_AR_FPSR] |= (uint64_t)result.flags <<
+                                 (13 + 13 * (op >= IA64_F67_FPRCPA ? 0 : sf));
+        env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
+    }
+    return result.predicate;
 }
 
 void HELPER(fma_s1)(CPUIA64State *env, uint32_t f1, uint32_t f3,

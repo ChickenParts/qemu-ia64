@@ -7619,7 +7619,10 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             uint8_t f_major = (insn >> 37) & 0xf;
             bool fclass_unc = f_major == 0x5 && extract64(insn, 12, 1);
             bool fcmp_unc = f_major == 0x4 && extract64(insn, 12, 1);
-            TCGLabel *skip = (fclass_unc || fcmp_unc) ? NULL : gen_qp_skip(qp);
+            bool f67_approx = (f_major == 0x0 || f_major == 0x1) &&
+                              extract64(insn, 33, 1);
+            TCGLabel *skip = (fclass_unc || fcmp_unc || f67_approx) ? NULL :
+                             gen_qp_skip(qp);
             bool handled = false;
 
             uint8_t f_x = extract64(insn, 33, 1);
@@ -7725,39 +7728,16 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 handled = true;
             }
 
-            if (!handled &&
-                (f_major == 0x0 || f_major == 0x1) &&
-                extract64(insn, 33, 1) == 1) {
-                /*
-                 * F6/F7 reciprocal-approximation families.
-                 *
-                 * Encoding:
-                 *   op{40:37}: 0 scalar, 1 parallel
-                 *   q{36}:     0 reciprocal, 1 reciprocal-square-root
-                 *   sf{35:34}: status field (not part of opcode selection)
-                 *   x{33}:     1
-                 *   p2{32:27}: predicate destination
-                 *
-                 * The existing helper implements only the scalar reciprocal
-                 * approximation path and remains architecturally limited
-                 * (FPSR/special-case work is tracked separately).  Do not
-                 * route rsqrt or parallel forms through it: that would execute
-                 * a different mathematical operation.
-                 */
-                uint8_t q = extract64(insn, 36, 1);
+            if (!handled && f67_approx) {
                 uint8_t p2 = extract64(insn, 27, 6);
-                uint8_t f3 = extract64(insn, 20, 7);
-                uint8_t f2 = extract64(insn, 13, 7);
-                uint8_t f1 = extract64(insn, 6, 7);
+                TCGv_i64 qual = gen_pr_read_bit(qp);
+                TCGv_i64 pred = tcg_temp_new_i64();
 
-                if (f_major == 0x0 && q == 0) {
-                    gen_helper_frcpa_s1(tcg_env,
-                                        tcg_constant_i32(f1),
-                                        tcg_constant_i32(p2),
-                                        tcg_constant_i32(f2),
-                                        tcg_constant_i32(f3));
-                    handled = true;
+                gen_helper_f67(pred, tcg_env, tcg_constant_i64(insn), qual);
+                if (p2 != 0) {
+                    gen_pr_write_bit(p2, pred);
                 }
+                handled = true;
             }
 
             if (!handled && ia64_f8_decode(insn) != IA64_F8_INVALID) {

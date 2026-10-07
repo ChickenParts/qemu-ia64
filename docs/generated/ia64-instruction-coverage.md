@@ -22,7 +22,7 @@ The baseline file locks **all vector routes**, not merely this summary. Rebaseli
 
 ## Observed dispatch by family
 
-Form-level observation (not semantic correctness): {'all_probes_accepted': 209, 'all_probes_rejected': 24}.
+Form-level observation (not semantic correctness): {'all_probes_accepted': 221, 'all_probes_rejected': 12}.
 
 | Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |
 |---|---|---:|---:|---|---|
@@ -47,10 +47,10 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 209, 
 | `fcmp.le` | F4 | 8 | 72/72 | `fcmp`:72 | FP-COMPARE |
 | `fcmp.unord` | F4 | 8 | 72/72 | `fcmp`:72 | FP-COMPARE |
 | `fclass.m` | F5 | 2 | 18/18 | `fclass`:18 | FP-CLASS |
-| `frcpa` | F6 | 4 | 36/36 | `frcpa_s1`:36 | FP-APPROX |
-| `frsqrta` | F7 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
-| `fprcpa` | F6 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
-| `fprsqrta` | F7 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
+| `frcpa` | F6 | 4 | 36/36 | `f67`:36 | FP-APPROX |
+| `frsqrta` | F7 | 4 | 36/36 | `f67`:36 | FP-APPROX |
+| `fprcpa` | F6 | 4 | 36/36 | `f67`:36 | FP-APPROX |
+| `fprsqrta` | F7 | 4 | 36/36 | `f67`:36 | FP-APPROX |
 | `fmin` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
 | `fmax` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
 | `famin` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
@@ -110,7 +110,7 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 209, 
 
 **FP-COMPARE.** F4 canonical EQ/LT/LE/UNORD forms use exact IA-64 register-format comparisons across sf0..sf3. Normal false qualification preserves predicate destinations; .unc false qualification clears both after equal-target legality. Disabled-FR and V/D faults precede predicate/FPSR commit; NaTVal clears both predicates without FP events. Pseudo-relations are assembler aliases. Broader shared FP/SWA semantics remain tracked separately.
 
-**FP-APPROX.** Scalar frcpa now decodes independently of sf and p2, while rsqrt and parallel forms remain explicitly unimplemented. The reciprocal helper still uses host division and ignores numerator/special-case, FPSR and exception semantics.
+**FP-APPROX.** All scalar and packed F6/F7 reciprocal and reciprocal-square-root forms use deterministic integer seed tables with NaTVal, special-value, predicate, status-field, V/D/Z and SWA semantics. Disabled-register and illegal-target faults precede source reads; enabled FP events fault before result/FPSR/dirty commit, while masked events become sticky. Parallel forms operate lane-wise and use sf0. No host floating point is used.
 
 **FP-BITOPS.** All 19 F9 data paths are integer-only 82-bit/packed operations with NaTVal propagation. Target legality precedes architectural PSR.dfl/dfh checks and NaTVal handling. Host/accessor tests cover aliases and all 96 FR rotations; separate real-IVT tests cover both F-slot positions, disabled banks, illegal-target priority, non-commit, retry, constants and false predication. Register-only faults have ISR.r/w/x=0. Reserved/ignored encodings and other FP families remain outside this result.
 
@@ -162,7 +162,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus FP support headers SHA-256: `2a3efe59a7952e3aa66a7faea669f8688e84ef0546f38d58b1620f1acefc63fd`.
-- All-vector observation SHA-256: `e410bac1af108d1ca2ad5151f79c733a0a4edf48fa486b4c2a4f7177b8f5b169`.
+- F-block plus FP support headers SHA-256: `ac9805959da8e77d292f4b331f79a8f5be89c2ffd9ea1f212935849420a4ab1b`.
+- All-vector observation SHA-256: `37adb352c925b73cbc69276690b7f578648bb343f269ebc58a409411147100b1`.
 
 No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; family data-path/state tests are separate.
