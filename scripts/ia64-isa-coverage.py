@@ -325,7 +325,7 @@ def render(data, vectors, executable, measurement):
              'The host harness compiles the actual production `case SLOT_F` with recording TCG emitters. It observes translation dispatch without copying the decoder into Python. It does not execute TCG, evaluate guest predicates, prove numeric results, or test architectural exception delivery. An accepted word can still be incorrectly implemented.', '',
              f'{len(PROFILES)} profiles cover ordinary/high/aliased FP operands, unit-multiply and high-register multiply operands, predication, and the p15/p16/p63 predicate-destination boundary. All profile encodings can be independently assembled and byte-compared with `--assembler`; that optional check is not implied by the host-only check.', '',
              'The additional unassigned-encoding probes do **not** assert reserved/illegal behavior. Intel’s opcode-table color key distinguishes ignored, reserved, and conditional-reserved cells. Their architectural dispositions are unadjudicated here; no negative-encoding conformance claim is made.', '',
-             'The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-F9-header hash supplies provenance; moving code also requires refreshing generated evidence.', '',
+             'The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-FP-support-header hash supplies provenance; moving code also requires refreshing generated evidence.', '',
              '## Observed dispatch by family', '',
              f"Form-level observation (not semantic correctness): {measurement['form_dispositions']}.", '',
              '| Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |',
@@ -352,9 +352,9 @@ def render(data, vectors, executable, measurement):
               'python3 scripts/ia64-isa-coverage.py --record', '```', '',
               '## Provenance', '',
               f"- Starting stack: `{data['baseline']}` (PR #6, above indexed-register/RSE work).",
-              f"- F-block plus F9 header SHA-256: `{measurement['source_f_block_sha256']}`.",
+              f"- F-block plus FP support headers SHA-256: `{measurement['source_f_block_sha256']}`.",
               f"- All-vector observation SHA-256: `{measurement['observations_sha256']}`.", '',
-              'No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.', '']
+              'No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; family data-path/state tests are separate.', '']
     return '\n'.join(lines)
 
 
