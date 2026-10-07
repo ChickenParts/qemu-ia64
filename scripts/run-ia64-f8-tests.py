@@ -122,7 +122,7 @@ def generate():
         ("fpcmp.unord.s2", 0x7fc000003f800000, 0x3f8000003f800000,
          0xffffffff00000000, 0),
         ("fpcmp.neq.s3", 0x7fc000003f800000, 0x3f8000003f800000,
-         0xffffffffffffffff, 0),
+         0xffffffff00000000, 0),
         ("fpcmp.nlt.s0", 0x7fc0000040000000, 0x3f8000003f800000,
          0xffffffff00000000, 1),
         ("fpcmp.nle.s0", 0x7fc0000040000000, 0x3f8000003f800000,
