@@ -22,22 +22,22 @@ The baseline file locks **all vector routes**, not merely this summary. Rebaseli
 
 ## Observed dispatch by family
 
-Form-level observation (not semantic correctness): {'all_probes_accepted': 221, 'all_probes_rejected': 12}.
+Form-level observation (not semantic correctness): {'all_probes_accepted': 233}.
 
 | Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |
 |---|---|---:|---:|---|---|
 | `fma` | F1 | 4 | 36/36 | `fma_s1`:32, `tcg`:4 | FP-SEMANTICS |
 | `fma.s` | F1 | 4 | 36/36 | `fma_s1`:32, `tcg`:4 | FP-SEMANTICS |
 | `fma.d` | F1 | 4 | 36/36 | `fma_s1`:32, `tcg`:4 | FP-SEMANTICS |
-| `fpma` | F1 | 4 | 0/36 | `unimplemented`:36 | FP-SEMANTICS |
+| `fpma` | F1 | 4 | 36/36 | `f1_parallel`:36 | FP-SEMANTICS |
 | `fms` | F1 | 4 | 36/36 | `fms_s1`:36 | FP-SEMANTICS |
 | `fms.s` | F1 | 4 | 36/36 | `fms_s1`:36 | FP-SEMANTICS |
 | `fms.d` | F1 | 4 | 36/36 | `fms_s1`:36 | FP-SEMANTICS |
-| `fpms` | F1 | 4 | 0/36 | `unimplemented`:36 | FP-SEMANTICS |
+| `fpms` | F1 | 4 | 36/36 | `f1_parallel`:36 | FP-SEMANTICS |
 | `fnma` | F1 | 4 | 36/36 | `fnma_s1`:36 | FP-SEMANTICS |
 | `fnma.s` | F1 | 4 | 36/36 | `fnma_s1`:36 | FP-SEMANTICS |
 | `fnma.d` | F1 | 4 | 36/36 | `fnma_s1`:36 | FP-SEMANTICS |
-| `fpnma` | F1 | 4 | 0/36 | `unimplemented`:36 | FP-SEMANTICS |
+| `fpnma` | F1 | 4 | 36/36 | `f1_parallel`:36 | FP-SEMANTICS |
 | `xma.l` | F2 | 1 | 9/9 | `xma_l`:9 | FP-STATE |
 | `xma.hu` | F2 | 1 | 9/9 | `xma_hu`:9 | FP-STATE |
 | `xma.h` | F2 | 1 | 9/9 | `xma_h`:9 | FP-STATE |
@@ -162,7 +162,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus FP support headers SHA-256: `ac9805959da8e77d292f4b331f79a8f5be89c2ffd9ea1f212935849420a4ab1b`.
-- All-vector observation SHA-256: `37adb352c925b73cbc69276690b7f578648bb343f269ebc58a409411147100b1`.
+- F-block plus FP support headers SHA-256: `093d59447e72cbaba15ee317938269092d96f16cc302bbee84e9ccfb3124b5cc`.
+- All-vector observation SHA-256: `6ea563e91333d75e09d8a83cbd00e8df915999de46d85b1057ced90d956e2e02`.
 
 No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; family data-path/state tests are separate.

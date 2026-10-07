@@ -33,7 +33,7 @@ EMITTERS = '''gen_set_label gen_set_predicates gen_fr_load_lo gen_fr_load_hi
  tcg_gen_clzi_i64 tcg_gen_shl_i64 tcg_gen_or_i64 tcg_gen_br
  tcg_gen_shri_i64 tcg_gen_neg_i64 tcg_gen_shli_i64
  gen_fchkf_branch gen_break_common'''.split()
-HELPERS = '''fcmp fma_s1 fms_s1 fnma_s1 f67
+HELPERS = '''fcmp f1_parallel fma_s1 fms_s1 fnma_s1 f67
  xma_l xma_hu xma_h f8 f9 f10 fselect fclass fsetc fclrf'''.split()
 
 
@@ -235,6 +235,7 @@ int main(void) {
                    capture_output=True, text=True)
     return executable, digest(block.encode() + b'\0fp-bitops.h\0' + header +
                               b'\0fp-convert.h\0' + (root / 'target/ia64/fp-convert.h').read_bytes() +
+                              b'\0fp-f1.h\0' + (root / 'target/ia64/fp-f1.h').read_bytes() +
                               b'\0fp-f8.h\0' + (root / 'target/ia64/fp-f8.h').read_bytes() +
                               b'\0fp-approx.h\0' + (root / 'target/ia64/fp-approx.h').read_bytes() +
                               b'\0fp-compare.h\0' + (root / 'target/ia64/fp-compare.h').read_bytes())
