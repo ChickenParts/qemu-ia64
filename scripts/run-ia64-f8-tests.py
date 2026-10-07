@@ -132,7 +132,7 @@ def generate():
         # Ordered qNaN in high lane raises masked V; denormal low lane is
         # short-circuited independently and raises D.
         ("fpcmp.lt.s0", 0x7fc0000000000001, 0x3f8000003f800000,
-         0x0000000000000000, 3),
+         0x00000000ffffffff, 3),
     ]
     for mnemonic, av, bv, expected_sig, flags in packed:
         setup_case(6, (av, 0x1003e), (bv, 0x1003e))
