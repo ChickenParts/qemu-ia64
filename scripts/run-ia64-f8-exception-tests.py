@@ -215,7 +215,7 @@ def generate():
     emit(lines, "f", "fpcmp.lt.s0 f6=f7,f8")
     lines.append("packed_after:")
     compare(lines, 15, 5)
-    spill_check(lines, 6, (0xffffffff00000000, 0x1003e))
+    spill_check(lines, 6, (0x0000000000000000, 0x1003e))
     check_fpsr(lines, 0x3f | (V << 13))
     emit(lines, "b", "br.cond.sptk false_predicate")
     lines.append("packed_handler:")
