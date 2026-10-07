@@ -22,7 +22,7 @@ The baseline file locks **all vector routes**, not merely this summary. Rebaseli
 
 ## Observed dispatch by family
 
-Form-level observation (not semantic correctness): {'all_probes_accepted': 185, 'all_probes_rejected': 48}.
+Form-level observation (not semantic correctness): {'all_probes_accepted': 209, 'all_probes_rejected': 24}.
 
 | Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |
 |---|---|---:|---:|---|---|
@@ -42,10 +42,10 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 185, 
 | `xma.hu` | F2 | 1 | 9/9 | `xma_hu`:9 | FP-STATE |
 | `xma.h` | F2 | 1 | 9/9 | `xma_h`:9 | FP-STATE |
 | `fselect` | F3 | 1 | 9/9 | `fselect`:9 | FP-SELECT |
-| `fcmp.eq` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
-| `fcmp.lt` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
-| `fcmp.le` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
-| `fcmp.unord` | F4 | 8 | 18/72 | `fcmp_s0`:18, `unimplemented`:54 | FP-COMPARE |
+| `fcmp.eq` | F4 | 8 | 72/72 | `fcmp`:72 | FP-COMPARE |
+| `fcmp.lt` | F4 | 8 | 72/72 | `fcmp`:72 | FP-COMPARE |
+| `fcmp.le` | F4 | 8 | 72/72 | `fcmp`:72 | FP-COMPARE |
+| `fcmp.unord` | F4 | 8 | 72/72 | `fcmp`:72 | FP-COMPARE |
 | `fclass.m` | F5 | 2 | 18/18 | `fclass`:18 | FP-CLASS |
 | `frcpa` | F6 | 4 | 36/36 | `frcpa_s1`:36 | FP-APPROX |
 | `frsqrta` | F7 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
@@ -108,7 +108,7 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 185, 
 
 **FP-STATE.** Numeric implementation present, not architecturally complete: NaTVal, illegal f0/f1 destination, disabled FP register faults and PSR.mfl/mfh must be checked.
 
-**FP-COMPARE.** Only .s0 reaches the compare helper; .unc predicate-false clearing and FPSR/NaTVal semantics remain incorrect or absent.
+**FP-COMPARE.** F4 canonical EQ/LT/LE/UNORD forms use exact IA-64 register-format comparisons across sf0..sf3. Normal false qualification preserves predicate destinations; .unc false qualification clears both after equal-target legality. Disabled-FR and V/D faults precede predicate/FPSR commit; NaTVal clears both predicates without FP events. Pseudo-relations are assembler aliases. Broader shared FP/SWA semantics remain tracked separately.
 
 **FP-APPROX.** Scalar frcpa now decodes independently of sf and p2, while rsqrt and parallel forms remain explicitly unimplemented. The reciprocal helper still uses host division and ignores numerator/special-case, FPSR and exception semantics.
 
@@ -162,7 +162,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus FP support headers SHA-256: `5fb8a2558ec27e79aecdad94793ffd99165f47536625791d4974c66f015d55ff`.
-- All-vector observation SHA-256: `d391bd535b8522cd666df59c2f3de66bbf1e09b95c7d894ca174124da7f0e80c`.
+- F-block plus FP support headers SHA-256: `2a3efe59a7952e3aa66a7faea669f8688e84ef0546f38d58b1620f1acefc63fd`.
+- All-vector observation SHA-256: `e410bac1af108d1ca2ad5151f79c733a0a4edf48fa486b4c2a4f7177b8f5b169`.
 
 No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; family data-path/state tests are separate.
