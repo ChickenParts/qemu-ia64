@@ -8,6 +8,7 @@
 #include "cpu.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
+#include "fp-f8.h"
 #include "interrupt.h"
 #include "pal.h"
 #include "sal.h"
@@ -2206,6 +2207,49 @@ uint64_t HELPER(fchkf_cond)(CPUIA64State *env, uint32_t sf)
 
     return ((flags & (~traps & 0x3f)) ||
             (flags & (~sf0_flags & 0x3f))) ? 1 : 0;
+}
+
+/*
+ * F8 scalar/packed min/max and packed comparisons.  Target legality and
+ * disabled-register checks precede numerical classification.  V/D are
+ * pre-result faults; masked events become sticky in the selected FPSR field.
+ */
+void HELPER(f8)(CPUIA64State *env, uint64_t insn)
+{
+    unsigned f1 = (insn >> 6) & 127;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned f3 = (insn >> 20) & 127;
+    unsigned sf = (insn >> 34) & 3;
+    int op = ia64_f8_decode(insn);
+    uint16_t disabled_code;
+    IA64FRBits a, b;
+    IA64F8Result result;
+
+    if (op == IA64_F8_INVALID || f1 <= 1) {
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
+    }
+
+    disabled_code = ia64_fp_disabled_code(env, f1, f2, f3, 0);
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
+    }
+
+    a = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                       HELPER(fr_get_hi)(env, f2) };
+    b = (IA64FRBits) { HELPER(fr_get_lo)(env, f3),
+                       HELPER(fr_get_hi)(env, f3) };
+    result = ia64_f8_result(op, a, b, env->ar[IA64_AR_FPSR], sf);
+
+    if (result.fault_code) {
+        ia64_fp_interrupt(env, IA64_VEC_FP_FAULT, result.fault_code,
+                          0, false, GETPC());
+    }
+
+    HELPER(fr_set_lo)(env, f1, result.value.significand);
+    HELPER(fr_set_hi)(env, f1, result.value.sign_exp);
+    env->ar[IA64_AR_FPSR] |= (uint64_t)result.flags << (13 + 13 * sf);
+    env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
 }
 
 /*
