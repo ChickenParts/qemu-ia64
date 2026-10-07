@@ -103,8 +103,7 @@ static inline IA64F8ExtClass ia64_f8_ext_class(IA64FRBits value)
 
 /*
  * Compare finite extended magnitudes exactly.  The explicit significand means
- * value ~= sig * 2^(exp-bias-63).  exp==0 uses the denormal exponent 1-bias.
- * Normalize only for comparison; the selected operand is returned unchanged.
+ * value ~= sig * 2^(exp-bias-63).  IA-64 DE0 (exp==0) uses the\n * architectural effective exponent 0xc001 before normalization.\n * Normalize only for comparison; the selected operand is returned unchanged.
  */
 static inline int ia64_f8_ext_mag_cmp(IA64FRBits a, IA64FRBits b)
 {
@@ -119,8 +118,10 @@ static inline int ia64_f8_ext_mag_cmp(IA64FRBits a, IA64FRBits b)
 
     alz = __builtin_clzll(as);
     blz = __builtin_clzll(bs);
-    ae = (int)((a.sign_exp & 0x1ffff) ?: 1) - (int)alz;
-    be = (int)((b.sign_exp & 0x1ffff) ?: 1) - (int)blz;
+    ae = (int)((a.sign_exp & 0x1ffff) ? (a.sign_exp & 0x1ffff) : 0xc001) -
+         (int)alz;
+    be = (int)((b.sign_exp & 0x1ffff) ? (b.sign_exp & 0x1ffff) : 0xc001) -
+         (int)blz;
     if (ae != be) {
         return ae < be ? -1 : 1;
     }
