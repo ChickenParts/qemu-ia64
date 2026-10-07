@@ -1,0 +1,38 @@
+name: IA-64 non-F fallback audit
+
+on:
+  push:
+    branches: [work/ia64-nonf-fallback-audit]
+    paths:
+      - .github/workflows/ia64-nonf-fallback-audit.yml
+      - scripts/ia64-nonf-fallback-audit.py
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+      - docs/generated/ia64-nonf-fallbacks.md
+  pull_request:
+    paths:
+      - .github/workflows/ia64-nonf-fallback-audit.yml
+      - scripts/ia64-nonf-fallback-audit.py
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+      - docs/generated/ia64-nonf-fallbacks.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check reviewed source census without rebaselining
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          git diff --exit-code
