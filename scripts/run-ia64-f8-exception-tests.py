@@ -126,6 +126,7 @@ def generate():
 
     # 2. Illegal destination wins even when the source bank is disabled.
     lines.append("illegal_case:")
+    emit(lines, "m", "rsm 0x30")
     emit(lines, "m", f"ssm {DFL:#x}")
     emit(lines, "m", "srlz.d")
     literal(lines, 14, "illegal_handler")
