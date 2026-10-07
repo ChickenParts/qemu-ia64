@@ -1,4 +1,4 @@
-name: IA-64 F9 and F10 validation
+name: IA-64 F-unit validation
 on:
   push:
     branches: [work/ia64-f9-bitops, work/ia64-f10-conversions, work/ia64-f10-exceptions, work/ia64-f9-register-faults, work/ia64-f8]
@@ -37,7 +37,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ia64-f9-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: ia64-funit-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
   runtime:
