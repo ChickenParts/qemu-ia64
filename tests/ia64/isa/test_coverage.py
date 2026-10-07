@@ -51,7 +51,8 @@ class CoverageTests(unittest.TestCase):
         root = Path(temporary.name)
         for relative in (AUDIT.REGISTRY, AUDIT.BASELINE, AUDIT.REPORT,
                          Path('target/ia64/translate.c'), Path('target/ia64/fp-bitops.h'),
-                         Path('target/ia64/fp-convert.h'), Path('target/ia64/fp-f8.h'),
+                         Path('target/ia64/fp-convert.h'), Path('target/ia64/fp-f1.h'),
+                         Path('target/ia64/fp-f8.h'),
                          Path('target/ia64/fp-approx.h'),
                          Path('target/ia64/fp-compare.h')):
             destination = root / relative
@@ -185,13 +186,13 @@ class CoverageTests(unittest.TestCase):
                     else:
                         self.assertEqual(route, helper)
 
-    def test_parallel_f1_stays_explicitly_unimplemented(self):
+    def test_parallel_f1_reaches_packed_helper(self):
         for family in ('fpma', 'fpms', 'fpnma'):
             for sf in range(4):
                 for profile in AUDIT.PROFILES:
                     self.assertEqual(
                         self.routes[f'{family}.s{sf}/{profile}'],
-                        'unimplemented')
+                        'f1_parallel')
 
     def test_negative_multiply_is_not_normalization(self):
         self.assertEqual(self.routes['fnma.s0/unit-multiply'], 'fnma_s1')

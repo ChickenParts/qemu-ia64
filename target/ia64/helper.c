@@ -8,6 +8,7 @@
 #include "cpu.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
+#include "fp-f1.h"
 #include "fp-f8.h"
 #include "fp-approx.h"
 #include "fp-compare.h"
@@ -3359,6 +3360,53 @@ uint64_t HELPER(f67)(CPUIA64State *env, uint64_t insn,
         env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
     }
     return result.predicate;
+}
+
+
+void HELPER(f1_parallel)(CPUIA64State *env, uint64_t insn)
+{
+    unsigned f1 = (insn >> 6) & 127;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned f3 = (insn >> 20) & 127;
+    unsigned f4 = (insn >> 27) & 127;
+    unsigned sf = (insn >> 34) & 3;
+    int op = ia64_f1_decode(insn);
+    uint16_t disabled_code;
+    IA64FRBits addend, left, right;
+    IA64F1Result result;
+
+    if (op == IA64_F1_INVALID || f1 <= 1) {
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
+    }
+    disabled_code = ia64_fp_disabled_code(env, f1, f2, f3, f4);
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
+    }
+
+    addend = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                            HELPER(fr_get_hi)(env, f2) };
+    left = (IA64FRBits) { HELPER(fr_get_lo)(env, f3),
+                          HELPER(fr_get_hi)(env, f3) };
+    right = (IA64FRBits) { HELPER(fr_get_lo)(env, f4),
+                           HELPER(fr_get_hi)(env, f4) };
+    result = ia64_f1_result(op, addend, left, right, f2 == 0,
+                            env->ar[IA64_AR_FPSR], sf);
+    if (result.fault_code) {
+        ia64_fp_interrupt(env, IA64_VEC_FP_FAULT, result.fault_code,
+                          0, false, GETPC());
+    }
+
+    HELPER(fr_set_lo)(env, f1, result.value.significand);
+    HELPER(fr_set_hi)(env, f1, result.value.sign_exp);
+    env->ar[IA64_AR_FPSR] |= (uint64_t)result.flags <<
+                             (13 + 13 * sf);
+    env->psr |= f1 < IA64_FR_ROT_BASE ? IA64_PSR_MFL : IA64_PSR_MFH;
+
+    if (result.trap_code) {
+        ia64_fp_interrupt(env, IA64_VEC_FP_TRAP, result.trap_code,
+                          0, true, GETPC());
+    }
 }
 
 void HELPER(fma_s1)(CPUIA64State *env, uint32_t f1, uint32_t f3,

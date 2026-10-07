@@ -7906,6 +7906,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                  * Parallel forms stay explicitly unimplemented until their
                  * lane semantics have dedicated helpers.
                  */
+                if (!handled && pc == 3) {
+                    gen_helper_f1_parallel(tcg_env,
+                                                   tcg_constant_i64(insn));
+                    handled = true;
+                }
+
                 if (!handled && pc != 3) {
                     if (op == 0) {
                         gen_helper_fma_s1(tcg_env,
