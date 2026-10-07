@@ -51,7 +51,8 @@ class CoverageTests(unittest.TestCase):
         root = Path(temporary.name)
         for relative in (AUDIT.REGISTRY, AUDIT.BASELINE, AUDIT.REPORT,
                          Path('target/ia64/translate.c'), Path('target/ia64/fp-bitops.h'),
-                         Path('target/ia64/fp-convert.h'), Path('target/ia64/fp-f8.h')):
+                         Path('target/ia64/fp-convert.h'), Path('target/ia64/fp-f8.h'),
+                         Path('target/ia64/fp-compare.h')):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, destination)
