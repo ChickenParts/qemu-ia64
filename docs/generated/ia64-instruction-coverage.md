@@ -18,7 +18,7 @@ The host harness compiles the actual production `case SLOT_F` with recording TCG
 
 The additional unassigned-encoding probes do **not** assert reserved/illegal behavior. Intel’s opcode-table color key distinguishes ignored, reserved, and conditional-reserved cells. Their architectural dispositions are unadjudicated here; no negative-encoding conformance claim is made.
 
-The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-F9-header hash supplies provenance; moving code also requires refreshing generated evidence.
+The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-FP-support-header hash supplies provenance; moving code also requires refreshing generated evidence.
 
 ## Observed dispatch by family
 
@@ -162,7 +162,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus F9 header SHA-256: `e984ddaeb0a2e3b0da0dc470990f537c6c13e9da999751c2c6614b4f1ef0cc45`.
+- F-block plus FP support headers SHA-256: `e984ddaeb0a2e3b0da0dc470990f537c6c13e9da999751c2c6614b4f1ef0cc45`.
 - All-vector observation SHA-256: `d391bd535b8522cd666df59c2f3de66bbf1e09b95c7d894ca174124da7f0e80c`.
 
-No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.
+No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; family data-path/state tests are separate.
