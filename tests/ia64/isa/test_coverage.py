@@ -51,7 +51,8 @@ class CoverageTests(unittest.TestCase):
         root = Path(temporary.name)
         for relative in (AUDIT.REGISTRY, AUDIT.BASELINE, AUDIT.REPORT,
                          Path('target/ia64/translate.c'), Path('target/ia64/fp-bitops.h'),
-                         Path('target/ia64/fp-convert.h'), Path('target/ia64/fp-f8.h')):
+                         Path('target/ia64/fp-convert.h'), Path('target/ia64/fp-f8.h'),
+                         Path('target/ia64/fp-compare.h')):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, destination)
@@ -208,6 +209,12 @@ class CoverageTests(unittest.TestCase):
         for v in selected:
             self.assertEqual(self.routes[v['id']], 'f8', v['id'])
 
+    def test_all_f4_forms_reach_fcmp_helper(self):
+        selected = [v for v in self.vectors if v['format'] == 'F4']
+        self.assertEqual(len(selected), 288)
+        for v in selected:
+            self.assertEqual(self.routes[v['id']], 'fcmp', v['id'])
+
     def test_all_f9_forms_reach_the_bit_operation_helper(self):
         vectors = [v for v in self.vectors if v['format'] == 'F9']
         self.assertEqual(len(vectors), 19 * len(AUDIT.PROFILES))
@@ -250,7 +257,7 @@ class CoverageTests(unittest.TestCase):
     def test_new_emitter_requires_explicit_review(self):
         root = self.modified_root()
         path = root / 'target/ia64/translate.c'
-        source = path.read_text().replace('gen_helper_fcmp_s0(', 'gen_helper_unreviewed(')
+        source = path.read_text().replace('gen_helper_fcmp(', 'gen_helper_unreviewed(')
         path.write_text(source)
         with self.assertRaises(subprocess.CalledProcessError):
             AUDIT.project(root, root, os.environ.get('CC', 'cc'))

@@ -9,6 +9,7 @@
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f8.h"
+#include "fp-compare.h"
 #include "interrupt.h"
 #include "pal.h"
 #include "sal.h"
@@ -3363,32 +3364,50 @@ void HELPER(fnma_s1)(CPUIA64State *env, uint32_t f1, uint32_t f3,
     ia64_ld_to_fp(env, f1, fmal(-a, b, c));
 }
 
-uint64_t HELPER(fcmp_s0)(CPUIA64State *env, uint32_t f2, uint32_t f3,
-                         uint32_t rel)
+uint64_t HELPER(fcmp)(CPUIA64State *env, uint64_t insn,
+                       uint64_t qual_arg)
 {
-    long double a = ia64_fp_to_ld(env, f2);
-    long double b = ia64_fp_to_ld(env, f3);
-    bool unord = isnan(a) || isnan(b);
-    bool cond = false;
+    unsigned p1 = (insn >> 6) & 63;
+    bool unc = ((insn >> 12) & 1) != 0;
+    unsigned f2 = (insn >> 13) & 127;
+    unsigned f3 = (insn >> 20) & 127;
+    unsigned p2 = (insn >> 27) & 63;
+    unsigned sf = (insn >> 34) & 3;
+    int rel = ia64_fcmp_decode(insn);
+    bool qual = qual_arg != 0;
+    uint16_t disabled_code;
+    IA64FRBits a, b;
+    IA64FCmpResult result;
 
-    switch (rel & 0x3) {
-    case 0: /* eq */
-        cond = !unord && (a == b);
-        break;
-    case 1: /* lt */
-        cond = !unord && (a < b);
-        break;
-    case 2: /* le */
-        cond = !unord && (a <= b);
-        break;
-    case 3: /* unord */
-        cond = unord;
-        break;
-    default:
-        g_assert_not_reached();
+    if (!qual && !unc) {
+        return 0;
+    }
+    if (rel == IA64_FCMP_INVALID || p1 == p2) {
+        ia64_fp_interrupt(env, IA64_VEC_ILLEGAL_OP, 0, 0, false, GETPC());
+    }
+    if (!qual) {
+        return 0;
     }
 
-    return cond ? 1 : 0;
+    disabled_code = ia64_fp_disabled_code(env, 0, f2, f3, 0);
+    if (disabled_code) {
+        ia64_fp_interrupt(env, IA64_VEC_DISABLED_FP, disabled_code, 0,
+                          false, GETPC());
+    }
+
+    a = (IA64FRBits) { HELPER(fr_get_lo)(env, f2),
+                       HELPER(fr_get_hi)(env, f2) };
+    b = (IA64FRBits) { HELPER(fr_get_lo)(env, f3),
+                       HELPER(fr_get_hi)(env, f3) };
+    result = ia64_fcmp_result(rel, a, b, env->ar[IA64_AR_FPSR], sf, true);
+
+    if (result.fault_code) {
+        ia64_fp_interrupt(env, IA64_VEC_FP_FAULT, result.fault_code,
+                          0, false, GETPC());
+    }
+
+    env->ar[IA64_AR_FPSR] |= (uint64_t)result.flags << (13 + 13 * sf);
+    return result.predicates;
 }
 
 /*
