@@ -8,6 +8,7 @@
 #include "cpu.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
+#include "fp-f8.h"
 #include "tcg/tcg-op.h"
 #include "tcg/tcg.h"
 #include "exec/helper-proto.h"
@@ -7754,6 +7755,12 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                                         tcg_constant_i32(f3));
                     handled = true;
                 }
+            }
+
+            if (!handled && ia64_f8_decode(insn) != IA64_F8_INVALID) {
+                /* F8 scalar/packed min/max and packed comparisons. */
+                gen_helper_f8(tcg_env, tcg_constant_i64(insn));
+                handled = true;
             }
 
             if (!handled && ia64_f9_decode(insn) != IA64_F9_INVALID) {

@@ -18,11 +18,11 @@ The host harness compiles the actual production `case SLOT_F` with recording TCG
 
 The additional unassigned-encoding probes do **not** assert reserved/illegal behavior. Intel’s opcode-table color key distinguishes ignored, reserved, and conditional-reserved cells. Their architectural dispositions are unadjudicated here; no negative-encoding conformance claim is made.
 
-The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-F9-header hash supplies provenance; moving code also requires refreshing generated evidence.
+The baseline file locks **all vector routes**, not merely this summary. Rebaselining requires reviewing the route changes and corresponding issues. The source-block-plus-FP-support-header hash supplies provenance; moving code also requires refreshing generated evidence.
 
 ## Observed dispatch by family
 
-Form-level observation (not semantic correctness): {'all_probes_accepted': 121, 'all_probes_rejected': 112}.
+Form-level observation (not semantic correctness): {'all_probes_accepted': 185, 'all_probes_rejected': 48}.
 
 | Family | Format | Forms | Accepted / probes | Emitted routes | Semantic audit |
 |---|---|---:|---:|---|---|
@@ -51,22 +51,22 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 121, 
 | `frsqrta` | F7 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
 | `fprcpa` | F6 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
 | `fprsqrta` | F7 | 4 | 0/36 | `unimplemented`:36 | FP-APPROX |
-| `fmin` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fmax` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `famin` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `famax` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpmin` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpmax` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpamin` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpamax` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.eq` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.lt` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.le` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.unord` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.neq` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.nlt` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.nle` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
-| `fpcmp.ord` | F8 | 4 | 0/36 | `unimplemented`:36 | MISSING |
+| `fmin` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fmax` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `famin` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `famax` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpmin` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpmax` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpamin` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpamax` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.eq` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.lt` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.le` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.unord` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.neq` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.nlt` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.nle` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
+| `fpcmp.ord` | F8 | 4 | 36/36 | `f8`:36 | FP-F8 |
 | `fmerge.s` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
 | `fmerge.ns` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
 | `fmerge.se` | F9 | 1 | 9/9 | `f9`:9 | FP-BITOPS |
@@ -126,6 +126,8 @@ Form-level observation (not semantic correctness): {'all_probes_accepted': 121, 
 
 **FP-CLASS.** F5 fclass implements sign/class masks, NaTVal predicate clearing, distinct-target legality, architectural disabled-bank checks, and .unc false-predicate clearing without host floating point. Full-system execution evidence is tracked separately.
 
+**FP-F8.** F8 scalar/packed min/max and packed comparisons use exact architectural register/single bit patterns. NaTVal propagates before numerical events; V/D are classified per lane, enabled events fault before result/FPSR/dirty commit, and masked events become sticky. No host floating point is used; broader F1/F4/F6/F7 FP semantics remain separate.
+
 **HINT.** NOP/hint decode observed; hint no-op policy is allowed, but this emission audit is not an execution proof.
 
 **MISSING.** No dedicated production implementation observed for this family.
@@ -160,7 +162,7 @@ python3 scripts/ia64-isa-coverage.py --record
 ## Provenance
 
 - Starting stack: `04f2bb639bd2e7759824e81e2c512d9034caf157` (PR #6, above indexed-register/RSE work).
-- F-block plus F9 header SHA-256: `e3a6c738a00e2d295b44fea48707d4740e8be2ba9468d190c98a9b87d80788ed`.
-- All-vector observation SHA-256: `0385b20222acc5daf31ff6d294368717899de6af9f89f368c94c29c651cc9d48`.
+- F-block plus FP support headers SHA-256: `5fb8a2558ec27e79aecdad94793ffd99165f47536625791d4974c66f015d55ff`.
+- All-vector observation SHA-256: `d391bd535b8522cd666df59c2f3de66bbf1e09b95c7d894ca174124da7f0e80c`.
 
-No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; F9 data-path/state tests are separate.
+No firmware, ROM, or private payload is needed or included. The audit itself does not execute instructions; family data-path/state tests are separate.
