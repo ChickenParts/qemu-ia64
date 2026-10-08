@@ -988,8 +988,18 @@ static bool ia64_epc_fetch_rights(CPUIA64State *env, uint64_t pc,
 }
 
 /* B8 epc: privilege check precedes the page-controlled promotion. */
-void HELPER(epc)(CPUIA64State *env, uint64_t pc)
+void HELPER(epc)(CPUIA64State *env, uint64_t pc, uint64_t insn)
 {
+    /*
+     * The instruction is unpredicated.  Even a false bit-pattern in
+     * the nominal qp field is illegal; it must never use gen_qp_skip.
+     */
+    if ((insn & ~(UINT64_C(0x3f) << 27)) != 0) {
+        ia64_fault(env_cpu(env), env, false, false,
+                   IA64_VEC_ILLEGAL_OP, 0, GETPC());
+        g_assert_not_reached();
+    }
+
     uint8_t cpl = IA64_PSR_CPL(env->psr);
     uint8_t ppl = extract64(env->ar[IA64_AR_PFS], 62, 2);
     uint8_t ar = 0, pl = 3;
