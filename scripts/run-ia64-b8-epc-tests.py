@@ -87,11 +87,11 @@ def generate(case: str) -> str:
         emit(lines, "m", "mov cr.itir=r14")
         pte = TEXT | (ar << 9) | (pl << 7) | (1 << 6) | (1 << 5) | 1
         literal(lines, 20, hex(pte))
-        # itc.i must be the last instruction of its instruction group.
-        # Use the M;;I;I stopping template, not the shared MII emitter
-        # that places two ordinary I instructions in its group.
-        lines.extend(["{ .mii", "itc.i r20", ";;",
-                      "nop.i 0", "nop.i 0", ";;", "}"])
+        # GNU IA-64 assigns LAST M-unit instructions to the M;MI
+        # template: slot 0 is followed immediately by a stop.  A
+        # plain MII template cannot encode the required stop after M.
+        lines.extend(["{ .mmi", "itc.i r20", ";;",
+                      "nop.m 0", "nop.i 0", ";;", "}"])
         emit(lines, "m", "srlz.i")
 
     # RFI from CPL0 installs CPL3 and optional PSR.it (normal executing
