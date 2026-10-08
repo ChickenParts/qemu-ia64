@@ -58,6 +58,8 @@ class B8SourceTest(unittest.TestCase):
         self.assertIn("br.call.sptk b0=cfm_snapshot", src)
         self.assertIn("mov r9=ar.pfs", src)
         self.assertIn("getf.sig r9=f32", src)
+        self.assertIn("ld8.fill r34=[r12]", src)
+        self.assertIn("tnat.z p6,p7=r{nat_after}", src)
         self.assertIn("br.wtop.sptk rotated_", src)
         self.assertIn("cmp.eq p16,p17=r0,r0", src)
 
