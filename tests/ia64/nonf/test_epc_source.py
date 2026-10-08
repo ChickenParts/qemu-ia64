@@ -39,6 +39,11 @@ class EPCSourceTests(unittest.TestCase):
         self.assertLess(fault, commit)
         self.assertIn("IA64_VEC_ILLEGAL_OP", body)
         self.assertIn("GETPC()", body)
+        # Illegal-operation ISR must have code/EI but not memory-access
+        # X/R/W flags. The generic ia64_fault() wrapper sets those flags.
+        self.assertEqual(2, body.count("ia64_exception(env_cpu(env), env"))
+        self.assertEqual(2, body.count("false, false, GETPC());"))
+        self.assertNotIn("ia64_fault(", body)
 
     def test_fetch_uses_only_instruction_entries_and_correct_pc(self):
         start = self.helper.index("static bool ia64_epc_fetch_rights(")
