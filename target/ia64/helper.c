@@ -17648,6 +17648,35 @@ void HELPER(ret_restore)(CPUIA64State *env)
     uint64_t bsp = ia64_rse_get_bsp(env);
     uint64_t pfs_cfm = env->ar[IA64_AR_PFS] & IA64_PFM_MASK;
     uint64_t b0 = env->b[0] & ~0xFULL;
+
+    if (env->rse_stack_switch_pending && env->rse_stack_switch_b0 == 0) {
+        int boundary = -1;
+
+        if (env->rse_stack_switch_bsp == (bsp & ~UINT64_C(0x7)) &&
+            env->rse_frames && env->rse_depth > 0) {
+            const struct IA64RSEReturnFrameView view = {
+                .base = env->rse_frames,
+                .count = env->rse_depth,
+                .stride = sizeof(*env->rse_frames),
+                .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+                .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+                .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
+            };
+            uint64_t top_ret = env->rse_frames[env->rse_depth - 1].ret_addr;
+
+            boundary = ia64_rse_bind_stack_switch_return(
+                &view, bsp, pfs_cfm, b0, top_ret);
+        }
+
+        if (boundary >= 0) {
+            env->rse_stack_switch_pfs = pfs_cfm;
+            env->rse_stack_switch_b0 = b0;
+            ia64_rse_strict_trace(env, "stack_switch_bind", b0, pfs_cfm);
+        } else {
+            ia64_rse_cancel_stack_switch(env);
+        }
+    }
+
     bool stack_switch = ia64_rse_stack_switch_matches(env, bsp, b0,
                                                       pfs_cfm);
 
@@ -17676,6 +17705,13 @@ void HELPER(ret_restore)(CPUIA64State *env)
                 if (exact) {
                     memcpy(&env->r[32], frame->r, sizeof(frame->r));
                     memcpy(&env->nat[32], frame->nat, sizeof(frame->nat));
+                    /*
+                     * The architectural activation can outlive this shadow
+                     * frame. Keep guest backing-store memory synchronized so
+                     * a later non-local return can reload the same window after
+                     * the shadow metadata has aged out.
+                     */
+                    ia64_rse_store_frame(env, bsp, pfs_cfm & 0x7f);
                     restored_from_shadow = true;
                 }
 
@@ -29872,23 +29908,17 @@ void HELPER(set_bspstore)(CPUIA64State *env, uint64_t bspstore)
      * Ordinary calls/alloc/cover/rfi cancel this state, so a firmware or OS
      * stack initialization cannot leak into a later unrelated return.
      */
-    uint64_t restored_b0 = env->b[0] & ~UINT64_C(0xf);
-    uint64_t top_ret = 0;
-    if (env->rse_depth > 0 && env->rse_frames) {
-        top_ret = env->rse_frames[env->rse_depth - 1].ret_addr &
-                  ~UINT64_C(0xf);
-    }
-    if (!task_switch && old_bspstore != 0 && bspstore != 0 &&
-        env->rse_depth > 0 && ia64_rse_is_lazy(env) &&
-        bspstore <= old_bspstore && bspstore <= old_bsp &&
-        restored_b0 != 0 && restored_b0 != top_ret) {
+    if (ia64_rse_should_arm_stack_switch(old_bspstore, bspstore, old_bsp,
+                                         env->rse_depth,
+                                         ia64_rse_is_lazy(env),
+                                         task_switch)) {
+        /* b0 and PFS are restored later; zero identity marks provisional. */
         env->rse_stack_switch_pending = 1;
         env->rse_stack_switch_bsp = bspstore;
-        env->rse_stack_switch_pfs = env->ar[IA64_AR_PFS];
-        env->rse_stack_switch_b0 = restored_b0;
+        env->rse_stack_switch_pfs = 0;
+        env->rse_stack_switch_b0 = 0;
         env->rse_stack_switch_ip = env->ip;
-        ia64_rse_strict_trace(env, "stack_switch_arm", bspstore,
-                              restored_b0);
+        ia64_rse_strict_trace(env, "stack_switch_arm", bspstore, 0);
     } else {
         ia64_rse_cancel_stack_switch(env);
     }

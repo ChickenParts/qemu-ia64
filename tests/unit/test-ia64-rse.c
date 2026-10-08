@@ -298,6 +298,60 @@ static void test_stack_switch_pfs_non_pfm_bits_ignored(void)
     g_assert_cmpint(find_stack_switch_boundary(&env, 0x1800, pfs), ==, 0);
 }
 
+static void test_stack_switch_deferred_firmware_order(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[3];
+    struct IA64RSEReturnFrameView view;
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].bsp = 0x1ffc2000;
+    frames[0].cfm = 0x201;
+    frames[0].ret_addr = 0x1ff10000;
+    frames[1].bsp = 0x1ffc3088;
+    frames[1].cfm = 0x30a;
+    frames[1].ret_addr = 0x1ff3d1d0;
+    frames[2].bsp = 0x1ffc30b8;
+    frames[2].cfm = 0x30a;
+    frames[2].ret_addr = 0x1ff3e780;
+    view = (struct IA64RSEReturnFrameView) {
+        .base = env.rse_frames,
+        .count = env.rse_depth,
+        .stride = sizeof(*env.rse_frames),
+        .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+        .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+        .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
+    };
+
+    g_assert_true(ia64_rse_should_arm_stack_switch(
+        0x1ffc30b8, 0x1ffc3088, 0x1ffc30b8, env.rse_depth,
+        true, false));
+    g_assert_cmpint(ia64_rse_bind_stack_switch_return(
+        &view, 0x1ffc3088, 0x30a, 0x1ff3d1d0, 0x1ff3e780), ==, 1);
+}
+
+static void test_stack_switch_deferred_rejects_ordinary_return(void)
+{
+    TestIA64RSEState env;
+    struct IA64RSEFrame frames[1];
+    struct IA64RSEReturnFrameView view;
+
+    init_frames(&env, frames, G_N_ELEMENTS(frames));
+    frames[0].bsp = 0x1ffc3088;
+    frames[0].cfm = 0x30a;
+    frames[0].ret_addr = 0x1ff3e780;
+    view = (struct IA64RSEReturnFrameView) {
+        .base = env.rse_frames,
+        .count = env.rse_depth,
+        .stride = sizeof(*env.rse_frames),
+        .cfm_offset = offsetof(struct IA64RSEFrame, cfm),
+        .ret_addr_offset = offsetof(struct IA64RSEFrame, ret_addr),
+        .bsp_offset = offsetof(struct IA64RSEFrame, bsp),
+    };
+    g_assert_cmpint(ia64_rse_bind_stack_switch_return(
+        &view, 0x1ffc3088, 0x30a, 0x1ff3e780, 0x1ff3e780), ==, -1);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -326,5 +380,9 @@ int main(int argc, char **argv)
                     test_stack_switch_all_frames_survive);
     g_test_add_func("/ia64/rse/stack-switch-pfs-mask",
                     test_stack_switch_pfs_non_pfm_bits_ignored);
+    g_test_add_func("/ia64/rse/stack-switch-deferred-firmware-order",
+                    test_stack_switch_deferred_firmware_order);
+    g_test_add_func("/ia64/rse/stack-switch-deferred-ordinary-return",
+                    test_stack_switch_deferred_rejects_ordinary_return);
     return g_test_run();
 }

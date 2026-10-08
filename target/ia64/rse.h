@@ -50,4 +50,24 @@ int ia64_rse_find_stack_switch_boundary(
     const struct IA64RSEReturnFrameView *view,
     uint64_t bsp, uint64_t pfs_cfm);
 
+/*
+ * Recognize only the architectural first half of a non-local restore here.
+ * b0 and PFS are intentionally absent: firmware is allowed to restore them
+ * after BSPSTORE and before br.ret.
+ */
+bool ia64_rse_should_arm_stack_switch(uint64_t old_bspstore,
+                                      uint64_t new_bspstore,
+                                      uint64_t old_bsp,
+                                      size_t shadow_depth,
+                                      bool lazy_mode,
+                                      bool task_switch);
+
+/* Bind the late return identity at br.ret; reject an ordinary top return. */
+int ia64_rse_bind_stack_switch_return(
+    const struct IA64RSEReturnFrameView *view,
+    uint64_t restored_bsp,
+    uint64_t current_pfs,
+    uint64_t current_b0,
+    uint64_t top_ret_addr);
+
 #endif /* TARGET_IA64_RSE_H */

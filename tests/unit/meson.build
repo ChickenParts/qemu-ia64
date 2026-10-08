@@ -48,6 +48,7 @@ tests = {
   'test-qapi-util': [],
   'test-interval-tree': [],
   'test-fifo': [],
+  'test-ia64-decode': [meson.project_source_root() / 'target/ia64/decode.c'],
   'test-ia64-interrupt': [meson.project_source_root() / 'target/ia64/interrupt.c'],
   'test-ia64-iosapic': [meson.project_source_root() / 'hw/ia64/iosapic-core.c'],
   'test-ia64-pal': [meson.project_source_root() / 'target/ia64/pal.c'],
