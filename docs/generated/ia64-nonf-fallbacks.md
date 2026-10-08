@@ -26,7 +26,7 @@ Observed non-F sites: **16**. All observed call sites including F/other: **21**.
 |---|---|---:|---|
 | `dynamic:unimpl_msg#1` | BREAK_HELPER | 1498 | not-in-non-f-scope |
 | `dynamic:unimpl_msg#2` | BREAK_HELPER | 1541 | not-in-non-f-scope |
-| `A-slot#1` | A | 3532 | not-adjudicated |
+| `A-slot#1` | A | 3516 | not-adjudicated |
 | `B-slot major=4 btype#1` | B | 3917 | not-adjudicated |
 | `B-slot#1` | B | 3964 | not-adjudicated |
 | `reserved template#1` | TEMPLATE | 3976 | not-in-non-f-scope |
