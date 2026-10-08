@@ -3590,6 +3590,22 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
     } else if (major == 0x0 && x6 == 0x2) {
         /* cover: create a covering frame for interruption/sigtramp paths */
         gen_helper_cover(tcg_env);
+    } else if (major == 0x0 && (x6 == 0x4 || x6 == 0x5) &&
+               (insn & ~(UINT64_C(0x3f) << 27)) == 0) {
+        /*
+         * B8 clrrrb / clrrrb.pr.  These are UNPREDICATED, with all
+         * non-x6 bits fixed zero; qp is not a usable qualifier.
+         *
+         * The shared helper clears only the relevant CFM RRB fields.
+         * For clrrrb (all), it also re-materializes rotating GR values
+         * and NaTs because this target models GR rotation by physically
+         * shifting the register window in rotate_grs(), unlike the
+         * architectural rename-map implementation for FRs and PRs.
+         *
+         * The instruction must end an instruction group; Intel rev 2.3
+         * leaves behavior undefined otherwise, so do not invent a fault.
+         */
+        gen_helper_clrrrb(tcg_env, tcg_constant_i32(x6 == 0x5));
     } else if (major == 0x0 && (x6 == 0x20 || x6 == 0x21)) {
         /* B4: br.cond/br.ia b2 (x6=0x20) and br.ret b2 (x6=0x21). */
         uint8_t b2 = extract64(insn, 13, 3);
