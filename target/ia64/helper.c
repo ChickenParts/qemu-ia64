@@ -13819,6 +13819,59 @@ void HELPER(rotate_grs)(CPUIA64State *env)
     env->nat[32] = last_nat;
 }
 
+/*
+ * B8 clrrrb / clrrrb.pr.  FRs and PRs are indexed through the live
+ * CFM rename bases, so clearing their fields immediately changes the
+ * architectural register view.  GRs are different in this target:
+ * rotate_grs() physically rotates the stacked values/NaTs to match the
+ * new architectural view, because the GR translator indexes r32..r127
+ * directly instead of using CFM.rrb.gr on every access.
+ *
+ * Before clearing rrb.gr we must undo that physical permutation.
+ * Given the old base k, logical GR[i] corresponds to physical GR[i+k].
+ * After reset it must see physical GR[i], which is the old logical
+ * GR[(i-k) modulo sor].  Use a temporary copy so aliases and NaTs stay
+ * associated with their corresponding physical registers.  Predicate-
+ * only clrrrb.pr must not touch GR/FR state or either rename base.
+ */
+void HELPER(clrrrb)(CPUIA64State *env, uint32_t predicate_only)
+{
+    uint64_t old_cfm = env->cfm;
+    const uint64_t pr_mask = UINT64_C(0x3f) << 32;
+
+    if (predicate_only) {
+        env->cfm = old_cfm & ~pr_mask;
+        return;
+    }
+
+    uint32_t sor = extract64(old_cfm, IA64_CFM_SOR_SHIFT, 4) * 8;
+    uint32_t sof = extract64(old_cfm, 0, 7);
+    uint32_t count = MIN(MIN(sor, 96U), sof);
+    uint32_t rrbg = extract64(old_cfm, 18, 7);
+    if (count > 1) {
+        rrbg %= count;
+        if (rrbg) {
+            uint64_t values[96];
+            uint8_t nats[96];
+
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t src = (i + count - rrbg) % count;
+                values[i] = env->r[32 + src];
+                nats[i] = env->nat[32 + src];
+            }
+            memcpy(&env->r[32], values, count * sizeof(values[0]));
+            memcpy(&env->nat[32], nats, count * sizeof(nats[0]));
+        }
+    }
+
+    /* Clear CFM.rrb.gr[24:18], rrb.fr[31:25], rrb.pr[37:32].
+     * Preserve SOF/SOL/SOR, high architectural CFM fields and all
+     * unrelated state. Missing group stop has undefined behavior.
+     */
+    env->cfm = old_cfm & ~((UINT64_C(0x7f) << 18) |
+                           (UINT64_C(0x7f) << 25) | pr_mask);
+}
+
 void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
 {
     /*

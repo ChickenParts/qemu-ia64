@@ -27,24 +27,24 @@ Observed non-F sites: **16**. All observed call sites including F/other: **21**.
 | `dynamic:unimpl_msg#1` | BREAK_HELPER | 1498 | not-in-non-f-scope |
 | `dynamic:unimpl_msg#2` | BREAK_HELPER | 1541 | not-in-non-f-scope |
 | `A-slot#1` | A | 3516 | not-adjudicated |
-| `B-slot major=4 btype#1` | B | 3885 | not-adjudicated |
-| `B-slot#1` | B | 3932 | not-adjudicated |
-| `reserved template#1` | TEMPLATE | 3944 | not-in-non-f-scope |
-| `M-slot#1` | M | 4169 | not-adjudicated |
-| `mov msr#1` | M | 4241 | not-adjudicated |
-| `M-slot#2` | M | 5001 | not-adjudicated |
-| `M-slot#3` | M | 5514 | not-adjudicated |
-| `M-slot op6/7#1` | M | 5930 | not-adjudicated |
-| `M-slot#4` | M | 5939 | not-adjudicated |
-| `I-slot#1` | I | 6323 | not-adjudicated |
-| `mux1 mbtype#1` | I | 6823 | not-adjudicated |
-| `I-slot#2` | I | 7209 | not-adjudicated |
-| `I-slot#3` | I | 7634 | not-adjudicated |
-| `I-slot#4` | I | 7646 | not-adjudicated |
-| `F-slot#1` | F | 8012 | not-in-non-f-scope |
-| `X-slot op0#1` | LX | 8044 | not-adjudicated |
-| `X-slot#1` | LX | 8136 | not-adjudicated |
-| `bad slot#1` | OTHER | 8140 | not-in-non-f-scope |
+| `B-slot major=4 btype#1` | B | 3901 | not-adjudicated |
+| `B-slot#1` | B | 3948 | not-adjudicated |
+| `reserved template#1` | TEMPLATE | 3960 | not-in-non-f-scope |
+| `M-slot#1` | M | 4185 | not-adjudicated |
+| `mov msr#1` | M | 4257 | not-adjudicated |
+| `M-slot#2` | M | 5017 | not-adjudicated |
+| `M-slot#3` | M | 5530 | not-adjudicated |
+| `M-slot op6/7#1` | M | 5946 | not-adjudicated |
+| `M-slot#4` | M | 5955 | not-adjudicated |
+| `I-slot#1` | I | 6339 | not-adjudicated |
+| `mux1 mbtype#1` | I | 6839 | not-adjudicated |
+| `I-slot#2` | I | 7225 | not-adjudicated |
+| `I-slot#3` | I | 7650 | not-adjudicated |
+| `I-slot#4` | I | 7662 | not-adjudicated |
+| `F-slot#1` | F | 8028 | not-in-non-f-scope |
+| `X-slot op0#1` | LX | 8060 | not-adjudicated |
+| `X-slot#1` | LX | 8152 | not-adjudicated |
+| `bad slot#1` | OTHER | 8156 | not-in-non-f-scope |
 
 ## Required next audit (not yet done)
 
