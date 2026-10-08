@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "epc.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -938,6 +939,90 @@ static uint64_t ia64_translate_tlb(CPUIA64State *env, bool is_data, uint64_t va,
     }
     *hit = false;
     return 0;
+}
+
+/*
+ * Obtain the access-rights and page-privilege fields associated with
+ * the instruction fetch at pc.  Match the fetch-side softmmu's ITR
+ * and ITLB selection, never the DTLB or an unrelated virtual page.
+ * A missing explicit translation cannot justify privilege promotion.
+ */
+static bool ia64_epc_fetch_rights(CPUIA64State *env, uint64_t pc,
+                                  uint8_t *ar, uint8_t *pl)
+{
+    uint32_t rid = RR_RID(env->rr[extract64(pc, 61, 3)]);
+    bool found = false;
+
+    for (int i = 0; i < ARRAY_SIZE(env->itrs); i++) {
+        if (!env->itrs[i].valid || env->itrs[i].rid != rid ||
+            !PTE_P(env->itrs[i].pte) || env->itrs[i].ps >= 64) {
+            continue;
+        }
+        uint64_t mask = ~((UINT64_C(1) << env->itrs[i].ps) - 1);
+        if ((pc & mask) == env->itrs[i].tag) {
+            *ar = PTE_AR(env->itrs[i].pte);
+            *pl = PTE_PL(env->itrs[i].pte);
+            found = true;
+            break;
+        }
+    }
+
+    /* This target's fetch refill currently allows ITLB hits to override
+     * a matched ITR.  Preserve that selection here until the common fetch
+     * translation path is consolidated.
+     */
+    for (int i = 0; i < ARRAY_SIZE(env->itlb); i++) {
+        if (!env->itlb[i].valid || env->itlb[i].rid != rid ||
+            !env->itlb[i].p || env->itlb[i].ps >= 64) {
+            continue;
+        }
+        uint64_t mask = ~((UINT64_C(1) << env->itlb[i].ps) - 1);
+        if ((pc & mask) == env->itlb[i].tag) {
+            *ar = env->itlb[i].ar;
+            *pl = env->itlb[i].pl;
+            found = true;
+            break;
+        }
+    }
+    return found;
+}
+
+/* B8 epc: privilege check precedes the page-controlled promotion. */
+void HELPER(epc)(CPUIA64State *env, uint64_t pc, uint64_t insn)
+{
+    /*
+     * The instruction is unpredicated.  Even a false bit-pattern in
+     * the nominal qp field is illegal; it must never use gen_qp_skip.
+     */
+    if ((insn & ~(UINT64_C(0x3f) << 27)) != 0) {
+        /* Illegal Operation is NOT a memory/instruction access fault:
+         * do not set ISR.X/R/W (the ordinary access-fault wrapper does).
+         */
+        ia64_exception(env_cpu(env), env, false, false,
+                       IA64_VEC_ILLEGAL_OP, 0, 0, 0,
+                       false, false, GETPC());
+        g_assert_not_reached();
+    }
+
+    uint8_t cpl = IA64_PSR_CPL(env->psr);
+    uint8_t ppl = extract64(env->ar[IA64_AR_PFS], 62, 2);
+    uint8_t ar = 0, pl = 3;
+    bool it = (env->psr & IA64_PSR_IT) != 0;
+    bool found = it && ia64_epc_fetch_rights(env, pc, &ar, &pl);
+    unsigned int target_cpl = ia64_epc_next_cpl(cpl, ppl, it, found, ar, pl);
+
+    if (target_cpl == IA64_EPC_ILLEGAL) {
+        /* Illegal Operation is NOT a memory/instruction access fault:
+         * do not set ISR.X/R/W (the ordinary access-fault wrapper does).
+         */
+        ia64_exception(env_cpu(env), env, false, false,
+                       IA64_VEC_ILLEGAL_OP, 0, 0, 0,
+                       false, false, GETPC());
+        g_assert_not_reached();
+    }
+
+    env->psr = (env->psr & ~IA64_PSR_CPL_MASK) |
+               ((uint64_t)target_cpl << IA64_PSR_CPL_SHIFT);
 }
 
 static bool ia64_try_translate(CPUIA64State *env, uint64_t va, hwaddr *pa)
