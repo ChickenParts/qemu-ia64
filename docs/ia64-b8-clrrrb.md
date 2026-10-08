@@ -55,6 +55,7 @@ clear, but only after equivalent guest tests pass.
 - `scripts/run-ia64-b8-clrrrb-tests.py`: 12 firmware-free real-QEMU
   executions, with 0, 1, 2, 7, 8 and 9 prior `br.wtop` rotations
   for each form. Check visible GR32/GR39, FR32, p16/p17, PSR.mfl/mfh,
+  and a real NaT bit carried by a rotating GR plus an adjacent clean GR,
   and exact RRB/size fields saved by a real `br.call` into `ar.pfs`.
 - `tests/ia64/nonf/test_b8_clrrrb.py`: source decoder and helper
   mutation guards; inherited reviewed non-F fallback census.
