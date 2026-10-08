@@ -995,8 +995,12 @@ void HELPER(epc)(CPUIA64State *env, uint64_t pc, uint64_t insn)
      * the nominal qp field is illegal; it must never use gen_qp_skip.
      */
     if ((insn & ~(UINT64_C(0x3f) << 27)) != 0) {
-        ia64_fault(env_cpu(env), env, false, false,
-                   IA64_VEC_ILLEGAL_OP, 0, GETPC());
+        /* Illegal Operation is NOT a memory/instruction access fault:
+         * do not set ISR.X/R/W (the ordinary access-fault wrapper does).
+         */
+        ia64_exception(env_cpu(env), env, false, false,
+                       IA64_VEC_ILLEGAL_OP, 0, 0, 0,
+                       false, false, GETPC());
         g_assert_not_reached();
     }
 
@@ -1008,8 +1012,12 @@ void HELPER(epc)(CPUIA64State *env, uint64_t pc, uint64_t insn)
     unsigned int target_cpl = ia64_epc_next_cpl(cpl, ppl, it, found, ar, pl);
 
     if (target_cpl == IA64_EPC_ILLEGAL) {
-        ia64_fault(env_cpu(env), env, false, false,
-                   IA64_VEC_ILLEGAL_OP, 0, GETPC());
+        /* Illegal Operation is NOT a memory/instruction access fault:
+         * do not set ISR.X/R/W (the ordinary access-fault wrapper does).
+         */
+        ia64_exception(env_cpu(env), env, false, false,
+                       IA64_VEC_ILLEGAL_OP, 0, 0, 0,
+                       false, false, GETPC());
         g_assert_not_reached();
     }
 
