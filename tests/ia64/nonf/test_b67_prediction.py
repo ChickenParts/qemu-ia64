@@ -19,8 +19,12 @@ class B67DecoderTests(unittest.TestCase):
         self.assertIn("(x6 == 0x10 || x6 == 0x11)", early)
         self.assertIn("(0x7ffULL << 16)", early)
         self.assertIn("0x2fULL", early)
-        self.assertEqual(2, early.count("return;"))
-        self.assertEqual(2, early.count("    if (major =="))
+        # B8 epc is also correctly routed before predicate skipping.
+        # Keep the B6/B7 invariants local to their own dispatcher region
+        # instead of forbidding future unpredicated B-unit instructions.
+        b67_region = early.split("B8 epc is UNPREDICATED", 1)[0]
+        self.assertEqual(2, b67_region.count("return;"))
+        self.assertEqual(2, b67_region.count("    if (major =="))
         self.assertIn('gen_unimpl(ctx, insn, "B-slot");', branch[predication:])
 
     def test_fixed_bit_mutation_breaks_early_routing(self):
