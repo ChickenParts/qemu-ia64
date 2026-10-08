@@ -87,7 +87,11 @@ def generate(case: str) -> str:
         emit(lines, "m", "mov cr.itir=r14")
         pte = TEXT | (ar << 9) | (pl << 7) | (1 << 6) | (1 << 5) | 1
         literal(lines, 20, hex(pte))
-        emit(lines, "m", "itc.i r20")
+        # itc.i must be the last instruction of its instruction group.
+        # Use the M;;I;I stopping template, not the shared MII emitter
+        # that places two ordinary I instructions in its group.
+        lines.extend(["{ .mii", "itc.i r20", ";;",
+                      "nop.i 0", "nop.i 0", ";;", "}"])
         emit(lines, "m", "srlz.i")
 
     # RFI from CPL0 installs CPL3 and optional PSR.it (normal executing
