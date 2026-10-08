@@ -128,7 +128,7 @@ def generate(profile: str) -> str:
     emit(lines, "b", "br.call.sptk b0=cfm_snapshot")
     emit(lines, "b", "br.cond.sptk fail")
     lines.append("cfm_snapshot:")
-    emit(lines, "m", "mov r9=ar.pfs")
+    emit(lines, "i", "mov r9=ar.pfs")
     literal(lines, 14, hex(CFM_FIELDS_MASK))
     emit(lines, "i", "and r9=r9,r14")
     if pred_only:
