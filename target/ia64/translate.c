@@ -3519,10 +3519,10 @@ static void decode_a_unit(DisasContext *ctx, uint64_t insn)
 
 static void decode_b_unit(DisasContext *ctx, uint64_t insn)
 {
-    if (insn == 0) {
-        /* nop.b 0 */
-        return;
-    }
+    /*
+     * Do not treat the all-zero B slot as a no-op: B9 encodes break.b 0.
+     * The B-unit no-op is major 2, x6=0, not the zero instruction word.
+     */
     uint8_t qp = insn & 0x3f;
     uint8_t major = (insn >> 37) & 0xf;
     uint8_t x6 = (insn >> 27) & 0x3f;
@@ -3541,8 +3541,21 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
 
     TCGLabel *skip_label = gen_qp_skip(qp);
 
-    /* rfi: op=0, x6=0x8 */
-    if (major == 0x0 && x6 == 0x8) {
+    /*
+     * B9: break.b imm21.  The all-zero word is break.b 0.
+     * The immediate is imm20[25:6] plus i[36], and the preexisting
+     * architectural break helper delivers the real IVT 0x2c00 fault,
+     * including IIM and the current bundle slot in ISR.ei.
+     */
+    if (major == 0x0 && x6 == 0x0) {
+        uint64_t imm = (extract64(insn, 36, 1) << 20) |
+                       extract64(insn, 6, 20);
+        gen_helper_breaki(tcg_env, tcg_constant_i64(imm));
+        if (qp == 0) {
+            ctx->base.is_jmp = DISAS_NORETURN;
+        }
+    } else if (major == 0x0 && x6 == 0x8) {
+        /* B8: rfi (op=0, x6=0x8). */
         gen_helper_rfi(tcg_env);
         if (qp == 0) {
             ctx->base.is_jmp = DISAS_NORETURN;
@@ -3890,9 +3903,8 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
             ctx->base.is_jmp = DISAS_NORETURN;
         }
         tcg_gen_exit_tb(NULL, 0);
-    } else if (((insn >> 37) & 0xf) == 0x2 && ((insn >> 27) & 0x3f) == 0x0) {
-        /* nop.b */
-        /* nothing */
+    } else if (major == 0x2 && (x6 == 0x0 || x6 == 0x1)) {
+        /* B9 nop.b and hint.b carry imm21 but have no visible effect. */
     } else {
         gen_unimpl(ctx, insn, "B-slot");
     }
