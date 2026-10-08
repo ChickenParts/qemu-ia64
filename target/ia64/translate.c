@@ -3539,6 +3539,29 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                                   tcg_constant_i32(qp));
     }
 
+    /*
+     * B6/B7 branch-prediction hints are unpredicated: bits 4:3 encode the
+     * whether hint, NOT qp.  Decode before gen_qp_skip() so an otherwise
+     * legal .loop/.dptk hint cannot be skipped as a predicate read.
+     * They only affect microarchitectural prediction resources, which
+     * QEMU does not model (no architectural state or interruption).
+     *
+     * B6: major=7, wh=0..3, ih=0..1; bits 5 and 2:0 are fixed zero.
+     * The imm21 target and timm9 tag do not alter execution state.
+     */
+    if (major == 0x7 && (insn & 0x27) == 0) {
+        return;
+    }
+    /*
+     * B7: major=2, x6=0x10/0x11 (brp/brp.ret); wh=0 or 2.
+     * Bits 36, 26:16, 5, 3 and 2:0 must be zero; b2/timm9 are
+     * prediction metadata, not a branch or register-state operation.
+     */
+    if (major == 0x2 && (x6 == 0x10 || x6 == 0x11) &&
+        (insn & ((1ULL << 36) | (0x7ffULL << 16) | 0x2fULL)) == 0) {
+        return;
+    }
+
     TCGLabel *skip_label = gen_qp_skip(qp);
 
     /*

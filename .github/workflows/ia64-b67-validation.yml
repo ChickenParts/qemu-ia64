@@ -1,0 +1,98 @@
+name: IA-64 B6/B7 branch prediction validation
+
+on:
+  push:
+    branches: [work/ia64-b6-b7-predict]
+    paths:
+      - .github/workflows/ia64-b67-validation.yml
+      - target/ia64/translate.c
+      - scripts/ia64-b67-byte-oracle.py
+      - scripts/run-ia64-b67-predict-tests.py
+      - scripts/ia64-nonf-fallback-audit.py
+      - tests/ia64/nonf/**
+      - docs/generated/ia64-nonf-fallbacks.md
+  pull_request:
+    paths:
+      - .github/workflows/ia64-b67-validation.yml
+      - target/ia64/translate.c
+      - scripts/ia64-b67-byte-oracle.py
+      - scripts/run-ia64-b67-predict-tests.py
+      - scripts/ia64-nonf-fallback-audit.py
+      - tests/ia64/nonf/**
+      - docs/generated/ia64-nonf-fallbacks.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  b67-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install IA-64 assembler and QEMU build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Check source snapshot and independent GNU B6/B7 bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/b67-evidence
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-b67-byte-oracle.py \
+            --out scratch/b67-evidence/gnu-oracle
+          python3 scripts/run-ia64-b67-predict-tests.py \
+            --assemble-only --out scratch/b67-evidence/assembly
+          git diff --exit-code
+      - name: Build production qemu-system-ia64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir build-b67
+          (cd build-b67; ../configure --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+            --disable-slirp --disable-werror)
+          ninja -C build-b67 -j"$(nproc)" qemu-system-ia64
+      - name: Run real-IVT B6/B7 and inherited regression guests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-b67-predict-tests.py \
+            --qemu build-b67/qemu-system-ia64 \
+            --out scratch/b67-evidence/guest-execution --timeout 10
+          python3 scripts/run-ia64-b9-exception-tests.py \
+            --qemu build-b67/qemu-system-ia64 \
+            --out scratch/b67-evidence/b9-regression --timeout 10
+          python3 scripts/run-ia64-f12-f15-exception-tests.py \
+            --qemu build-b67/qemu-system-ia64 \
+            --out scratch/b67-evidence/f12-f15 --timeout 10
+          QEMU_BIN="$PWD/build-b67/qemu-system-ia64" \
+          IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+          IA64_FSLOT_LOGDIR=scratch/b67-evidence/fslot/logs \
+          IA64_FSLOT_OUTDIR=scratch/b67-evidence/fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+      - name: Retain exact source and emulator fingerprint
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p scratch/b67-evidence
+          git rev-parse HEAD > scratch/b67-evidence/source-head.txt
+          if test -f build-b67/qemu-system-ia64; then
+            sha256sum build-b67/qemu-system-ia64 > scratch/b67-evidence/qemu-sha256.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-b67-validation
+          path: scratch/b67-evidence
+          retention-days: 14
+          if-no-files-found: error
