@@ -124,3 +124,36 @@ int ia64_rse_find_stack_switch_boundary(
 
     return first_at_or_above;
 }
+
+bool ia64_rse_should_arm_stack_switch(uint64_t old_bspstore,
+                                      uint64_t new_bspstore,
+                                      uint64_t old_bsp,
+                                      size_t shadow_depth,
+                                      bool lazy_mode,
+                                      bool task_switch)
+{
+    old_bspstore &= ~UINT64_C(0x7);
+    new_bspstore &= ~UINT64_C(0x7);
+    old_bsp &= ~UINT64_C(0x7);
+
+    return !task_switch && lazy_mode && shadow_depth > 0 &&
+           old_bspstore != 0 && new_bspstore != 0 &&
+           new_bspstore <= old_bspstore && new_bspstore <= old_bsp;
+}
+
+int ia64_rse_bind_stack_switch_return(
+    const struct IA64RSEReturnFrameView *view,
+    uint64_t restored_bsp,
+    uint64_t current_pfs,
+    uint64_t current_b0,
+    uint64_t top_ret_addr)
+{
+    uint64_t target = current_b0 & ~UINT64_C(0xf);
+    uint64_t top = top_ret_addr & ~UINT64_C(0xf);
+
+    if (target == 0 || (top != 0 && target == top)) {
+        return -1;
+    }
+    return ia64_rse_find_stack_switch_boundary(view, restored_bsp,
+                                                current_pfs);
+}

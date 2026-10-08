@@ -1,0 +1,87 @@
+name: IA-64 RSE and M43 production source
+
+on:
+  push:
+    branches: [work/ia64-rse-m43-materialized]
+    paths:
+      - target/ia64/**
+      - tests/unit/test-ia64-rse.c
+      - tests/unit/test-ia64-decode.c
+      - .github/workflows/ia64-rse-m43-source-validation.yml
+  pull_request:
+    paths:
+      - target/ia64/**
+      - tests/unit/test-ia64-rse.c
+      - tests/unit/test-ia64-decode.c
+      - .github/workflows/ia64-rse-m43-source-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-guest-regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install build/test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu ninja-build \
+            pkg-config python3 ruby libglib2.0-dev libpixman-1-dev zlib1g-dev
+      - name: Check committed repairs, without applying temporary patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f target/ia64/decode.c
+          test -f target/ia64/decode.h
+          grep -F 'ia64_munit_decode_indexed_read(insn)' target/ia64/translate.c
+          grep -F 'ia64_rse_bind_stack_switch_return(' target/ia64/helper.c
+          grep -F 'ia64_rse_store_frame(env, bsp, pfs_cfm & 0x7f);' target/ia64/helper.c
+          python3 scripts/check-ia64-rooster-branch.py
+          git diff --check
+      - name: Build IA-64 emulator and direct RSE/M43 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --target-list=ia64-softmmu --enable-plugins \
+            --disable-slirp --disable-docs --disable-gtk --disable-sdl \
+            --disable-werror
+          ninja -C build -j"$(nproc)" \
+            qemu-system-ia64 tests/unit/test-ia64-rse tests/unit/test-ia64-decode
+          build/tests/unit/test-ia64-rse | tee rse-source.tap
+          build/tests/unit/test-ia64-decode | tee m43-source.tap
+          git diff --exit-code
+      - name: Re-run legacy firmware-free F-slot guest controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          QEMU_BIN="$PWD/build/qemu-system-ia64" \
+          IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+          IA64_FSLOT_LOGDIR=scratch/ia64-rse-m43-fslot/logs \
+          IA64_FSLOT_OUTDIR=scratch/ia64-rse-m43-fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+      - name: Preserve evidence
+        if: always()
+        run: |
+          mkdir -p scratch/ia64-rse-m43-evidence
+          if test -f rse-source.tap; then cp rse-source.tap scratch/ia64-rse-m43-evidence/; fi
+          if test -f m43-source.tap; then cp m43-source.tap scratch/ia64-rse-m43-evidence/; fi
+          if test -d scratch/ia64-rse-m43-fslot; then
+            cp -r scratch/ia64-rse-m43-fslot scratch/ia64-rse-m43-evidence/
+          fi
+          git rev-parse HEAD > scratch/ia64-rse-m43-evidence/source.txt
+          if test -f build/qemu-system-ia64; then
+            sha256sum build/qemu-system-ia64 > scratch/ia64-rse-m43-evidence/qemu.sha256
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-rse-m43-source-evidence
+          path: scratch/ia64-rse-m43-evidence
+          if-no-files-found: error
+          retention-days: 14
