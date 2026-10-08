@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/run-ia64-fslot-tests.sh [timeout]
 
 Builds and runs a bare-metal IA-64 directed selftest for core F-slot ops:
-`fadd.s`, `fsub.s`, `fmpy.s`, `fneg`, `fabs`, and `fcmp.*`.
+`fadd.s`, `fsub.s`, `fmpy.s`, `fneg`, `fabs`, `fcmp.*`, and `fcvt.xf`.
 
 Arguments:
   timeout   Optional timeout passed to `timeout` (default: 12s)
@@ -42,7 +42,7 @@ bin="$outdir/fslot-selftest.elf"
 
 set +e
 QEMU_IA64_BREAK_LOG=1 IA64_LOGDIR="$logdir" IA64_KERNEL="$bin" IA64_INITRD= IA64_APPEND= \
-  timeout "$run_timeout" scripts/run-ia64-kernel.sh
+  timeout -k 2s "$run_timeout" scripts/run-ia64-kernel.sh
 rc=$?
 set -e
 

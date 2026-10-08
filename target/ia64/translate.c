@@ -7617,6 +7617,72 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             }
 
             if (!handled && f_major == 0x0) {
+                /*
+                 * F11: fcvt.xf f1 = f2
+                 *
+                 * Convert the 64-bit significand of f2 as a signed integer
+                 * into canonical register-format floating point.  This
+                 * instruction is exact and has no status-field/rounding
+                 * completer.  Keep the conversion in integer TCG so the
+                 * INT64_MIN case is exact as well.
+                 *
+                 * Encoding:
+                 *   op{40:37}=0 x{33}=0 x6{32:27}=0x1c
+                 *   bits{35:34}=0 f3{26:20}=0
+                 */
+                uint8_t x = extract64(insn, 33, 1);
+                uint8_t sf = extract64(insn, 34, 2);
+                uint8_t x6 = extract64(insn, 27, 6);
+                uint8_t f3 = extract64(insn, 20, 7);
+                if (x == 0 && sf == 0 && x6 == 0x1c && f3 == 0) {
+                    uint8_t f2 = extract64(insn, 13, 7) & 0x7f;
+                    uint8_t f1 = extract64(insn, 6, 7) & 0x7f;
+                    TCGv_i64 sig = tcg_temp_new_i64();
+                    TCGv_i64 mant = tcg_temp_new_i64();
+                    TCGv_i64 sign = tcg_temp_new_i64();
+                    TCGLabel *zero = gen_new_label();
+                    TCGLabel *nonnegative = gen_new_label();
+                    TCGLabel *done = gen_new_label();
+
+                    gen_fr_load_lo(sig, f2);
+                    tcg_gen_brcondi_i64(TCG_COND_EQ, sig, 0, zero);
+
+                    tcg_gen_mov_i64(mant, sig);
+                    tcg_gen_movi_i64(sign, 0);
+                    tcg_gen_brcondi_i64(TCG_COND_GE, sig, 0, nonnegative);
+                    tcg_gen_sub_i64(mant, tcg_constant_i64(0), sig);
+                    tcg_gen_movi_i64(sign, 0x20000);
+                    gen_set_label(nonnegative);
+
+                    TCGv_i64 lz = tcg_temp_new_i64();
+                    TCGv_i64 mant_norm = tcg_temp_new_i64();
+                    TCGv_i64 exp_norm = tcg_temp_new_i64();
+                    TCGv_i64 expw_norm = tcg_temp_new_i64();
+
+                    tcg_gen_clzi_i64(lz, mant, 64);
+                    tcg_gen_shl_i64(mant_norm, mant, lz);
+                    tcg_gen_movi_i64(exp_norm, IA64_FP_EXP_INTEGER);
+                    tcg_gen_sub_i64(exp_norm, exp_norm, lz);
+                    tcg_gen_andi_i64(exp_norm, exp_norm, 0x1ffff);
+                    tcg_gen_or_i64(expw_norm, sign, exp_norm);
+
+                    if (f1 > 1) {
+                        gen_fr_store_lo(f1, mant_norm);
+                        gen_fr_store_hi(f1, expw_norm);
+                    }
+                    tcg_gen_br(done);
+
+                    gen_set_label(zero);
+                    if (f1 > 1) {
+                        gen_fr_store_lo(f1, tcg_constant_i64(0));
+                        gen_fr_store_hi(f1, tcg_constant_i64(0));
+                    }
+                    gen_set_label(done);
+                    handled = true;
+                }
+            }
+
+            if (!handled && f_major == 0x0) {
                 /* F9: fmerge.{s,ns,se} f1 = f2, f3 */
                 uint8_t x = extract64(insn, 33, 1);
                 uint8_t x6 = extract64(insn, 27, 6);

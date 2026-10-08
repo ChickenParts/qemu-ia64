@@ -102,14 +102,85 @@ test_fp_nan_unord:
 
 test_fp_nan_unord_p17:
 (p17)	br.sptk.many fail
-	br.cond.spnt pass
+	br.cond.spnt test_fcvt_xf_positive
+
+test_fcvt_xf_positive:
+	/*
+	 * Exact firmware regression: this assembles as fcvt.xf f7=f7,
+	 * the opcode that stopped the Xen DXE path (000e000e1c0).
+	 * f7 still contains integer-form +3 from startup.
+	 */
+	fcvt.xf f7 = f7
+	getf.sig r30 = f7
+	movl r31 = 0xc000000000000000
+	cmp.eq p6,p7 = r30, r31
+(p6)	br.cond.spnt test_fcvt_xf_positive_exp
+	br.sptk.many fail
+
+test_fcvt_xf_positive_exp:
+	getf.exp r30 = f7
+	movl r31 = 0x10000
+	cmp.eq p6,p7 = r30, r31
+(p6)	br.cond.spnt test_fcvt_xf_negative
+	br.sptk.many fail
+
+test_fcvt_xf_negative:
+	movl r30 = 0xfffffffffffffffd
+	setf.sig f19 = r30
+	fcvt.xf f19 = f19
+	getf.sig r30 = f19
+	movl r31 = 0xc000000000000000
+	cmp.eq p6,p7 = r30, r31
+(p6)	br.cond.spnt test_fcvt_xf_negative_exp
+	br.sptk.many fail
+
+test_fcvt_xf_negative_exp:
+	getf.exp r30 = f19
+	movl r31 = 0x30000
+	cmp.eq p6,p7 = r30, r31
+(p6)	br.cond.spnt test_fcvt_xf_zero
+	br.sptk.many fail
+
+test_fcvt_xf_zero:
+	movl r30 = 0
+	setf.sig f20 = r30
+	fcvt.xf f20 = f20
+	getf.sig r30 = f20
+	cmp.eq p6,p7 = r30, r0
+(p6)	br.cond.spnt test_fcvt_xf_zero_exp
+	br.sptk.many fail
+
+test_fcvt_xf_zero_exp:
+	getf.exp r30 = f20
+	cmp.eq p6,p7 = r30, r0
+(p6)	br.cond.spnt test_fcvt_xf_min
+	br.sptk.many fail
+
+test_fcvt_xf_min:
+	movl r30 = 0x8000000000000000
+	setf.sig f21 = r30
+	fcvt.xf f21 = f21
+	getf.sig r30 = f21
+	movl r31 = 0x8000000000000000
+	cmp.eq p6,p7 = r30, r31
+(p6)	br.cond.spnt test_fcvt_xf_min_exp
+	br.sptk.many fail
+
+test_fcvt_xf_min_exp:
+	getf.exp r30 = f21
+	movl r31 = 0x3003e
+	cmp.eq p6,p7 = r30, r31
+(p6)	br.cond.spnt pass
+	br.sptk.many fail
 
 pass:
 	movl r8 = 0x66736c70		/* "fslp" marker in break log */
 	break 0
-	br.sptk.many pass
+pass_spin:
+	br.sptk.many pass_spin
 
 fail:
 	movl r8 = 0x66736c66		/* "fslf" marker in break log */
 	break 0
-	br.sptk.many fail
+fail_spin:
+	br.sptk.many fail_spin
