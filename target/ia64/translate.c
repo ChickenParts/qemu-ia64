@@ -3562,6 +3562,22 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         return;
     }
 
+    /*
+     * B8 epc is UNPREDICATED.  Route every major=0/x6=0x10 word through
+     * the helper BEFORE normal branch-unit qualification: the helper
+     * faults fixed-field/qp violations, checks AR.PFS.ppl against CPL,
+     * and promotes only via the fetched instruction translation.
+     *
+     * End the TB even when epc does not change CPL, so the next group
+     * executes with the correct MMU index and updated privilege.
+     */
+    if (major == 0 && x6 == 0x10) {
+        gen_helper_epc(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                       tcg_constant_i64(insn));
+        ctx->base.is_jmp = DISAS_TOO_MANY;
+        return;
+    }
+
     TCGLabel *skip_label = gen_qp_skip(qp);
 
     /*
