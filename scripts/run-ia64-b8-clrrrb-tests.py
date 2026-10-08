@@ -73,6 +73,16 @@ def generate(profile: str) -> str:
         literal(lines, 20, hex(0x7100 + i))
         emit(lines, "i", f"mov r{32+i}=r20")
 
+    # Create an architected NaT on r34 via the same ld8.fill/ar.unat
+    # mechanism as ia64-nat-selftest.S. The harness starts with a
+    # 16-byte aligned r12, so ar.unat bit0 marks the loaded GR NaT.
+    # A data-value-only rotation test would miss lost/mispaired NaTs.
+    literal(lines, 20, 1)
+    emit(lines, "m", "mov ar.unat=r20")
+    emit(lines, "m", "ld8.fill r34=[r12]")
+    emit(lines, "i", "tnat.z p6,p7=r34")
+    emit(lines, "b", "(p6) br.cond.sptk fail")
+
     # Two distinguishable physical FR sources: rotating f32 reads the
     # final chosen physical register after N rotations.  If N=0, f32
     # remains the original sentinel; otherwise rotating f32 hits f(128-N).
@@ -97,6 +107,9 @@ def generate(profile: str) -> str:
     rotated_gr32 = 0x7100 + ((8 - rotations % 8) % 8)
     rotated_fr32 = 0x5151 if rotations == 0 else 0xA5A5
     compare(lines, 32, hex(rotated_gr32))
+    nat_rotated = 32 + ((2 + rotations) % 8)
+    emit(lines, "i", f"tnat.z p6,p7=r{nat_rotated}")
+    emit(lines, "b", "(p6) br.cond.sptk fail")
     emit(lines, "m", "getf.sig r9=f32")
     compare(lines, 9, hex(rotated_fr32))
     check_predicate(lines, 16 + rotations, True, "before")
@@ -111,6 +124,12 @@ def generate(profile: str) -> str:
     compare(lines, 32, hex(expected_gr32))
     compare(lines, 39, hex((0x7100 + ((7 - rotations % 8) % 8))
                             if pred_only else 0x7107))
+    nat_after = nat_rotated if pred_only else 34
+    emit(lines, "i", f"tnat.z p6,p7=r{nat_after}")
+    emit(lines, "b", "(p6) br.cond.sptk fail")
+    nat_clean = 32 + ((nat_after - 32 + 1) % 8)
+    emit(lines, "i", f"tnat.z p6,p7=r{nat_clean}")
+    emit(lines, "b", "(p7) br.cond.sptk fail")
     emit(lines, "m", "getf.sig r9=f32")
     compare(lines, 9, hex(expected_fr32))
 
@@ -177,7 +196,7 @@ def main() -> None:
         "coverage": [
             "0/1/2/7/8/9 rotations before clear",
             "all-RRB reset versus predicate-only reset",
-            "GR32 and GR39 physical rematerialization across wrap",
+            "GR32/GR39 physical rematerialization and real GR NaT preservation",
             "FR32 live rename view, PR16/PR17 live predicate view",
             "SOF/SOL/SOR and per-field RRB checks via br.call->ar.pfs",
             "PSR.mfl/mfh unchanged; no spurious IVT interruption",
