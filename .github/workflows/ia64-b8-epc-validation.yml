@@ -1,0 +1,111 @@
+name: IA-64 B8 epc validation
+
+on:
+  push:
+    branches: [work/ia64-b8-epc]
+    paths:
+      - .github/workflows/ia64-b8-epc-validation.yml
+      - target/ia64/epc.h
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - scripts/ia64-b8-epc-byte-oracle.py
+      - scripts/run-ia64-b8-epc-tests.py
+      - tests/ia64/nonf/**
+      - docs/generated/ia64-nonf-fallbacks.md
+  pull_request:
+    paths:
+      - .github/workflows/ia64-b8-epc-validation.yml
+      - target/ia64/epc.h
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - scripts/ia64-b8-epc-byte-oracle.py
+      - scripts/run-ia64-b8-epc-tests.py
+      - tests/ia64/nonf/**
+      - docs/generated/ia64-nonf-fallbacks.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  epc-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install IA-64 GNU cross-binutils and QEMU build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Verify production host logic and GNU independent bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/epc-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/epc-evidence/epc-host tests/ia64/nonf/epc-logic-test.c
+          scratch/epc-evidence/epc-host
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-b8-epc-byte-oracle.py \
+            --out scratch/epc-evidence/gnu-oracle
+          python3 scripts/run-ia64-b8-epc-tests.py \
+            --assemble-only --out scratch/epc-evidence/assembly
+          git diff --exit-code
+      - name: Build full production qemu-system-ia64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir build-epc
+          (cd build-epc; ../configure --target-list=ia64-softmmu \
+             --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+             --disable-slirp --disable-werror)
+          ninja -C build-epc -j"$(nproc)" qemu-system-ia64
+      - name: Run epc real-IVT and inherited guest regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-b8-epc-tests.py \
+            --qemu build-epc/qemu-system-ia64 \
+            --out scratch/epc-evidence/epc-guest --timeout 10
+          python3 scripts/run-ia64-b8-clrrrb-tests.py \
+            --qemu build-epc/qemu-system-ia64 \
+            --out scratch/epc-evidence/clrrrb --timeout 10
+          python3 scripts/run-ia64-b67-predict-tests.py \
+            --qemu build-epc/qemu-system-ia64 \
+            --out scratch/epc-evidence/b67 --timeout 10
+          python3 scripts/run-ia64-b9-exception-tests.py \
+            --qemu build-epc/qemu-system-ia64 \
+            --out scratch/epc-evidence/b9 --timeout 10
+          python3 scripts/run-ia64-f12-f15-exception-tests.py \
+            --qemu build-epc/qemu-system-ia64 \
+            --out scratch/epc-evidence/f12-f15 --timeout 10
+          QEMU_BIN="$PWD/build-epc/qemu-system-ia64" \
+          IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+          IA64_FSLOT_LOGDIR=scratch/epc-evidence/fslot/logs \
+          IA64_FSLOT_OUTDIR=scratch/epc-evidence/fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+      - name: Retain exact source and QEMU provenance
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p scratch/epc-evidence
+          git rev-parse HEAD > scratch/epc-evidence/source-head.txt
+          if test -f build-epc/qemu-system-ia64; then
+            sha256sum build-epc/qemu-system-ia64 > scratch/epc-evidence/qemu-sha256.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-b8-epc-validation
+          path: scratch/epc-evidence
+          retention-days: 14
+          if-no-files-found: error
