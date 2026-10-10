@@ -3578,6 +3578,17 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         return;
     }
 
+    /*
+     * B8 vmsw.0/.1 are unpredicated.  Decode them before ordinary
+     * branch-unit qualification so qp/fixed-field violations fault.
+     */
+    if (major == 0 && (x6 == 0x18 || x6 == 0x19)) {
+        gen_helper_vmsw(tcg_env, tcg_constant_i64(ctx->base.pc_next),
+                        tcg_constant_i64(insn));
+        ctx->base.is_jmp = DISAS_TOO_MANY;
+        return;
+    }
+
     TCGLabel *skip_label = gen_qp_skip(qp);
 
     /*

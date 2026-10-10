@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "epc.h"
+#include "vmsw.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -1023,6 +1024,36 @@ void HELPER(epc)(CPUIA64State *env, uint64_t pc, uint64_t insn)
 
     env->psr = (env->psr & ~IA64_PSR_CPL_MASK) |
                ((uint64_t)target_cpl << IA64_PSR_CPL_SHIFT);
+}
+
+static void ia64_vmsw_raise_illegal(CPUIA64State *env)
+{
+    /*
+     * Illegal Operation is not an instruction-access fault.  Preserve the
+     * same no-X/R/W ISR construction used by epc's fixed-field path.
+     */
+    ia64_exception(env_cpu(env), env, false, false,
+                   IA64_VEC_ILLEGAL_OP, 0, 0, 0,
+                   false, false, GETPC());
+    g_assert_not_reached();
+}
+
+/* B8 vmsw.0/vmsw.1 on the current CPU model, which advertises NoVM. */
+void HELPER(vmsw)(CPUIA64State *env, uint64_t pc, uint64_t insn)
+{
+    (void)pc;
+
+    /*
+     * vmsw is unpredicated.  Keep reserved qp/fixed-field classification
+     * explicit even though both a malformed word and a legal vmsw word on
+     * this no-VM model currently deliver Illegal Operation.
+     */
+    if (!ia64_vmsw_encoding_valid(insn)) {
+        ia64_vmsw_raise_illegal(env);
+    }
+
+    /* Feature absence has priority over CPL and all virtualization checks. */
+    ia64_vmsw_raise_illegal(env);
 }
 
 static bool ia64_try_translate(CPUIA64State *env, uint64_t va, hwaddr *pa)

@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "pal.h"
+#include "vmsw.h"
 
 static IA64PALResult ia64_pal_result(int64_t status,
                                      uint64_t v0,
@@ -164,9 +165,23 @@ IA64PALResult ia64_pal_result_vm_info(uint64_t level,
 IA64PALResult ia64_pal_result_proc_get_features(
     uint64_t feature_set)
 {
-    /* No configurable processor feature sets are modeled. */
-    (void)feature_set;
-    return ia64_pal_result(IA64_PAL_STATUS_EINVAL, 0, 0, 0);
+    uint64_t implemented;
+    uint64_t current;
+    uint64_t controllable;
+
+    if (!ia64_vmsw_no_vm_pal_features(feature_set,
+                                      &implemented,
+                                      &current,
+                                      &controllable)) {
+        return ia64_pal_result(IA64_PAL_STATUS_EINVAL, 0, 0, 0);
+    }
+
+    /*
+     * NoVM is an interrogable, read-only fact.  EnableVmsw remains clear,
+     * matching the decoder/helper policy for this non-virtualizing model.
+     */
+    return ia64_pal_result(IA64_PAL_STATUS_SUCCESS,
+                           implemented, current, controllable);
 }
 
 IA64PALResult ia64_pal_result_freq_base(void)
