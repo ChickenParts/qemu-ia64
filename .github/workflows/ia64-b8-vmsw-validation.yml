@@ -1,0 +1,112 @@
+name: IA-64 B8 vmsw validation
+
+on:
+  push:
+    branches: [work/ia64-b8-vmsw]
+    paths:
+      - .github/workflows/ia64-b8-vmsw-validation.yml
+      - docs/generated/ia64-nonf-fallbacks.md
+      - docs/ia64-b8-vmsw.md
+      - scripts/run-ia64-b8-vmsw-tests.py
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/pal.c
+      - target/ia64/translate.c
+      - target/ia64/vmsw.h
+      - tests/ia64/nonf/**
+  pull_request:
+    paths:
+      - .github/workflows/ia64-b8-vmsw-validation.yml
+      - docs/generated/ia64-nonf-fallbacks.md
+      - docs/ia64-b8-vmsw.md
+      - scripts/run-ia64-b8-vmsw-tests.py
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/pal.c
+      - target/ia64/translate.c
+      - target/ia64/vmsw.h
+      - tests/ia64/nonf/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vmsw-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install IA-64 GNU cross-binutils and QEMU build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Verify production policy, source order and assembler support
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/vmsw-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/vmsw-evidence/vmsw-policy \
+            tests/ia64/nonf/vmsw-policy-test.c
+          scratch/vmsw-evidence/vmsw-policy | \
+            tee scratch/vmsw-evidence/host-policy.txt
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/run-ia64-b8-vmsw-tests.py \
+            --assemble-only --out scratch/vmsw-evidence/assembly
+          git diff --exit-code
+      - name: Build full production qemu-system-ia64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir build-vmsw
+          (cd build-vmsw; ../configure --target-list=ia64-softmmu \
+             --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+             --disable-slirp --disable-werror)
+          ninja -C build-vmsw -j"$(nproc)" qemu-system-ia64
+      - name: Run vmsw and inherited real-guest regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-b8-vmsw-tests.py \
+            --qemu build-vmsw/qemu-system-ia64 \
+            --out scratch/vmsw-evidence/vmsw-guest --timeout 10
+          python3 scripts/run-ia64-b8-epc-tests.py \
+            --qemu build-vmsw/qemu-system-ia64 \
+            --out scratch/vmsw-evidence/epc --timeout 10
+          python3 scripts/run-ia64-b8-clrrrb-tests.py \
+            --qemu build-vmsw/qemu-system-ia64 \
+            --out scratch/vmsw-evidence/clrrrb --timeout 10
+          python3 scripts/run-ia64-b67-predict-tests.py \
+            --qemu build-vmsw/qemu-system-ia64 \
+            --out scratch/vmsw-evidence/b67 --timeout 10
+          python3 scripts/run-ia64-b9-exception-tests.py \
+            --qemu build-vmsw/qemu-system-ia64 \
+            --out scratch/vmsw-evidence/b9 --timeout 10
+          python3 scripts/run-ia64-f12-f15-exception-tests.py \
+            --qemu build-vmsw/qemu-system-ia64 \
+            --out scratch/vmsw-evidence/f12-f15 --timeout 10
+      - name: Retain exact source and QEMU provenance
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p scratch/vmsw-evidence
+          git rev-parse HEAD > scratch/vmsw-evidence/source-head.txt
+          if test -f build-vmsw/qemu-system-ia64; then
+            sha256sum build-vmsw/qemu-system-ia64 > \
+              scratch/vmsw-evidence/qemu-sha256.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-b8-vmsw-validation
+          path: scratch/vmsw-evidence
+          retention-days: 14
+          if-no-files-found: error
