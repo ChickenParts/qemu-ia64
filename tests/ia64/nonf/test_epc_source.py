@@ -7,6 +7,22 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def function_text(source: str, signature: str) -> str:
+    """Return one C function without depending on which helper follows it."""
+    begin = source.index(signature)
+    brace = source.index("{", begin)
+    depth = 0
+    for offset in range(brace, len(source)):
+        char = source[offset]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[begin:offset + 1]
+    raise AssertionError(f"unterminated function: {signature}")
+
+
 class EPCSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -27,9 +43,7 @@ class EPCSourceTests(unittest.TestCase):
                       (ROOT / "target/ia64/helper.h").read_text())
 
     def test_invalid_fixed_fields_fault_before_pfs_and_psr_mutations(self):
-        begin = self.helper.index("void HELPER(epc)(")
-        end = self.helper.index("static bool ia64_try_translate(", begin)
-        body = self.helper[begin:end]
+        body = function_text(self.helper, "void HELPER(epc)(")
         bad = body.index("(insn & ~(UINT64_C(0x3f) << 27)) != 0")
         check = body.index("ia64_epc_next_cpl(")
         fault = body.index("if (target_cpl == IA64_EPC_ILLEGAL)")
