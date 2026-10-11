@@ -9,6 +9,7 @@
 #include "epc.h"
 #include "vmsw.h"
 #include "b4.h"
+#include "b5.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -1081,6 +1082,25 @@ void HELPER(b4_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn)
 
     (void)pc;
     if (ia64_b4_faults_before_predication(kind, qp)) {
+        ia64_exception(env_cpu(env), env, false, false,
+                       IA64_VEC_ILLEGAL_OP, 0, 0, 0,
+                       false, false, retaddr);
+        g_assert_not_reached();
+    }
+}
+
+/*
+ * B5 Table 4-53 assigns only odd indirect-call whether hints.  Even wh
+ * values are Reserved and must fault before ordinary predicate skipping.
+ */
+void HELPER(b5_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn)
+{
+    uintptr_t retaddr = GETPC();
+    unsigned int major = extract64(insn, 37, 4);
+    unsigned int wh = extract64(insn, 32, 3);
+
+    (void)pc;
+    if (ia64_b5_is_reserved(major, wh)) {
         ia64_exception(env_cpu(env), env, false, false,
                        IA64_VEC_ILLEGAL_OP, 0, 0, 0,
                        false, false, retaddr);
