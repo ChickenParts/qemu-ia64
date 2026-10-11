@@ -61,6 +61,9 @@ helper_h_path.write_text(
 
 translate_path = Path("target/ia64/translate.c")
 translate = translate_path.read_text()
+start = translate.index("static void decode_b_unit(")
+end = translate.index("static void decode_insn(", start)
+bunit = translate[start:end]
 qp_anchor = "    TCGLabel *skip_label = gen_qp_skip(qp);\n"
 route = """    /*
      * B4 reserved btypes fault unconditionally, and br.ia requires qp=0.
@@ -73,15 +76,16 @@ route = """    /*
     }
 
 """
-if translate.count(qp_anchor) != 1 or "gen_helper_b4_validate" in translate:
+if bunit.count(qp_anchor) != 1 or "gen_helper_b4_validate" in bunit:
     raise SystemExit("unexpected B-unit predicate anchor")
-translate = translate.replace(qp_anchor, route + qp_anchor)
+bunit = bunit.replace(qp_anchor, route + qp_anchor)
 old_comment = "        /* B4: br.cond/br.ia b2 (x6=0x20) and br.ret b2 (x6=0x21). */"
 new_comment = """        /*
          * Assigned B4 forms were validated before predicate qualification:
          * br.cond/br.ia for x6=0x20 and br.ret for x6=0x21.
          * Successful br.ia transition semantics remain explicitly deferred.
          */"""
-if translate.count(old_comment) != 1:
+if bunit.count(old_comment) != 1:
     raise SystemExit("unexpected B4 decoder comment")
-translate_path.write_text(translate.replace(old_comment, new_comment))
+bunit = bunit.replace(old_comment, new_comment)
+translate_path.write_text(translate[:start] + bunit + translate[end:])
