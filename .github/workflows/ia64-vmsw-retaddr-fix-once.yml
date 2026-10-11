@@ -1,3 +1,4 @@
+# One-shot workflow; deletes itself with the source transformer on success.
 name: IA-64 vmsw retaddr fix once
 
 on:
