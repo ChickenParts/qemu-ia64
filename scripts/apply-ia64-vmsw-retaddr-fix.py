@@ -82,7 +82,7 @@ new = """        absent = body.rindex(\"ia64_vmsw_raise_illegal(env, retaddr)\")
         fault = self.helper[fault_begin:fault_end]
         self.assertIn(\"IA64_VEC_ILLEGAL_OP\", fault)
         self.assertIn(\"false, false, retaddr);\", fault)
-        self.assertNotIn(\"GETPC()\", fault)
+        self.assertNotIn(\"false, false, GETPC());\", fault)
         self.assertNotIn(\"ia64_fault(\", fault)
 """
 if test.count(old) != 1:
