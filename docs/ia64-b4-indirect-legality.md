@@ -14,17 +14,19 @@ B4 uses major opcode 0 and the following exact `x6` / `btype` assignments:
 | `0x20` | 1 | `br.ia` |
 | `0x21` | 4 | `br.ret` |
 
-Every other B4 `btype` cell in those two tables is brown **Reserved**.  Brown
+Every other B4 `btype` cell in those two tables is brown **Reserved**. Brown
 reserved words cause Illegal Operation unconditionally; predicate value does
-not suppress the fault.  The `e` notation in the table is a group-ending
+not suppress the fault. The `e` notation in the table is a group-ending
 annotation, not another opcode assignment.
 
-`br.ia` is itself unpredicated.  The encoding retains a nominal `qp` bitfield,
-but the architecture requires it to select PR0.  Any nonzero encoded `qp`
+`br.ia` is itself unpredicated. The encoding retains a nominal `qp` bitfield,
+but the architecture requires it to select PR0. Any nonzero encoded `qp`
 therefore faults before ordinary predicate qualification, even when the named
-predicate is false.
+predicate is false. GNU `as` accepts a qualified spelling and emits that
+nonzero `qp`; the exact assembler-produced word is retained as an
+architectural negative fixture rather than treated as proof of legality.
 
-Legal `br.cond` and `br.ret` remain normally predicated.  Their existing branch,
+Legal `br.cond` and `br.ret` remain normally predicated. Their existing branch,
 return and firmware-compatibility behavior is intentionally left behind the
 normal `gen_qp_skip()` path.
 
@@ -56,7 +58,7 @@ A conforming successful `br.ia` path must address, as one coherent feature:
   transfer as equivalent to IA-32 mode.
 
 Until those pieces exist, this work closes only the B4 table-legality and
-unpredicated-qualification gap.  It does not relabel the current firmware
+unpredicated-qualification gap. It does not relabel the current firmware
 shortcut as an architectural `br.ia` implementation.
 
 ## Validation
@@ -64,11 +66,12 @@ shortcut as an architectural `br.ia` implementation.
 - `tests/ia64/nonf/b4-policy-test.c`: 524,288 production-policy combinations
   over every major, x6, btype and qp.
 - `scripts/ia64-b4-byte-oracle.py`: GNU-derived `br.cond`, `br.ia` and `br.ret`
-  words in B slots 0/1/2, assembler rejection of qualified `br.ia`, and proofs
-  that raw negative fixtures change only btype or qp.
+  words in B slots 0/1/2, plus the GNU-qualified `br.ia` word as a negative
+  `qp=6` fixture and proofs that raw reserved fixtures change only btype.
 - `scripts/run-ia64-b4-legality-tests.py`: real QEMU IVT faults for reserved
-  x6/btype cells and nonzero-qp `br.ia`, including a false-predicate case that
-  must still fault, plus legal conditional taken/fallthrough behavior.
+  x6/btype cells and the GNU-produced nonzero-qp `br.ia`, including a false-
+  predicate case that must still fault, plus legal conditional taken/fallthrough
+  behavior.
 - Exact source-order tests ensure validation remains before `gen_qp_skip()` and
   no successful IA-32 transition is claimed.
 - The permanent workflow builds the complete emulator and reruns B8 vmsw/EPC,
