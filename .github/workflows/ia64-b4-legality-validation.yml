@@ -28,6 +28,10 @@ on:
       - tests/ia64/nonf/**
   workflow_dispatch:
 
+concurrency:
+  group: ia64-b4-legality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
