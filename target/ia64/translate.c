@@ -3599,6 +3599,13 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                                tcg_constant_i64(insn));
     }
 
+    /* B5 even wh cells are Reserved and fault regardless of qp. */
+    if (major == 1) {
+        gen_helper_b5_validate(tcg_env,
+                               tcg_constant_i64(ctx->base.pc_next),
+                               tcg_constant_i64(insn));
+    }
+
     TCGLabel *skip_label = gen_qp_skip(qp);
 
     /*
@@ -3721,7 +3728,7 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         }
         tcg_gen_exit_tb(NULL, 0);
     } else if (major == 0x1) {
-        /* br.call b1 = b2 */
+        /* B5 assigned odd-wh br.call b1 = b2; legality checked above. */
         uint8_t b1 = extract64(insn, 6, 3);
         uint8_t b2 = extract64(insn, 13, 3);
         /*
