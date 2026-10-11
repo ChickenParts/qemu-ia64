@@ -20,6 +20,14 @@ implements the architecturally honest subset:
 This is intentionally not a no-op and intentionally does not add a CPU model
 that can set `PSR.vm` without the rest of the virtualization contract.
 
+The Illegal Operation path preserves the return address of the translated
+`HELPER(vmsw)` call before entering its nested C fault helper.  `GETPC()` must
+not be evaluated in that nested function: doing so prevents
+`cpu_restore_state()` from recovering the source B slot, causing `CR.ISR.ei`
+and `CR.IPSR.ri` to report slot zero.  The B1 runtime case is a permanent
+regression test for this fault-metadata invariant rather than merely another
+copy of the B0 opcode test.
+
 ## PAL feature reporting
 
 `PAL_PROC_GET_FEATURES(feature_set=0)` now succeeds and reports:
