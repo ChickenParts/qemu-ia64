@@ -1,3 +1,4 @@
+# One-shot workflow; removes itself and its transformer after a green source gate.
 name: IA-64 B4 legality source transform once
 
 on:
