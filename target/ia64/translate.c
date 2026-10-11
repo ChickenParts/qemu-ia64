@@ -3589,6 +3589,16 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         return;
     }
 
+    /*
+     * B4 reserved btypes fault unconditionally, and br.ia requires qp=0.
+     * Validate before gen_qp_skip(); legal br.cond/br.ret remain predicated.
+     */
+    if (major == 0 && (x6 == 0x20 || x6 == 0x21)) {
+        gen_helper_b4_validate(tcg_env,
+                               tcg_constant_i64(ctx->base.pc_next),
+                               tcg_constant_i64(insn));
+    }
+
     TCGLabel *skip_label = gen_qp_skip(qp);
 
     /*
@@ -3634,7 +3644,11 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
          */
         gen_helper_clrrrb(tcg_env, tcg_constant_i32(x6 == 0x5));
     } else if (major == 0x0 && (x6 == 0x20 || x6 == 0x21)) {
-        /* B4: br.cond/br.ia b2 (x6=0x20) and br.ret b2 (x6=0x21). */
+        /*
+         * Assigned B4 forms were validated before predicate qualification:
+         * br.cond/br.ia for x6=0x20 and br.ret for x6=0x21.
+         * Successful br.ia transition semantics remain explicitly deferred.
+         */
         uint8_t b2 = extract64(insn, 13, 3);
         TCGv_i64 tgt = tcg_temp_new_i64();
         tcg_gen_andi_i64(tgt, cpu_b[b2], ~0xFULL);

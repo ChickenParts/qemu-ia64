@@ -1,0 +1,126 @@
+name: IA-64 B4 indirect legality validation
+
+on:
+  push:
+    branches: [work/ia64-b4-indirect-legality]
+    paths:
+      - .github/workflows/ia64-b4-legality-validation.yml
+      - docs/ia64-b4-indirect-legality.md
+      - docs/generated/ia64-nonf-fallbacks.md
+      - scripts/ia64-b4-byte-oracle.py
+      - scripts/run-ia64-b4-legality-tests.py
+      - target/ia64/b4.h
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+  pull_request:
+    paths:
+      - .github/workflows/ia64-b4-legality-validation.yml
+      - docs/ia64-b4-indirect-legality.md
+      - docs/generated/ia64-nonf-fallbacks.md
+      - scripts/ia64-b4-byte-oracle.py
+      - scripts/run-ia64-b4-legality-tests.py
+      - target/ia64/b4.h
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+  workflow_dispatch:
+
+concurrency:
+  group: ia64-b4-legality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  b4-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install IA-64 GNU cross-binutils and QEMU build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Verify B4 policy, source order and independent GNU bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/b4-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/b4-evidence/b4-policy \
+            tests/ia64/nonf/b4-policy-test.c
+          scratch/b4-evidence/b4-policy | \
+            tee scratch/b4-evidence/host-policy.txt
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-b4-byte-oracle.py \
+            --out scratch/b4-evidence/gnu-oracle
+          python3 scripts/run-ia64-b4-legality-tests.py \
+            --assemble-only --out scratch/b4-evidence/assembly
+          git diff --exit-code
+      - name: Build full production qemu-system-ia64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir build-b4
+          (cd build-b4; ../configure --target-list=ia64-softmmu \
+             --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+             --disable-slirp --disable-werror)
+          ninja -C build-b4 -j"$(nproc)" qemu-system-ia64
+      - name: Run B4 and inherited real-guest regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-b4-legality-tests.py \
+            --qemu build-b4/qemu-system-ia64 \
+            --out scratch/b4-evidence/b4-guest --timeout 10
+          python3 scripts/run-ia64-b8-vmsw-tests.py \
+            --qemu build-b4/qemu-system-ia64 \
+            --out scratch/b4-evidence/vmsw --timeout 10
+          python3 scripts/run-ia64-b8-epc-tests.py \
+            --qemu build-b4/qemu-system-ia64 \
+            --out scratch/b4-evidence/epc --timeout 10
+          python3 scripts/run-ia64-b8-clrrrb-tests.py \
+            --qemu build-b4/qemu-system-ia64 \
+            --out scratch/b4-evidence/clrrrb --timeout 10
+          python3 scripts/run-ia64-b67-predict-tests.py \
+            --qemu build-b4/qemu-system-ia64 \
+            --out scratch/b4-evidence/b67 --timeout 10
+          python3 scripts/run-ia64-b9-exception-tests.py \
+            --qemu build-b4/qemu-system-ia64 \
+            --out scratch/b4-evidence/b9 --timeout 10
+          python3 scripts/run-ia64-f12-f15-exception-tests.py \
+            --qemu build-b4/qemu-system-ia64 \
+            --out scratch/b4-evidence/f12-f15 --timeout 10
+          QEMU_BIN="$PWD/build-b4/qemu-system-ia64" \
+          IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+          IA64_FSLOT_LOGDIR=scratch/b4-evidence/fslot/logs \
+          IA64_FSLOT_OUTDIR=scratch/b4-evidence/fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+      - name: Retain exact source and QEMU provenance
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p scratch/b4-evidence
+          git rev-parse HEAD > scratch/b4-evidence/source-head.txt
+          if test -f build-b4/qemu-system-ia64; then
+            sha256sum build-b4/qemu-system-ia64 > \
+              scratch/b4-evidence/qemu-sha256.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-b4-legality-validation
+          path: scratch/b4-evidence
+          retention-days: 14
+          if-no-files-found: error
