@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Firmware-free real-IVT B4 reserved and predication validation.
 
-Reserved words are one-field mutations of complete GNU-assembled B4 bundles;
-valid conditional branches are assembled normally.  Successful br.ia mode
-transition is deliberately not claimed by this legality tranche.
+Reserved btype words are one-field mutations of complete GNU-assembled B4
+bundles.  The nonzero-qp br.ia negative is itself assembled by GNU.  Valid
+conditional branches are assembled normally.  Successful br.ia mode transition
+is deliberately not claimed by this legality tranche.
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ GENERAL_VECTOR = 0x5400
 PASS, FAIL = "0x62347061", "0x62346661"
 RI_MASK = 3 << 41
 
-# kind, base spelling, slot, mutated btype, mutated qp
+# kind, base spelling, slot, requested btype, requested qp
 FAULT_PROFILES = {
     "reserved-cond-btype2-b0":
         ("br.cond.sptk.few b2", 0, 2, 0),
@@ -45,7 +46,7 @@ FAULT_PROFILES = {
     "reserved-ret-btype0-b2":
         ("br.ret.sptk.few b2", 2, 0, 0),
     "qualified-ia-falseqp-b1":
-        ("br.ia.sptk.few b2", 1, 1, 6),
+        ("(p6) br.ia.sptk.few b2", 1, 1, 6),
 }
 POSITIVE_PROFILES = {
     "legal-cond-taken-b0": (0, True),
@@ -165,12 +166,16 @@ def prepare_fault_bundles(out: Path) -> dict[str, bytes]:
     raw = out / "gnu-derived-raw"
     for case, (spelling, slot, btype, qp) in FAULT_PROFILES.items():
         base = oracle.assemble_bundle(spelling, slot, raw, case + "-base")
-        mutated = oracle.mutate_b4(base, slot, btype=btype, qp=qp)
-        word = oracle.extract_word(mutated, slot)
+        if case == "qualified-ia-falseqp-b1":
+            # GNU itself emits qp=6 for this architecturally reserved form.
+            encoded = base
+        else:
+            encoded = oracle.mutate_b4(base, slot, btype=btype, qp=qp)
+        word = oracle.extract_word(encoded, slot)
         got = oracle.fields(word)
         if got["major"] != 0 or got["qp"] != qp or got["btype"] != btype:
-            raise ValueError(f"{case}: mutation did not produce requested B4 word")
-        bundles[case] = mutated
+            raise ValueError(f"{case}: fixture did not produce requested B4 word")
+        bundles[case] = encoded
     return bundles
 
 
@@ -204,7 +209,7 @@ def main() -> None:
         "coverage": [
             "reserved x6=0x20 btype 2 and 7",
             "reserved x6=0x21 btype 0",
-            "unpredicated br.ia qp=6 fault despite p6=false",
+            "GNU-encoded br.ia qp=6 fault despite p6=false",
             "B slots 0/1/2 and exact ISR.ei/IPSR.ri",
             "legal br.cond taken and false-predicate fallthrough",
             "no reserved-branch side effects and real IVT/RFI recovery",
