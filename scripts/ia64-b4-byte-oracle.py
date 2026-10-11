@@ -3,7 +3,9 @@
 """Independent GNU IA-64 byte oracle for assigned B4 indirect branches.
 
 Positive words always come from GNU as.  Reserved runtime fixtures are derived
-by changing only B4 btype/qp bits in those complete GNU-produced bundles.
+by changing only B4 btype bits in complete GNU-produced bundles.  GNU also
+accepts a qualified br.ia spelling; that exact word is retained as a negative
+architectural fixture because Intel requires br.ia's encoded qp to be zero.
 """
 from __future__ import annotations
 
@@ -109,41 +111,54 @@ def run(out: Path) -> dict:
                      "bits41": f"{word:011x}", "fields": got,
                      "bundle_sha256": hashlib.sha256(data).hexdigest()})
 
-    # GNU's B0 opcode class must reject qualification of unpredicated br.ia.
-    assembler = shlex.split(os.environ.get("IA64_AS", "ia64-linux-gnu-as"))
-    pred = out / "predicated-br-ia.S"
-    pred.write_text(bundle_source("(p6) br.ia.sptk.few b3", 2))
-    command = subprocess.run(assembler + ["-o", str(out / "predicated-br-ia.o"),
-                                          str(pred)],
-                             capture_output=True, text=True, timeout=30)
-    if command.returncode == 0:
-        raise ValueError("GNU assembler unexpectedly accepted predicated br.ia")
+    # GNU accepts qualification even though the architecture requires qp=0.
+    # Retain the exact GNU word as a negative runtime fixture rather than
+    # treating assembler acceptance as proof of architectural legality.
+    qualified_data = assemble_bundle("(p6) br.ia.sptk.few b3", 2, out,
+                                     "qualified-br-ia")
+    qualified_word = extract_word(qualified_data, 2)
+    qualified_fields = fields(qualified_word)
+    expected_qualified = {"major": 0, "x6": 0x20, "btype": 1,
+                          "b2": 3, "qp": 6}
+    for key, value in expected_qualified.items():
+        if qualified_fields[key] != value:
+            raise ValueError(
+                f"qualified br.ia: GNU word {qualified_word:011x} "
+                f"{key}={qualified_fields[key]} != {value}")
 
     # Prove the reserved fixture builder changes no template/operand field
-    # except the specifically requested btype or qp bits.
+    # except the specifically requested btype; retain a separate qp-only proof.
     base = assemble_bundle("br.cond.sptk.few b2", 0, out, "mutation-base")
     base_word = extract_word(base, 0)
     reserved = extract_word(mutate_b4(base, 0, btype=7), 0)
-    qualified_ia_base = assemble_bundle("br.ia.sptk.few b3", 1, out,
-                                        "qualified-ia-base")
-    ia_word = extract_word(qualified_ia_base, 1)
-    qualified = extract_word(mutate_b4(qualified_ia_base, 1, qp=6), 1)
+    ia_base = assemble_bundle("br.ia.sptk.few b3", 1, out,
+                              "qualified-ia-mutation-base")
+    ia_word = extract_word(ia_base, 1)
+    qualified_mutation = extract_word(mutate_b4(ia_base, 1, qp=6), 1)
     if (base_word ^ reserved) != (7 << 6):
         raise ValueError("reserved mutation changed fields outside btype")
-    if (ia_word ^ qualified) != 6:
+    if (ia_word ^ qualified_mutation) != 6:
         raise ValueError("br.ia mutation changed fields outside qp")
 
     report = {
         "reference": "Intel Itanium SDM Vol 3 rev 2.3, B4 tables 4-49/4-50",
-        "cases": len(rows), "predicated_br_ia_rejected": True,
+        "positive_cases": len(rows),
+        "gnu_qualified_br_ia": {
+            "accepted": True, "assembly": "(p6) br.ia.sptk.few b3",
+            "slot": 2, "bits41": f"{qualified_word:011x}",
+            "fields": qualified_fields,
+            "bundle_sha256": hashlib.sha256(qualified_data).hexdigest(),
+            "architectural_class": "reserved-qp-negative",
+        },
         "mutation_proofs": {
             "reserved_btype_xor": f"{base_word ^ reserved:011x}",
-            "qualified_ia_qp_xor": f"{ia_word ^ qualified:011x}",
+            "qualified_ia_qp_xor": f"{ia_word ^ qualified_mutation:011x}",
         },
         "results": rows,
     }
     (out / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print("IA-64 B4 GNU BYTE ORACLE PASS: 3/3; predicated br.ia rejected")
+    print("IA-64 B4 GNU BYTE ORACLE PASS: 3/3 positive; "
+          "qualified br.ia encoded qp=6 negative")
     return report
 
 
