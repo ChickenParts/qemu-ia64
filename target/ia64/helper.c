@@ -1026,21 +1026,28 @@ void HELPER(epc)(CPUIA64State *env, uint64_t pc, uint64_t insn)
                ((uint64_t)target_cpl << IA64_PSR_CPL_SHIFT);
 }
 
-static void ia64_vmsw_raise_illegal(CPUIA64State *env)
+static G_NORETURN void ia64_vmsw_raise_illegal(CPUIA64State *env,
+                                                   uintptr_t retaddr)
 {
     /*
      * Illegal Operation is not an instruction-access fault.  Preserve the
      * same no-X/R/W ISR construction used by epc's fixed-field path.
+     *
+     * GETPC() must be captured in HELPER(vmsw), not in this nested C helper:
+     * only the translated-helper return address lets cpu_restore_state()
+     * recover the faulting B-slot and construct ISR.ei/IPSR.ri correctly.
      */
     ia64_exception(env_cpu(env), env, false, false,
                    IA64_VEC_ILLEGAL_OP, 0, 0, 0,
-                   false, false, GETPC());
+                   false, false, retaddr);
     g_assert_not_reached();
 }
 
 /* B8 vmsw.0/vmsw.1 on the current CPU model, which advertises NoVM. */
 void HELPER(vmsw)(CPUIA64State *env, uint64_t pc, uint64_t insn)
 {
+    uintptr_t retaddr = GETPC();
+
     (void)pc;
 
     /*
@@ -1049,11 +1056,11 @@ void HELPER(vmsw)(CPUIA64State *env, uint64_t pc, uint64_t insn)
      * this no-VM model currently deliver Illegal Operation.
      */
     if (!ia64_vmsw_encoding_valid(insn)) {
-        ia64_vmsw_raise_illegal(env);
+        ia64_vmsw_raise_illegal(env, retaddr);
     }
 
     /* Feature absence has priority over CPL and all virtualization checks. */
-    ia64_vmsw_raise_illegal(env);
+    ia64_vmsw_raise_illegal(env, retaddr);
 }
 
 static bool ia64_try_translate(CPUIA64State *env, uint64_t va, hwaddr *pa)

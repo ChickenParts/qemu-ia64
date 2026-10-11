@@ -36,15 +36,20 @@ class VMSWSourceTests(unittest.TestCase):
         end = self.helper.index("static bool ia64_try_translate(", begin)
         body = self.helper[begin:end]
         validate = body.index("ia64_vmsw_encoding_valid(insn)")
-        absent = body.rindex("ia64_vmsw_raise_illegal(env)")
+        absent = body.rindex("ia64_vmsw_raise_illegal(env, retaddr)")
         self.assertLess(validate, absent)
+        self.assertIn("uintptr_t retaddr = GETPC();", body)
+        self.assertEqual(2, body.count(
+            "ia64_vmsw_raise_illegal(env, retaddr)"))
         self.assertNotIn("IA64_PSR_VM", body)
         self.assertNotIn("env->psr =", body)
         fault_begin = self.helper.index(
-            "static void ia64_vmsw_raise_illegal(")
+            "static G_NORETURN void ia64_vmsw_raise_illegal(")
         fault_end = self.helper.index("void HELPER(vmsw)(", fault_begin)
         fault = self.helper[fault_begin:fault_end]
         self.assertIn("IA64_VEC_ILLEGAL_OP", fault)
+        self.assertIn("false, false, retaddr);", fault)
+        self.assertNotIn("false, false, GETPC());", fault)
         self.assertNotIn("ia64_fault(", fault)
 
     def test_encoding_requires_zero_qp_and_fixed_fields(self):
