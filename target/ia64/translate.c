@@ -3526,6 +3526,7 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
     uint8_t qp = insn & 0x3f;
     uint8_t major = (insn >> 37) & 0xf;
     uint8_t x6 = (insn >> 27) & 0x3f;
+    uint8_t b12_type = extract64(insn, 6, 3);
 
     if (ia64_dbg_bunit_match(ctx->base.pc_next)) {
         uint8_t btype = extract64(insn, 6, 3);
@@ -3613,10 +3614,20 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
     if (major == 0x4) {
         gen_helper_b12_validate(tcg_env,
                                 tcg_constant_i64(ctx->base.pc_next),
-                                tcg_constant_i64(insn));
+                                tcg_constant_i64(insn),
+                                tcg_constant_i32(ctx->ri));
     }
 
-    TCGLabel *skip_label = gen_qp_skip(qp);
+    /*
+     * B1 while-loop's qp is an INPUT to the branch decision and rotating
+     * state update, not an ordinary instruction-execution qualifier.
+     * A false PR[qp] must still execute the loop (EC can be > 1).
+     */
+    uint8_t predicate_for_skip = qp;
+    if (major == 0x4 && (b12_type == 2 || b12_type == 3)) {
+        predicate_for_skip = 0;
+    }
+    TCGLabel *skip_label = gen_qp_skip(predicate_for_skip);
 
     /*
      * B9: break.b imm21.  The all-zero word is break.b 0.

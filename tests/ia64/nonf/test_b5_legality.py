@@ -18,7 +18,7 @@ class B5LegalitySourceTests(unittest.TestCase):
         end = self.translator.index("static void decode_insn(", begin)
         decoder = self.translator[begin:end]
         validate = decoder.index("gen_helper_b5_validate(tcg_env")
-        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(qp);")
+        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(predicate_for_skip);")
         call = decoder.index("} else if (major == 0x1) {")
         self.assertLess(validate, skip)
         self.assertLess(skip, call)

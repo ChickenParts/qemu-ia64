@@ -1117,7 +1117,8 @@ void HELPER(b5_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn)
  * Reserved B1/B2 branch types and invalid counted-branch qp fault
  * before normal predicate processing. Capture translated GETPC directly.
  */
-void HELPER(b12_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn)
+void HELPER(b12_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn,
+                          uint32_t ri)
 {
     uintptr_t retaddr = GETPC();
     unsigned int major = extract64(insn, 37, 4);
@@ -1126,7 +1127,8 @@ void HELPER(b12_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn)
     IA64B12Class kind = ia64_b12_classify(major, btype);
 
     (void)pc;
-    if (ia64_b12_faults_before_predication(kind, qp)) {
+    if (ia64_b12_faults_before_predication(kind, qp) ||
+        ia64_b12_loop_wrong_slot(kind, ri)) {
         ia64_exception(env_cpu(env), env, false, false,
                        IA64_VEC_ILLEGAL_OP, 0, 0, 0,
                        false, false, retaddr);
