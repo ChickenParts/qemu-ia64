@@ -20,13 +20,14 @@ extract_word = b4.extract_word
 replace_word = b4.replace_word
 fields = b4.fields
 
-# Six assigned Intel B1/B2 btypes; three genuine B slot placements.
+# All six assigned Intel B1/B2 btypes; seven GNU words in valid B slots.
 CASES = (
     ("cond-b0", "br.cond.sptk.few _start", 0, 0, 0),
-    ("wexit-b1", "br.wexit.spnt.many _start", 1, 2, 0),
+    ("cond-b1", "br.cond.spnt.many _start", 1, 0, 0),
+    ("wexit-b2", "br.wexit.spnt.many _start", 2, 2, 0),
     ("wtop-b2", "(p6) br.wtop.dptk.few _start", 2, 3, 6),
-    ("cloop-b0", "br.cloop.sptk.few _start", 0, 5, 0),
-    ("cexit-b1", "br.cexit.spnt.many _start", 1, 6, 0),
+    ("cloop-b2", "br.cloop.sptk.few _start", 2, 5, 0),
+    ("cexit-b2", "br.cexit.spnt.many _start", 2, 6, 0),
     ("ctop-b2", "br.ctop.dpnt.few _start", 2, 7, 0),
 )
 
@@ -70,7 +71,7 @@ def run(out: Path):
     report = {"source": "Intel SDM Vol 3 rev 2.3 Table 4-47/B1/B2",
               "positives": positive, "negatives": negative}
     (out / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print("IA-64 B1/B2 GNU BYTE ORACLE PASS: 6/6 assigned + 4 field mutations")
+    print("IA-64 B1/B2 GNU BYTE ORACLE PASS: 7/7 assigned + 4 field mutations")
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)

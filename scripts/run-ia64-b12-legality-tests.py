@@ -28,14 +28,14 @@ FAULTS = {
     "reserved-btype1-b0": ("br.cond.sptk.few _start", 0, 1, 0),
     "reserved-btype4-falseqp-b1": ("(p6) br.cond.spnt.many _start", 1, 4, 6),
     "cloop-nonzeroqp6-b2": ("br.cloop.sptk.few _start", 2, 5, 6),
-    "cexit-nonzeroqp1-b0": ("br.cexit.dptk.few _start", 0, 6, 1),
+    "cexit-nonzeroqp1-b2": ("br.cexit.dptk.few _start", 2, 6, 1),
 }
 # slot, branch family, should branch
 POSITIVES = {
     "cond-taken-b0": (0, "cond", True),
     "cond-false-b1": (1, "cond", False),
     "cloop-taken-b2": (2, "cloop", True),
-    "cloop-untaken-b0": (0, "cloop", False),
+    "cloop-untaken-b2": (2, "cloop", False),
 }
 PROFILES = {**FAULTS, **POSITIVES}
 

@@ -17,7 +17,7 @@ CR.ISR.ei and CR.IPSR.ri, delivers a **non-access Illegal Operation**,
 and commits no loop/predicate/branch state. Existing legal B1/B2
 execution remains unchanged in this focused tranche.
 
-Validation: 8,192 policy cases; 6 independently GNU-assembled assigned
+Validation: 8,192 policy cases; 7 independently GNU-assembled words covering all six assigned
 forms and 4 controlled negative field mutations; 8 firmware-free
 full-system IVT profiles for illegal btypes, B2 qp restrictions, legal
 B1 taken/false-predicate and B2 counted taken/untaken control. Check
