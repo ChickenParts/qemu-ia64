@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/run-ia64-b12-legality-tests.py \
-            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b5 --timeout 10
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b12 --timeout 10
           python3 scripts/run-ia64-b5-legality-tests.py \
             --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b5 --timeout 10
           python3 scripts/run-ia64-b4-legality-tests.py \
