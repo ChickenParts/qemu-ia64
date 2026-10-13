@@ -72,8 +72,14 @@ def terminal(lines: list[str], handler: list[str] | None = None) -> None:
     lines += [f".org {IVT}", "ivt_base:",
               f".org {IVT + BREAK_VECTOR}", "break_vector:"]
     if handler is None:
-        emit(lines, "b", "br.cond.sptk fail")
+        # The terminal marker itself raises BREAK; return to its spinner.
+        emit(lines, "b", "br.cond.sptk b6")
     else:
+        # First BREAK is the test interruption (r15=0). The terminal
+        # BREAK occurs after handler completion (r15=1) and must not
+        # re-enter fault assertions or manufacture a FAIL marker.
+        emit(lines, "i", "cmp.eq p6,p7=r15,r0")
+        emit(lines, "b", "(p7) br.cond.sptk b6")
         lines += handler
     lines += [f".org {IVT + GENERAL_VECTOR}", "general_vector:"]
     emit(lines, "b", "br.cond.sptk fail")

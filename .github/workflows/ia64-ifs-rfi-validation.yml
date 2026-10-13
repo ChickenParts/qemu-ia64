@@ -8,7 +8,6 @@ on:
       - docs/ia64-ifs-rfi-state.md
       - docs/generated/ia64-nonf-fallbacks.md
       - scripts/run-ia64-ifs-rfi-tests.py
-      - scripts/run-ia64-ifs-rfi-tests.py
       - scripts/run-ia64-b12-legality-tests.py
       - scripts/run-ia64-b5-legality-tests.py
       - target/ia64/ifs.h
@@ -23,7 +22,6 @@ on:
       - .github/workflows/ia64-ifs-rfi-validation.yml
       - docs/ia64-ifs-rfi-state.md
       - docs/generated/ia64-nonf-fallbacks.md
-      - scripts/run-ia64-ifs-rfi-tests.py
       - scripts/run-ia64-ifs-rfi-tests.py
       - scripts/run-ia64-b12-legality-tests.py
       - scripts/run-ia64-b5-legality-tests.py
@@ -58,7 +56,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential binutils-ia64-linux-gnu libglib2.0-dev \
             libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
-      - name: Verify B1/B2 policy, source order and GNU bytes
+      - name: Verify IFS architectural policy and full guest assemblies
         run: |
           set -euo pipefail
           mkdir -p scratch/ifs-evidence
@@ -78,7 +76,7 @@ jobs:
              --disable-docs --disable-gtk --disable-sdl --disable-vnc \
              --disable-slirp --disable-werror)
           ninja -C build-ifs -j"$(nproc)" qemu-system-ia64
-      - name: Run B1/B2 and inherited real-guest regressions
+      - name: Run IFS and inherited real-guest regressions
         run: |
           set -euo pipefail
           python3 scripts/run-ia64-ifs-rfi-tests.py \
