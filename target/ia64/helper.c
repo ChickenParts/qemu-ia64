@@ -11,6 +11,7 @@
 #include "b4.h"
 #include "b5.h"
 #include "b12.h"
+#include "ifs.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -733,10 +734,13 @@ static bool ia64_exception(CPUState *cs, CPUIA64State *env, bool is_data,
         }
     }
     /*
-     * IFS = CFM{38:0} | AR.EC{5:0} << 52 | V (bit 63 set by cover).
-     * Save CFM and AR.EC together so rfi can restore both.
+     * IFS contains only the 38-bit frame marker and a validity flag.
+     * A collected interruption (PSR.ic=1) invalidates IFS; otherwise
+     * software can explicitly save CFM with cover while PSR.ic=0.
+     * AR.EC is separate architected application state, not part of IFS.
      */
-    env->cr_ifs = env->cfm | ((env->ar[IA64_AR_EC] & 0x3fULL) << 52);
+    env->cr_ifs = ia64_ifs_on_interruption(
+        env->cr_ifs, (interrupted_psr & IA64_PSR_IC) != 0);
     /*
      * Build ISR flags (X/W/R) and leave isr.code at 0 for normal accesses.
      * Linux uses bit 32 (IA64_ISR_X_BIT) to distinguish instruction misses.
@@ -1923,18 +1927,11 @@ void HELPER(rfi)(CPUIA64State *env)
         ia64_switch_banks(env);
     }
     /*
-     * rfi returns from an interruption and restores the interrupted context
-     * from cr.ipsr/cr.iip/cr.ifs.  It must not unwind normal call frames.
-     *
-     * cr.ifs has a validity bit at 63 (set by cover when PSR.ic=0).
-     * The EC field (bits 52-57) is restored to AR.EC per IA-64 SDM.
+     * rfi restores the frame marker only when IFS.v is valid.  IFS has
+     * no EC field; AR.EC must survive the interruption independently.
+     * Do not interpret reserved IFS bits [62:38] as CFM or EC.
      */
-    uint64_t ifs = env->cr_ifs;
-    if (ifs & (1ULL << 63)) {
-        env->cfm = ifs & ~(1ULL << 63);
-        /* Restore AR.EC from IFS.ec (bits 52-57) */
-        env->ar[IA64_AR_EC] = (ifs >> 52) & 0x3f;
-    }
+    env->cfm = ia64_ifs_rfi_cfm(env->cfm, env->cr_ifs);
 
     /*
      * Linux also uses rfi as a control transfer during early boot (to switch
@@ -30399,11 +30396,9 @@ void HELPER(cover)(CPUIA64State *env)
         log_count++;
     }
 
-    /*
-     * When interruption collection is off, cover also updates cr.ifs (V=1).
-     * Set V unconditionally since Linux relies on it for rfi paths.
-     */
-    env->cr_ifs = old_cfm | (1ULL << 63);
+    /* cover saves the frame only when PSR.ic=0 (Intel SDM 3:48). */
+    env->cr_ifs = ia64_ifs_on_cover(env->cr_ifs, old_cfm,
+                                    (env->psr & IA64_PSR_IC) != 0);
 
     ia64_rse_store_frame(env, bsp, sof);
 
