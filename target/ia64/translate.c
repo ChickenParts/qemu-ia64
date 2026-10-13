@@ -3606,6 +3606,16 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                                tcg_constant_i64(insn));
     }
 
+    /*
+     * B1/B2: brown major-4 btypes and nonzero counted-branch qp
+     * fault before normal predicate qualification.
+     */
+    if (major == 0x4) {
+        gen_helper_b12_validate(tcg_env,
+                                tcg_constant_i64(ctx->base.pc_next),
+                                tcg_constant_i64(insn));
+    }
+
     TCGLabel *skip_label = gen_qp_skip(qp);
 
     /*
