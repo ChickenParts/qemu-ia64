@@ -8,6 +8,7 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "interrupt.h"
+#include "ifs.h"
 #include "qemu/bswap.h"
 #include "qemu/host-utils.h"
 #include "qemu/qemu-print.h"
@@ -504,7 +505,9 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             ia64_intr_push_window(env);
             env->cr_ipsr = env->psr;
             env->cr_iip = env->ip & ~0xFULL;
-            env->cr_ifs = env->cfm;
+            /* External interrupts require PSR.ic=1: invalidate IFS.v. */
+            env->cr_ifs = ia64_ifs_on_interruption(
+                env->cr_ifs, (env->psr & IA64_PSR_IC) != 0);
             env->cr_isr = 0;
             env->cr_iim = 0;
 
