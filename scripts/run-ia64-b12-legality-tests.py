@@ -48,7 +48,9 @@ def setup(lines, lc, *, p6_false=False, p1_false=False):
     literal(lines, 15, 0)
     literal(lines, 20, lc)
     emit(lines, "i", "mov ar.lc=r20")
-    literal(lines, 20, hex(EC))
+    # mov.i ar.ec takes a six-bit architectural count; QEMU stores it
+    # in EC_CNT[63:58] and mov from AR.EC exposes that raw representation.
+    literal(lines, 20, 2)
     emit(lines, "i", "mov ar.ec=r20")
     if p6_false:
         emit(lines, "i", "cmp.ne p6,p7=r0,r0")
