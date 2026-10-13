@@ -10,6 +10,7 @@
 #include "vmsw.h"
 #include "b4.h"
 #include "b5.h"
+#include "b12.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -1101,6 +1102,27 @@ void HELPER(b5_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn)
 
     (void)pc;
     if (ia64_b5_is_reserved(major, wh)) {
+        ia64_exception(env_cpu(env), env, false, false,
+                       IA64_VEC_ILLEGAL_OP, 0, 0, 0,
+                       false, false, retaddr);
+        g_assert_not_reached();
+    }
+}
+
+/*
+ * Reserved B1/B2 branch types and invalid counted-branch qp fault
+ * before normal predicate processing. Capture translated GETPC directly.
+ */
+void HELPER(b12_validate)(CPUIA64State *env, uint64_t pc, uint64_t insn)
+{
+    uintptr_t retaddr = GETPC();
+    unsigned int major = extract64(insn, 37, 4);
+    unsigned int btype = extract64(insn, 6, 3);
+    unsigned int qp = extract64(insn, 0, 6);
+    IA64B12Class kind = ia64_b12_classify(major, btype);
+
+    (void)pc;
+    if (ia64_b12_faults_before_predication(kind, qp)) {
         ia64_exception(env_cpu(env), env, false, false,
                        IA64_VEC_ILLEGAL_OP, 0, 0, 0,
                        false, false, retaddr);

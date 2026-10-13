@@ -1,0 +1,118 @@
+name: IA-64 B1/B2 table legality validation
+
+on:
+  push:
+    branches: [work/ia64-b12-table-legality]
+    paths:
+      - .github/workflows/ia64-b12-legality-validation.yml
+      - docs/ia64-b12-table-legality.md
+      - docs/generated/ia64-nonf-fallbacks.md
+      - scripts/ia64-b12-byte-oracle.py
+      - scripts/run-ia64-b12-legality-tests.py
+      - scripts/run-ia64-b5-legality-tests.py
+      - target/ia64/b12.h
+      - target/ia64/b5.h
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+  pull_request:
+    paths:
+      - .github/workflows/ia64-b12-legality-validation.yml
+      - docs/ia64-b12-table-legality.md
+      - docs/generated/ia64-nonf-fallbacks.md
+      - scripts/ia64-b12-byte-oracle.py
+      - scripts/run-ia64-b12-legality-tests.py
+      - scripts/run-ia64-b5-legality-tests.py
+      - target/ia64/b12.h
+      - target/ia64/b5.h
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+  workflow_dispatch:
+
+concurrency:
+  group: ia64-b12-legality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  b12-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install IA-64 binutils and build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Verify B1/B2 policy, source order and GNU bytes
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/b12-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/b12-evidence/b12-policy tests/ia64/nonf/b12-policy-test.c
+          scratch/b12-evidence/b12-policy | tee scratch/b12-evidence/host-policy.txt
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-b12-byte-oracle.py \
+            --out scratch/b12-evidence/gnu-oracle
+          python3 scripts/run-ia64-b12-legality-tests.py \
+            --assemble-only --out scratch/b12-evidence/assembly
+          git diff --exit-code
+      - name: Build full qemu-system-ia64
+        run: |
+          set -euo pipefail
+          mkdir build-b12
+          (cd build-b12; ../configure --target-list=ia64-softmmu \
+             --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+             --disable-slirp --disable-werror)
+          ninja -C build-b12 -j"$(nproc)" qemu-system-ia64
+      - name: Run B1/B2 and inherited real-guest regressions
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-b12-legality-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b5 --timeout 10
+          python3 scripts/run-ia64-b5-legality-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b5 --timeout 10
+          python3 scripts/run-ia64-b4-legality-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b4 --timeout 10
+          python3 scripts/run-ia64-b8-vmsw-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/vmsw --timeout 10
+          python3 scripts/run-ia64-b8-epc-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/epc --timeout 10
+          python3 scripts/run-ia64-b8-clrrrb-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/clrrrb --timeout 10
+          python3 scripts/run-ia64-b67-predict-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b67 --timeout 10
+          python3 scripts/run-ia64-b9-exception-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/b9 --timeout 10
+          python3 scripts/run-ia64-f12-f15-exception-tests.py \
+            --qemu build-b12/qemu-system-ia64 --out scratch/b12-evidence/f12-f15 --timeout 10
+          QEMU_BIN="$PWD/build-b12/qemu-system-ia64" \
+          IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+          IA64_FSLOT_LOGDIR=scratch/b12-evidence/fslot/logs \
+          IA64_FSLOT_OUTDIR=scratch/b12-evidence/fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+      - name: Retain exact provenance
+        if: always()
+        run: |
+          mkdir -p scratch/b12-evidence
+          git rev-parse HEAD > scratch/b12-evidence/source-head.txt
+          test ! -f build-b12/qemu-system-ia64 || \
+            sha256sum build-b12/qemu-system-ia64 > scratch/b12-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-b12-legality-validation
+          path: scratch/b12-evidence
+          retention-days: 14
+          if-no-files-found: error
