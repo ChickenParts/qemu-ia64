@@ -35,7 +35,7 @@ class EPCSourceTests(unittest.TestCase):
         end = self.trans.index("static void decode_insn(", start)
         decoder = self.trans[start:end]
         epc = decoder.index("if (major == 0 && x6 == 0x10)")
-        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(qp);")
+        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(predicate_for_skip);")
         self.assertLess(epc, skip)
         self.assertIn("gen_helper_epc(tcg_env", decoder[:skip])
         self.assertIn("ctx->base.is_jmp = DISAS_TOO_MANY;", decoder[epc:skip])

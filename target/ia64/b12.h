@@ -40,4 +40,22 @@ static inline int ia64_b12_faults_before_predication(IA64B12Class kind,
              kind == IA64_B12_CEXIT ||
              kind == IA64_B12_CTOP) && (qp & 0x3f) != 0);
 }
+/*
+ * Intel Volume 3, br pp. 3:24 and 3:27: all B1 while (2/3) and B2
+ * counted (5/6/7) forms must occupy bundle instruction slot 2,
+ * irrespective of whether control transfer is taken.
+ */
+static inline int ia64_b12_loop_wrong_slot(IA64B12Class kind,
+                                           unsigned int ri)
+{
+    return (kind == IA64_B12_WEXIT || kind == IA64_B12_WTOP ||
+            kind == IA64_B12_CLOOP || kind == IA64_B12_CEXIT ||
+            kind == IA64_B12_CTOP) && ri != 2;
+}
+
+/* Only B1 while-loop forms use qp as a condition, not an execution guard. */
+static inline int ia64_b12_while_uses_qp_as_operand(IA64B12Class kind)
+{
+    return kind == IA64_B12_WEXIT || kind == IA64_B12_WTOP;
+}
 #endif /* TARGET_IA64_B12_H */

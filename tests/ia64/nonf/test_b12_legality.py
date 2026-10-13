@@ -17,7 +17,7 @@ class B12SourceTests(unittest.TestCase):
         end = self.translator.index("static void decode_insn(", start)
         body = self.translator[start:end]
         validate = body.index("gen_helper_b12_validate(tcg_env")
-        skip = body.index("TCGLabel *skip_label = gen_qp_skip(qp);")
+        skip = body.index("TCGLabel *skip_label = gen_qp_skip(predicate_for_skip);")
         execute = body.index("} else if (major == 0x4) {")
         self.assertLess(validate, skip)
         self.assertLess(skip, execute)

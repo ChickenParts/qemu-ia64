@@ -13,7 +13,7 @@ class B67DecoderTests(unittest.TestCase):
         start = source.index("static void decode_b_unit(")
         end = source.index("static void decode_insn(", start)
         branch = source[start:end]
-        predication = branch.index("TCGLabel *skip_label = gen_qp_skip(qp);")
+        predication = branch.index("TCGLabel *skip_label = gen_qp_skip(predicate_for_skip);")
         early = branch[:predication]
         self.assertIn("major == 0x7 && (insn & 0x27) == 0", early)
         self.assertIn("(x6 == 0x10 || x6 == 0x11)", early)

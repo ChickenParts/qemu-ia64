@@ -19,7 +19,7 @@ class B4LegalitySourceTests(unittest.TestCase):
         end = self.translator.index("static void decode_insn(", begin)
         decoder = self.translator[begin:end]
         validate = decoder.index("gen_helper_b4_validate(tcg_env")
-        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(qp);")
+        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(predicate_for_skip);")
         execute = decoder.index(
             "} else if (major == 0x0 && (x6 == 0x20 || x6 == 0x21)) {")
         self.assertLess(validate, skip)

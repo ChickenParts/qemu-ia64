@@ -23,7 +23,7 @@ class VMSWSourceTests(unittest.TestCase):
         vmsw = decoder.index(
             "if (major == 0 && (x6 == 0x18 || x6 == 0x19))"
         )
-        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(qp);")
+        skip = decoder.index("TCGLabel *skip_label = gen_qp_skip(predicate_for_skip);")
         self.assertLess(vmsw, skip)
         self.assertIn("gen_helper_vmsw(tcg_env", decoder[vmsw:skip])
         self.assertIn("ctx->base.is_jmp = DISAS_TOO_MANY;",
