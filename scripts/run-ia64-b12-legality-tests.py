@@ -47,9 +47,9 @@ def setup(lines, lc, *, p6_false=False, p1_false=False):
     emit(lines, "i", "mov b6=r14")
     literal(lines, 15, 0)
     literal(lines, 20, lc)
-    emit(lines, "m", "mov ar.lc=r20")
+    emit(lines, "i", "mov ar.lc=r20")
     literal(lines, 20, hex(EC))
-    emit(lines, "m", "mov ar.ec=r20")
+    emit(lines, "i", "mov ar.ec=r20")
     if p6_false:
         emit(lines, "i", "cmp.ne p6,p7=r0,r0")
     if p1_false:
@@ -79,9 +79,9 @@ def terminal_and_ivt(lines, slot):
     compare(lines, 9, hex(slot << 41))
     emit(lines, "m", "mov r9=cr.iim")
     compare(lines, 9, 0)
-    emit(lines, "m", "mov r9=ar.lc")
+    emit(lines, "i", "mov r9=ar.lc")
     compare(lines, 9, 5)
-    emit(lines, "m", "mov r9=ar.ec")
+    emit(lines, "i", "mov r9=ar.ec")
     compare(lines, 9, hex(EC))
     literal(lines, 14, "after_b12")
     emit(lines, "m", "mov cr.iip=r14")
@@ -108,9 +108,9 @@ def fault_source(case, raw):
               ".byte " + ", ".join(f"0x{x:02x}" for x in raw),
               ".align 16", "after_b12:"]
     compare(lines, 15, 1)
-    emit(lines, "m", "mov r9=ar.lc")
+    emit(lines, "i", "mov r9=ar.lc")
     compare(lines, 9, 5)
-    emit(lines, "m", "mov r9=ar.ec")
+    emit(lines, "i", "mov r9=ar.ec")
     compare(lines, 9, hex(EC))
     emit(lines, "b", "br.cond.sptk pass")
     lines += ["pass:"]
@@ -145,14 +145,14 @@ def positive_source(case):
     else:
         compare(lines, 15, 0)
         if kind == "cloop":
-            emit(lines, "m", "mov r9=ar.lc")
+            emit(lines, "i", "mov r9=ar.lc")
             compare(lines, 9, 0)
         emit(lines, "b", "br.cond.sptk pass")
     lines += ["branch_target:"]
     if taken:
         compare(lines, 15, 0)
         if kind == "cloop":
-            emit(lines, "m", "mov r9=ar.lc")
+            emit(lines, "i", "mov r9=ar.lc")
             compare(lines, 9, 1)
         emit(lines, "b", "br.cond.sptk pass")
     else:
