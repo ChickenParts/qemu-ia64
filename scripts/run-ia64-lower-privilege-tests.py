@@ -132,7 +132,8 @@ def generate(case):
     lines += [f".org {IVT}","ivt_base:",f".org {IVT+BREAK}","break_vector:"]
     # r15=2 identifies the terminal pass/fail logging BREAK. A prior
     # break.m is an intentional CPL probe from the return destination.
-    emit(lines,"i","cmp.eq p6,p7=r15,2")
+    literal(lines,20,2)
+    emit(lines,"i","cmp.eq p6,p7=r15,r20")
     emit(lines,"b","(p6) br.cond.sptk b6")
     compare(lines,15,1 if expected else 0)
     literal(lines,15,2)
