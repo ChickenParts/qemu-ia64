@@ -89,7 +89,7 @@ def clear_debug_flags(lines):
     emit(lines,"m","srlz.d")
 
 def check_return_cpl(lines, expected):
-    emit(lines,"m","mov r9=psr")
+    emit(lines,"m","mov r9=cr.ipsr")
     literal(lines,14,hex(CPL_MASK))
     emit(lines,"i","and r9=r9,r14")
     compare(lines,9,hex(expected<<32))
@@ -104,25 +104,46 @@ def generate(case):
     lines += ["post_source:"]
     if false_qp:
         compare(lines,15,0)
-        check_return_cpl(lines,0)
+        # Still at CPL0 (the predicated return never executed).
         clear_debug_flags(lines)
-        emit(lines,"b","br.cond.sptk pass")
+        emit(lines,"b","br.cond.sptk cpl_check")
     else:
         emit(lines,"b","br.cond.sptk fail")
     lines += ["target_bundle:"]
     if not false_qp:
         compare(lines,15,1 if expected else 0)
-        check_return_cpl(lines,ppl)
-        clear_debug_flags(lines)
-        emit(lines,"b","br.cond.sptk pass")
+        # Do not read/write PSR at CPL>0: mov r=psr and mov psr.l=r
+        # are privileged. Use a user-safe break.m to inspect saved CPL
+        # in CR.IPSR from the privileged vector handler instead.
+        if ppl==0 and expected is None:
+            clear_debug_flags(lines)
+        emit(lines,"b","br.cond.sptk cpl_check")
     else:
         emit(lines,"b","br.cond.sptk fail")
+    lines += ["cpl_check:"]
+    emit(lines,"m","break.m 0")
+    lines += ["after_cpl_check:"]
+    compare(lines,15,2)
+    emit(lines,"b","br.cond.sptk pass")
     lines += ["pass:"]
     literal(lines,14,"pass_spin")
     emit(lines,"i","mov b6=r14")
     ivt.terminal(lines,PASS,FAIL)
     lines += [f".org {IVT}","ivt_base:",f".org {IVT+BREAK}","break_vector:"]
-    emit(lines,"b","br.cond.sptk b6")
+    # r15=2 identifies the terminal pass/fail logging BREAK. A prior
+    # break.m is an intentional CPL probe from the return destination.
+    emit(lines,"i","cmp.eq p6,p7=r15,2")
+    emit(lines,"b","(p6) br.cond.sptk b6")
+    compare(lines,15,1 if expected else 0)
+    literal(lines,15,2)
+    check_return_cpl(lines,0 if false_qp else ppl)
+    literal(lines,14,"after_cpl_check")
+    emit(lines,"m","mov cr.iip=r14")
+    emit(lines,"m","mov r9=cr.ipsr")
+    literal(lines,14,hex(RI_MASK))
+    emit(lines,"i","andcm r9=r9,r14")
+    emit(lines,"m","mov cr.ipsr=r9")
+    emit(lines,"b","rfi")
     lines += [f".org {IVT+GENERAL}","general_vector:"]
     emit(lines,"b","br.cond.sptk fail")
     # IA-64 vector entries are just 0x100 bytes apart. The complete
