@@ -36,7 +36,7 @@ PROFILES = {
     "ss-disabled": ("alu", 2, False, False),
 }
 
-def setup(lines: list[str], kind: str, ss: bool, tb: bool) -> None:
+def setup(lines: list[str], kind: str, slot: int, ss: bool, tb: bool) -> None:
     literal(lines, 14, "ivt_base")
     emit(lines, "m", "mov cr.iva=r14")
     emit(lines, "m", "srlz.i")
@@ -54,6 +54,11 @@ def setup(lines: list[str], kind: str, ss: bool, tb: bool) -> None:
     emit(lines, "i", "or r9=r9,r14")
     literal(lines, 14, hex(RI_MASK))
     emit(lines, "i", "andcm r9=r9,r14")
+    # Enter *at* the source instruction, not at earlier filler NOPs.
+    # PSR.ss would correctly trap on those NOPs before the requested slot.
+    if slot:
+        literal(lines, 14, hex(slot << 41))
+        emit(lines, "i", "or r9=r9,r14")
     emit(lines, "m", "mov cr.ipsr=r9")
     emit(lines, "b", "rfi")
 
@@ -90,7 +95,7 @@ def generate(case: str) -> str:
     state = (0x1234 if kind == "mlx" else
              0 if kind in ("false", "untaken", "nopm", "nopf") else 1)
     lines = [".text", ".explicit", ".align 16", ".global _start", "_start:"]
-    setup(lines, kind, ss, tb)
+    setup(lines, kind, slot, ss, tb)
     source_bundle(lines, kind, slot)
     lines.append("post_source:")
     if taken:
