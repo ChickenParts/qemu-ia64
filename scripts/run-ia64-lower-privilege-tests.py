@@ -125,11 +125,16 @@ def generate(case):
     emit(lines,"b","br.cond.sptk b6")
     lines += [f".org {IVT+GENERAL}","general_vector:"]
     emit(lines,"b","br.cond.sptk fail")
+    # IA-64 vector entries are just 0x100 bytes apart. The complete
+    # handler does not fit between LP and TB: put a short trampoline
+    # in each vector, then the shared assertions at a distant address.
     for vec,label in ((LPV,"lp_vector"),(TBV,"tb_vector")):
         lines += [f".org {IVT+vec}",label+":"]
-        if vec!=expected:
-            emit(lines,"b","br.cond.sptk fail")
-            continue
+        emit(lines,"b","br.cond.sptk trap_checks" if vec==expected
+             else "br.cond.sptk fail")
+    lines += [f".org {IVT+0x8000}","trap_checks:"]
+    if expected is not None:
+        vec=expected
         compare(lines,15,0)
         literal(lines,15,1)
         emit(lines,"m","mov r9=cr.isr")
