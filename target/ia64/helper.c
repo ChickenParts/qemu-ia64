@@ -13,6 +13,7 @@
 #include "b12.h"
 #include "ifs.h"
 #include "taken-branch.h"
+#include "lower-privilege.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -803,6 +804,55 @@ static bool ia64_exception(CPUState *cs, CPUIA64State *env, bool is_data,
  * interruption state is captured.  IIPA/ISR.ei name the source, while
  * IIP/IPSR.ri name the target slot 0. No invented data-access flags.
  */
+/*
+ * br.ret's architectural PFS.ppl -> PSR.cpl demotion occurs after the
+ * register-stack restoration, never on a call or ordinary branch.
+ * PPL must be snapshotted BEFORE ret_restore(): the RSE shadow window
+ * can replace AR.PFS as part of return-frame reconstruction.
+ *
+ * If PSR.lp was enabled and this return actually lowered privilege,
+ * deliver the 0x5e00 post-commit trap BEFORE the lower-priority
+ * PSR.tb taken-branch trap. The ISR.code reflects concurrent TB/SS.
+ * A non-demoting return must not generate LP, even with PSR.lp=1.
+ */
+void HELPER(ret_privilege)(CPUIA64State *env, uint64_t source,
+                           uint32_t ri, uint64_t target,
+                           uint64_t saved_ppl)
+{
+    uint64_t source_psr = env->psr;
+    unsigned current_cpl = IA64_PSR_CPL(source_psr);
+    unsigned next_cpl = ia64_lp_return_cpl(current_cpl, saved_ppl);
+    bool lp_trap = ia64_lp_should_trap(source_psr, current_cpl, saved_ppl);
+
+    if (next_cpl != current_cpl) {
+        env->psr = (env->psr & ~IA64_PSR_CPL_MASK) |
+                   ((uint64_t)next_cpl << IA64_PSR_CPL_SHIFT);
+    }
+    if (!lp_trap) {
+        return;
+    }
+
+    CPUState *cs = env_cpu(env);
+    uintptr_t retaddr = GETPC();
+    if (retaddr) {
+        cpu_restore_state(cs, retaddr);
+    }
+    uint64_t interrupted_psr = env->psr;
+    ia64_intr_push_window(env);
+    env->cr_ipsr = ia64_tb_saved_ipsr(interrupted_psr);
+    env->cr_iip = ia64_tb_target_iip(target);
+    env->cr_iipa = source & ~UINT64_C(15);
+    env->cr_ifs = ia64_ifs_on_interruption(
+        env->cr_ifs, (interrupted_psr & IA64_PSR_IC) != 0);
+    env->cr_isr = ia64_lp_isr(ri, interrupted_psr);
+
+    cs->exception_index = IA64_EXCP_BASE + IA64_VEC_LOWER_PRIVILEGE;
+    env->dbg_tbexit_last_fault_vec = IA64_VEC_LOWER_PRIVILEGE;
+    env->dbg_tbexit_last_fault_ip = source;
+    cpu_loop_exit_restore(cs, retaddr);
+    g_assert_not_reached();
+}
+
 void HELPER(taken_branch)(CPUIA64State *env, uint64_t source, uint32_t ri,
                           uint64_t target)
 {

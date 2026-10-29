@@ -3727,7 +3727,15 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
             gen_helper_manual_call_enter(tcg_env,
                                           tcg_constant_i64(ctx->base.pc_next));
         }
+        /*
+         * Snapshot the *caller's* saved PPL before return/RSE window
+         * reconstruction. AR.PFS can change when the shadow frame pops.
+         */
+        TCGv_i64 ret_saved_ppl = tcg_temp_new_i64();
         if (x6 == 0x21) {
+            TCGv_i64 pfs_before = gen_load_ar(IA64_AR_PFS);
+            tcg_gen_shri_i64(ret_saved_ppl, pfs_before, 62);
+            tcg_gen_andi_i64(ret_saved_ppl, ret_saved_ppl, 3);
             gen_helper_ret_restore(tcg_env);
         } else if (b2 == 0) {
             gen_helper_ret_restore_b0(tcg_env);
@@ -3755,6 +3763,13 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
                                      tcg_constant_i32(ctx->ri),
                                      tcg_constant_i64(insn),
                                      tgt);
+        if (x6 == 0x21) {
+            /* br.ret may demote PSR.cpl, then LP wins over TB/SS. */
+            gen_helper_ret_privilege(tcg_env,
+                                    tcg_constant_i64(ctx->base.pc_next),
+                                    tcg_constant_i32(ctx->ri),
+                                    tgt, ret_saved_ppl);
+        }
         gen_record_branch(ctx, insn, (x6 == 0x21) ? 2 : 1, tgt);
         tcg_gen_mov_i64(cpu_pc, tgt);
         gen_set_ri_const(0);
