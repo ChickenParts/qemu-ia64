@@ -1565,6 +1565,20 @@ static void gen_record_branch(DisasContext *ctx, uint64_t insn,
                    tcg_env, offsetof(CPUIA64State, last_branch_insn));
     tcg_gen_st_i64(tcg_constant_i64((uint64_t)kind | ((uint64_t)ctx->ri << 8)),
                    tcg_env, offsetof(CPUIA64State, last_branch_kind));
+
+    /*
+     * This function only runs on a TAKEN branch path, after all required
+     * PFS/CFM/BR/LC/EC/rotation side effects. Check PSR.tb at runtime:
+     * tb may change in the same TB, and rfi is never recorded here.
+     */
+    TCGv_i64 tb_bit = tcg_temp_new_i64();
+    TCGLabel *no_tb_trap = gen_new_label();
+    tcg_gen_andi_i64(tb_bit, cpu_psr, IA64_PSR_TB);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, tb_bit, 0, no_tb_trap);
+    gen_helper_taken_branch(tcg_env,
+                            tcg_constant_i64(ctx->base.pc_next),
+                            tcg_constant_i32(ctx->ri), to);
+    gen_set_label(no_tb_trap);
 }
 
 static void gen_record_b0_write(DisasContext *ctx, uint64_t insn,
@@ -3874,6 +3888,8 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
 	            /* Conditional branch on cond. */
 	            TCGLabel *not_taken = gen_new_label();
             tcg_gen_brcondi_i64(TCG_COND_EQ, cond, 0, not_taken);
+            gen_record_branch(ctx, insn, 4,
+                              tcg_constant_i64(ctx->base.pc_next + disp));
             tcg_gen_movi_i64(cpu_pc, ctx->base.pc_next + disp);
             gen_set_ri_const(0);
             tcg_gen_exit_tb(NULL, 0);
@@ -3889,6 +3905,8 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
             tcg_gen_addi_i64(lc1, lc, -1);
             gen_store_ar(65, lc1);
 
+            gen_record_branch(ctx, insn, 4,
+                              tcg_constant_i64(ctx->base.pc_next + disp));
             tcg_gen_movi_i64(cpu_pc, ctx->base.pc_next + disp);
             gen_set_ri_const(0);
             tcg_gen_exit_tb(NULL, 0);

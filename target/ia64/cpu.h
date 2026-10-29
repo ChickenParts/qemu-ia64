@@ -494,6 +494,7 @@ struct IA64CPUClass {
 #define IA64_VEC_DISABLED_FP          0x5500
 #define IA64_VEC_FP_FAULT             0x5C00
 #define IA64_VEC_FP_TRAP              0x5D00
+#define IA64_VEC_TAKEN_BRANCH         0x5F00
 #define IA64_VEC_UNALIGNED_DATA_REFERENCE 0x5A00
 
 void ia64_cpu_list(void);
