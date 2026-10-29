@@ -18,7 +18,7 @@ class LowerPrivilegeTests(unittest.TestCase):
     def test_ret_snapshots_ppl_before_rse_and_traps_after(self):
         b=self.tr[self.tr.index("static void decode_b_unit("):
                   self.tr.index("static void decode_insn(")]
-        start=b.index("/* Snapshot the *caller's* saved PPL")
+        start=b.index("Snapshot the *caller's* saved PPL")
         snap=b.index("tcg_gen_shri_i64(ret_saved_ppl, pfs_before, 62)",start)
         restore=b.index("gen_helper_ret_restore(tcg_env)",snap)
         check=b.index("gen_helper_check_null_branch(tcg_env",restore)
