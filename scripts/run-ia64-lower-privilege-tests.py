@@ -72,8 +72,10 @@ def setup(lines,ppl,enable_lp,enable_tb,false_qp,enable_ss,source_slot):
     emit(lines,"m","mov r9=psr")
     literal(lines,14,hex(IC|(LP if enable_lp else 0)|(TB if enable_tb else 0)))
     emit(lines,"i","or r9=r9,r14")
-    emit(lines,"m","mov psr.l=r9")
-    emit(lines,"m","srlz.d")
+    if not enable_ss:
+        # Original low-PSR path for non-single-step return profiles.
+        emit(lines,"m","mov psr.l=r9")
+        emit(lines,"m","srlz.d")
     if false_qp:
         emit(lines,"i","cmp.ne p6,p7=r0,r0")
     if enable_ss:
@@ -82,8 +84,9 @@ def setup(lines,ppl,enable_lp,enable_tb,false_qp,enable_ss,source_slot):
         # filler NOPs would exercise a different instruction.
         literal(lines,14,"source_bundle")
         emit(lines,"m","mov cr.iip=r14")
-        emit(lines,"m","mov r9=psr")
-        literal(lines,14,hex(SS|IC))
+        # r9 already contains PSR plus LP/TB/IC. Only saved IPSR
+        # acquires these flags, while live PSR.ic remains clear for RFI.
+        literal(lines,14,hex(SS))
         emit(lines,"i","or r9=r9,r14")
         literal(lines,14,hex(RI_MASK))
         emit(lines,"i","andcm r9=r9,r14")

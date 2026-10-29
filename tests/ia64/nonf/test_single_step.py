@@ -46,6 +46,18 @@ class SingleStepSource(unittest.TestCase):
         self.assertIn("tb_enabled ? ia64_tb_isr(ri, source_psr)", helper)
         self.assertIn("ia64_ss_isr(ri, source_psr)", helper)
 
+    def test_lp_ss_rfi_uses_saved_ipsr_without_live_psr_ic(self):
+        lp = (ROOT / "scripts/run-ia64-lower-privilege-tests.py").read_text()
+        setup = lp[lp.index("def setup("):lp.index("def br_ret(")]
+        self.assertIn("if not enable_ss:", setup)
+        self.assertIn('literal(lines,14,hex(SS))', setup)
+        self.assertIn('emit(lines,"m","mov cr.ipsr=r9")', setup)
+        self.assertLess(setup.index("if not enable_ss:"),
+                        setup.index('emit(lines,"m","mov psr.l=r9")'))
+        self.assertLess(setup.index('emit(lines,"m","mov cr.ipsr=r9")'),
+                        setup.index('emit(lines,"b","rfi")'))
+        self.assertNotIn('literal(lines,14,hex(SS|IC))', setup)
+
     def test_post_success_snapshot_not_fault_path(self):
         ss = self.he[self.he.index("void HELPER(single_step)("):
                      self.he.index("static bool ia64_fault(")]
