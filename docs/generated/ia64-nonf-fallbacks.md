@@ -24,8 +24,8 @@ Observed non-F sites: **16**. All observed call sites including F/other: **21**.
 
 | Stable label | Unit | Current source line | Classification |
 |---|---|---:|---|
-| `dynamic:unimpl_msg#1` | BREAK_HELPER | 1498 | not-in-non-f-scope |
-| `dynamic:unimpl_msg#2` | BREAK_HELPER | 1541 | not-in-non-f-scope |
+| `dynamic:unimpl_msg#1` | BREAK_HELPER | 1499 | not-in-non-f-scope |
+| `dynamic:unimpl_msg#2` | BREAK_HELPER | 1542 | not-in-non-f-scope |
 | `A-slot#1` | A | 3533 | not-adjudicated |
 | `B-slot major=4 btype#1` | B | 4006 | not-adjudicated |
 | `B-slot#1` | B | 4053 | not-adjudicated |
