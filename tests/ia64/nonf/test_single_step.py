@@ -24,7 +24,7 @@ class SingleStepSource(unittest.TestCase):
                         block.index("ctx->ri++;"))
         self.assertIn("ctx->base.is_jmp != DISAS_NORETURN", block)
         self.assertIn("type != SLOT_L", block)
-        self.assertIn("mlx_pair ? 1 : cur_ri", block)
+        self.assertIn("const uint8_t step_source_ri = cur_ri;", block)
         self.assertIn("ia64_ss_next_ri(cur_ri, mlx_pair)", block)
         self.assertIn("ia64_ss_next_iip(ctx->base.pc_next, cur_ri", block)
         self.assertIn("extract64(insn, 27, 6) == 0x8", block)

@@ -13,7 +13,8 @@ Intel Itanium SDM rev 2.3, Volume 2 §5.5.3 and §8, Table 8-3.
   next CR.IIP/IPSR.RI identify the instruction to be executed on RFI.
 - After source slot0 -> next RI1; slot1 -> RI2; slot2 -> next bundle/RI0.
   MLX L+X is one long instruction: L cannot independently single-step,
-  and X completion reports source EI1 and next bundle/RI0.
+  and X completion reports source ISR.EI=2 and next bundle/RI0.
+  Restart of the L+X pair itself uses RI1, not ISR.EI1.
 - A taken B/F/X branch saves its target as next IP (RI0); SS-only
   selects 0x6000 and simultaneous TB|SS selects 0x5f00 with code 0xc.
 - B4 privilege-demoting returns still select 0x5e00 ahead of TB/SS,

@@ -20,7 +20,8 @@ int main(void)
                     ((flags & 8) ? (UINT64_C(1) << 25) : 0);
                 unsigned next_ri = (mlx || slot == 2) ? 0 : slot + 1;
                 uint64_t next_offset = (mlx || slot == 2) ? 16 : 0;
-                uint64_t expected_isr = ((uint64_t)slot << 41) |
+                unsigned trap_ei = mlx ? 2 : slot;
+                uint64_t expected_isr = ((uint64_t)trap_ei << 41) |
                     UINT64_C(8) | ((flags & 4) ? 0 : (UINT64_C(1) << 39));
                 for (unsigned bundle = 0; bundle < 256; ++bundle) {
                     uint64_t pc = UINT64_C(0x12340000) + 16 * bundle;
@@ -31,7 +32,7 @@ int main(void)
                         ia64_ss_saved_ipsr(psr, next_ri) !=
                             ((psr & ~IA64_TB_RI_MASK) |
                              ((uint64_t)next_ri << 41)) ||
-                        ia64_ss_isr(slot, psr) != expected_isr) {
+                        ia64_ss_isr(trap_ei, psr) != expected_isr) {
                         fprintf(stderr, "IA64 SS policy fails slot=%u mlx=%u "
                                 "flags=%u bundle=%u\n",
                                 slot, mlx, flags, bundle);

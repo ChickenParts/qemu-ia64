@@ -130,7 +130,8 @@ def generate(case: str) -> str:
         compare(lines, 15, 0)
         literal(lines, 15, 1)
         emit(lines, "m", "mov r9=cr.isr")
-        compare(lines, 9, hex((slot << 41) | expected_code))
+        compare(lines, 9, hex(((2 if kind == "mlx" else slot) << 41) |
+                              expected_code))
         emit(lines, "m", "mov r9=cr.iipa")
         literal(lines, 14, "source_bundle")
         emit(lines, "i", "cmp.eq p6,p7=r9,r14")

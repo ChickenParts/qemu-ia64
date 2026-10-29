@@ -8452,7 +8452,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
      * taken branch uses gen_record_branch() to save its actual destination.
      * rfi never single-steps. The MLX L+X pair is ONE instruction: the L
      * extension does not retire independently, and the X slot reports EI=1
-     * with its resume at the following bundle, RI=0.
+     * with ISR.ei=2 and its resume at the following bundle, RI=0.
      *
      * Include DISAS_TOO_MANY: PSR-changing instructions and epc complete
      * before a new TB. Predicated-off ordinary instructions execute as
@@ -8462,7 +8462,11 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         !(type == SLOT_B && extract64(insn, 37, 4) == 0 &&
           extract64(insn, 27, 6) == 0x8)) {
         const bool mlx_pair = type == SLOT_X;
-        const uint8_t step_source_ri = mlx_pair ? 1 : cur_ri;
+        /*
+         * ISR.ei is the trap-generating X slot (2), although restart of
+         * the long L+X instruction uses IPSR.ri=1. Intel SDM Vol2 3.3.5.2.
+         */
+        const uint8_t step_source_ri = cur_ri;
         const uint8_t step_next_ri = ia64_ss_next_ri(cur_ri, mlx_pair);
         const uint64_t step_next_ip =
             ia64_ss_next_iip(ctx->base.pc_next, cur_ri, mlx_pair);
