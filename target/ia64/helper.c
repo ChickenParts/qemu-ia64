@@ -12,6 +12,7 @@
 #include "b5.h"
 #include "b12.h"
 #include "ifs.h"
+#include "taken-branch.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -788,6 +789,49 @@ static bool ia64_exception(CPUState *cs, CPUIA64State *env, bool is_data,
     }
     cpu_loop_exit_restore(cs, retaddr);
     return false;
+}
+
+/*
+ * Taken Branch trap is post-commit and resumes at the BRANCH TARGET.
+ * It is deliberately separate from ia64_exception(trap=true), which
+ * computes the *next sequential* slot (correct for FP/single step traps,
+ * but wrong for a taken branch).
+ *
+ * gen_record_branch emits this only on paths that actually transfer
+ * control, after call/ret/loop side effects.  The host PC restores
+ * the architectural source PSR, including its pre-branch RI, before
+ * interruption state is captured.  IIPA/ISR.ei name the source, while
+ * IIP/IPSR.ri name the target slot 0. No invented data-access flags.
+ */
+void HELPER(taken_branch)(CPUIA64State *env, uint64_t source, uint32_t ri,
+                          uint64_t target)
+{
+    CPUState *cs = env_cpu(env);
+    uintptr_t retaddr = GETPC();
+
+    if (!ia64_tb_enabled(env->psr)) {
+        return;
+    }
+
+    if (retaddr) {
+        cpu_restore_state(cs, retaddr);
+    }
+
+    uint64_t source_psr = env->psr;
+    ia64_intr_push_window(env);
+
+    env->cr_ipsr = ia64_tb_saved_ipsr(source_psr);
+    env->cr_iip = ia64_tb_target_iip(target);
+    env->cr_iipa = source & ~UINT64_C(15);
+    env->cr_ifs = ia64_ifs_on_interruption(
+        env->cr_ifs, (source_psr & IA64_PSR_IC) != 0);
+    env->cr_isr = ia64_tb_isr(ri, source_psr);
+    cs->exception_index = IA64_EXCP_BASE + IA64_VEC_TAKEN_BRANCH;
+    env->dbg_tbexit_last_fault_vec = IA64_VEC_TAKEN_BRANCH;
+    env->dbg_tbexit_last_fault_ip = source;
+
+    cpu_loop_exit_restore(cs, retaddr);
+    g_assert_not_reached();
 }
 
 static bool ia64_fault(CPUState *cs, CPUIA64State *env, bool is_data,
