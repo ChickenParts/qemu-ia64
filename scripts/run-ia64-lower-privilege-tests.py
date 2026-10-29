@@ -16,39 +16,46 @@ ivt=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ivt)
 emit,literal,compare=ivt.emit,ivt.literal,ivt.compare
 IVT=0x400000
-LPV,TBV,BREAK,GENERAL=0x5e00,0x5f00,0x2c00,0x5400
-LP,TB,IC=(1<<25),(1<<26),(1<<13)
+LPV,TBV,SSV,BREAK,GENERAL=0x5e00,0x5f00,0x6000,0x2c00,0x5400
+LP,TB,SS,IC=(1<<25),(1<<26),(1<<40),(1<<13)
 RI_MASK=3<<41
 CPL_MASK=3<<32
 PASS,FAIL="0x6c707061","0x6c706661"
 
-# saved PFS.ppl, source slot, PSR.lp, PSR.tb, false qp.
+# saved PFS.ppl, source slot, PSR.lp, PSR.tb, false qp, PSR.ss.
 PROFILES={
-    "lp-ppl3-b0":(3,0,True,False,False),
-    "lp-ppl3-b1":(3,1,True,False,False),
-    "lp-ppl3-b2":(3,2,True,False,False),
-    "lp-tb-ppl3-b0":(3,0,True,True,False),
-    "lp-tb-ppl3-b1":(3,1,True,True,False),
-    "lp-tb-ppl3-b2":(3,2,True,True,False),
-    "lp-tb-ppl1-b2":(1,2,True,True,False),
-    "lp-tb-ppl2-b2":(2,2,True,True,False),
-    "tb-only-ppl3-b2":(3,2,False,True,False),
-    "no-flags-ppl3-b2":(3,2,False,False,False),
-    "lp-no-demotion-ppl0-b2":(0,2,True,False,False),
-    "tb-no-demotion-ppl0-b2":(0,2,True,True,False),
-    "false-qp-ppl3-b1":(3,1,True,True,True),
+    "lp-ppl3-b0":(3,0,True,False,False,False),
+    "lp-ppl3-b1":(3,1,True,False,False,False),
+    "lp-ppl3-b2":(3,2,True,False,False,False),
+    "lp-tb-ppl3-b0":(3,0,True,True,False,False),
+    "lp-tb-ppl3-b1":(3,1,True,True,False,False),
+    "lp-tb-ppl3-b2":(3,2,True,True,False,False),
+    "lp-tb-ppl1-b2":(1,2,True,True,False,False),
+    "lp-tb-ppl2-b2":(2,2,True,True,False,False),
+    "tb-only-ppl3-b2":(3,2,False,True,False,False),
+    "no-flags-ppl3-b2":(3,2,False,False,False,False),
+    "lp-no-demotion-ppl0-b2":(0,2,True,False,False,False),
+    "tb-no-demotion-ppl0-b2":(0,2,True,True,False,False),
+    "false-qp-ppl3-b1":(3,1,True,True,True,False),
+    # SS requires CR.IPSR.ss + RFI, not mov psr.l or ssm.
+    "lp-ss-ppl3-b2":(3,2,True,False,False,True),
+    "lp-tb-ss-ppl3-b2":(3,2,True,True,False,True),
+    "tb-ss-ppl0-b2":(0,2,False,True,False,True),
+    "ss-only-ppl0-b2":(0,2,False,False,False,True),
 }
 
-def expected_vector(ppl,lp,tb,false_qp):
+def expected_vector(ppl,lp,tb,false_qp,ss=False):
     if false_qp:
         return None
     if ppl>0 and lp:
         return LPV
     if tb:
         return TBV
+    if ss:
+        return SSV
     return None
 
-def setup(lines,ppl,enable_lp,enable_tb,false_qp):
+def setup(lines,ppl,enable_lp,enable_tb,false_qp,enable_ss,source_slot):
     literal(lines,14,"ivt_base")
     emit(lines,"m","mov cr.iva=r14")
     emit(lines,"m","srlz.i")
@@ -69,6 +76,22 @@ def setup(lines,ppl,enable_lp,enable_tb,false_qp):
     emit(lines,"m","srlz.d")
     if false_qp:
         emit(lines,"i","cmp.ne p6,p7=r0,r0")
+    if enable_ss:
+        # Bit 40 cannot be set through mov psr.l (low 32 bits), ssm or rsm.
+        # Enter directly at the return's source slot; stepping earlier
+        # filler NOPs would exercise a different instruction.
+        literal(lines,14,"source_bundle")
+        emit(lines,"m","mov cr.iip=r14")
+        emit(lines,"m","mov r9=psr")
+        literal(lines,14,hex(SS|IC))
+        emit(lines,"i","or r9=r9,r14")
+        literal(lines,14,hex(RI_MASK))
+        emit(lines,"i","andcm r9=r9,r14")
+        if source_slot:
+            literal(lines,14,hex(source_slot<<41))
+            emit(lines,"i","or r9=r9,r14")
+        emit(lines,"m","mov cr.ipsr=r9")
+        emit(lines,"b","rfi")
 
 def br_ret(lines,slot,false_qp):
     spelling="(p6) br.ret.sptk.few b2" if false_qp else "br.ret.sptk.few b2"
@@ -95,10 +118,10 @@ def check_return_cpl(lines, expected):
     compare(lines,9,hex(expected<<32))
 
 def generate(case):
-    ppl,slot,lp,tb,false_qp=PROFILES[case]
-    expected=expected_vector(ppl,lp,tb,false_qp)
+    ppl,slot,lp,tb,false_qp,ss=PROFILES[case]
+    expected=expected_vector(ppl,lp,tb,false_qp,ss)
     lines=[".text",".explicit",".align 16",".global _start","_start:"]
-    setup(lines,ppl,lp,tb,false_qp)
+    setup(lines,ppl,lp,tb,false_qp,ss,slot)
     lines += ["source_bundle:"]
     br_ret(lines,slot,false_qp)
     lines += ["post_source:"]
@@ -150,7 +173,8 @@ def generate(case):
     # IA-64 vector entries are just 0x100 bytes apart. The complete
     # handler does not fit between LP and TB: put a short trampoline
     # in each vector, then the shared assertions at a distant address.
-    for vec,label in ((LPV,"lp_vector"),(TBV,"tb_vector")):
+    for vec,label in ((LPV,"lp_vector"),(TBV,"tb_vector"),
+                      (SSV,"ss_vector")):
         lines += [f".org {IVT+vec}",label+":"]
         emit(lines,"b","br.cond.sptk trap_checks" if vec==expected
              else "br.cond.sptk fail")
@@ -161,7 +185,7 @@ def generate(case):
         literal(lines,15,1)
         emit(lines,"m","mov r9=cr.isr")
         code=((slot<<41)|((2 if vec==LPV else 0)|
-                           (4 if tb else 0)))
+                           (4 if tb else 0)|(8 if ss else 0)))
         compare(lines,9,hex(code))
         emit(lines,"m","mov r9=cr.iipa")
         literal(lines,14,"source_bundle")
@@ -172,13 +196,13 @@ def generate(case):
         emit(lines,"i","cmp.eq p6,p7=r9,r14")
         emit(lines,"b","(p7) br.cond.spnt fail")
         emit(lines,"m","mov r9=cr.ipsr")
-        literal(lines,14,hex(RI_MASK|CPL_MASK|LP|TB|IC))
+        literal(lines,14,hex(RI_MASK|CPL_MASK|LP|TB|SS|IC))
         emit(lines,"i","and r10=r9,r14")
         compare(lines,10,hex((ppl<<32)|(LP if lp else 0)|
-                              (TB if tb else 0)|IC))
+                              (TB if tb else 0)|(SS if ss else 0)|IC))
         # Handler entered CPL0. RFI must restore the committed target CPL,
         # but remove LP/TB in IPSR so subsequent branch checks do not trap.
-        literal(lines,14,hex(LP|TB))
+        literal(lines,14,hex(LP|TB|SS))
         emit(lines,"i","andcm r9=r9,r14")
         emit(lines,"m","mov cr.ipsr=r9")
         emit(lines,"b","rfi")
@@ -200,7 +224,7 @@ def main():
              for k in chosen]
     info={"reference":"Intel Itanium SDM Vol2 rev2.3 p2:205 and Vol3 br.ret",
           "cases":len(chosen),
-          "scope":"PFS.ppl CPL demotion, PSR.lp priority over TB; SS deferred",
+          "scope":"PFS.ppl CPL demotion, PSR.lp priority over TB/SS, and SS-only br.ret",
           "results":results}
     args.out.mkdir(parents=True,exist_ok=True)
     (args.out/"summary.json").write_text(json.dumps(info,indent=2)+"\n")
