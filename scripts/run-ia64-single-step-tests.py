@@ -34,6 +34,14 @@ PROFILES = {
     "br-not-taken-ss": ("untaken", 2, True, False),
     "br-not-taken-tb-ss": ("untaken", 2, True, True),
     "ss-disabled": ("alu", 2, False, False),
+    "fchkf-taken-ss": ("fchkf-taken", 2, True, False),
+    "fchkf-taken-tb-ss": ("fchkf-taken", 2, True, True),
+    "fchkf-fallthrough-ss": ("fchkf-fallthrough", 2, True, False),
+    "brl-cond-ss": ("brl", 1, True, False),
+    "brl-cond-tb-ss": ("brl", 1, True, True),
+    "brl-call-ss": ("brlcall", 1, True, False),
+    "brl-call-tb-ss": ("brlcall", 1, True, True),
+    "fault-suppresses-ss": ("fault", 0, True, False),
 }
 
 def setup(lines: list[str], kind: str, slot: int, ss: bool, tb: bool) -> None:
@@ -46,6 +54,10 @@ def setup(lines: list[str], kind: str, slot: int, ss: bool, tb: bool) -> None:
     emit(lines, "i", "mov b7=r14")
     if kind in ("false", "untaken"):
         emit(lines, "i", "cmp.ne p6,p7=r0,r0")  # p6=false
+    if kind.startswith("fchkf"):
+        # sf1 invalid flag causes taken F14; zero is non-taken control.
+        literal(lines, 20, hex(1 << 26) if kind == "fchkf-taken" else 0)
+        emit(lines, "m", "mov ar.fpsr=r20")
     # PSR.ss is bit40: set it in IPSR, then enter the test using RFI.
     literal(lines, 14, "source_bundle")
     emit(lines, "m", "mov cr.iip=r14")
@@ -75,6 +87,19 @@ def source_bundle(lines: list[str], kind: str, slot: int) -> None:
                 else "(p6) br.cond.sptk target_bundle")
         lines.extend(["{ .mib", "nop.m 0", "nop.i 0", insn, ";;", "}"])
         return
+    if kind.startswith("fchkf"):
+        lines.extend(["{ .mmf", "nop.m 0", "nop.m 0",
+                      "fchkf.s1 target_bundle", ";;", "}"])
+        return
+    if kind in ("brl", "brlcall"):
+        insn = ("brl.call.sptk b0=target_bundle" if kind == "brlcall"
+                else "brl.cond.sptk target_bundle")
+        lines.extend(["{ .mlx", "nop.m 0", insn, ";;", "}"])
+        return
+    if kind == "fault":
+        lines.extend(["{ .mii", "break.m 0", "nop.i 0", "nop.i 0",
+                      ";;", "}"])
+        return
     if kind == "nopm":
         lines.extend(["{ .mii", "nop.m 0", "nop.i 0", "nop.i 0", ";;", "}"])
         return
@@ -83,17 +108,27 @@ def source_bundle(lines: list[str], kind: str, slot: int) -> None:
     words[slot] = insn
     lines.extend(["{ .mii", *words, ";;", "}"])
 
+def check_call_committed(lines: list[str], kind: str) -> None:
+    if kind != "brlcall":
+        return
+    emit(lines, "i", "mov r9=b0")
+    literal(lines, 14, "post_source")
+    emit(lines, "i", "cmp.eq p6,p7=r9,r14")
+    emit(lines, "b", "(p7) br.cond.spnt fail")
+
+
 def generate(case: str) -> str:
     kind, slot, ss, tb = PROFILES[case]
-    taken = kind == "taken"
+    taken = kind in ("taken", "fchkf-taken", "brl", "brlcall")
+    fault = kind == "fault"
     expect_trap = ss or (tb and taken)
-    expected_vec = (TBV if taken and tb else SSV) if expect_trap else None
-    next_ri = 0 if taken or slot == 2 or kind == "mlx" else slot + 1
+    expected_vec = (BREAK if fault else
+                    (TBV if taken and tb else SSV) if expect_trap else None)
+    next_ri = 0 if fault or taken or slot == 2 or kind == "mlx" else slot + 1
     next_label = ("target_bundle" if taken else
                   "post_source" if next_ri == 0 else "source_bundle")
     expected_code = (4 | (8 if ss else 0)) if expected_vec == TBV else 8
-    state = (0x1234 if kind == "mlx" else
-             0 if kind in ("false", "untaken", "taken", "nopm", "nopf") else 1)
+    state = 0x1234 if kind == "mlx" else (1 if kind == "alu" else 0)
     lines = [".text", ".explicit", ".align 16", ".global _start", "_start:"]
     setup(lines, kind, slot, ss, tb)
     source_bundle(lines, kind, slot)
@@ -108,16 +143,26 @@ def generate(case: str) -> str:
     if taken:
         compare(lines, 15, 1 if expect_trap else 0)
         compare(lines, 11, state)
+        check_call_committed(lines, kind)
         emit(lines, "b", "br.cond.sptk pass")
     else:
         emit(lines, "b", "br.cond.sptk fail")
     lines.append("pass:")
+    if fault:
+        # Distinguish terminal marker BREAK from the original fault.
+        literal(lines, 15, 2)
     literal(lines, 14, "pass_spin")
     emit(lines, "i", "mov b6=r14")
     ivt.terminal(lines, PASS, FAIL)
     lines += [f".org {IVT}", "ivt_base:",
               f".org {IVT + BREAK}", "break_vector:"]
-    emit(lines, "b", "br.cond.sptk b6")
+    if fault:
+        literal(lines, 20, 2)
+        emit(lines, "i", "cmp.eq p6,p7=r15,r20")
+        emit(lines, "b", "(p6) br.cond.sptk b6")
+        emit(lines, "b", "br.cond.sptk fault_checks")
+    else:
+        emit(lines, "b", "br.cond.sptk b6")
     lines += [f".org {IVT + GENERAL}", "general_vector:"]
     emit(lines, "b", "br.cond.sptk fail")
     for vec, label in ((LPV, "lp_vector"), (TBV, "tb_vector"),
@@ -126,12 +171,12 @@ def generate(case: str) -> str:
         insn = "br.cond.sptk trap_checks" if vec == expected_vec else "br.cond.sptk fail"
         emit(lines, "b", insn)
     lines += [f".org {IVT + 0x9000}", "trap_checks:"]
-    if expect_trap:
+    if expect_trap and not fault:
         compare(lines, 15, 0)
         literal(lines, 15, 1)
         emit(lines, "m", "mov r9=cr.isr")
-        compare(lines, 9, hex(((2 if kind == "mlx" else slot) << 41) |
-                              expected_code))
+        compare(lines, 9, hex(((2 if kind in ("mlx", "brl", "brlcall")
+                                else slot) << 41) | expected_code))
         emit(lines, "m", "mov r9=cr.iipa")
         literal(lines, 14, "source_bundle")
         emit(lines, "i", "cmp.eq p6,p7=r9,r14")
@@ -146,6 +191,7 @@ def generate(case: str) -> str:
         compare(lines, 10, hex((next_ri << 41) | (SS if ss else 0) |
                                (TB if tb else 0) | IC))
         compare(lines, 11, state)
+        check_call_committed(lines, kind)
         # The resumed instruction executes once with SS/TB cleared.
         literal(lines, 14, hex(SS | TB))
         emit(lines, "i", "andcm r9=r9,r14")
@@ -153,6 +199,27 @@ def generate(case: str) -> str:
         emit(lines, "b", "rfi")
     else:
         emit(lines, "b", "br.cond.sptk fail")
+    if fault:
+        # A pre-result BREAK fault outranks and suppresses PSR.ss.
+        # Source slot0 is saved as a fault, never as a postcommit 0x6000.
+        lines += [f".org {IVT + 0xA000}", "fault_checks:"]
+        compare(lines, 15, 0)
+        literal(lines, 15, 1)
+        emit(lines, "m", "mov r9=cr.iip")
+        literal(lines, 14, "source_bundle")
+        emit(lines, "i", "cmp.eq p6,p7=r9,r14")
+        emit(lines, "b", "(p7) br.cond.spnt fail")
+        emit(lines, "m", "mov r9=cr.ipsr")
+        literal(lines, 14, hex(SS | RI_MASK))
+        emit(lines, "i", "and r10=r9,r14")
+        compare(lines, 10, hex(SS))
+        compare(lines, 11, 0)
+        literal(lines, 14, "post_source")
+        emit(lines, "m", "mov cr.iip=r14")
+        literal(lines, 14, hex(SS | RI_MASK))
+        emit(lines, "i", "andcm r9=r9,r14")
+        emit(lines, "m", "mov cr.ipsr=r9")
+        emit(lines, "b", "rfi")
     return "\n".join(lines) + "\n"
 
 def main() -> None:
@@ -174,7 +241,8 @@ def main() -> None:
     failures = []
     for c in chosen:
         try:
-            results.append(ivt.run_one(c, args, case_spec=(SSV, PASS, FAIL),
+            results.append(ivt.run_one(c, args, case_spec=(
+                BREAK if PROFILES[c][0] == "fault" else SSV, PASS, FAIL),
                                        source=generate(c)))
         except RuntimeError as exc:
             failures.append((c, str(exc)))
@@ -187,7 +255,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps({
         "reference": "Intel SDM rev2.3 Vol2 5.5.3 and section 8",
-        "scope": "PSR.ss sequential/MLX/taken/untaken and TB+SS precedence",
+        "scope": "PSR.ss sequential/MLX, F14 and long branches, fault suppression, TB+SS",
         "cases": len(chosen), "results": results,
     }, indent=2) + "\n")
     mode = "ASSEMBLY" if args.assemble_only else "EXECUTION"

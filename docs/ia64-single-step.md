@@ -31,3 +31,12 @@ suppression, false-qp NOP semantics, next-instruction RFI resume once;
 full clean QEMU build and inherited stacked tests. Host C policy and
 source-shape guards are necessary, not a substitute for real execution.
 Keep #21 and #45 open and **ISA COMPLETE=NO**.
+
+## Additional guest coverage
+
+The SS validation runner now includes F14 `fchkf.s1` taken/non-taken
+paths, MLX long branches `brl.cond` / `brl.call` with SS-only
+and TB+SS simultaneous code, plus a BREAK fault taken before instruction
+success to prove 0x6000 suppression. The long-call cases assert `b0`
+return-pointer commit before trap and after RFI. These are real GNU
+IA-64 guest executions; assembly is not evidence of runtime conformance.

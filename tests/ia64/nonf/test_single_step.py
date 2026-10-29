@@ -46,6 +46,17 @@ class SingleStepSource(unittest.TestCase):
         self.assertIn("tb_enabled ? ia64_tb_isr(ri, source_psr)", helper)
         self.assertIn("ia64_ss_isr(ri, source_psr)", helper)
 
+    def test_f14_mlx_branches_and_fault_gate_have_real_profiles(self):
+        guest = (ROOT / "scripts/run-ia64-single-step-tests.py").read_text()
+        for case in ("fchkf-taken-ss", "fchkf-fallthrough-ss",
+                     "brl-cond-tb-ss", "brl-call-ss", "fault-suppresses-ss"):
+            self.assertIn('"' + case + '"', guest)
+        self.assertIn('fchkf.s1 target_bundle', guest)
+        self.assertIn('brl.call.sptk b0=target_bundle', guest)
+        self.assertIn('if expect_trap and not fault:', guest)
+        self.assertIn('fault_checks:', guest)
+        self.assertIn('check_call_committed(lines, kind)', guest)
+
     def test_lp_ss_rfi_uses_saved_ipsr_without_live_psr_ic(self):
         lp = (ROOT / "scripts/run-ia64-lower-privilege-tests.py").read_text()
         setup = lp[lp.index("def setup("):lp.index("def br_ret(")]
