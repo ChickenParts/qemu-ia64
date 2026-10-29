@@ -93,7 +93,7 @@ def generate(case: str) -> str:
                   "post_source" if next_ri == 0 else "source_bundle")
     expected_code = (4 | (8 if ss else 0)) if expected_vec == TBV else 8
     state = (0x1234 if kind == "mlx" else
-             0 if kind in ("false", "untaken", "nopm", "nopf") else 1)
+             0 if kind in ("false", "untaken", "taken", "nopm", "nopf") else 1)
     lines = [".text", ".explicit", ".align 16", ".global _start", "_start:"]
     setup(lines, kind, slot, ss, tb)
     source_bundle(lines, kind, slot)
@@ -166,8 +166,23 @@ def main() -> None:
         ap.error("--timeout must be in (0,60]")
     args.out = args.out.resolve()
     chosen = [args.only] if args.only else list(PROFILES)
-    results = [ivt.run_one(c, args, case_spec=(SSV, PASS, FAIL),
-                           source=generate(c)) for c in chosen]
+    # Run every profile even after the first failure. The shared harness
+    # writes each result.json before raising, so preserve all guest logs in
+    # the Actions artifact and make one CI cycle diagnose every mismatch.
+    results = []
+    failures = []
+    for c in chosen:
+        try:
+            results.append(ivt.run_one(c, args, case_spec=(SSV, PASS, FAIL),
+                                       source=generate(c)))
+        except RuntimeError as exc:
+            failures.append((c, str(exc)))
+            result_file = args.out / c / "result.json"
+            if result_file.exists():
+                results.append(json.loads(result_file.read_text()))
+    if failures:
+        print("IA64 SINGLE-STEP FAILURES: " + ", ".join(
+            name for name, _ in failures), file=sys.stderr)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps({
         "reference": "Intel SDM rev2.3 Vol2 5.5.3 and section 8",
@@ -175,7 +190,12 @@ def main() -> None:
         "cases": len(chosen), "results": results,
     }, indent=2) + "\n")
     mode = "ASSEMBLY" if args.assemble_only else "EXECUTION"
-    print(f"IA64 SINGLE-STEP {mode} PASS: {len(results)}/{len(PROFILES)} profiles")
+    passed = sum(r.get("execution") == ("not-run" if args.assemble_only
+                                              else "pass") for r in results)
+    print(f"IA64 SINGLE-STEP {mode}: {passed}/{len(chosen)} profiles passed")
+    if failures:
+        raise RuntimeError("; ".join(f"{case}: {error}"
+                                     for case, error in failures))
 
 if __name__ == "__main__":
     try:
