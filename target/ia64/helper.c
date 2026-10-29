@@ -14,6 +14,7 @@
 #include "ifs.h"
 #include "taken-branch.h"
 #include "lower-privilege.h"
+#include "single-step.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -853,31 +854,73 @@ void HELPER(ret_privilege)(CPUIA64State *env, uint64_t source,
     g_assert_not_reached();
 }
 
+/*
+ * The same taken-branch retirement point reports either TB (higher priority)
+ * or SS, while preserving the branch destination and all committed state.
+ */
 void HELPER(taken_branch)(CPUIA64State *env, uint64_t source, uint32_t ri,
                           uint64_t target)
 {
     CPUState *cs = env_cpu(env);
     uintptr_t retaddr = GETPC();
+    bool tb_enabled = ia64_tb_enabled(env->psr);
+    bool ss_enabled = ia64_ss_enabled(env->psr);
 
-    if (!ia64_tb_enabled(env->psr)) {
+    if (!tb_enabled && !ss_enabled) {
+        return;
+    }
+    if (retaddr) {
+        cpu_restore_state(cs, retaddr);
+    }
+    uint64_t source_psr = env->psr;
+    const uint32_t vec = tb_enabled ? IA64_VEC_TAKEN_BRANCH :
+                                     IA64_VEC_SINGLE_STEP;
+
+    ia64_intr_push_window(env);
+    env->cr_ipsr = ia64_tb_saved_ipsr(source_psr);
+    env->cr_iip = ia64_tb_target_iip(target);
+    env->cr_iipa = source & ~UINT64_C(15);
+    env->cr_ifs = ia64_ifs_on_interruption(
+        env->cr_ifs, (source_psr & IA64_PSR_IC) != 0);
+    env->cr_isr = tb_enabled ? ia64_tb_isr(ri, source_psr) :
+                               ia64_ss_isr(ri, source_psr);
+    cs->exception_index = IA64_EXCP_BASE + vec;
+    env->dbg_tbexit_last_fault_vec = vec;
+    env->dbg_tbexit_last_fault_ip = source;
+
+    cpu_loop_exit_restore(cs, retaddr);
+    g_assert_not_reached();
+}
+
+/*
+ * Sequential SS is delivered AFTER the retired instruction's state changes.
+ * The translator computes the architected next instruction, including the
+ * virtual slot transition for MLX (source EI=1, next bundle/RI0).
+ */
+void HELPER(single_step)(CPUIA64State *env, uint64_t source,
+                         uint32_t source_ri, uint64_t next_iip,
+                         uint32_t next_ri)
+{
+    if (!ia64_ss_enabled(env->psr)) {
         return;
     }
 
+    CPUState *cs = env_cpu(env);
+    uintptr_t retaddr = GETPC();
     if (retaddr) {
         cpu_restore_state(cs, retaddr);
     }
 
     uint64_t source_psr = env->psr;
     ia64_intr_push_window(env);
-
-    env->cr_ipsr = ia64_tb_saved_ipsr(source_psr);
-    env->cr_iip = ia64_tb_target_iip(target);
+    env->cr_ipsr = ia64_ss_saved_ipsr(source_psr, next_ri);
+    env->cr_iip = next_iip & ~UINT64_C(15);
     env->cr_iipa = source & ~UINT64_C(15);
     env->cr_ifs = ia64_ifs_on_interruption(
         env->cr_ifs, (source_psr & IA64_PSR_IC) != 0);
-    env->cr_isr = ia64_tb_isr(ri, source_psr);
-    cs->exception_index = IA64_EXCP_BASE + IA64_VEC_TAKEN_BRANCH;
-    env->dbg_tbexit_last_fault_vec = IA64_VEC_TAKEN_BRANCH;
+    env->cr_isr = ia64_ss_isr(source_ri, source_psr);
+    cs->exception_index = IA64_EXCP_BASE + IA64_VEC_SINGLE_STEP;
+    env->dbg_tbexit_last_fault_vec = IA64_VEC_SINGLE_STEP;
     env->dbg_tbexit_last_fault_ip = source;
 
     cpu_loop_exit_restore(cs, retaddr);
