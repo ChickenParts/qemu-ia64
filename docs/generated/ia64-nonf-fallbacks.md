@@ -26,25 +26,25 @@ Observed non-F sites: **16**. All observed call sites including F/other: **21**.
 |---|---|---:|---|
 | `dynamic:unimpl_msg#1` | BREAK_HELPER | 1498 | not-in-non-f-scope |
 | `dynamic:unimpl_msg#2` | BREAK_HELPER | 1541 | not-in-non-f-scope |
-| `A-slot#1` | A | 3516 | not-adjudicated |
-| `B-slot major=4 btype#1` | B | 3970 | not-adjudicated |
-| `B-slot#1` | B | 4017 | not-adjudicated |
-| `reserved template#1` | TEMPLATE | 4029 | not-in-non-f-scope |
-| `M-slot#1` | M | 4254 | not-adjudicated |
-| `mov msr#1` | M | 4326 | not-adjudicated |
-| `M-slot#2` | M | 5086 | not-adjudicated |
-| `M-slot#3` | M | 5599 | not-adjudicated |
-| `M-slot op6/7#1` | M | 6015 | not-adjudicated |
-| `M-slot#4` | M | 6024 | not-adjudicated |
-| `I-slot#1` | I | 6408 | not-adjudicated |
-| `mux1 mbtype#1` | I | 6908 | not-adjudicated |
-| `I-slot#2` | I | 7294 | not-adjudicated |
-| `I-slot#3` | I | 7719 | not-adjudicated |
-| `I-slot#4` | I | 7731 | not-adjudicated |
-| `F-slot#1` | F | 8097 | not-in-non-f-scope |
-| `X-slot op0#1` | LX | 8129 | not-adjudicated |
-| `X-slot#1` | LX | 8221 | not-adjudicated |
-| `bad slot#1` | OTHER | 8225 | not-in-non-f-scope |
+| `A-slot#1` | A | 3530 | not-adjudicated |
+| `B-slot major=4 btype#1` | B | 3988 | not-adjudicated |
+| `B-slot#1` | B | 4035 | not-adjudicated |
+| `reserved template#1` | TEMPLATE | 4047 | not-in-non-f-scope |
+| `M-slot#1` | M | 4272 | not-adjudicated |
+| `mov msr#1` | M | 4344 | not-adjudicated |
+| `M-slot#2` | M | 5104 | not-adjudicated |
+| `M-slot#3` | M | 5617 | not-adjudicated |
+| `M-slot op6/7#1` | M | 6033 | not-adjudicated |
+| `M-slot#4` | M | 6042 | not-adjudicated |
+| `I-slot#1` | I | 6426 | not-adjudicated |
+| `mux1 mbtype#1` | I | 6926 | not-adjudicated |
+| `I-slot#2` | I | 7312 | not-adjudicated |
+| `I-slot#3` | I | 7737 | not-adjudicated |
+| `I-slot#4` | I | 7749 | not-adjudicated |
+| `F-slot#1` | F | 8115 | not-in-non-f-scope |
+| `X-slot op0#1` | LX | 8147 | not-adjudicated |
+| `X-slot#1` | LX | 8239 | not-adjudicated |
+| `bad slot#1` | OTHER | 8243 | not-in-non-f-scope |
 
 ## Required next audit (not yet done)
 
