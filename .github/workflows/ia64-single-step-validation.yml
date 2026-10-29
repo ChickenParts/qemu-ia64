@@ -1,0 +1,94 @@
+name: IA64 PSR.ss single-step and branch priority qualification
+
+on:
+  push:
+    branches: [work/ia64-psr-ss-single-step]
+    paths:
+      - .github/workflows/ia64-single-step-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-single-step-tests.py
+      - scripts/run-ia64-lower-privilege-tests.py
+      - scripts/run-ia64-taken-branch-tests.py
+      - docs/generated/ia64-nonf-fallbacks.md
+  pull_request:
+    paths:
+      - .github/workflows/ia64-single-step-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-single-step-tests.py
+      - scripts/run-ia64-lower-privilege-tests.py
+      - scripts/run-ia64-taken-branch-tests.py
+      - docs/generated/ia64-nonf-fallbacks.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-single-step-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ss-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install cross-assembler and build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Verify policy, source guards and GNU-assembled guests
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/ss-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/ss-evidence/ss-policy \
+            tests/ia64/nonf/single-step-policy-test.c
+          scratch/ss-evidence/ss-policy | tee scratch/ss-evidence/host-policy.txt
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/run-ia64-single-step-tests.py \
+            --assemble-only --out scratch/ss-evidence/assembly
+          git diff --exit-code
+      - name: Build full qemu-system-ia64
+        run: |
+          set -euo pipefail
+          mkdir build-ss
+          (cd build-ss; ../configure --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+            --disable-slirp --disable-werror)
+          ninja -C build-ss -j"$(nproc)" qemu-system-ia64
+      - name: Execute SS and inherited LP/TB/loop real-system fixtures
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-single-step-tests.py \
+            --qemu build-ss/qemu-system-ia64 --out scratch/ss-evidence/ss --timeout 10
+          python3 scripts/run-ia64-lower-privilege-tests.py \
+            --qemu build-ss/qemu-system-ia64 --out scratch/ss-evidence/lp --timeout 10
+          python3 scripts/run-ia64-taken-branch-tests.py \
+            --qemu build-ss/qemu-system-ia64 --out scratch/ss-evidence/tb --timeout 10
+          python3 scripts/run-ia64-b12-loop-tests.py \
+            --qemu build-ss/qemu-system-ia64 --out scratch/ss-evidence/b12 --timeout 10
+          python3 scripts/run-ia64-ifs-rfi-tests.py \
+            --qemu build-ss/qemu-system-ia64 --out scratch/ss-evidence/ifs --timeout 10
+      - name: Record exact source and emulator identity
+        if: always()
+        run: |
+          mkdir -p scratch/ss-evidence
+          git rev-parse HEAD > scratch/ss-evidence/source-head.txt
+          test ! -f build-ss/qemu-system-ia64 || \
+            sha256sum build-ss/qemu-system-ia64 > scratch/ss-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-single-step-validation
+          path: scratch/ss-evidence
+          retention-days: 14
+          if-no-files-found: error

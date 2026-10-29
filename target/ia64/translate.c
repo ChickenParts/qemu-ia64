@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "fp-bitops.h"
+#include "single-step.h"
 #include "fp-convert.h"
 #include "fp-f8.h"
 #include "fp-compare.h"
@@ -1567,18 +1568,20 @@ static void gen_record_branch(DisasContext *ctx, uint64_t insn,
                    tcg_env, offsetof(CPUIA64State, last_branch_kind));
 
     /*
-     * This function only runs on a TAKEN branch path, after all required
-     * PFS/CFM/BR/LC/EC/rotation side effects. Check PSR.tb at runtime:
-     * tb may change in the same TB, and rfi is never recorded here.
+     * Only a genuinely taken branch reaches this path. Record after the
+     * branch's PFS/CFM/BR/LC/EC and RSE effects, but before exiting the TB.
+     * TB outranks SS when both are enabled; the helper saves both ISR.code
+     * bits. LP has already been checked by br.ret's ret_privilege helper.
+     * rfi is intentionally never recorded here.
      */
     TCGv_i64 tb_bit = tcg_temp_new_i64();
-    TCGLabel *no_tb_trap = gen_new_label();
-    tcg_gen_andi_i64(tb_bit, cpu_psr, IA64_PSR_TB);
-    tcg_gen_brcondi_i64(TCG_COND_EQ, tb_bit, 0, no_tb_trap);
+    TCGLabel *no_branch_trap = gen_new_label();
+    tcg_gen_andi_i64(tb_bit, cpu_psr, IA64_PSR_TB | IA64_PSR_SS);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, tb_bit, 0, no_branch_trap);
     gen_helper_taken_branch(tcg_env,
                             tcg_constant_i64(ctx->base.pc_next),
                             tcg_constant_i32(ctx->ri), to);
-    gen_set_label(no_tb_trap);
+    gen_set_label(no_branch_trap);
 }
 
 static void gen_record_b0_write(DisasContext *ctx, uint64_t insn,
@@ -8443,7 +8446,43 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
                                tcg_constant_i32(ctx->ri),
                                tcg_constant_i64(insn));
     }
-    
+
+    /*
+     * Post-success single step. A faulting helper does not return, and a
+     * taken branch uses gen_record_branch() to save its actual destination.
+     * rfi never single-steps. The MLX L+X pair is ONE instruction: the L
+     * extension does not retire independently, and the X slot reports EI=1
+     * with ISR.ei=2 and its resume at the following bundle, RI=0.
+     *
+     * Include DISAS_TOO_MANY: PSR-changing instructions and epc complete
+     * before a new TB. Predicated-off ordinary instructions execute as
+     * no-ops and still have a sequential step boundary.
+     */
+    if (ctx->base.is_jmp != DISAS_NORETURN && type != SLOT_L &&
+        !(type == SLOT_B && extract64(insn, 37, 4) == 0 &&
+          extract64(insn, 27, 6) == 0x8)) {
+        const bool mlx_pair = type == SLOT_X;
+        /*
+         * ISR.ei is the trap-generating X slot (2), although restart of
+         * the long L+X instruction uses IPSR.ri=1. Intel SDM Vol2 3.3.5.2.
+         */
+        const uint8_t step_source_ri = cur_ri;
+        const uint8_t step_next_ri = ia64_ss_next_ri(cur_ri, mlx_pair);
+        const uint64_t step_next_ip =
+            ia64_ss_next_iip(ctx->base.pc_next, cur_ri, mlx_pair);
+        TCGv_i64 ss_flag = tcg_temp_new_i64();
+        TCGLabel *no_step = gen_new_label();
+
+        tcg_gen_andi_i64(ss_flag, cpu_psr, IA64_PSR_SS);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, ss_flag, 0, no_step);
+        gen_helper_single_step(tcg_env,
+                               tcg_constant_i64(ctx->base.pc_next),
+                               tcg_constant_i32(step_source_ri),
+                               tcg_constant_i64(step_next_ip),
+                               tcg_constant_i32(step_next_ri));
+        gen_set_label(no_step);
+    }
+
     ctx->ri++;
     if (ctx->ri == 3) {
         ctx->ri = 0;
