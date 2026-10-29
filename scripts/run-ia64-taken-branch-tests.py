@@ -51,7 +51,13 @@ def setup(lines: list[str], kind: str, expect: bool,
     # PSR.ic=1 makes CR.IIPA and ISR.ei defined at the interruption.
     emit(lines, "m", "ssm 0x2000")
     if tb_enabled:
-        emit(lines, "m", "ssm 0x4000000")
+        # ssm/rsm take imm24: PSR.tb (bit26) cannot be expressed there.
+        # Change psr.l via the architected register move, preserving all
+        # other current PSR low bits including ic/CPL.
+        emit(lines, "m", "mov r9=psr")
+        literal(lines, 20, hex(TB))
+        emit(lines, "i", "or r20=r9,r20")
+        emit(lines, "m", "mov psr.l=r20")
     emit(lines, "m", "srlz.d")
     if kind in ("wtop", "cloop"):
         emit(lines, "m", "alloc r20=ar.pfs,0,0,8,8")
@@ -130,7 +136,11 @@ def generate(case: str) -> str:
         # Reaching fallthrough means a taken branch was ignored.
         emit(lines, "b", "br.cond.sptk fail")
     else:
-        emit(lines, "m", "rsm 0x4000000")
+        # PSR.tb is not in the immediate mask of rsm.
+        emit(lines, "m", "mov r9=psr")
+        literal(lines, 14, hex(TB))
+        emit(lines, "i", "andcm r9=r9,r14")
+        emit(lines, "m", "mov psr.l=r9")
         emit(lines, "m", "srlz.d")
         compare(lines, 15, 0)
         emit(lines, "b", "br.cond.sptk pass")
@@ -138,7 +148,11 @@ def generate(case: str) -> str:
     if expect:
         compare(lines, 15, 1 if do_trap else 0)
         check_committed(lines, case, kind)
-        emit(lines, "m", "rsm 0x4000000")
+        # PSR.tb is not in the immediate mask of rsm.
+        emit(lines, "m", "mov r9=psr")
+        literal(lines, 14, hex(TB))
+        emit(lines, "i", "andcm r9=r9,r14")
+        emit(lines, "m", "mov psr.l=r9")
         emit(lines, "m", "srlz.d")
         emit(lines, "b", "br.cond.sptk pass")
     else:
