@@ -1,0 +1,138 @@
+name: IA-64 PSR.tb Taken Branch trap validation
+
+on:
+  push:
+    branches: [work/ia64-psr-tb-taken-branch]
+    paths:
+      - .github/workflows/ia64-taken-branch-validation.yml
+      - docs/ia64-taken-branch-state.md
+      - docs/generated/ia64-nonf-fallbacks.md
+      - scripts/run-ia64-taken-branch-tests.py
+      - scripts/run-ia64-b12-loop-tests.py
+      - scripts/ia64-b12-loop-byte-oracle.py
+      - scripts/run-ia64-b12-legality-tests.py
+      - scripts/run-ia64-ifs-rfi-tests.py
+      - scripts/run-ia64-b5-legality-tests.py
+      - target/ia64/taken-branch.h
+      - target/ia64/b12.h
+      - target/ia64/cpu.h
+      - target/ia64/ifs.h
+      - target/ia64/b5.h
+      - target/ia64/cpu.c
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+  pull_request:
+    paths:
+      - .github/workflows/ia64-taken-branch-validation.yml
+      - docs/ia64-taken-branch-state.md
+      - docs/generated/ia64-nonf-fallbacks.md
+      - scripts/run-ia64-taken-branch-tests.py
+      - scripts/run-ia64-b12-loop-tests.py
+      - scripts/ia64-b12-loop-byte-oracle.py
+      - scripts/run-ia64-b12-legality-tests.py
+      - scripts/run-ia64-ifs-rfi-tests.py
+      - scripts/run-ia64-b5-legality-tests.py
+      - target/ia64/taken-branch.h
+      - target/ia64/b12.h
+      - target/ia64/cpu.h
+      - target/ia64/ifs.h
+      - target/ia64/b5.h
+      - target/ia64/cpu.c
+      - target/ia64/helper.c
+      - target/ia64/helper.h
+      - target/ia64/translate.c
+      - tests/ia64/nonf/**
+  workflow_dispatch:
+
+concurrency:
+  group: ia64-taken-branch-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  taken-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install IA-64 binutils and build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Verify PSR.tb policy and real-guest assemblies
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/taken-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/taken-evidence/taken-policy tests/ia64/nonf/taken-branch-policy-test.c
+          scratch/taken-evidence/taken-policy | tee scratch/taken-evidence/host-policy.txt
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-b12-loop-byte-oracle.py \
+            --out scratch/taken-evidence/gnu-oracle
+          python3 scripts/run-ia64-taken-branch-tests.py \
+            --assemble-only --out scratch/taken-evidence/assembly
+          git diff --exit-code
+      - name: Build full qemu-system-ia64
+        run: |
+          set -euo pipefail
+          mkdir build-taken
+          (cd build-taken; ../configure --target-list=ia64-softmmu \
+             --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+             --disable-slirp --disable-werror)
+          ninja -C build-taken -j"$(nproc)" qemu-system-ia64
+      - name: Run PSR.tb and inherited real-guest regressions
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-taken-branch-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/taken --timeout 10
+          python3 scripts/run-ia64-b12-loop-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/loops --timeout 10
+          python3 scripts/run-ia64-ifs-rfi-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/ifs --timeout 10
+          python3 scripts/run-ia64-b12-legality-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/b12 --timeout 10
+          python3 scripts/run-ia64-b5-legality-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/b5 --timeout 10
+          python3 scripts/run-ia64-b4-legality-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/b4 --timeout 10
+          python3 scripts/run-ia64-b8-vmsw-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/vmsw --timeout 10
+          python3 scripts/run-ia64-b8-epc-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/epc --timeout 10
+          python3 scripts/run-ia64-b8-clrrrb-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/clrrrb --timeout 10
+          python3 scripts/run-ia64-b67-predict-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/b67 --timeout 10
+          python3 scripts/run-ia64-b9-exception-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/b9 --timeout 10
+          python3 scripts/run-ia64-f12-f15-exception-tests.py \
+            --qemu build-taken/qemu-system-ia64 --out scratch/taken-evidence/f12-f15 --timeout 10
+          QEMU_BIN="$PWD/build-taken/qemu-system-ia64" \
+          IA64_AS=ia64-linux-gnu-as IA64_LD=ia64-linux-gnu-ld \
+          IA64_FSLOT_LOGDIR=scratch/taken-evidence/fslot/logs \
+          IA64_FSLOT_OUTDIR=scratch/taken-evidence/fslot/out \
+            bash scripts/run-ia64-fslot-tests.sh 3s
+      - name: Retain exact provenance
+        if: always()
+        run: |
+          mkdir -p scratch/taken-evidence
+          git rev-parse HEAD > scratch/taken-evidence/source-head.txt
+          test ! -f build-taken/qemu-system-ia64 || \
+            sha256sum build-taken/qemu-system-ia64 > scratch/taken-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-taken-branch-validation
+          path: scratch/taken-evidence
+          retention-days: 14
+          if-no-files-found: error
