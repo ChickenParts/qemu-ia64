@@ -1578,7 +1578,6 @@ static void gen_record_branch(DisasContext *ctx, uint64_t insn,
      * Every taken branch must check target validity, even without
      * IA64_PSR_TB | IA64_PSR_SS: UIA outranks both. Call once after
      * PFS/CFM/BR/LC/EC and RSE commits, never on untaken branches.
-     * The helper returns immediately for valid untrapped targets.
      */
     gen_helper_taken_branch(tcg_env,
                             tcg_constant_i64(ctx->base.pc_next),
