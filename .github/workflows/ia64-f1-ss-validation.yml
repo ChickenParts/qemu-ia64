@@ -1,0 +1,98 @@
+name: IA64 F1 parallel FP+SS cross-lane real-IVT validation
+
+on:
+  push:
+    branches: [work/ia64-f1-ss-matrix]
+    paths:
+      - .github/workflows/ia64-f1-ss-validation.yml
+      - scripts/run-ia64-f1-ss-tests.py
+      - scripts/run-ia64-f1-exception-tests.py
+      - scripts/run-ia64-fp-ss-priority-tests.py
+      - tests/ia64/nonf/**
+      - target/ia64/**
+  pull_request:
+    paths:
+      - .github/workflows/ia64-f1-ss-validation.yml
+      - scripts/run-ia64-f1-ss-tests.py
+      - scripts/run-ia64-f1-exception-tests.py
+      - scripts/run-ia64-fp-ss-priority-tests.py
+      - tests/ia64/nonf/**
+      - target/ia64/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-f1-ss-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  f1-ss-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install IA64 GNU binutils and QEMU dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Verify source contracts, host policy and GNU guests
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/f1-ss-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/f1-ss-evidence/fp-ss-policy \
+            tests/ia64/nonf/fp-ss-priority-policy-test.c
+          scratch/f1-ss-evidence/fp-ss-policy | tee scratch/f1-ss-evidence/host-policy.txt
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/f1-ss-evidence/f1-bit-policy \
+            tests/ia64/nonf/f1-ss-code-policy-test.c
+          scratch/f1-ss-evidence/f1-bit-policy | tee scratch/f1-ss-evidence/f1-bit-policy.txt
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/run-ia64-f1-ss-tests.py \
+            --assemble-only --out scratch/f1-ss-evidence/assembly
+          git diff --exit-code
+      - name: Build full qemu-system-ia64
+        run: |
+          set -euo pipefail
+          mkdir build-f1-ss
+          (cd build-f1-ss; ../configure --target-list=ia64-softmmu \
+             --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+             --disable-slirp --disable-werror)
+          ninja -C build-f1-ss -j"$(nproc)" qemu-system-ia64
+      - name: Execute F1+SS, prior F1, FP+SS, SS/LP/TB real guests
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-f1-ss-tests.py \
+            --qemu build-f1-ss/qemu-system-ia64 --out scratch/f1-ss-evidence/f1-ss --timeout 10
+          python3 scripts/run-ia64-f1-exception-tests.py \
+            --qemu build-f1-ss/qemu-system-ia64 --out scratch/f1-ss-evidence/f1-old --timeout 10
+          python3 scripts/run-ia64-fp-ss-priority-tests.py \
+            --qemu build-f1-ss/qemu-system-ia64 --out scratch/f1-ss-evidence/fp-ss --timeout 10
+          python3 scripts/run-ia64-single-step-tests.py \
+            --qemu build-f1-ss/qemu-system-ia64 --out scratch/f1-ss-evidence/ss --timeout 10
+          python3 scripts/run-ia64-lower-privilege-tests.py \
+            --qemu build-f1-ss/qemu-system-ia64 --out scratch/f1-ss-evidence/lp --timeout 10
+          python3 scripts/run-ia64-taken-branch-tests.py \
+            --qemu build-f1-ss/qemu-system-ia64 --out scratch/f1-ss-evidence/tb --timeout 10
+      - name: Source and emulator hash provenance
+        if: always()
+        run: |
+          mkdir -p scratch/f1-ss-evidence
+          git rev-parse HEAD > scratch/f1-ss-evidence/source-head.txt
+          test ! -f build-f1-ss/qemu-system-ia64 || \
+            sha256sum build-f1-ss/qemu-system-ia64 > scratch/f1-ss-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-f1-ss-validation
+          path: scratch/f1-ss-evidence
+          retention-days: 14
+          if-no-files-found: error
