@@ -14,6 +14,7 @@
 #include "ifs.h"
 #include "taken-branch.h"
 #include "lower-privilege.h"
+#include "uia-address.h"
 #include "single-step.h"
 #include "fp-trap-priority.h"
 #include "fp-bitops.h"
@@ -866,16 +867,24 @@ void HELPER(taken_branch)(CPUIA64State *env, uint64_t source, uint32_t ri,
     uintptr_t retaddr = GETPC();
     bool tb_enabled = ia64_tb_enabled(env->psr);
     bool ss_enabled = ia64_ss_enabled(env->psr);
+    /*
+     * Merced UIA is a post-result TRAP before LP/TB/SS. A malformed
+     * branch target matters even if both debug flags are disabled.
+     * Normalize physical-mode firmware aliases as instruction fetch does.
+     */
+    bool uia = ia64_uia_target_unimplemented(
+        target, env->psr, ia64_phys_mode_addr(target));
 
-    if (!tb_enabled && !ss_enabled) {
+    if (!tb_enabled && !ss_enabled && !uia) {
         return;
     }
     if (retaddr) {
         cpu_restore_state(cs, retaddr);
     }
     uint64_t source_psr = env->psr;
-    const uint32_t vec = tb_enabled ? IA64_VEC_TAKEN_BRANCH :
-                                     IA64_VEC_SINGLE_STEP;
+    const uint32_t vec = uia ? IA64_VEC_LOWER_PRIVILEGE :
+                         (tb_enabled ? IA64_VEC_TAKEN_BRANCH :
+                                       IA64_VEC_SINGLE_STEP);
 
     ia64_intr_push_window(env);
     env->cr_ipsr = ia64_tb_saved_ipsr(source_psr);
@@ -883,8 +892,10 @@ void HELPER(taken_branch)(CPUIA64State *env, uint64_t source, uint32_t ri,
     env->cr_iipa = source & ~UINT64_C(15);
     env->cr_ifs = ia64_ifs_on_interruption(
         env->cr_ifs, (source_psr & IA64_PSR_IC) != 0);
-    env->cr_isr = tb_enabled ? ia64_tb_isr(ri, source_psr) :
-                               ia64_ss_isr(ri, source_psr);
+    /* UIA itself has no ISR.code bit: save concurrent TB/SS. */
+    env->cr_isr = uia ? ia64_uia_trap_isr(ri, source_psr, false) :
+                  (tb_enabled ? ia64_tb_isr(ri, source_psr) :
+                                ia64_ss_isr(ri, source_psr));
     cs->exception_index = IA64_EXCP_BASE + vec;
     env->dbg_tbexit_last_fault_vec = vec;
     env->dbg_tbexit_last_fault_ip = source;
