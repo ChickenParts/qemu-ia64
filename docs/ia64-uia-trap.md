@@ -50,7 +50,9 @@ emulator compatibility behavior rather than a hardware claim.
 
 ## Deliberate limits
 
-This bounded tranche does **not** implement UIA for rfi-to-bad-target,
+PR #50 does **not** implement UIA for rfi-to-bad-target; the separate
+stacked native-Itanium rfi follow-up is described in
+[ia64-uia-rfi.md](ia64-uia-rfi.md). Neither tranche covers
 sequential slot2 at the top of implemented VA/PA range, IA-32
 transitions/br.ia, or interactions with TLB translation/data UIA
 semantics. It does not assert that a virtual-mode guest mapping is

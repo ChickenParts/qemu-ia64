@@ -2,18 +2,20 @@ name: IA64 Merced UIA taken-branch trap and TB/SS priority qualification
 
 on:
   push:
-    branches: [work/ia64-uia-taken-branch-trap]
+    branches: [work/ia64-uia-taken-branch-trap, work/ia64-uia-rfi-trap]
     paths:
       - .github/workflows/ia64-uia-validation.yml
       - target/ia64/**
       - tests/ia64/nonf/**
       - scripts/run-ia64-uia-branch-tests.py
+      - scripts/run-ia64-uia-rfi-tests.py
   pull_request:
     paths:
       - .github/workflows/ia64-uia-validation.yml
       - target/ia64/**
       - tests/ia64/nonf/**
       - scripts/run-ia64-uia-branch-tests.py
+      - scripts/run-ia64-uia-rfi-tests.py
   workflow_dispatch:
 
 permissions:
@@ -46,10 +48,16 @@ jobs:
             -o scratch/uia-evidence/uia-policy \
             tests/ia64/nonf/uia-policy-test.c
           scratch/uia-evidence/uia-policy | tee scratch/uia-evidence/policy.txt
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/uia-evidence/uia-rfi-policy \
+            tests/ia64/nonf/uia-rfi-policy-test.c
+          scratch/uia-evidence/uia-rfi-policy | tee scratch/uia-evidence/rfi-policy.txt
           python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
           python3 scripts/ia64-nonf-fallback-audit.py --check
           python3 scripts/run-ia64-uia-branch-tests.py \
             --assemble-only --out scratch/uia-evidence/assembly
+          python3 scripts/run-ia64-uia-rfi-tests.py \
+            --assemble-only --out scratch/uia-evidence/rfi-assembly
           git diff --exit-code
       - name: Build full qemu-system-ia64
         run: |
@@ -64,6 +72,8 @@ jobs:
           set -euo pipefail
           python3 scripts/run-ia64-uia-branch-tests.py \
             --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/uia --timeout 10
+          python3 scripts/run-ia64-uia-rfi-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/uia-rfi --timeout 10
           python3 scripts/run-ia64-branch-ss-loop-call-tests.py \
             --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/branch-ss --timeout 10
           python3 scripts/run-ia64-single-step-tests.py \
