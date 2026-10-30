@@ -31,9 +31,12 @@ PSR.it and normalized physical address. This is specific to CPU family7
 
 - 130 independent address/ISR host oracle cases across eight VRNs,
   physical edge, simultaneous SS/TB/LP/IC, near-edge controls.
-- Eleven GNU IA-64 real-IVT guest profiles, with a genuine 4-KiB
+- Eleven GNU IA-64 real-IVT guest profiles, with a genuine 16-KiB
   ITC.I mapping placing a source bundle at the high virtual address
-  0x0003fffffffffff0. A 16-MiB identity ITC.I entry makes the IVT
+  0x0003fffffffffff0. Both the virtual page and backing physical
+  page use 16-KiB alignment (the target's TARGET_PAGE_BITS=14);
+  a 4-KiB mapping would alias the wrong physical offset in QEMU.
+  A 16-MiB identity ITC.I entry makes the IVT
   accessible under PSR.it=1. Tests include I/B/F/MLX slots,
   predicated-off branch, TB/SS/IC combinations and near-edge controls.
 - Real vector, CR.ISR, CR.IIPA/IIP/IPSR/RI, committed register r10,
