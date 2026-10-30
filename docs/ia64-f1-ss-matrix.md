@@ -35,3 +35,11 @@ guest oracles disagree, inspect actual logs and repair the emulator
 rather than weakening or deleting tests.
 
 Keep issues #21/#45/#10 open, **ISA COMPLETE=NO**, no forced merges.
+
+## Exhaustive host-side ISR.code gate
+
+A portable C test enumerates all **256** combinations of the low/high
+packed completion flags at ISR.code[14:7], under the **16** combinations
+of concurrent PSR.ss/tb/ic/lp, for **4,096** independently computed
+policies. This supplements (and does not replace) the nine real IA-64
+F1 guest executions and the inherited FP+SS policy's 512 cases.

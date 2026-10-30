@@ -50,6 +50,10 @@ jobs:
             -o scratch/f1-ss-evidence/fp-ss-policy \
             tests/ia64/nonf/fp-ss-priority-policy-test.c
           scratch/f1-ss-evidence/fp-ss-policy | tee scratch/f1-ss-evidence/host-policy.txt
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/f1-ss-evidence/f1-bit-policy \
+            tests/ia64/nonf/f1-ss-code-policy-test.c
+          scratch/f1-ss-evidence/f1-bit-policy | tee scratch/f1-ss-evidence/f1-bit-policy.txt
           python3 scripts/ia64-nonf-fallback-audit.py --check
           python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
           python3 scripts/run-ia64-f1-ss-tests.py \
