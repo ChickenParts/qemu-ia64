@@ -87,4 +87,43 @@ static inline uint64_t ia64_uia_rfi_isr(unsigned source_ri,
                                             (UINT64_C(1) << IA64_TB_ISR_NI_BIT));
 }
 
+/*
+ * The architected post-result UIA TRAP is also possible after a successful
+ * sequential slot-2 retirement at the upper edge of Merced's implemented
+ * instruction address space (SDM Vol2 §5.3 / vector 0x5e00).
+ *
+ * This is a conservative compile-time TB boundary test, not an access
+ * permission check: a virtual boundary and the masked physical boundary
+ * are both considered because PSR.it is a runtime register here. False
+ * positives merely end a TB; the actual runtime helper decides the trap.
+ * Physical-mode firmware's sign-extended 32-bit aliases are handled by
+ * the existing ia64_phys_mode_addr() in the runtime helper.
+ */
+static inline bool ia64_uia_sequential_edge_candidate(uint64_t source)
+{
+    uint64_t bundle = source & ~UINT64_C(15);
+    uint64_t next = bundle + UINT64_C(16);
+    const uint64_t pa_mask = (UINT64_C(1) << 61) - 1;
+    uint64_t physical = bundle & pa_mask;
+    uint64_t physical_next = next & pa_mask;
+
+    return (ia64_uia_virtual_implemented(bundle) &&
+            !ia64_uia_virtual_implemented(next)) ||
+           (ia64_uia_physical_implemented(physical) &&
+            !ia64_uia_physical_implemented(physical_next));
+}
+
+/* A sequential instruction is NOT a taken branch, even with PSR.tb=1.
+ * Only a simultaneous successfully retired instruction's SS contributes
+ * to the UIA trap's ISR.code; never synthesize TB or LP bits.
+ */
+static inline uint64_t ia64_uia_sequential_isr(unsigned source_ri,
+                                               uint64_t source_psr)
+{
+    return ((uint64_t)(source_ri & 3) << IA64_TB_ISR_EI_SHIFT) |
+           ((source_psr & IA64_TB_SS_PSR_MASK) ? IA64_SS_CODE : 0) |
+           ((source_psr & IA64_TB_IC_PSR_MASK) ? 0 :
+                                            (UINT64_C(1) << IA64_TB_ISR_NI_BIT));
+}
+
 #endif /* TARGET_IA64_UIA_ADDRESS_H */

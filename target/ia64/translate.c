@@ -8472,17 +8472,32 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         const uint8_t step_next_ri = ia64_ss_next_ri(cur_ri, mlx_pair);
         const uint64_t step_next_ip =
             ia64_ss_next_iip(ctx->base.pc_next, cur_ri, mlx_pair);
+        /*
+         * Even with PSR.ss clear, a successful sequential slot-2
+         * instruction at the Merced PA/VA edge must check the *next*
+         * address before translating/fetching the next bundle. This
+         * compile-time gate is intentionally conservative about PSR.it.
+         * The helper's runtime PSR and normalized PA choose the result.
+         */
+        const bool uia_edge = step_next_ri == 0 &&
+            ia64_uia_sequential_edge_candidate(ctx->base.pc_next);
         TCGv_i64 ss_flag = tcg_temp_new_i64();
         TCGLabel *no_step = gen_new_label();
 
-        tcg_gen_andi_i64(ss_flag, cpu_psr, IA64_PSR_SS);
-        tcg_gen_brcondi_i64(TCG_COND_EQ, ss_flag, 0, no_step);
+        if (!uia_edge) {
+            tcg_gen_andi_i64(ss_flag, cpu_psr, IA64_PSR_SS);
+            tcg_gen_brcondi_i64(TCG_COND_EQ, ss_flag, 0, no_step);
+        }
         gen_helper_single_step(tcg_env,
                                tcg_constant_i64(ctx->base.pc_next),
                                tcg_constant_i32(step_source_ri),
                                tcg_constant_i64(step_next_ip),
                                tcg_constant_i32(step_next_ri));
         gen_set_label(no_step);
+        if (uia_edge) {
+            /* Do not speculatively decode the unimplemented next bundle. */
+            ctx->base.is_jmp = DISAS_TOO_MANY;
+        }
     }
 
     ctx->ri++;
