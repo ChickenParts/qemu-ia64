@@ -66,6 +66,8 @@ class MercedSequentialUIA(unittest.TestCase):
         for needle in ('"itc.i r20"', "install_itc(",
                        '"edge_page", 14', '".balign 16384"',
                        '".space 16368, 0"',
+                       'start_ri = 1 if p.kind == "mlx" else 2',
+                       'hex(flags & ~RI)',
                        '"mov cr.ipsr=r9"', '"rfi"',
                        '"mov r9=cr.isr"', '"mov r9=cr.iipa"',
                        '"mov r9=cr.iip"', '"mov r9=cr.ipsr"',
