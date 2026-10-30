@@ -2075,12 +2075,33 @@ void HELPER(bsw)(CPUIA64State *env, uint32_t bn)
     env->psr |= bn ? IA64_PSR_BN : 0;
 }
 
-void HELPER(rfi)(CPUIA64State *env)
+void HELPER(rfi)(CPUIA64State *env, uint64_t source, uint32_t source_ri)
 {
     static int rfi_log_count;
 
-    ia64_rse_cancel_stack_switch(env);
+    /*
+     * rfi restores CR.IIP and CR.IPSR, not an ordinary branch target.
+     * For native Itanium it can nevertheless generate the chosen
+     * post-result UIA TRAP if the restored instruction address is
+     * outside Merced's implemented PA/VA width. Validate the restored
+     * PSR.it (rather than the handler's physical-mode PSR).
+     */
     uint64_t new_psr = env->cr_ipsr;
+    uint64_t new_ip = env->cr_iip & ~UINT64_C(15);
+    bool uia = ia64_uia_itanium_rfi_unimplemented(
+        new_ip, new_psr, ia64_phys_mode_addr(new_ip));
+    CPUState *cs = NULL;
+    uintptr_t retaddr = 0;
+
+    if (uia) {
+        cs = env_cpu(env);
+        retaddr = GETPC();
+        if (retaddr) {
+            cpu_restore_state(cs, retaddr);
+        }
+    }
+
+    ia64_rse_cancel_stack_switch(env);
     uint32_t cur_bn = (env->psr & IA64_PSR_BN) ? 1 : 0;
     uint32_t new_bn = (new_psr & IA64_PSR_BN) ? 1 : 0;
     if (cur_bn != new_bn) {
@@ -2118,7 +2139,29 @@ void HELPER(rfi)(CPUIA64State *env)
         rfi_log_count++;
     }
     env->psr = new_psr;
-    env->ip = env->cr_iip & ~0xFULL;
+    env->ip = new_ip;
+
+    if (uia) {
+        /*
+         * The RFI has already restored PSR/CFM/bank/RSE. Capture this
+         * resumed context, with its original IPSR.ri, as the interrupted
+         * state. Only the *source* RFI slot is encoded in ISR.ei.
+         * Unlike an ordinary taken branch, rfi cannot concurrently
+         * produce LP/TB/SS: ISR.code must remain zero.
+         */
+        ia64_intr_push_window(env);
+        env->cr_ipsr = new_psr;
+        env->cr_iip = new_ip;
+        env->cr_iipa = source & ~UINT64_C(15);
+        env->cr_ifs = ia64_ifs_on_interruption(
+            env->cr_ifs, (new_psr & IA64_PSR_IC) != 0);
+        env->cr_isr = ia64_uia_rfi_isr(source_ri, new_psr);
+        cs->exception_index = IA64_EXCP_BASE + IA64_VEC_LOWER_PRIVILEGE;
+        env->dbg_tbexit_last_fault_vec = IA64_VEC_LOWER_PRIVILEGE;
+        env->dbg_tbexit_last_fault_ip = source;
+        cpu_loop_exit_restore(cs, retaddr);
+        g_assert_not_reached();
+    }
 }
 
 static uint64_t ia64_dbg_next_call_pc;
