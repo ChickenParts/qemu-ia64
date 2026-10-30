@@ -1,0 +1,95 @@
+name: IA64 B1/B2 loop and B3/B5 call PSR.ss/TB real-IVT qualification
+
+on:
+  push:
+    branches: [work/ia64-branch-ss-loop-call-matrix]
+    paths:
+      - .github/workflows/ia64-branch-ss-loop-call-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-branch-ss-loop-call-tests.py
+  pull_request:
+    paths:
+      - .github/workflows/ia64-branch-ss-loop-call-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-branch-ss-loop-call-tests.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-branch-ss-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  branch-ss-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install GNU IA-64 and QEMU build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Source guards, fallback audit and genuine GNU guest assembly
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/branch-ss-evidence
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 scripts/run-ia64-branch-ss-loop-call-tests.py \
+            --assemble-only --out scratch/branch-ss-evidence/assembly
+          git diff --exit-code
+      - name: Clean-build full qemu-system-ia64
+        run: |
+          set -euo pipefail
+          mkdir build-branch-ss
+          (cd build-branch-ss; ../configure --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+            --disable-slirp --disable-werror)
+          ninja -C build-branch-ss -j"$(nproc)" qemu-system-ia64
+      - name: Execute branch+SS and inherited branch/LP/RFI real IA64 guests
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-branch-ss-loop-call-tests.py \
+            --qemu build-branch-ss/qemu-system-ia64 \
+            --out scratch/branch-ss-evidence/branch-ss --timeout 10
+          python3 scripts/run-ia64-b12-loop-tests.py \
+            --qemu build-branch-ss/qemu-system-ia64 \
+            --out scratch/branch-ss-evidence/b12 --timeout 10
+          python3 scripts/run-ia64-b5-legality-tests.py \
+            --qemu build-branch-ss/qemu-system-ia64 \
+            --out scratch/branch-ss-evidence/b5 --timeout 10
+          python3 scripts/run-ia64-single-step-tests.py \
+            --qemu build-branch-ss/qemu-system-ia64 \
+            --out scratch/branch-ss-evidence/ss --timeout 10
+          python3 scripts/run-ia64-lower-privilege-tests.py \
+            --qemu build-branch-ss/qemu-system-ia64 \
+            --out scratch/branch-ss-evidence/lp --timeout 10
+          python3 scripts/run-ia64-taken-branch-tests.py \
+            --qemu build-branch-ss/qemu-system-ia64 \
+            --out scratch/branch-ss-evidence/tb --timeout 10
+          python3 scripts/run-ia64-ifs-rfi-tests.py \
+            --qemu build-branch-ss/qemu-system-ia64 \
+            --out scratch/branch-ss-evidence/ifs --timeout 10
+      - name: Record exact source and emulator hashes
+        if: always()
+        run: |
+          mkdir -p scratch/branch-ss-evidence
+          git rev-parse HEAD > scratch/branch-ss-evidence/source-head.txt
+          test ! -f build-branch-ss/qemu-system-ia64 || \
+            sha256sum build-branch-ss/qemu-system-ia64 > scratch/branch-ss-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-branch-ss-loop-call-validation
+          path: scratch/branch-ss-evidence
+          retention-days: 14
+          if-no-files-found: error
