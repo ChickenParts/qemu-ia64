@@ -48,7 +48,7 @@ class MercedUIASource(unittest.TestCase):
                        "ia64_uia_virtual_implemented",
                        "ia64_uia_physical_implemented",
                        "(UINT64_C(1) << 36)",
-                       "ia64_tb_isr(source_ri, source_psr)"):
+                       "IA64_TB_PSR_MASK) ? IA64_TB_CODE : 0"):
             self.assertIn(needle,self.policy)
         self.assertNotIn("IA64_UIA_CODE",self.policy)
 

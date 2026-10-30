@@ -50,8 +50,15 @@ static inline uint64_t ia64_uia_trap_isr(unsigned source_ri,
                                          uint64_t source_psr,
                                          bool concurrent_lp)
 {
-    /* UIA has NO dedicated ISR.code bit: only LP/TB/SS, source EI/NI. */
-    return ia64_tb_isr(source_ri, source_psr) |
-           (concurrent_lp ? IA64_LP_CODE : UINT64_C(0));
+    /*
+     * UIA has NO dedicated ISR.code bit. Unlike ia64_tb_isr(), which
+     * assumes an enabled taken-branch trap, these causes are optional.
+     */
+    return ((uint64_t)(source_ri & 3) << IA64_TB_ISR_EI_SHIFT) |
+           ((source_psr & IA64_TB_PSR_MASK) ? IA64_TB_CODE : 0) |
+           ((source_psr & IA64_TB_SS_PSR_MASK) ? IA64_SS_CODE : 0) |
+           ((source_psr & IA64_TB_IC_PSR_MASK) ? 0 :
+                                            (UINT64_C(1) << IA64_TB_ISR_NI_BIT)) |
+           (concurrent_lp ? IA64_LP_CODE : 0);
 }
 #endif /* TARGET_IA64_UIA_ADDRESS_H */
