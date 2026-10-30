@@ -1,0 +1,94 @@
+name: IA64 Merced UIA taken-branch trap and TB/SS priority qualification
+
+on:
+  push:
+    branches: [work/ia64-uia-taken-branch-trap]
+    paths:
+      - .github/workflows/ia64-uia-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-uia-branch-tests.py
+  pull_request:
+    paths:
+      - .github/workflows/ia64-uia-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-uia-branch-tests.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-uia-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  uia-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install GNU IA64 cross-binutils and QEMU dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Host policy, source guards, non-F audit, GNU assembly
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/uia-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/uia-evidence/uia-policy \
+            tests/ia64/nonf/uia-policy-test.c
+          scratch/uia-evidence/uia-policy | tee scratch/uia-evidence/policy.txt
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 scripts/run-ia64-uia-branch-tests.py \
+            --assemble-only --out scratch/uia-evidence/assembly
+          git diff --exit-code
+      - name: Build full qemu-system-ia64
+        run: |
+          set -euo pipefail
+          mkdir build-uia
+          (cd build-uia; ../configure --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+            --disable-slirp --disable-werror)
+          ninja -C build-uia -j"$(nproc)" qemu-system-ia64
+      - name: Execute UIA and inherited branch, FP, RFI real QEMU guests
+        run: |
+          set -euo pipefail
+          python3 scripts/run-ia64-uia-branch-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/uia --timeout 10
+          python3 scripts/run-ia64-branch-ss-loop-call-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/branch-ss --timeout 10
+          python3 scripts/run-ia64-single-step-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/ss --timeout 10
+          python3 scripts/run-ia64-lower-privilege-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/lp --timeout 10
+          python3 scripts/run-ia64-taken-branch-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/tb --timeout 10
+          python3 scripts/run-ia64-b12-loop-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/b12 --timeout 10
+          python3 scripts/run-ia64-fp-ss-priority-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/fp-ss --timeout 10
+          python3 scripts/run-ia64-ifs-rfi-tests.py \
+            --qemu build-uia/qemu-system-ia64 --out scratch/uia-evidence/ifs --timeout 10
+      - name: Retain exact source and emulator SHA-256
+        if: always()
+        run: |
+          mkdir -p scratch/uia-evidence
+          git rev-parse HEAD > scratch/uia-evidence/source-head.txt
+          test ! -f build-uia/qemu-system-ia64 || \
+            sha256sum build-uia/qemu-system-ia64 > scratch/uia-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-uia-trap-validation
+          path: scratch/uia-evidence
+          retention-days: 14
+          if-no-files-found: error
