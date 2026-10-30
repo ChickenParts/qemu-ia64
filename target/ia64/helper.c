@@ -15,6 +15,7 @@
 #include "taken-branch.h"
 #include "lower-privilege.h"
 #include "single-step.h"
+#include "fp-trap-priority.h"
 #include "fp-bitops.h"
 #include "fp-convert.h"
 #include "fp-f1.h"
@@ -939,6 +940,15 @@ static G_NORETURN void ia64_fp_interrupt(CPUIA64State *env, uint32_t vec,
                                          uint16_t code, uint64_t isr_extra,
                                          bool trap, uintptr_t retaddr)
 {
+    /*
+     * The FP trap has priority over concurrent PSR.ss, but the saved
+     * ISR.code must report BOTH conditions (Intel SDM Vol2 Table 8-3).
+     * Only the post-result FP TRAP gets SS: pre-result FP faults must
+     * still restart without a synthetic single-step completion.
+     */
+    if (vec == IA64_VEC_FP_TRAP && trap) {
+        code = ia64_fp_trap_isr_code(code, env->psr);
+    }
     ia64_exception(env_cpu(env), env, false, false, vec, 0, code,
                    isr_extra, false, trap, retaddr);
     g_assert_not_reached();
