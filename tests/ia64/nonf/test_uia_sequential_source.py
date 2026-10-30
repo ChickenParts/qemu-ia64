@@ -55,7 +55,7 @@ class MercedSequentialUIA(unittest.TestCase):
         for needle in ("IA64_TB_CODE", "IA64_LP_CODE", "IA64_TB_PSR_MASK"):
             self.assertNotIn(needle, s)
 
-    def test_real_4k_itc_mapping_and_negative_controls(self):
+    def test_real_16k_itc_mapping_and_negative_controls(self):
         for case in ("edge-adds-no-flags", "edge-adds-ss",
                      "edge-adds-tb", "edge-adds-tb-ss",
                      "edge-adds-ic-ss", "edge-nop-b-tb-ss",
@@ -64,6 +64,8 @@ class MercedSequentialUIA(unittest.TestCase):
                      "near-adds-ss", "near-nop-b-ss"):
             self.assertIn('"' + case + '"', self.guest)
         for needle in ('"itc.i r20"', "install_itc(",
+                       '"edge_page", 14', '".balign 16384"',
+                       '".space 16368, 0"',
                        '"mov cr.ipsr=r9"', '"rfi"',
                        '"mov r9=cr.isr"', '"mov r9=cr.iipa"',
                        '"mov r9=cr.iip"', '"mov r9=cr.ipsr"',
