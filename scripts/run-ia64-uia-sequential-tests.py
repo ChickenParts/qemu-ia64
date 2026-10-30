@@ -122,7 +122,8 @@ def generate(case: str) -> str:
     install_itc(lines, hex(TEXT), hex(TEXT | PTE_FLAGS), 24)
     install_itc(lines, hex(p.source_va & ~0x3fff), "edge_page", 14)
 
-    # RFI is a valid transfer to an implemented source, slot RI2.
+    # RFI enters an ordinary final slot at RI2, but the long MLX L+X
+    # instruction must begin at RI1 and retires once at source EI2.
     # Live PSR.ic=0 is required; restored PSR.it=1 tests true VA.
     emit(lines, "m", "rsm 0x2000")
     emit(lines, "m", "srlz.i")
@@ -131,8 +132,9 @@ def generate(case: str) -> str:
     emit(lines, "m", "mov r9=psr")
     literal(lines, 14, hex(IT | IC | LP | TB | SS | RI))
     emit(lines, "i", "andcm r9=r9,r14")
+    start_ri = 1 if p.kind == "mlx" else 2
     flags = IT | (IC if p.ic else 0) | (TB if p.tb else 0) | \
-            (SS if p.ss else 0) | (2 << 41)
+            (SS if p.ss else 0) | (start_ri << 41)
     literal(lines, 14, hex(flags))
     emit(lines, "i", "or r9=r9,r14")
     emit(lines, "m", "mov cr.ipsr=r9")
@@ -172,7 +174,8 @@ def generate(case: str) -> str:
     emit(lines, "m", "mov r9=cr.ipsr")
     literal(lines, 14, hex(IT | IC | LP | TB | SS | RI))
     emit(lines, "i", "and r9=r9,r14")
-    compare(lines, 9, hex(flags))
+    # The saved interruption resumes at next bundle RI0, not source RI2.
+    compare(lines, 9, hex(flags & ~RI))
     compare(lines, 10, p.expected_reg)
     literal(lines, 14, "after_trap")
     emit(lines, "m", "mov cr.iip=r14")
