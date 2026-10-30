@@ -8,6 +8,7 @@
 #include "cpu.h"
 #include "fp-bitops.h"
 #include "single-step.h"
+#include "uia-address.h"
 #include "fp-convert.h"
 #include "fp-f8.h"
 #include "fp-compare.h"
