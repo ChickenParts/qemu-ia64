@@ -155,8 +155,8 @@ def generate(case: str) -> str:
     emit(lines, "b", "br.cond.sptk b6")
     lines += [f".org {IVT_OFF + GENERAL}", "general_vector:"]
     emit(lines, "b", "br.cond.sptk fail")
-    for vector, name in ((UIA, "uia_vector"), (SSV, "ss_vector"),
-                         (TBV, "tb_vector")):
+    for vector, name in ((UIA, "uia_vector"), (TBV, "tb_vector"),
+                         (SSV, "ss_vector")):
         lines += [f".org {IVT_OFF + vector}", name + ":"]
         emit(lines, "b", "br.cond.sptk checks" if vector == p.vec
              else "br.cond.sptk fail")
