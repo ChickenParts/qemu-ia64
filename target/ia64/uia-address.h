@@ -61,4 +61,30 @@ static inline uint64_t ia64_uia_trap_isr(unsigned source_ri,
                                             (UINT64_C(1) << IA64_TB_ISR_NI_BIT)) |
            (concurrent_lp ? IA64_LP_CODE : 0);
 }
+/*
+ * The IA-64 rfi instruction is not a taken branch and never generates
+ * PSR.tb/ss or PSR.lp traps. Its post-result UIA TRAP (SDM Vol2 §8)
+ * therefore has only the source EI and NI fields, even when the
+ * *restored* PSR has tb/ss/lp set. The next IPSR.ri comes from rfi,
+ * not from the source instruction and must not be reset to zero.
+ *
+ * IA-32 (PSR.is=1) transition semantics remain a separate tranche:
+ * do not apply the native Itanium address rule to that unsupported mode.
+ */
+static inline bool ia64_uia_itanium_rfi_unimplemented(uint64_t target,
+                                                       uint64_t restored_psr,
+                                                       uint64_t normalized_pa)
+{
+    return !(restored_psr & (UINT64_C(1) << 34)) &&
+           ia64_uia_target_unimplemented(target, restored_psr, normalized_pa);
+}
+
+static inline uint64_t ia64_uia_rfi_isr(unsigned source_ri,
+                                        uint64_t restored_psr)
+{
+    return ((uint64_t)(source_ri & 3) << IA64_TB_ISR_EI_SHIFT) |
+           ((restored_psr & IA64_TB_IC_PSR_MASK) ? 0 :
+                                            (UINT64_C(1) << IA64_TB_ISR_NI_BIT));
+}
+
 #endif /* TARGET_IA64_UIA_ADDRESS_H */

@@ -3661,7 +3661,9 @@ static void decode_b_unit(DisasContext *ctx, uint64_t insn)
         }
     } else if (major == 0x0 && x6 == 0x8) {
         /* B8: rfi (op=0, x6=0x8). */
-        gen_helper_rfi(tcg_env);
+        gen_helper_rfi(tcg_env,
+                       tcg_constant_i64(ctx->base.pc_next),
+                       tcg_constant_i32(ctx->ri));
         if (qp == 0) {
             ctx->base.is_jmp = DISAS_NORETURN;
         }
