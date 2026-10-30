@@ -1574,14 +1574,15 @@ static void gen_record_branch(DisasContext *ctx, uint64_t insn,
      * bits. LP has already been checked by br.ret's ret_privilege helper.
      * rfi is intentionally never recorded here.
      */
-    TCGv_i64 tb_bit = tcg_temp_new_i64();
-    TCGLabel *no_branch_trap = gen_new_label();
-    tcg_gen_andi_i64(tb_bit, cpu_psr, IA64_PSR_TB | IA64_PSR_SS);
-    tcg_gen_brcondi_i64(TCG_COND_EQ, tb_bit, 0, no_branch_trap);
+    /*
+     * Every taken branch must check target validity, even without
+     * IA64_PSR_TB | IA64_PSR_SS: UIA outranks both. Call once after
+     * PFS/CFM/BR/LC/EC and RSE commits, never on untaken branches.
+     * The helper returns immediately for valid untrapped targets.
+     */
     gen_helper_taken_branch(tcg_env,
                             tcg_constant_i64(ctx->base.pc_next),
                             tcg_constant_i32(ctx->ri), to);
-    gen_set_label(no_branch_trap);
 }
 
 static void gen_record_b0_write(DisasContext *ctx, uint64_t insn,

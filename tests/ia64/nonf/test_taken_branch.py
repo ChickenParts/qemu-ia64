@@ -29,15 +29,17 @@ class TakenBranchSource(unittest.TestCase):
         self.assertNotIn("env->ar[IA64_AR_EC] =",s)
         self.assertNotIn("IA64_VEC_FP_TRAP",s)
 
-    def test_dynamic_runtime_gate_only_on_taken_paths(self):
+    def test_all_taken_branches_check_uia_without_psr_debug_flags(self):
         a=self.t.index("static void gen_record_branch(")
         b=self.t.index("static void gen_record_b0_write(",a)
         s=self.t[a:b]
-        for must in ("cpu_psr, IA64_PSR_TB", "TCG_COND_EQ, tb_bit, 0",
+        for must in ("Every taken branch must check target validity",
                      "gen_helper_taken_branch(tcg_env", "tcg_constant_i32(ctx->ri)"):
             self.assertIn(must,s)
+        self.assertNotIn("no_branch_trap",s)
+        self.assertNotIn("TCG_COND_EQ, tb_bit, 0",s)
         self.assertEqual(s.count("gen_helper_taken_branch("),1)
-        # rfi may have PSR.tb set, but must never call the branch helper.
+        # RFI does not report a taken-branch trap, regardless of flags.
         a=self.t.index("/* B8: rfi")
         b=self.t.index("} else if (major == 0x0",a)
         self.assertNotIn("gen_record_branch(",self.t[a:b])

@@ -34,7 +34,9 @@ class SingleStepSource(unittest.TestCase):
     def test_branch_priority_after_lp_helper_and_runtime(self):
         branch = self.tr[self.tr.index("static void gen_record_branch("):
                          self.tr.index("static void gen_record_b0_write(")]
+        self.assertIn("Every taken branch must check target validity", branch)
         self.assertIn("IA64_PSR_TB | IA64_PSR_SS", branch)
+        self.assertNotIn("no_branch_trap", branch)
         self.assertEqual(branch.count("gen_helper_taken_branch("), 1)
         b4 = self.tr[self.tr.index("static void decode_b_unit("):
                      self.tr.index("static void decode_insn(")]
