@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Real IVT guests for Merced nonbranch slot-2 upper-VA UIA TRAP.
 
-A genuine ITC.I entry maps one executable 4K page to the last page in
+A genuine ITC.I entry maps one executable 16KiB page to the last page in
 implemented region-0 virtual space, and a 16MiB identity entry keeps
 the IVT/guest code executable while PSR.it=1.
 """
@@ -42,7 +42,7 @@ class Profile:
 
     @property
     def source_va(self) -> int:
-        return EDGE - 0x1000 if self.near else EDGE
+        return EDGE - 0x4000 if self.near else EDGE
 
     @property
     def next_va(self) -> int:
@@ -120,7 +120,7 @@ def generate(case: str) -> str:
         emit(lines, "i", "cmp.ne p6,p7=r0,r0")
 
     install_itc(lines, hex(TEXT), hex(TEXT | PTE_FLAGS), 24)
-    install_itc(lines, hex(p.source_va & ~0xfff), "edge_page", 12)
+    install_itc(lines, hex(p.source_va & ~0x3fff), "edge_page", 14)
 
     # RFI is a valid transfer to an implemented source, slot RI2.
     # Live PSR.ic=0 is required; restored PSR.it=1 tests true VA.
@@ -143,8 +143,8 @@ def generate(case: str) -> str:
     compare(lines, 10, p.expected_reg)
     emit(lines, "b", "br.cond.sptk pass")
 
-    lines.extend([".balign 4096", "edge_page:",
-                  ".space 4080, 0", "edge_bundle:"])
+    lines.extend([".balign 16384", "edge_page:",
+                  ".space 16368, 0", "edge_bundle:"])
     edge_instruction(lines, p.kind)
     lines.append("pass:")
     literal(lines, 14, "pass_spin")
@@ -209,7 +209,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps({
         "reference": "Intel Itanium SDM rev2.3 Vol2 §5.3, UIA 0x5e00 pp2:205–206",
-        "mode": "real PSR.it=1, 4K high-VA ITC.I mapping",
+        "mode": "real PSR.it=1, 16KiB high-VA ITC.I mapping",
         "cases": len(selected), "results": results, "failures": failures,
     }, indent=2) + "\n")
     count = sum(x.get("execution") ==
