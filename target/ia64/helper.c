@@ -913,7 +913,15 @@ void HELPER(single_step)(CPUIA64State *env, uint64_t source,
                          uint32_t source_ri, uint64_t next_iip,
                          uint32_t next_ri)
 {
-    if (!ia64_ss_enabled(env->psr)) {
+    /*
+     * The successful slot-2 instruction retired, and the next bundle
+     * may be outside the implemented Merced address range. UIA is
+     * higher priority than simultaneous SS, but PSR.tb is irrelevant:
+     * sequential fallthrough is never a taken branch.
+     */
+    bool uia = next_ri == 0 && ia64_uia_target_unimplemented(
+        next_iip, env->psr, ia64_phys_mode_addr(next_iip));
+    if (!uia && !ia64_ss_enabled(env->psr)) {
         return;
     }
 
@@ -924,15 +932,18 @@ void HELPER(single_step)(CPUIA64State *env, uint64_t source,
     }
 
     uint64_t source_psr = env->psr;
+    uint32_t vec = uia ? IA64_VEC_LOWER_PRIVILEGE :
+                         IA64_VEC_SINGLE_STEP;
     ia64_intr_push_window(env);
     env->cr_ipsr = ia64_ss_saved_ipsr(source_psr, next_ri);
     env->cr_iip = next_iip & ~UINT64_C(15);
     env->cr_iipa = source & ~UINT64_C(15);
     env->cr_ifs = ia64_ifs_on_interruption(
         env->cr_ifs, (source_psr & IA64_PSR_IC) != 0);
-    env->cr_isr = ia64_ss_isr(source_ri, source_psr);
-    cs->exception_index = IA64_EXCP_BASE + IA64_VEC_SINGLE_STEP;
-    env->dbg_tbexit_last_fault_vec = IA64_VEC_SINGLE_STEP;
+    env->cr_isr = uia ? ia64_uia_sequential_isr(source_ri, source_psr) :
+                        ia64_ss_isr(source_ri, source_psr);
+    cs->exception_index = IA64_EXCP_BASE + vec;
+    env->dbg_tbexit_last_fault_vec = vec;
     env->dbg_tbexit_last_fault_ip = source;
 
     cpu_loop_exit_restore(cs, retaddr);

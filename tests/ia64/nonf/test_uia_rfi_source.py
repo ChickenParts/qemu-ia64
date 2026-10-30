@@ -50,7 +50,8 @@ class RFIIUATests(unittest.TestCase):
 
     def test_rfi_status_cannot_invent_concurrent_trap_codes(self):
         a = self.policy.index("static inline uint64_t ia64_uia_rfi_isr(")
-        rfi = self.policy[a:]
+        b = self.policy.index("\n}", a) + 2
+        rfi = self.policy[a:b]
         self.assertIn("IA64_TB_ISR_EI_SHIFT", rfi)
         self.assertIn("IA64_TB_ISR_NI_BIT", rfi)
         for token in ("IA64_TB_CODE", "IA64_SS_CODE", "IA64_LP_CODE"):

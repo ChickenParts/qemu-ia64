@@ -24,27 +24,27 @@ Observed non-F sites: **16**. All observed call sites including F/other: **21**.
 
 | Stable label | Unit | Current source line | Classification |
 |---|---|---:|---|
-| `dynamic:unimpl_msg#1` | BREAK_HELPER | 1499 | not-in-non-f-scope |
-| `dynamic:unimpl_msg#2` | BREAK_HELPER | 1542 | not-in-non-f-scope |
-| `A-slot#1` | A | 3533 | not-adjudicated |
-| `B-slot major=4 btype#1` | B | 4008 | not-adjudicated |
-| `B-slot#1` | B | 4055 | not-adjudicated |
-| `reserved template#1` | TEMPLATE | 4067 | not-in-non-f-scope |
-| `M-slot#1` | M | 4292 | not-adjudicated |
-| `mov msr#1` | M | 4364 | not-adjudicated |
-| `M-slot#2` | M | 5124 | not-adjudicated |
-| `M-slot#3` | M | 5637 | not-adjudicated |
-| `M-slot op6/7#1` | M | 6053 | not-adjudicated |
-| `M-slot#4` | M | 6062 | not-adjudicated |
-| `I-slot#1` | I | 6446 | not-adjudicated |
-| `mux1 mbtype#1` | I | 6946 | not-adjudicated |
-| `I-slot#2` | I | 7332 | not-adjudicated |
-| `I-slot#3` | I | 7757 | not-adjudicated |
-| `I-slot#4` | I | 7769 | not-adjudicated |
-| `F-slot#1` | F | 8135 | not-in-non-f-scope |
-| `X-slot op0#1` | LX | 8167 | not-adjudicated |
-| `X-slot#1` | LX | 8259 | not-adjudicated |
-| `bad slot#1` | OTHER | 8263 | not-in-non-f-scope |
+| `dynamic:unimpl_msg#1` | BREAK_HELPER | 1500 | not-in-non-f-scope |
+| `dynamic:unimpl_msg#2` | BREAK_HELPER | 1543 | not-in-non-f-scope |
+| `A-slot#1` | A | 3534 | not-adjudicated |
+| `B-slot major=4 btype#1` | B | 4009 | not-adjudicated |
+| `B-slot#1` | B | 4056 | not-adjudicated |
+| `reserved template#1` | TEMPLATE | 4068 | not-in-non-f-scope |
+| `M-slot#1` | M | 4293 | not-adjudicated |
+| `mov msr#1` | M | 4365 | not-adjudicated |
+| `M-slot#2` | M | 5125 | not-adjudicated |
+| `M-slot#3` | M | 5638 | not-adjudicated |
+| `M-slot op6/7#1` | M | 6054 | not-adjudicated |
+| `M-slot#4` | M | 6063 | not-adjudicated |
+| `I-slot#1` | I | 6447 | not-adjudicated |
+| `mux1 mbtype#1` | I | 6947 | not-adjudicated |
+| `I-slot#2` | I | 7333 | not-adjudicated |
+| `I-slot#3` | I | 7758 | not-adjudicated |
+| `I-slot#4` | I | 7770 | not-adjudicated |
+| `F-slot#1` | F | 8136 | not-in-non-f-scope |
+| `X-slot op0#1` | LX | 8168 | not-adjudicated |
+| `X-slot#1` | LX | 8260 | not-adjudicated |
+| `bad slot#1` | OTHER | 8264 | not-in-non-f-scope |
 
 ## Required next audit (not yet done)
 
