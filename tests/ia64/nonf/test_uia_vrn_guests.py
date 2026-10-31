@@ -67,5 +67,29 @@ class MercedSequentialVirtualRegionGuests(unittest.TestCase):
                 self.assertEqual(bool(p.expected_isr & guests.NI), not p.ic)
 
 
+    def test_explicit_itlb_tr_precedes_region_6_7_compat_mapping(self):
+        # A regression in ia64_cpu_tlb_fill used to short-circuit
+        # low-half region 6/7 before looking up a real ITC.I mapping.
+        # That made these guests loop in the 0x400 ITLB vector.
+        source = (ROOT / "target/ia64/helper.c").read_text()
+        body = source.split("bool ia64_cpu_tlb_fill(", 1)[1].split(
+            "void HELPER(check_null_branch)", 1)[0]
+        itr = body.index("for (int i = 0; i < ARRAY_SIZE(env->itrs); i++)")
+        itlb = body.index("for (int i = 0; i < ARRAY_SIZE(env->itlb); i++)")
+        dtr = body.index("for (int i = 0; i < ARRAY_SIZE(env->dtrs); i++)")
+        dtlb = body.index("for (int i = 0; i < ARRAY_SIZE(env->dtlb); i++)")
+        miss = body.index("if (!hit) {", itlb)
+        direct7 = body.index("Linux uses region 7 addresses (__va())")
+        direct6 = body.index("Linux uses region 6 as an identity-mapped")
+        fault = body.index("IA64_VEC_INST_TLB", direct6)
+        self.assertLess(itr, itlb)
+        self.assertLess(dtr, dtlb)
+        self.assertLess(itlb, miss)
+        self.assertLess(dtlb, miss)
+        self.assertLess(miss, direct7)
+        self.assertLess(direct7, direct6)
+        self.assertLess(direct6, fault)
+
+
 if __name__ == "__main__":
     unittest.main()
