@@ -39,10 +39,13 @@ class Profile:
     tb: bool = False
     ic: bool = False
     near: bool = False
+    vrn: int = 0
 
     @property
     def source_va(self) -> int:
-        return EDGE - 0x4000 if self.near else EDGE
+        # Bit [63:61] selects the virtual region; sign-extension and
+        # the implemented/unimplemented boundary are within each region.
+        return (self.vrn << 61) | (EDGE - 0x4000 if self.near else EDGE)
 
     @property
     def next_va(self) -> int:
@@ -72,6 +75,18 @@ PROFILES = {
     "edge-false-branch-tb-ss": Profile(kind="false-branch", tb=True, ss=True),
     "near-adds-ss": Profile(ss=True, near=True),
     "near-nop-b-ss": Profile(kind="nop-b", ss=True, near=True),
+    # Real ITC.I/IVT execution, not merely host address-policy testing,
+    # across *every* virtual-region number 1..7. Region 0 is above.
+    "edge-vrn1-adds": Profile(vrn=1),
+    "edge-vrn2-adds-ss": Profile(vrn=2, ss=True),
+    "edge-vrn3-adds-tb": Profile(vrn=3, tb=True),
+    "edge-vrn4-adds-tb-ss": Profile(vrn=4, tb=True, ss=True),
+    "edge-vrn5-adds-ic-ss": Profile(vrn=5, ic=True, ss=True),
+    "edge-vrn6-nop-b-tb-ss": Profile(vrn=6, kind="nop-b", tb=True, ss=True),
+    "edge-vrn7-long-mov-ss": Profile(vrn=7, kind="mlx", ss=True),
+    # In-range controls guard against a false region-boundary UIA.
+    "near-vrn6-adds-ss": Profile(vrn=6, ss=True, near=True),
+    "near-vrn7-adds-ss": Profile(vrn=7, ss=True, near=True),
 }
 
 def install_itc(lines: list[str], va: str, pte: str, page_shift: int) -> None:
