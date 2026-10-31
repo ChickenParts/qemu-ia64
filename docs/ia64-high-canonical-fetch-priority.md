@@ -57,6 +57,24 @@ noncanonical target IIP/RI, ISR.code=0 and NI/IC behavior. It repairs
 the target and clears IT/debug flags before returning to physical
 harness code. No fabricated TB, LP or SS cause on RFI.
 
+### First real-guest failure and fixture correction
+
+[The first PR-merge run, 41188910036](https://github.com/ChickenParts/qemu-ia64/actions/runs/41188910036)
+passed **32/32** sequential/upper-canonical guest executions and all
+20 inherited branch UIA cases, but only **11/15** RFI UIA cases: every
+new restored-IT virtual-gap RFI guest entered the UIA vector, then
+repeatedly faulted at the **IVT address itself** (0x5405e00 and the
+0x5400400 instruction-TLB handler). Those logs distinguish a missing
+**handler translation** from an incorrect UIA target decision.
+
+The corrected virtual RFI fixture installs one 16MiB identity
+`ITC.I` entry for the test harness **and** the IVT *before* restoring
+`PSR.it=1`. It never maps the invalid gap target. The existing eleven
+physical RFI controls deliberately remain unchanged. A source-independent
+test requires the virtual RFI cases to install exactly one such entry.
+A clean rerun must independently verify all 15 guests; do not claim
+the corrected fixture is qualified from the failed run.
+
 An independent 162-case C host address-policy oracle (up from 130)
 covers the first/last valid high VA and both invalid gaps for each VRN.
 Python host oracles assert actual assembled source mappings, source/next
