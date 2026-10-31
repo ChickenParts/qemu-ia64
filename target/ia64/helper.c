@@ -27187,34 +27187,6 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     /*
-     * Linux uses region 7 addresses (__va()) as a direct map of physical memory.
-     * However, region 7 also contains other (non-identity) kernel addresses
-     * such as the negative percpu range. Only treat region 7 with bit60==0
-     * (i.e. VA in [RGN_BASE(7), RGN_BASE(7)+2^60)) as identity-mapped.
-     */
-    if (extract64(address, 61, 3) == 7 && extract64(address, 60, 1) == 0) {
-        hwaddr phys_addr = address & ((1ULL << 61) - 1);
-        int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
-        tlb_set_page(cs, address & TARGET_PAGE_MASK,
-                     phys_addr & TARGET_PAGE_MASK, prot,
-                     mmu_idx, TARGET_PAGE_SIZE);
-        return true;
-    }
-
-    /*
-     * Linux uses region 6 as an identity-mapped uncached I/O region
-     * (RGN_UNCACHED). Treat it as a direct physical mapping.
-     */
-    if (extract64(address, 61, 3) == 6 && extract64(address, 60, 1) == 0) {
-        hwaddr phys_addr = address & ((1ULL << 61) - 1);
-        int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
-        tlb_set_page(cs, address & TARGET_PAGE_MASK,
-                     phys_addr & TARGET_PAGE_MASK, prot,
-                     mmu_idx, TARGET_PAGE_SIZE);
-        return true;
-    }
-
-    /*
      * Physical mode: if translation is disabled for this access, treat the
      * address as a physical address and never raise translation faults.
      *
@@ -27346,6 +27318,41 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     if (!hit) {
+        /*
+         * Linux's low-half region-6 I/O and region-7 linear-map shortcuts
+         * are compatibility FALLBACKS, not stronger than explicit mappings.
+         * Check ITR/DTR and ITC/DTC first, so a guest-installed translation
+         * for these VRNs wins (including its architectural access rights).
+         * Keep the original direct-map behavior when no entry matches.
+         */
+        /*
+         * Linux uses region 7 addresses (__va()) as a direct map of physical memory.
+         * However, region 7 also contains other (non-identity) kernel addresses
+         * such as the negative percpu range. Only treat region 7 with bit60==0
+         * (i.e. VA in [RGN_BASE(7), RGN_BASE(7)+2^60)) as identity-mapped.
+         */
+        if (extract64(address, 61, 3) == 7 && extract64(address, 60, 1) == 0) {
+            hwaddr phys_addr = address & ((1ULL << 61) - 1);
+            int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+            tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                         phys_addr & TARGET_PAGE_MASK, prot,
+                         mmu_idx, TARGET_PAGE_SIZE);
+            return true;
+        }
+
+        /*
+         * Linux uses region 6 as an identity-mapped uncached I/O region
+         * (RGN_UNCACHED). Treat it as a direct physical mapping.
+         */
+        if (extract64(address, 61, 3) == 6 && extract64(address, 60, 1) == 0) {
+            hwaddr phys_addr = address & ((1ULL << 61) - 1);
+            int prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+            tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                         phys_addr & TARGET_PAGE_MASK, prot,
+                         mmu_idx, TARGET_PAGE_SIZE);
+            return true;
+        }
+
         bool is_data = access_type != MMU_INST_FETCH;
         bool write = (access_type == MMU_DATA_STORE);
         uint32_t vec;
