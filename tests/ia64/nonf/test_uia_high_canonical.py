@@ -95,7 +95,7 @@ class HighCanonicalAndFetchPriority(unittest.TestCase):
                 self.assertIn(hex(p.pa), asm)
                 self.assertIn("mov cr.ipsr=r9", asm)
                 self.assertIn("uia_vector:", asm)
-                self.assertNotIn("itc.i r20", asm)
+                # The noncanonical target has no mapping, but the IVT\n                # must be executable after restored PSR.it=1 traps.\n                self.assertEqual(asm.count("itc.i r20"), 1)
                 self.assertIn("rfi", asm)
                 if "low" in name:
                     self.assertEqual(p.pa & MASK61, 1 << 50)
