@@ -33,6 +33,7 @@ BAD_VA_HIGH = HIGH_CANON - 16  # immediately below high canonical half
 NI, EI_RFI = 1 << 39, 2 << 41
 PA44, PA45 = 1 << 44, 1 << 45
 PASS, FAIL = "0x72666970", "0x72666966"
+PTE_FLAGS = (1 << 9) | (1 << 6) | (1 << 5) | 1
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,21 @@ PROFILES = {
 }
 
 
+def install_virtual_ivt(lines: list[str]) -> None:
+    # Unlike a physical-mode UIA, a restored PSR.it=1 UIA may preserve
+    # translation when dispatching the vector. Preinstall a real 16MiB
+    # identity ITC.I mapping that covers BOTH the harness and its IVT.
+    # The target VA itself remains deliberately noncanonical/unmapped.
+    literal(lines, 14, hex(ivt.TEXT))
+    emit(lines, "m", "mov cr.ifa=r14")
+    literal(lines, 14, hex(24 << 2))
+    emit(lines, "m", "mov cr.itir=r14")
+    literal(lines, 20, hex(ivt.TEXT | PTE_FLAGS))
+    lines.extend(["{ .mmi", "itc.i r20", ";;",
+                  "nop.m 0", "nop.i 0", ";;", "}"])
+    emit(lines, "m", "srlz.i")
+
+
 def generate(case: str) -> str:
     p = PROFILES[case]
     lines = [".text", ".explicit", ".align 16", ".global _start", "_start:"]
@@ -87,6 +103,8 @@ def generate(case: str) -> str:
     literal(lines, 15, 0)
     literal(lines, 14, "fail")
     emit(lines, "i", "mov b7=r14")
+    if p.virtual:
+        install_virtual_ivt(lines)
     # rfi is legal only with live PSR.ic=0. The *restored* IC is varied.
     emit(lines, "m", "rsm 0x2000")
     emit(lines, "m", "srlz.i")
