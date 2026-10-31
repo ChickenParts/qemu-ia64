@@ -22,7 +22,7 @@ class MercedSequentialVirtualRegionGuests(unittest.TestCase):
     def test_all_eight_regions_have_real_edge_profiles(self):
         by_region = {}
         for name, profile in guests.PROFILES.items():
-            if not profile.near:
+            if not profile.near and not profile.high:
                 by_region.setdefault(profile.vrn, []).append(name)
         self.assertEqual(set(by_region), set(range(8)))
         for vrn in range(8):

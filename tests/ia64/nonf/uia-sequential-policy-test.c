@@ -48,6 +48,27 @@ int main(void)
             cases++;
         }
     }
+    /* Each of the eight VRNs has two valid high canonical endpoints,
+     * separated from the low canonical half by a noncanonical gap.
+     * These are independent literal truth-table inputs, not computed
+     * from the implementation's ia64_uia_virtual_implemented().
+     */
+    const uint64_t high_base = (UINT64_C(1) << 61) - (UINT64_C(1) << 50);
+    for (unsigned r = 0; r < 8; r++) {
+        const uint64_t vrn = (uint64_t)r << 61;
+        const uint64_t valid_first = vrn | high_base;
+        const uint64_t valid_last = vrn | ((UINT64_C(1) << 61) - 16);
+        const uint64_t invalid_low_gap = vrn | (UINT64_C(1) << 50);
+        const uint64_t invalid_high_gap = vrn | (high_base - 16);
+        if (!ia64_uia_virtual_implemented(valid_first) ||
+            !ia64_uia_virtual_implemented(valid_last) ||
+            ia64_uia_virtual_implemented(invalid_low_gap) ||
+            ia64_uia_virtual_implemented(invalid_high_gap)) {
+            fprintf(stderr, "high canonical/gap VA policy failed in VRN %u\\n", r);
+            return 6;
+        }
+        cases += 4;
+    }
     for (unsigned source_ri = 0; source_ri < 3; source_ri++) {
         for (unsigned flags = 0; flags < 16; flags++) {
             uint64_t psr = ((flags & 1) ? SS : 0) |
@@ -79,5 +100,5 @@ int main(void)
     }
     cases += 2;
     printf("IA64 MERCED SEQUENTIAL UIA POLICY PASS: %u cases\n", cases);
-    return cases == 130 ? 0 : 6;
+    return cases == 162 ? 0 : 7;
 }

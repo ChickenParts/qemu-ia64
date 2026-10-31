@@ -26,10 +26,14 @@ emit, literal, compare = ivt.emit, ivt.literal, ivt.compare
 IVT = 0x400000
 UIA, TBV, SSV = 0x5e00, 0x5f00, 0x6000
 BREAK, GENERAL = 0x2c00, 0x5400
-IC, LP, TB, SS, RI = 1 << 13, 1 << 25, 1 << 26, 1 << 40, 3 << 41
+IC, LP, TB, SS, RI, IT = 1 << 13, 1 << 25, 1 << 26, 1 << 40, 3 << 41, 1 << 36
+HIGH_CANON = (1 << 61) - (1 << 50)
+BAD_VA_LOW = 1 << 50  # first address above Merced's low canonical half
+BAD_VA_HIGH = HIGH_CANON - 16  # immediately below high canonical half
 NI, EI_RFI = 1 << 39, 2 << 41
 PA44, PA45 = 1 << 44, 1 << 45
 PASS, FAIL = "0x72666970", "0x72666966"
+PTE_FLAGS = (1 << 9) | (1 << 6) | (1 << 5) | 1
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,11 @@ class Profile:
     pa: int = PA44
     flags: int = 0
     target_ri: int = 0
+    virtual: bool = False
+
+    @property
+    def restored_flags(self) -> int:
+        return self.flags | (IT if self.virtual else 0)
 
     @property
     def destination(self) -> str:
@@ -61,7 +70,28 @@ PROFILES = {
     "rfi-uia-restored-ri2-ss": Profile(target_ri=2, flags=SS),
     "rfi-valid-return": Profile(bad=False),
     "rfi-valid-collected": Profile(bad=False, flags=IC),
+    # Architecturally noncanonical VA gaps: UIA must be selected by
+    # restored PSR.it=1 BEFORE any speculative instruction-TLB fetch.
+    "rfi-virtual-gap-low-vrn0": Profile(pa=BAD_VA_LOW, virtual=True),
+    "rfi-virtual-gap-high-vrn1-ic": Profile(pa=(1 << 61) | BAD_VA_HIGH, virtual=True, flags=IC),
+    "rfi-virtual-gap-low-vrn6-tb-ss": Profile(pa=(6 << 61) | BAD_VA_LOW, virtual=True, flags=TB | SS),
+    "rfi-virtual-gap-high-vrn7-ic-ss": Profile(pa=(7 << 61) | BAD_VA_HIGH, virtual=True, flags=IC | SS),
 }
+
+
+def install_virtual_ivt(lines: list[str]) -> None:
+    # Unlike a physical-mode UIA, a restored PSR.it=1 UIA may preserve
+    # translation when dispatching the vector. Preinstall a real 16MiB
+    # identity ITC.I mapping that covers BOTH the harness and its IVT.
+    # The target VA itself remains deliberately noncanonical/unmapped.
+    literal(lines, 14, hex(ivt.TEXT))
+    emit(lines, "m", "mov cr.ifa=r14")
+    literal(lines, 14, hex(24 << 2))
+    emit(lines, "m", "mov cr.itir=r14")
+    literal(lines, 20, hex(ivt.TEXT | PTE_FLAGS))
+    lines.extend(["{ .mmi", "itc.i r20", ";;",
+                  "nop.m 0", "nop.i 0", ";;", "}"])
+    emit(lines, "m", "srlz.i")
 
 
 def generate(case: str) -> str:
@@ -73,15 +103,17 @@ def generate(case: str) -> str:
     literal(lines, 15, 0)
     literal(lines, 14, "fail")
     emit(lines, "i", "mov b7=r14")
+    if p.virtual:
+        install_virtual_ivt(lines)
     # rfi is legal only with live PSR.ic=0. The *restored* IC is varied.
     emit(lines, "m", "rsm 0x2000")
     emit(lines, "m", "srlz.i")
     literal(lines, 14, p.destination)
     emit(lines, "m", "mov cr.iip=r14")
     emit(lines, "m", "mov r9=psr")
-    literal(lines, 14, hex(IC | LP | TB | SS | RI))
+    literal(lines, 14, hex(IC | LP | TB | SS | RI | IT))
     emit(lines, "i", "andcm r9=r9,r14")
-    literal(lines, 14, hex(p.flags | (p.target_ri << 41)))
+    literal(lines, 14, hex(p.restored_flags | (p.target_ri << 41)))
     emit(lines, "i", "or r9=r9,r14")
     emit(lines, "m", "mov cr.ipsr=r9")
     lines.append("source_rfi:")
@@ -125,15 +157,17 @@ def generate(case: str) -> str:
         emit(lines, "m", "mov r9=cr.iip")
         compare(lines, 9, p.destination)
         emit(lines, "m", "mov r9=cr.ipsr")
-        literal(lines, 14, hex(IC | LP | TB | SS | RI))
+        literal(lines, 14, hex(IC | LP | TB | SS | RI | IT))
         emit(lines, "i", "and r10=r9,r14")
-        compare(lines, 10, hex(p.flags | (p.target_ri << 41)))
+        compare(lines, 10, hex(p.restored_flags | (p.target_ri << 41)))
         # The target is deliberately unexecutable. Repair saved IIP and
         # clear restored debug flags and RI for a genuine single rfi.
         literal(lines, 14, "after_rfi")
         emit(lines, "m", "mov cr.iip=r14")
         emit(lines, "m", "mov r9=cr.ipsr")
-        literal(lines, 14, hex(LP | TB | SS | RI))
+        # Repair to the physically addressed harness; a virtual UIA
+        # trap must clear restored PSR.it before the repaired RFI.
+        literal(lines, 14, hex(LP | TB | SS | RI | (IT if p.virtual else 0)))
         emit(lines, "i", "andcm r9=r9,r14")
         emit(lines, "m", "mov cr.ipsr=r9")
         emit(lines, "b", "rfi")
@@ -167,7 +201,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps({
         "reference": "Intel Itanium SDM rev2.3 Vol2 §8 UIA 0x5e00, Vol3 rfi",
-        "scope": "native Itanium rfi restored UIA; no rfi LP/TB/SS",
+        "scope": "native rfi UIA on restored PA or noncanonical VA; no LP/TB/SS",
         "cases": len(cases), "results": results, "failures": failures,
     }, indent=2) + "\n")
     count = sum(x.get("execution") ==
