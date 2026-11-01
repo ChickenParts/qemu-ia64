@@ -4299,13 +4299,6 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             break;
         }
         case 0x1: {
-            /*
-             * Intel SDM Vol3 Table 4-45, pp.3:347-348: M42 mov-to
-             * encodings use x6=00..05 and itr.d/i use 0e/0f; M43
-             * mov-FROM indirect registers use x6=10..17. Keep those
-             * separate: wrongly decoding M43 with x6=0b..0f steals
-             * ptr.d/ptr.i and itr.d/itr.i before their actual cases.
-             */
             /* mov to/from control regs and region regs */
             uint8_t x3 = (insn >> 33) & 0x7;
             uint8_t x6 = (insn >> 27) & 0x3f;
