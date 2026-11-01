@@ -27432,15 +27432,24 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     bool write = access_type == MMU_DATA_STORE;
     uint32_t vec = 0;
 
+    /*
+     * Intel SDM Vol2 4.1.8: P=0 precedes access permissions; granted
+     * permissions precede access-bit and dirty-bit faults. In particular,
+     * a read-only, A=0, D=0 store must report Access Rights (0x5300),
+     * not Access Bit (0x2800) or Dirty Bit (0x2000).
+     *
+     * The key-related stages are not yet implemented: this implements
+     * priority only among the fault classes currently modeled.
+     */
     if (match && !match->p) {
         vec = IA64_VEC_DATA_PAGE_NOT_P;
+    } else if (match &&
+               !ia64_access_rights(match->ar, match->pl, cpl, access_type)) {
+        vec = is_data ? IA64_VEC_DATA_ACCESS_RIGHTS : IA64_VEC_INST_ACCESS_RIGHTS;
     } else if (match && !match->a) {
         vec = is_data ? IA64_VEC_DATA_ACCESS_BIT : IA64_VEC_INST_ACCESS_BIT;
     } else if (write && match && !match->d) {
         vec = IA64_VEC_DATA_DIRTY;
-    } else if (match &&
-               !ia64_access_rights(match->ar, match->pl, cpl, access_type)) {
-        vec = is_data ? IA64_VEC_DATA_ACCESS_RIGHTS : IA64_VEC_INST_ACCESS_RIGHTS;
     }
 
     if (vec) {
@@ -30218,9 +30227,12 @@ static void ia64_insert_tlb(CPUIA64State *env, bool is_data, uint64_t va,
                             uint8_t ar, uint8_t pl, uint8_t d, uint8_t a,
                             uint8_t p, uint8_t ed)
 {
-    if (!p) {
-        return;
-    }
+    /*
+     * The P bit is an *architectural page-present attribute*, not the
+     * translation cache's hidden entry-valid bit. ITC.D/ITC.I with P=0
+     * must still match and fault at Page Not Present (0x5000), instead
+     * of degenerating into a false TLB miss.
+     */
     uint64_t mask = (1ULL << ps) - 1;
     uint64_t tag = va & ~mask;
     uint64_t pbase = pa & ~mask;
