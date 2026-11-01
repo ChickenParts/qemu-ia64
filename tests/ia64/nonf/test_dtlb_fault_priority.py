@@ -37,7 +37,7 @@ class DTLBPrioritySource(unittest.TestCase):
         cls.script = (ROOT / "scripts/run-ia64-dtlb-fault-priority-tests.py").read_text()
 
     def test_independent_fault_vectors_and_qualifiers(self):
-        self.assertEqual(len(runner.PROFILES), 15)
+        self.assertEqual(len(runner.PROFILES), 24)
         self.assertEqual({p.vrn for p in runner.PROFILES.values()}, set(range(8)))
         self.assertEqual(
             {p.vec for p in runner.PROFILES.values()},
@@ -61,7 +61,20 @@ class DTLBPrioritySource(unittest.TestCase):
         for name, p in runner.PROFILES.items():
             with self.subTest(name=name):
                 asm = runner.generate(name)
-                self.assertEqual(asm.count("itc.d r20"), int(p.mapped))
+                self.assertEqual(asm.count("itc.d r20"),
+                                 int(p.mapped and not p.tr))
+                self.assertEqual(asm.count("itr.d dtr[r22]=r20"),
+                                 int(p.mapped and p.tr))
+                self.assertEqual(asm.count("ptc.e r23"),
+                                 int(p.mapped and p.tr))
+                if p.tr:
+                    self.assertTrue(p.mapped)
+                    self.assertLess(asm.index("itr.d dtr[r22]=r20"),
+                                    asm.index("ptc.e r23"))
+                    self.assertLess(asm.index("rsm 0x2000"),
+                                    asm.index("itr.d dtr[r22]=r20"))
+                    self.assertLess(asm.index("ptc.e r23"),
+                                    asm.index("srlz.d"))
                 self.assertIn("srlz.d", asm)
                 self.assertIn("mov cr.ipsr=r9", asm)
                 self.assertIn("source_bundle:", asm)
@@ -121,6 +134,52 @@ class DTLBPrioritySource(unittest.TestCase):
         self.assertIn("env->dtlb[idx].valid = 1", insert)
         self.assertIn("env->itlb[idx].p = p", insert)
         self.assertIn("env->itlb[idx].valid = 1", insert)
+
+
+    def test_pinned_translation_registers_preserve_not_present(self):
+        # Each pinned TR must match on its own hidden valid/RID/tag,
+        # even when the PTE's architectural P bit is zero. Purged TC
+        # copies cannot silently substitute for these registers.
+        body = self.helper.split("bool ia64_cpu_tlb_fill(", 1)[1].split(
+            "void HELPER(check_null_branch)", 1)[0]
+        for which in ("itrs", "dtrs"):
+            with self.subTest(which=which):
+                entry = body.split(
+                    f"for (int i = 0; i < ARRAY_SIZE(env->{which}); i++)", 1)[1]
+                entry = entry.split("break;\n", 1)[0]
+                self.assertIn(f"!env->{which}[i].valid", entry)
+                self.assertIn(f"env->{which}[i].rid != rid", entry)
+                self.assertNotIn(f"if (!PTE_P(env->{which}[i].pte))", entry)
+                self.assertIn(f"tr_match.p  = PTE_P(env->{which}[i].pte)", entry)
+                self.assertIn("match = &tr_match", entry)
+                self.assertIn("hit = true", entry)
+
+    def test_dtr_p_zero_requires_real_tr_not_cached_copy(self):
+        tr_profiles = {n: p for n, p in runner.PROFILES.items() if p.tr}
+        self.assertEqual(len(tr_profiles), 9)
+        p_zero = {n: p for n, p in tr_profiles.items() if not p.present}
+        self.assertEqual(len(p_zero), 3)
+        self.assertEqual({p.vrn for p in p_zero.values()}, {5, 6, 7})
+        self.assertTrue(all(p.vec == runner.NOT_PRESENT for p in p_zero.values()))
+        for name, p in tr_profiles.items():
+            with self.subTest(name=name):
+                asm = runner.generate(name)
+                self.assertEqual(asm.count("itc.d r20"), 0)
+                self.assertEqual(asm.count("itr.d dtr[r22]=r20"), 1)
+                self.assertEqual(asm.count("ptc.e r23"), 1)
+                self.assertIn("mov cr.ifa=r14", asm)
+                self.assertIn("mov cr.itir=r14", asm)
+                self.assertLess(asm.index("itr.d dtr[r22]=r20"),
+                                asm.index("ptc.e r23"))
+                self.assertIn(hex(p.va), asm)
+        # ptc.e must retain pinned TRs while removing TC entries.
+        start = self.helper.index("void HELPER(ptc_e)(")
+        end = self.helper.index("void HELPER(ptc_g)(", start)
+        helper = self.helper[start:end]
+        self.assertIn("env->dtlb[i].valid = 0", helper)
+        self.assertIn("env->itlb[i].valid = 0", helper)
+        self.assertNotIn("env->dtrs[i].valid = 0", helper)
+        self.assertNotIn("env->itrs[i].valid = 0", helper)
 
 
 if __name__ == "__main__":
