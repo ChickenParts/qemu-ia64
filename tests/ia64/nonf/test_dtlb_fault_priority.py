@@ -96,8 +96,7 @@ class DTLBPrioritySource(unittest.TestCase):
         self.assertLess(fill.index("for (int i = 0; i < ARRAY_SIZE(env->dtlb)"),
                         fill.index("Linux uses region 6 as an identity-mapped"))
         self.assertLess(fill.index("Linux uses region 7 addresses (__va())"),
-                        fill.index("if (!hit) {", fill.index("Linux uses region 7 addresses (__va())")) if
-                        False else fill.index("IA64_VEC_DATA_TLB"))
+                        fill.index("IA64_VEC_DATA_TLB"))
 
     def test_p_zero_is_an_inserted_cache_entry_not_tlb_miss(self):
         h = self.helper
