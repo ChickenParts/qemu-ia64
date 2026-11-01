@@ -70,6 +70,14 @@ class DTLBPrioritySource(unittest.TestCase):
                     self.assertIn("mov r9=cr.iip", asm)
                     self.assertIn("mov r9=cr.isr", asm)
                     self.assertIn("mov r9=cr.ipsr", asm)
+                    checks = asm.split("fault_checks:", 1)[1]
+                    # The IVT does not implicitly disable live PSR.dt.
+                    # Physical memory comparisons must follow an actual
+                    # rsm DT and serialization, never precede them.
+                    self.assertLess(checks.index("rsm 0x20000"),
+                                    checks.index("srlz.d"))
+                    self.assertLess(checks.index("srlz.d"),
+                                    checks.index("ld8 r9=[r14]"))
                 else:
                     # A clean result must not enter the fault handler;
                     # it has no reason to read interruption registers.
