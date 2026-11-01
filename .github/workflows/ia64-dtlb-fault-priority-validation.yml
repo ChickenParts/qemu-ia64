@@ -1,0 +1,97 @@
+name: IA64 ITC.D data-access rights and A/D/P fault-priority real-IVT qualification
+
+on:
+  push:
+    branches: [work/ia64-dtlb-fault-priority]
+    paths:
+      - .github/workflows/ia64-dtlb-fault-priority-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-dtlb-fault-priority-tests.py
+  pull_request:
+    paths:
+      - .github/workflows/ia64-dtlb-fault-priority-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-dtlb-fault-priority-tests.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-dtlb-fault-priority-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dtlb-priority:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install GNU IA64 binutils and QEMU dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Independent source oracles and GNU IA-64 DTLB guest assembly
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/dtlb-priority-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/dtlb-priority-evidence/uia-policy \
+            tests/ia64/nonf/uia-sequential-policy-test.c
+          scratch/dtlb-priority-evidence/uia-policy | \
+            tee scratch/dtlb-priority-evidence/uia-policy.txt
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 scripts/run-ia64-dtlb-fault-priority-tests.py --assemble-only \
+            --out scratch/dtlb-priority-evidence/assembly
+          git diff --exit-code
+      - name: Clean qemu-system-ia64 rebuild
+        run: |
+          set -euo pipefail
+          mkdir build-dtlb-priority
+          (cd build-dtlb-priority; ../configure --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+            --disable-slirp --disable-werror)
+          ninja -C build-dtlb-priority -j"$(nproc)" qemu-system-ia64
+      - name: Real DTLB priority and inherited IA-64 IVT guest execution
+        run: |
+          set -euo pipefail
+          QEMU=build-dtlb-priority/qemu-system-ia64
+          python3 scripts/run-ia64-dtlb-fault-priority-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/dtlb --timeout 10
+          python3 scripts/run-ia64-uia-sequential-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/sequential --timeout 10
+          python3 scripts/run-ia64-uia-branch-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/branch --timeout 10
+          python3 scripts/run-ia64-uia-rfi-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/rfi --timeout 10
+          python3 scripts/run-ia64-single-step-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/ss --timeout 10
+          python3 scripts/run-ia64-lower-privilege-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/lp --timeout 10
+          python3 scripts/run-ia64-fp-ss-priority-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/fp-ss --timeout 10
+          python3 scripts/run-ia64-ifs-rfi-tests.py \
+            --qemu "$QEMU" --out scratch/dtlb-priority-evidence/ifs --timeout 10
+      - name: Record exact checkout and emulator binary hashes
+        if: always()
+        run: |
+          mkdir -p scratch/dtlb-priority-evidence
+          git rev-parse HEAD > scratch/dtlb-priority-evidence/source-head.txt
+          test ! -f build-dtlb-priority/qemu-system-ia64 || \
+            sha256sum build-dtlb-priority/qemu-system-ia64 \
+            > scratch/dtlb-priority-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-dtlb-priority-evidence
+          path: scratch/dtlb-priority-evidence
+          retention-days: 14
+          if-no-files-found: error
