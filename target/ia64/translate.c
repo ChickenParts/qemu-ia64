@@ -4299,6 +4299,13 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
             break;
         }
         case 0x1: {
+            /*
+             * Intel SDM Vol3 Table 4-45, pp.3:347-348: M42 mov-to
+             * encodings use x6=00..05 and itr.d/i use 0e/0f; M43
+             * mov-FROM indirect registers use x6=10..17. Keep those
+             * separate: wrongly decoding M43 with x6=0b..0f steals
+             * ptr.d/ptr.i and itr.d/itr.i before their actual cases.
+             */
             /* mov to/from control regs and region regs */
             uint8_t x3 = (insn >> 33) & 0x7;
             uint8_t x6 = (insn >> 27) & 0x3f;
@@ -4542,7 +4549,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xd) {
+            if (x3 == 0 && x6 == 0x13) {
                 /* M43: mov r1 = pkr[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4615,7 +4622,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xe) {
+            if (x3 == 0 && x6 == 0x14) {
                 /* M43: mov r1 = pmc[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4640,7 +4647,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xf) {
+            if (x3 == 0 && x6 == 0x15) {
                 /* M43: mov r1 = pmd[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4713,7 +4720,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xb) {
+            if (x3 == 0 && x6 == 0x11) {
                 /* M43: mov r1 = dbr[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4738,7 +4745,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xc) {
+            if (x3 == 0 && x6 == 0x12) {
                 /* M43: mov r1 = ibr[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
