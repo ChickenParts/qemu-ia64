@@ -52,6 +52,24 @@ Success cases check the committed loaded value or physical store.
 All fixtures set saved `PSR.dt=1` via `CR.IPSR`+native `rfi`,
 without relying on `ssm/rsm` to *enable* the high PSR flags.
 
+## First real-IVT diagnosis (2026-11-01 UTC)
+
+[The first exact-merge CI attempt](https://github.com/ChickenParts/qemu-ia64/actions/runs/41286687274)
+passed **15/15 GNU assembly cases**, all five positive real
+load/store controls, and QEMU delivered **the expected fault vector
+for every one of the other ten cases** (0x800, 0x5300, 0x2800,
+0x2000 or 0x5000). The ten cases failed later in the checking handler:
+the handler used a physical `data_page` pointer while live `PSR.dt`
+remained enabled, triggering an unrelated 0x800 DTLB miss on the
+handler's physical-memory verification load.
+
+The fixture now performs a real `rsm 0x20000` followed by `srlz.d`
+**inside the fault handler, before its physical memory check**.
+This changes live data address translation only; `CR.IPSR.dt=1`
+is still required and verified before the repaired RFI. An independent
+source test enforces the instruction order. A fresh exact-merge guest
+run is required before calling the whole tranche qualified.
+
 Python source-independent truth-table assertions check all 15 profiles
 against their expected vectors and verify production helper ordering.
 A dedicated exact-merge CI workflow compiles a clean emulator, executes
