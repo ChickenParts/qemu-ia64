@@ -33,6 +33,29 @@ deliberately installs incompatible translations: software must avoid
 ambiguous overlapping translations. All real DTR tests explicitly
 purge the opportunistic TC copy first.
 
+## Decoder collision revealed by the real guests
+
+The first exact-merge Actions run [41301892357](https://github.com/ChickenParts/qemu-ia64/actions/runs/41301892357)
+passed the 24 GNU IA-64 guest **assemblies** and clean QEMU build.
+All 15 inherited ITC.D guests passed, but all nine pinned-DTR guests
+failed. [Artifact 13081477266](https://github.com/ChickenParts/qemu-ia64/actions/runs/41301892357/artifacts/13081477266)
+shows **no `itr.d` helper trace** before the guest RFI. Unmapped-region
+tests took 0x800 DTLB miss; regions 6/7 fell into the legacy direct-map
+fallback instead of using the intended DTR. Therefore the pinned DTR
+had not actually been created.
+
+The next investigation found **M43 mov-FROM decode opcode collisions**
+in `decode_insn()`: indirect register reads for DBR, IBR, PKR, PMC,
+PMD had erroneously used x6=0x0b/0x0c/0x0d/0x0e/0x0f. Those M43 cases
+appear earlier in the decoder than `ptr.d`/i and `itr.d`/i, stealing the
+instructions. Intel Vol3 **Table 4-45, pp. 3:347–348** explicitly
+assigns M43 read x6=0x10 (RR), **0x11..0x15** for DBR/IBR/PKR/PMC/PMD;
+**0x0c/0x0d are `ptr.d`/i** and **0x0e/0x0f are `itr.d`/i**.
+The decoder fixes all five erroneous read values; a fail-closed
+independent table oracle now prevents future opcode aliasing.
+The **corrected full QEMU run, not the initial failed one**, must
+qualify the pinned-DTR implementation.
+
 ## Real-IVT regression matrix
 
 Nine new profiles extend the existing `scripts/run-ia64-dtlb-fault-priority-tests.py`
