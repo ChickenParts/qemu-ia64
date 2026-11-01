@@ -179,6 +179,12 @@ def generate(case: str) -> str:
 
     lines += [f".org {IVT_OFF + 0x9000}", "fault_checks:"]
     if p.vec:
+        # A data fault does not implicitly clear live PSR.dt. The IVT
+        # checks the physical data-page sentinel, so explicitly switch
+        # the *live* handler to physical data mode before that load.
+        # Saved CR.IPSR.dt remains set and is verified below.
+        emit(lines, "m", "rsm 0x20000")
+        emit(lines, "m", "srlz.d")
         compare(lines, 15, 0)
         literal(lines, 15, 1)
         emit(lines, "m", "mov r9=cr.isr")
