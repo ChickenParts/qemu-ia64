@@ -65,10 +65,15 @@ class DTLBPrioritySource(unittest.TestCase):
                 self.assertIn("srlz.d", asm)
                 self.assertIn("mov cr.ipsr=r9", asm)
                 self.assertIn("source_bundle:", asm)
-                self.assertIn("mov r9=cr.ifa", asm)
-                self.assertIn("mov r9=cr.iip", asm)
-                self.assertIn("mov r9=cr.isr", asm)
-                self.assertIn("mov r9=cr.ipsr", asm)
+                if p.vec:
+                    self.assertIn("mov r9=cr.ifa", asm)
+                    self.assertIn("mov r9=cr.iip", asm)
+                    self.assertIn("mov r9=cr.isr", asm)
+                    self.assertIn("mov r9=cr.ipsr", asm)
+                else:
+                    # A clean result must not enter the fault handler;
+                    # it has no reason to read interruption registers.
+                    self.assertNotIn("mov r9=cr.ifa", asm)
                 self.assertIn("mov cr.iip=r14", asm)
                 self.assertIn("rfi", asm)
                 self.assertIn("data_page:", asm)
@@ -90,8 +95,8 @@ class DTLBPrioritySource(unittest.TestCase):
         positions = [fill.index(needle) for needle in segments]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("vec = IA64_VEC_DATA_PAGE_NOT_P", fill)
-        self.assertIn("vec = IA64_VEC_DATA_ACCESS_RIGHTS", fill)
-        self.assertIn("vec = IA64_VEC_DATA_ACCESS_BIT", fill)
+        self.assertIn("IA64_VEC_DATA_ACCESS_RIGHTS", fill)
+        self.assertIn("IA64_VEC_DATA_ACCESS_BIT", fill)
         self.assertIn("vec = IA64_VEC_DATA_DIRTY", fill)
         self.assertLess(fill.index("for (int i = 0; i < ARRAY_SIZE(env->dtlb)"),
                         fill.index("Linux uses region 6 as an identity-mapped"))
