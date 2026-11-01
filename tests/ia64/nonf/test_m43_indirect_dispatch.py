@@ -16,8 +16,9 @@ class IndirectRegisterOpcodeTable(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         src = (ROOT / "target/ia64/translate.c").read_text()
-        cls.source = src[src.index("        case 0x1: {", src.index("static void decode_insn(")):
-                         src.index("        case 0x2:", src.index("        case 0x1: {", src.index("static void decode_insn(")))]
+        start = src.index("        case 0x1: {", src.index("static void decode_insn("))
+        end = src.index("        case 0x4:", start)
+        cls.source = src[start:end]
 
     def test_m43_read_codes_match_intel_table_4_45(self):
         # Table 4-45: all these require x3=0, major 1, x6=0x10..0x15.
