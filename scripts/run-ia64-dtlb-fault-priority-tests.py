@@ -45,6 +45,7 @@ class Profile:
     dirty: bool = True
     present: bool = True
     high: bool = False
+    tr: bool = False
     vec: int = 0
 
     @property
@@ -97,6 +98,27 @@ PROFILES = {
     "not-present-r6-store": Profile(kind="store", vrn=6, ar=1,
                                     present=False, accessed=False,
                                     dirty=False, vec=NOT_PRESENT),
+    # Pinned DTR tests purge the translation cache after itr.d, forcing
+    # a true Translation Register match (never the implicit TC copy).
+    "tr-positive-r0-load": Profile(tr=True),
+    "tr-positive-r6-store": Profile(tr=True, kind="store", vrn=6),
+    "tr-readonly-r7-load": Profile(tr=True, vrn=7, ar=1),
+    "tr-rights-r2-store-ad0": Profile(tr=True, kind="store", vrn=2,
+                                     ar=1, accessed=False, dirty=False,
+                                     vec=ACCESS_RIGHTS),
+    "tr-access-r3-load": Profile(tr=True, vrn=3, accessed=False,
+                                 vec=ACCESS_BIT),
+    "tr-dirty-r4-store": Profile(tr=True, kind="store", vrn=4,
+                                 dirty=False, vec=DIRTY),
+    "tr-notpresent-r5-load": Profile(tr=True, vrn=5, present=False,
+                                     accessed=False, dirty=False,
+                                     vec=NOT_PRESENT),
+    "tr-notpresent-r6-store": Profile(tr=True, kind="store", vrn=6,
+                                      present=False, accessed=False,
+                                      dirty=False, vec=NOT_PRESENT),
+    "tr-notpresent-r7-store": Profile(tr=True, kind="store", vrn=7,
+                                      present=False, accessed=False,
+                                      dirty=False, vec=NOT_PRESENT),
 }
 
 
@@ -108,8 +130,21 @@ def install_dtlb(lines: list[str], profile: Profile) -> None:
     literal(lines, 20, "data_page")
     literal(lines, 21, hex(profile.pte_flags))
     emit(lines, "i", "or r20=r20,r21")
-    lines.extend(["{ .mmi", "itc.d r20", ";;",
-                  "nop.m 0", "nop.i 0", ";;", "}"])
+    if profile.tr:
+        # itr.d requires uncollected interruption state (PSR.ic=0).
+        emit(lines, "m", "rsm 0x2000")
+        emit(lines, "m", "srlz.i")
+        literal(lines, 22, 3)  # pinned DTR slot, independent of TC ring
+        lines.extend(["{ .mmi", "itr.d dtr[r22]=r20", ";;",
+                      "nop.m 0", "nop.i 0", ";;", "}"])
+        # itr.d also seeds an opportunistic TC copy in this QEMU model.
+        # ptc.e purges only translation caches; the pinned DTR survives.
+        # A P=0 test can now PASS only via the real DTR lookup path.
+        literal(lines, 23, hex(profile.va & ~0x3fff))
+        emit(lines, "m", "ptc.e r23")
+    else:
+        lines.extend(["{ .mmi", "itc.d r20", ";;",
+                      "nop.m 0", "nop.i 0", ";;", "}"])
     emit(lines, "m", "srlz.d")
 
 
@@ -246,7 +281,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps({
         "reference": "Intel Itanium SDM Vol2 4.1.8, 8: Data TLB faults",
-        "scope": "ITC.D real guest: missing/present/rights/access/dirty",
+        "scope": "ITC.D and pinned DTR after TC purge: P/rights/access/dirty",
         "cases": len(selected), "results": results, "failures": failures
     }, indent=2) + "\n")
     count = sum(x.get("execution") ==
