@@ -4542,7 +4542,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xd) {
+            if (x3 == 0 && x6 == 0x13) {
                 /* M43: mov r1 = pkr[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4615,7 +4615,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xe) {
+            if (x3 == 0 && x6 == 0x14) {
                 /* M43: mov r1 = pmc[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4640,7 +4640,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xf) {
+            if (x3 == 0 && x6 == 0x15) {
                 /* M43: mov r1 = pmd[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4713,7 +4713,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xb) {
+            if (x3 == 0 && x6 == 0x11) {
                 /* M43: mov r1 = dbr[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);
@@ -4738,7 +4738,7 @@ static void decode_insn(DisasContext *ctx, uint64_t insn, enum SlotType type)
                 }
                 break;
             }
-            if (x3 == 0 && x6 == 0xc) {
+            if (x3 == 0 && x6 == 0x12) {
                 /* M43: mov r1 = ibr[r3] */
                 uint8_t qp = insn & 0x3f;
                 TCGLabel *skip_label = gen_qp_skip(qp);

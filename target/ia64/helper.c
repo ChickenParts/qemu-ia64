@@ -27225,14 +27225,14 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     typeof(env->dtlb[0]) tr_match;
 
     /*
-     * Check instruction vs data TLBs. Rid must match; page mask uses ps.
+     * TR entry validity and the translation's architectural P bit differ.
+     * A valid ITR/DTR with P=0 must match and deliver Page Not Present,
+     * not fall through to a misleading instruction/data TLB miss.
+     * Intel SDM Vol2 Table 4-3, "p" versus hidden valid field.
      */
     if (access_type == MMU_INST_FETCH) {
         for (int i = 0; i < ARRAY_SIZE(env->itrs); i++) {
             if (!env->itrs[i].valid || env->itrs[i].rid != rid) {
-                continue;
-            }
-            if (!PTE_P(env->itrs[i].pte)) {
                 continue;
             }
             uint64_t mask = ~((1ULL << env->itrs[i].ps) - 1);
@@ -27246,7 +27246,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                 tr_match.pl = PTE_PL(env->itrs[i].pte);
                 tr_match.d  = PTE_D(env->itrs[i].pte);
                 tr_match.a  = PTE_A(env->itrs[i].pte);
-                tr_match.p  = 1;
+                tr_match.p  = PTE_P(env->itrs[i].pte);
                 tr_match.ed = PTE_ED(env->itrs[i].pte);
                 tr_match.valid = 1;
                 match = &tr_match;
@@ -27257,9 +27257,6 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     } else {
         for (int i = 0; i < ARRAY_SIZE(env->dtrs); i++) {
             if (!env->dtrs[i].valid || env->dtrs[i].rid != rid) {
-                continue;
-            }
-            if (!PTE_P(env->dtrs[i].pte)) {
                 continue;
             }
             uint64_t mask = ~((1ULL << env->dtrs[i].ps) - 1);
@@ -27273,7 +27270,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                 tr_match.pl = PTE_PL(env->dtrs[i].pte);
                 tr_match.d  = PTE_D(env->dtrs[i].pte);
                 tr_match.a  = PTE_A(env->dtrs[i].pte);
-                tr_match.p  = 1;
+                tr_match.p  = PTE_P(env->dtrs[i].pte);
                 tr_match.ed = PTE_ED(env->dtrs[i].pte);
                 tr_match.valid = 1;
                 match = &tr_match;
