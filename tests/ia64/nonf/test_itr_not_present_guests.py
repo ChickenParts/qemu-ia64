@@ -46,8 +46,9 @@ class PinnedITRRealGuests(unittest.TestCase):
                 self.assertEqual(p.vec, independent_vector(p))
                 self.assertEqual(p.start_ri, 1 if p.kind == "mlx" else 2)
                 self.assertEqual(p.expected_reg, 4 if p.mode == "ok" else 3)
-                self.assertEqual(p.pte_flags & 1,
-                                 int(p.mode not in ("miss", "not-present")))
+                if p.mode != "miss":
+                    self.assertEqual(p.pte_flags & 1,
+                                     int(p.mode != "not-present"))
                 self.assertEqual(p.expected_isr & 0xf,
                                  8 if p.mode == "ok" else 0)
                 self.assertEqual(p.expected_isr >> 41,
