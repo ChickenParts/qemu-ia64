@@ -1,0 +1,98 @@
+name: IA64 pinned ITR.I page presence and fetch priority real-IVT qualification
+
+on:
+  push:
+    branches: [work/ia64-itr-not-present-real]
+    paths:
+      - .github/workflows/ia64-itr-not-present-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-itr-not-present-tests.py
+  pull_request:
+    paths:
+      - .github/workflows/ia64-itr-not-present-validation.yml
+      - target/ia64/**
+      - tests/ia64/nonf/**
+      - scripts/run-ia64-itr-not-present-tests.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia64-itr-not-present-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  itr-not-present:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install GNU IA64 assembler/linker and QEMU build requirements
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils-ia64-linux-gnu libglib2.0-dev \
+            libpixman-1-dev ninja-build pkg-config python3 zlib1g-dev
+      - name: Independent address oracle, source audit and real ITR assembly
+        run: |
+          set -euo pipefail
+          mkdir -p scratch/itr-evidence
+          cc -std=gnu2x -O2 -Wall -Wextra -Werror \
+            -o scratch/itr-evidence/uia-policy \
+            tests/ia64/nonf/uia-sequential-policy-test.c
+          scratch/itr-evidence/uia-policy | tee scratch/itr-evidence/uia-policy.txt
+          python3 -m unittest discover -s tests/ia64/nonf -p 'test_*.py' -v
+          python3 scripts/ia64-nonf-fallback-audit.py --check
+          python3 scripts/run-ia64-itr-not-present-tests.py --assemble-only \
+            --out scratch/itr-evidence/assembly
+          git diff --exit-code
+      - name: Clean full qemu-system-ia64 build
+        run: |
+          set -euo pipefail
+          mkdir build-itr-real
+          (cd build-itr-real; ../configure --target-list=ia64-softmmu \
+            --disable-docs --disable-gtk --disable-sdl --disable-vnc \
+            --disable-slirp --disable-werror)
+          ninja -C build-itr-real -j"$(nproc)" qemu-system-ia64
+      - name: Real pinned ITR, DTLB and all inherited IVT guest execution
+        run: |
+          set -euo pipefail
+          QEMU=build-itr-real/qemu-system-ia64
+          python3 scripts/run-ia64-itr-not-present-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/itr --timeout 10
+          python3 scripts/run-ia64-dtlb-fault-priority-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/dtlb --timeout 10
+          python3 scripts/run-ia64-uia-sequential-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/sequential --timeout 10
+          python3 scripts/run-ia64-uia-branch-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/branch --timeout 10
+          python3 scripts/run-ia64-uia-rfi-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/rfi --timeout 10
+          python3 scripts/run-ia64-single-step-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/ss --timeout 10
+          python3 scripts/run-ia64-lower-privilege-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/lp --timeout 10
+          python3 scripts/run-ia64-fp-ss-priority-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/fp-ss --timeout 10
+          python3 scripts/run-ia64-ifs-rfi-tests.py \
+            --qemu "$QEMU" --out scratch/itr-evidence/ifs --timeout 10
+      - name: Record exact merged checkout and emulator binary hashes
+        if: always()
+        run: |
+          mkdir -p scratch/itr-evidence
+          git rev-parse HEAD > scratch/itr-evidence/source-head.txt
+          test ! -f build-itr-real/qemu-system-ia64 || \
+            sha256sum build-itr-real/qemu-system-ia64 \
+            > scratch/itr-evidence/qemu-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia64-itr-real-evidence
+          path: scratch/itr-evidence
+          retention-days: 14
+          if-no-files-found: error
