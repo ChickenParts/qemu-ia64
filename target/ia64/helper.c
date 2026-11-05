@@ -27115,6 +27115,29 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     CPUIA64State *env = cpu_env(cs);
     bool is_fetch = (access_type == MMU_INST_FETCH);
 
+    /*
+     * Intel SDM Vol2 §4.3.3 and Table 5-3: non-speculative data references
+     * to an unimplemented virtual address fault BEFORE translation misses,
+     * page-presence and protection checks. This Merced model advertises
+     * a 51-bit within-region VA and requires VA[60:51] to replicate VA[50].
+     *
+     * Perform the check before the firmware/per-cpu and region-6/7 Linux
+     * compatibility mappings. Otherwise a noncanonical region-6/7 address
+     * could be silently treated as physical or reported as a DTLB miss.
+     *
+     * Unimplemented Data Address is a pre-result GENERAL EXCEPTION
+     * (vector 0x5400, ISR.code{7:4}=3, ISR.r/w from the memory access).
+     * CR.IFA is unspecified for this vector: do not manufacture an IFA.
+     * Speculative/NaT deferral and RSE references need separate qualification.
+     */
+    if (!is_fetch && (env->psr & IA64_PSR_DT) &&
+        !ia64_uia_virtual_implemented((uint64_t)address)) {
+        return ia64_exception(cs, env, true,
+                              access_type == MMU_DATA_STORE,
+                              IA64_VEC_GENERAL_EXCEPTION, 0, 0x30, 0,
+                              true, false, retaddr);
+    }
+
 #ifndef CONFIG_USER_ONLY
     ia64_fw_try_patch_efi_hobs(env);
     /*
