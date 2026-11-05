@@ -368,21 +368,6 @@ static inline uint64_t ia64_rse_get_bsp(const CPUIA64State *env)
     return bsp & ~0x7ULL;
 }
 
-static inline void ia64_rse_update_loadrs(CPUIA64State *env, uint64_t bsp)
-{
-    uint64_t rsc = env->ar[IA64_AR_RSC];
-    if (ia64_rsc_get_mode(rsc) != 0) {
-        env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(rsc, 0);
-        return;
-    }
-    uint64_t bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
-    uint64_t bytes = (bsp > bspstore) ? (bsp - bspstore) : 0;
-    if (bytes > IA64_RSC_LOADRS_MASK) {
-        bytes = IA64_RSC_LOADRS_MASK;
-    }
-    env->ar[IA64_AR_RSC] = ia64_rsc_set_loadrs(env->ar[IA64_AR_RSC], bytes);
-}
-
 static void ia64_rse_write_mem(CPUIA64State *env, uint64_t addr, uint64_t val)
 {
     cpu_stq_data(env, addr, val);
@@ -1573,6 +1558,31 @@ static bool ia64_rse_pop_window(CPUIA64State *env)
         return false;
     }
     struct IA64RSEFrame *frame = &env->rse_frames[env->rse_depth - 1];
+    uint64_t current_bsp = ia64_rse_get_bsp(env);
+    uint64_t caller_bsp = current_bsp;
+
+    /*
+     * AR.BSP is the end of the current frame.  The caller's OUT registers
+     * overlap the callee's IN registers, so returning replaces the callee
+     * frame with that shared OUT region:
+     *
+     *   caller_bsp = current_bsp - callee_sof + caller_outs
+     *
+     * Apply the adjustment before restoring CFM.  Manual-call shadow frames
+     * do not model an RSE call transition and therefore leave BSP alone.
+     */
+    if (frame->share_outs) {
+        uint8_t current_sof = env->cfm & 0x7f;
+        uint8_t caller_sof = frame->cfm & 0x7f;
+        uint8_t caller_sol = (frame->cfm >> 7) & 0x7f;
+        uint8_t caller_outs = (caller_sof > caller_sol) ?
+            (caller_sof - caller_sol) : 0;
+        int64_t delta = -(int64_t)current_sof + (int64_t)caller_outs;
+
+        caller_bsp = ia64_rse_skip_regs(current_bsp, delta);
+        env->ar[IA64_AR_BSP] = caller_bsp;
+        ia64_rse_strict_trace(env, "ret_bsp", current_bsp, caller_bsp);
+    }
 
     /*
      * Model the shared physical registers between caller OUT and callee IN.
@@ -13277,9 +13287,14 @@ uint64_t HELPER(alloc)(CPUIA64State *env, uint64_t sof, uint64_t sol, uint64_t s
     if (growth != 0) {
         uint64_t bsp = ia64_rse_get_bsp(env);
         uint64_t old_bsp = bsp;
+
+        /*
+         * AR.BSP points just past the current frame.  alloc resizes that
+         * frame, so move BSP by the SOF delta.  The dirty partition is the
+         * interval [BSPSTORE, BSP); it is not the architected LOADRS field.
+         */
         bsp = ia64_rse_skip_regs(bsp, growth);
         env->ar[IA64_AR_BSP] = bsp;
-        ia64_rse_update_loadrs(env, bsp);
         ia64_rse_strict_trace(env, "alloc_bsp", old_bsp, bsp);
     }
 
@@ -14613,9 +14628,14 @@ void HELPER(call)(CPUIA64State *env, uint64_t pc, uint64_t tgt)
     if (!ia64_rse_is_lazy(env)) {
         ia64_rse_store_frame(env, bsp, sof);
     }
-    bsp = ia64_rse_skip_regs(bsp, sol);
-    env->ar[IA64_AR_BSP] = bsp;
-    ia64_rse_update_loadrs(env, bsp);
+
+    /*
+     * br.call remaps the caller's OUT region as the callee's initial frame.
+     * Both views end at the same AR.BSP; changing BSP here double-counts the
+     * caller's locals and makes every call/return pair leak backing-store
+     * space.  Only the callee's subsequent alloc changes the frame end.
+     */
+    ia64_rse_strict_trace(env, "call_bsp", bsp, bsp);
 
     ia64_rse_push_window(env, pc + 16);
     {
@@ -17411,10 +17431,6 @@ void HELPER(ret_restore)(CPUIA64State *env)
     }
     if (ia64_rse_pop_window(env)) {
         ia64_restore_ec_from_pfs(env);
-        uint8_t sol = (env->cfm >> 7) & 0x7f;
-        bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
-        env->ar[IA64_AR_BSP] = bsp;
-        ia64_rse_update_loadrs(env, bsp);
     }
     if (watch_hit) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -17502,11 +17518,6 @@ void HELPER(ret_restore_b0)(CPUIA64State *env)
     if (do_pop) {
         if (ia64_rse_pop_window(env)) {
             ia64_restore_ec_from_pfs(env);
-            uint64_t bsp = ia64_rse_get_bsp(env);
-            uint8_t sol = (env->cfm >> 7) & 0x7f;
-            bsp = ia64_rse_skip_regs(bsp, -(int64_t)sol);
-            env->ar[IA64_AR_BSP] = bsp;
-            ia64_rse_update_loadrs(env, bsp);
         }
     }
 
@@ -29178,18 +29189,19 @@ void HELPER(ptr_i)(CPUIA64State *env, uint64_t va, uint64_t range)
 void HELPER(flushrs)(CPUIA64State *env)
 {
     /*
-     * flushrs synchronizes ar.bspstore with ar.bsp and clears ar.rsc.loadrs.
-     * In lazy mode, use loadrs as the dirty-byte count; in eager mode spill
-     * the current frame size (SOF) like the existing eager paths.
+     * flushrs drains the dirty partition and synchronizes BSPSTORE with BSP.
+     * LOADRS is software-provided state for the separate loadrs instruction;
+     * it is neither a live dirty-register count nor an alloc/call depth.
      */
     uint64_t rsc = env->ar[IA64_AR_RSC];
-    uint64_t loadrs = ia64_rsc_get_loadrs(rsc) & ~0x7ULL;
     uint64_t bsp = ia64_rse_get_bsp(env);
+    uint64_t bspstore = env->ar[IA64_AR_BSPSTORE] & ~0x7ULL;
+    uint64_t dirty_bytes = (bsp > bspstore) ? (bsp - bspstore) : 0;
     uint8_t sof = env->cfm & 0x7f;
-    uint8_t spill_regs = ia64_rse_is_lazy(env) ? ia64_rse_bytes_to_regs(loadrs)
-                                               : MIN(sof, (uint8_t)96);
+    uint8_t spill_regs = ia64_rse_is_lazy(env) ?
+        ia64_rse_bytes_to_regs(dirty_bytes) : MIN(sof, (uint8_t)96);
 
-    ia64_rse_strict_trace(env, "flushrs_pre", loadrs, spill_regs);
+    ia64_rse_strict_trace(env, "flushrs_pre", dirty_bytes, spill_regs);
     if (spill_regs) {
         ia64_rse_store_frame(env, bsp, spill_regs);
     }
@@ -29245,16 +29257,11 @@ void HELPER(cover)(CPUIA64State *env)
     uint8_t sof = old_cfm & 0x7f;
     uint64_t bsp = ia64_rse_get_bsp(env);
 
-    uint64_t new_bsp = ia64_rse_skip_regs(bsp, sof);
-    uint64_t cover_bytes = new_bsp - bsp;
-
     if (log_count < 64) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "cover ip=%016" PRIx64 " psr=%016" PRIx64
-                      " cfm=%016" PRIx64 " sof=%u bsp=%016" PRIx64
-                      " -> new_bsp=%016" PRIx64 " bytes=%" PRIu64 "\n",
-                      env->ip, env->psr, old_cfm, sof, bsp,
-                      new_bsp, cover_bytes);
+                      " cfm=%016" PRIx64 " sof=%u bsp=%016" PRIx64 "\n",
+                      env->ip, env->psr, old_cfm, sof, bsp);
         log_count++;
     }
 
@@ -29265,8 +29272,12 @@ void HELPER(cover)(CPUIA64State *env)
     env->cr_ifs = old_cfm | (1ULL << 63);
 
     ia64_rse_store_frame(env, bsp, sof);
-    env->ar[IA64_AR_BSP] = new_bsp;
-    ia64_rse_update_loadrs(env, new_bsp);
+
+    /*
+     * cover makes the current frame dirty and exposes an empty frame whose
+     * end is the same BSP.  Advancing BSP by SOF here counts the frame twice.
+     */
+    ia64_rse_strict_trace(env, "cover_bsp", bsp, bsp);
 
     /* Create the covering frame: no stacked regs/rotations. */
     env->cfm = 0;
