@@ -7,6 +7,9 @@ ia64_ss.add(files(
 ))
 
 ia64_system_ss = ss.source_set()
+ia64_system_ss.add(files(
+  'return-policy.c',
+))
 
 target_arch += {'ia64': ia64_ss}
 target_system_arch += {'ia64': ia64_system_ss}
