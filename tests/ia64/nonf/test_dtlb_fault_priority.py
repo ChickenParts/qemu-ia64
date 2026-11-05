@@ -17,6 +17,8 @@ spec.loader.exec_module(runner)
 def independent_vector(p):
     # Independent literal oracle for the AR={1,2}, CPL=0 test subset.
     # Intel SDM Vol2 §4.1.8: present > permissions > access > dirty.
+    if p.gap:
+        return 0x5400
     if not p.mapped:
         return 0x800
     if not p.present:
@@ -37,11 +39,11 @@ class DTLBPrioritySource(unittest.TestCase):
         cls.script = (ROOT / "scripts/run-ia64-dtlb-fault-priority-tests.py").read_text()
 
     def test_independent_fault_vectors_and_qualifiers(self):
-        self.assertEqual(len(runner.PROFILES), 24)
+        self.assertEqual(len(runner.PROFILES), 42)
         self.assertEqual({p.vrn for p in runner.PROFILES.values()}, set(range(8)))
         self.assertEqual(
             {p.vec for p in runner.PROFILES.values()},
-            {0, 0x800, 0x2000, 0x2800, 0x5000, 0x5300})
+            {0, 0x800, 0x2000, 0x2800, 0x5000, 0x5300, 0x5400})
         for name, p in runner.PROFILES.items():
             with self.subTest(name=name):
                 self.assertIn(p.kind, {"load", "store"})
@@ -53,7 +55,10 @@ class DTLBPrioritySource(unittest.TestCase):
                                  p.kind == "load" and not p.vec else runner.INIT_REG)
                 self.assertEqual(p.expected_memory, runner.STORE_DATA if
                                  p.kind == "store" and not p.vec else runner.INIT_DATA)
-                self.assertEqual(p.expected_isr, 1 << (33 if p.kind == "store" else 34))
+                self.assertEqual(
+                    p.expected_isr,
+                    (1 << (33 if p.kind == "store" else 34)) |
+                    (0x30 if p.gap else 0))
                 if not p.present:
                     self.assertEqual(p.pte_flags, 0)
 
@@ -79,7 +84,12 @@ class DTLBPrioritySource(unittest.TestCase):
                 self.assertIn("mov cr.ipsr=r9", asm)
                 self.assertIn("source_bundle:", asm)
                 if p.vec:
-                    self.assertIn("mov r9=cr.ifa", asm)
+                    if p.gap:
+                        # UAD is a General Exception; the architecture
+                        # does not promise CR.IFA for this vector.
+                        self.assertNotIn("mov r9=cr.ifa", asm)
+                    else:
+                        self.assertIn("mov r9=cr.ifa", asm)
                     self.assertIn("mov r9=cr.iip", asm)
                     self.assertIn("mov r9=cr.isr", asm)
                     self.assertIn("mov r9=cr.ipsr", asm)

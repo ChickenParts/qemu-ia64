@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""GNU IA-64 real-IVT DTLB translation and post-lookup fault-priority tests.
+"""GNU IA-64 real-IVT DTLB and unimplemented data-address faults.
 
-Run a single M-slot load/store at PSR.dt=1 after inserting an actual
-16KiB ITC.D translation. Handler checks the exact vector/IFA/IIP/RI/ISR,
-uncommitted data on faults, and resumes once via repaired native RFI.
+Run M-slot loads/stores with PSR.dt=1, using actual ITC.D or pinned DTR
+entries for mapped cases. Noncanonical VA cases must fault at general
+exception 0x5400 ahead of DTLB misses or region 6/7 direct-map shortcuts.
+Handlers check only architecturally defined fault state; CR.IFA is not
+specified for unimplemented data address faults.
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ INIT_DATA = 0x1122334455667788
 STORE_DATA = 0x123456789ABCDEF0
 INIT_REG = 0x3333
 HIGH_BASE = (1 << 61) - (1 << 50)
+UAD_CODE = 0x30  # General Exception ISR.code{7:4}=3, rs=0
 PASS, FAIL = "0x64746c70", "0x64746c66"
 
 
@@ -46,10 +49,15 @@ class Profile:
     present: bool = True
     high: bool = False
     tr: bool = False
+    gap: str = ""  # "low" or "high": noncanonical Merced data VA
     vec: int = 0
 
     @property
     def va(self) -> int:
+        if self.gap == "low":
+            return (self.vrn << 61) | (1 << 50)
+        if self.gap == "high":
+            return (self.vrn << 61) | (HIGH_BASE - 0x4000)
         return (self.vrn << 61) | ((HIGH_BASE if self.high else 0) + 0x8000)
 
     @property
@@ -60,7 +68,8 @@ class Profile:
 
     @property
     def expected_isr(self) -> int:
-        return WRITE_ISR if self.kind == "store" else READ_ISR
+        return (WRITE_ISR if self.kind == "store" else READ_ISR) | (
+            UAD_CODE if self.gap else 0)
 
     @property
     def expected_reg(self) -> int:
@@ -119,6 +128,36 @@ PROFILES = {
     "tr-notpresent-r7-store": Profile(tr=True, kind="store", vrn=7,
                                       present=False, accessed=False,
                                       dirty=False, vec=NOT_PRESENT),
+    # Intel SDM Vol2 §4.3.3: invalid VA beats DTLB miss and region 6/7
+    # compatibility mappings. Low/high gap cases cover EVERY VRN.
+    # Alternate load/store to verify ISR.r/w and noncommit across both.
+    "uad-r0-low-load": Profile(vrn=0, mapped=False, gap="low", vec=GENERAL),
+    "uad-r0-high-store": Profile(vrn=0, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    "uad-r1-low-load": Profile(vrn=1, mapped=False, gap="low", vec=GENERAL),
+    "uad-r1-high-store": Profile(vrn=1, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    "uad-r2-low-load": Profile(vrn=2, mapped=False, gap="low", vec=GENERAL),
+    "uad-r2-high-store": Profile(vrn=2, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    "uad-r3-low-load": Profile(vrn=3, mapped=False, gap="low", vec=GENERAL),
+    "uad-r3-high-store": Profile(vrn=3, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    "uad-r4-low-load": Profile(vrn=4, mapped=False, gap="low", vec=GENERAL),
+    "uad-r4-high-store": Profile(vrn=4, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    "uad-r5-low-load": Profile(vrn=5, mapped=False, gap="low", vec=GENERAL),
+    "uad-r5-high-store": Profile(vrn=5, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    "uad-r6-low-load": Profile(vrn=6, mapped=False, gap="low", vec=GENERAL),
+    "uad-r6-high-store": Profile(vrn=6, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    "uad-r7-low-load": Profile(vrn=7, mapped=False, gap="low", vec=GENERAL),
+    "uad-r7-high-store": Profile(vrn=7, mapped=False, gap="high",
+                                 kind="store", vec=GENERAL),
+    # Valid high-canonical controls must NOT be misclassified as UAD.
+    "mapped-r6-high-load": Profile(vrn=6, high=True),
+    "mapped-r7-high-store": Profile(vrn=7, high=True, kind="store"),
 }
 
 
@@ -224,8 +263,11 @@ def generate(case: str) -> str:
         literal(lines, 15, 1)
         emit(lines, "m", "mov r9=cr.isr")
         compare(lines, 9, hex(p.expected_isr))
-        emit(lines, "m", "mov r9=cr.ifa")
-        compare(lines, 9, hex(p.va))
+        if not p.gap:
+            # Intel Table 8-1 marks CR.IFA unspecified on UAD.
+            # Never compare a fabricated faulting VA for this vector.
+            emit(lines, "m", "mov r9=cr.ifa")
+            compare(lines, 9, hex(p.va))
         emit(lines, "m", "mov r9=cr.iip")
         literal(lines, 14, "source_bundle")
         emit(lines, "i", "cmp.eq p6,p7=r9,r14")
@@ -280,8 +322,8 @@ def main() -> None:
                 results.append(json.loads(file.read_text()))
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps({
-        "reference": "Intel Itanium SDM Vol2 4.1.8, 8: Data TLB faults",
-        "scope": "ITC.D and pinned DTR after TC purge: P/rights/access/dirty",
+        "reference": "Intel Itanium SDM Vol2 §§4.1.8,4.3.3,5.3 and §8",
+        "scope": "ITC.D, pinned DTR and noncanonical data VA / General Exception",
         "cases": len(selected), "results": results, "failures": failures
     }, indent=2) + "\n")
     count = sum(x.get("execution") ==
